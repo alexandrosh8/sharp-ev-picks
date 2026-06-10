@@ -1,0 +1,56 @@
+name: betting-ai
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: betting_ai
+      POSTGRES_PASSWORD: betting_ai
+      POSTGRES_DB: betting_ai
+      TZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U betting_ai -d betting_ai"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Production app service (Stage 2 — Ubuntu/OpenClaw). For local Mac dev,
+  # run the app on the host: `uv run uvicorn app.main:app --reload`.
+  app:
+    build: .
+    profiles: ["prod"]
+    env_file: .env
+    environment:
+      TZ: UTC
+      DATABASE_URL: postgresql+asyncpg://betting_ai:betting_ai@postgres:5432/betting_ai
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
