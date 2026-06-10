@@ -21,6 +21,7 @@ from app.backtesting.clv import clv_log
 from app.edge.value import anchor_fair_probs
 from app.ingestion.base import OddsLoader
 from app.pipeline import group_market_prices
+from app.probabilities.devig import DevigMethod
 from app.storage.models import Event, Pick
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ async def true_up_clv(
     loader: OddsLoader,
     session_factory: "async_sessionmaker",
     sport_keys: Sequence[str],
+    devig_method: DevigMethod = DevigMethod.SHIN,
 ) -> int:
     """Refresh closing-fair/CLV fields on open picks. Returns rows updated."""
     updated = 0
@@ -47,7 +49,9 @@ async def true_up_clv(
         # (external event ref, market str) -> fair probs from the freshest book panel
         fair_by_market: dict[tuple[str, str], dict[str, float]] = {}
         for (event_id, market), (prices, _) in group_market_prices(snapshots).items():
-            anchored = anchor_fair_probs(prices)
+            # Same devig as the pick strategy, so live CLV is comparable to
+            # the backtest's CLV columns.
+            anchored = anchor_fair_probs(prices, devig_method=devig_method)
             if anchored is not None:
                 fair_by_market[(event_id, str(market))] = anchored[1]
 

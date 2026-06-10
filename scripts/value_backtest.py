@@ -92,46 +92,81 @@ class Stats:
         )
 
 
-def bets_for(rows: list[dict], thr: float) -> list[VBet]:
-    """One bet per match: the highest-edge selection clearing the threshold."""
+# Market definitions: (pre-match Pinnacle cols, pre-match Max cols, closing
+# Pinnacle cols, closing Max cols, settle fn over the CSV row per outcome idx)
+def _won_1x2(r: dict, i: int) -> bool | None:
+    ftr = r.get("FTR")
+    if ftr not in ("H", "D", "A"):
+        return None
+    return ftr == ("H", "D", "A")[i]
+
+
+def _won_ou25(r: dict, i: int) -> bool | None:
+    try:
+        goals = int(r["FTHG"]) + int(r["FTAG"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (goals >= 3) if i == 0 else (goals <= 2)
+
+
+MARKETS = {
+    "1x2": (
+        ("PSH", "PSD", "PSA"),
+        ("MaxH", "MaxD", "MaxA"),
+        ("PSCH", "PSCD", "PSCA"),
+        ("MaxCH", "MaxCD", "MaxCA"),
+        _won_1x2,
+    ),
+    "ou25": (
+        ("P>2.5", "P<2.5"),
+        ("Max>2.5", "Max<2.5"),
+        ("PC>2.5", "PC<2.5"),
+        ("MaxC>2.5", "MaxC<2.5"),
+        _won_ou25,
+    ),
+}
+
+
+def bets_for(
+    rows: list[dict],
+    thr: float,
+    devig_method: DevigMethod = DevigMethod.POWER,
+    markets: tuple[str, ...] = ("1x2",),
+) -> list[VBet]:
+    """One bet per (match, market): the highest-edge selection >= threshold."""
     out: list[VBet] = []
     for r in rows:
-        ps = [_f(r.get("PSH")), _f(r.get("PSD")), _f(r.get("PSA"))]
-        mx = [_f(r.get("MaxH")), _f(r.get("MaxD")), _f(r.get("MaxA"))]
-        psc = [_f(r.get("PSCH")), _f(r.get("PSCD")), _f(r.get("PSCA"))]
-        mxc = [_f(r.get("MaxCH")), _f(r.get("MaxCD")), _f(r.get("MaxCA"))]
-        ftr = r.get("FTR")
-        if None in ps or None in mx or ftr not in ("H", "D", "A"):
-            continue
-        sharp = devig(ps, method=DevigMethod.POWER)  # type: ignore[arg-type]
-        close_p = (
-            devig(psc, method=DevigMethod.POWER)  # type: ignore[arg-type]
-            if None not in psc
-            else None
-        )
-        close_m = (
-            devig(mxc, method=DevigMethod.POWER)  # type: ignore[arg-type]
-            if None not in mxc
-            else None
-        )
-        best: tuple[float, int] | None = None  # (edge, idx)
-        for i in range(3):
-            edge = sharp[i] - 1.0 / mx[i]  # type: ignore[operator]
-            if edge >= thr and (best is None or edge > best[0]):
-                best = (edge, i)
-        if best is None:
-            continue
-        edge, i = best
-        sel = ("H", "D", "A")[i]
-        out.append(
-            VBet(
-                won=(ftr == sel),
-                odds=mx[i],  # type: ignore[arg-type]
-                edge=edge,
-                clv_pinn=clv_log(mx[i], close_p[i]) if close_p else None,  # type: ignore[arg-type]
-                clv_max=clv_log(mx[i], close_m[i]) if close_m else None,  # type: ignore[arg-type]
+        for market in markets:
+            ps_c, mx_c, psc_c, mxc_c, won_fn = MARKETS[market]
+            ps = [_f(r.get(c)) for c in ps_c]
+            mx = [_f(r.get(c)) for c in mx_c]
+            psc = [_f(r.get(c)) for c in psc_c]
+            mxc = [_f(r.get(c)) for c in mxc_c]
+            if None in ps or None in mx or won_fn(r, 0) is None:
+                continue
+            sharp = devig(ps, method=devig_method)  # type: ignore[arg-type]
+            close_p = devig(psc, method=devig_method) if None not in psc else None  # type: ignore[arg-type]
+            close_m = devig(mxc, method=devig_method) if None not in mxc else None  # type: ignore[arg-type]
+            best: tuple[float, int] | None = None  # (edge, idx)
+            for i in range(len(ps)):
+                edge = sharp[i] - 1.0 / mx[i]  # type: ignore[operator]
+                if edge >= thr and (best is None or edge > best[0]):
+                    best = (edge, i)
+            if best is None:
+                continue
+            edge, i = best
+            won = won_fn(r, i)
+            if won is None:
+                continue
+            out.append(
+                VBet(
+                    won=won,
+                    odds=mx[i],  # type: ignore[arg-type]
+                    edge=edge,
+                    clv_pinn=clv_log(mx[i], close_p[i]) if close_p else None,  # type: ignore[arg-type]
+                    clv_max=clv_log(mx[i], close_m[i]) if close_m else None,  # type: ignore[arg-type]
+                )
             )
-        )
     return out
 
 
@@ -175,44 +210,59 @@ def _fmt(stats: Stats, label: str, baseline: Stats | None = None) -> str:
 
 async def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--leagues", default="E0,E1,SP1,D1,I1,F1")
-    p.add_argument("--train-seasons", default="2122,2223,2324")
+    p.add_argument("--leagues", default="E0,E1,E2,E3,SC0,D1,D2,I1,I2,SP1,SP2,F1,F2,N1,B1,P1,T1,G1")
+    # 2019/20+ is the maximal window with full PSH+Max+PSC+MaxC coverage
+    # (Max/Avg columns replaced BetBrain in 2019/20; Pinnacle closing too).
+    p.add_argument("--train-seasons", default="1920,2021,2122,2223,2324")
     p.add_argument("--test-seasons", default="2425,2526")
+    p.add_argument("--markets", default="1x2,ou25")
     args = p.parse_args()
     leagues = [x.strip() for x in args.leagues.split(",") if x.strip()]
     train_s = [x.strip() for x in args.train_seasons.split(",") if x.strip()]
     test_s = [x.strip() for x in args.test_seasons.split(",") if x.strip()]
+    markets = tuple(x.strip() for x in args.markets.split(",") if x.strip())
 
-    print(f"\nVALUE BACKTEST v2 — leagues {leagues}")
-    print(f"TRAIN seasons {train_s} (threshold sweep) | TEST seasons {test_s} (held out)")
-    print("One bet per match; CLV vs Pinnacle close AND vs Max-of-books close.\n")
+    print(f"\nVALUE BACKTEST v3 — {len(leagues)} leagues, markets {markets}")
+    print(f"TRAIN {train_s} (devig x threshold sweep) | TEST {test_s} (held out, one shot)")
+    print("One bet per (match, market); CLV vs Pinnacle close AND Max-of-books close.\n")
 
     train_rows = await load(leagues, train_s)
     test_rows = await load(leagues, test_s)
     print(f"train: {len(train_rows)} matches | test: {len(test_rows)} matches\n")
 
-    print("TRAIN sweep (thr=0.000 is the BASELINE null — bet everything):")
-    baseline_train = Stats.from_bets(bets_for(train_rows, 0.0))
-    print(_fmt(baseline_train, "0.000"))
-    sweep: list[tuple[float, Stats]] = []
-    for thr in (0.005, 0.010, 0.015, 0.020, 0.030):
-        s = Stats.from_bets(bets_for(train_rows, thr))
-        sweep.append((thr, s))
-        print(_fmt(s, f"{thr:.3f}", baseline_train))
+    devig_methods = (DevigMethod.POWER, DevigMethod.SHIN, DevigMethod.MULTIPLICATIVE)
+    thresholds = (0.005, 0.010, 0.015, 0.020, 0.030)
 
-    # choose the train threshold maximizing ROI with a workable sample
-    viable = [(t, s) for t, s in sweep if s.n >= 100]
+    print("TRAIN sweep (thr=0.000 rows are the BASELINE null — bet everything):")
+    sweep: list[tuple[DevigMethod, float, Stats]] = []
+    baselines: dict[DevigMethod, Stats] = {}
+    for dm in devig_methods:
+        baselines[dm] = Stats.from_bets(bets_for(train_rows, 0.0, dm, markets))
+        print(_fmt(baselines[dm], f"{dm.value[:5]}/0.000"))
+        for thr in thresholds:
+            s = Stats.from_bets(bets_for(train_rows, thr, dm, markets))
+            sweep.append((dm, thr, s))
+            print(_fmt(s, f"{dm.value[:5]}/{thr:.3f}", baselines[dm]))
+
+    # choose the (devig, threshold) maximizing train ROI with a workable sample
+    viable = [(d, t, s) for d, t, s in sweep if s.n >= 150]
     if not viable:
-        print("\nNo viable threshold (n>=100) on train — verdict: NO PROVEN EDGE.")
+        print("\nNo viable combo (n>=150) on train — verdict: NO PROVEN EDGE.")
         return
-    best_thr, best_train = max(viable, key=lambda ts: ts[1].roi)
-    print(f"\nchosen on TRAIN: thr={best_thr} (ROI {best_train.roi * 100:+.2f}%, n={best_train.n})")
+    best_dm, best_thr, best_train = max(viable, key=lambda x: x[2].roi)
+    print(
+        f"\nchosen on TRAIN: devig={best_dm.value} thr={best_thr} "
+        f"(ROI {best_train.roi * 100:+.2f}%, n={best_train.n})"
+    )
 
-    print("\nHELD-OUT TEST evaluation:")
-    baseline_test = Stats.from_bets(bets_for(test_rows, 0.0))
-    test = Stats.from_bets(bets_for(test_rows, best_thr))
+    print("\nHELD-OUT TEST evaluation (single shot, never tuned on):")
+    baseline_test = Stats.from_bets(bets_for(test_rows, 0.0, best_dm, markets))
+    test = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, markets))
     print(_fmt(baseline_test, "0.000"))
     print(_fmt(test, f"{best_thr:.3f}", baseline_test))
+    for market in markets:
+        m_stats = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, (market,)))
+        print(_fmt(m_stats, f"  {market}", baseline_test))
 
     # computed verdict (never hardcoded): selection skill on held-out data =
     # incremental CLV-vs-Pinnacle over the baseline, with 2*SE separation,

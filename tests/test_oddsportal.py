@@ -73,7 +73,7 @@ async def test_match_converts_to_snapshots_and_registers_teams() -> None:
     assert {s.selection for s in totals} == {"Over 2.5", "Under 2.5"}
     assert all(s.decimal_odds > 1.0 for s in snapshots)
 
-    teams = directory.lookup(MATCH["match_link"])
+    teams = directory.lookup(str(MATCH["match_link"]))
     assert teams is not None
     assert teams.home == "Alpha FC"
     assert teams.away == "Beta United"

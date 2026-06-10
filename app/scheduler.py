@@ -44,6 +44,7 @@ from app.notifications.dispatcher import AlertDispatcher
 from app.notifications.telegram import TelegramSink
 from app.notifications.webhook import WebhookSink
 from app.pipeline import PipelineDeps, run_pick_pipeline, run_value_pipeline
+from app.probabilities.devig import DevigMethod
 from app.risk.exposure import DailyExposureLedger
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,10 @@ def build_scheduler(
 
     if loader is not None:
         use_value = settings.pick_strategy == "value"
+        # v3 backtest chose the devig on TRAIN only (docs/backtesting/
+        # value-findings.md); the same method prices the closing fair in the
+        # CLV true-up so live CLV is comparable to the backtest.
+        value_devig = DevigMethod(settings.value_devig)
         deps = PipelineDeps(
             loader=loader,
             model=model,
@@ -169,7 +174,8 @@ def build_scheduler(
             directory=directory,
             session_factory=session_factory,
             model_name="value-sharp-vs-soft" if use_value else model.name,
-            model_version="v2" if use_value else model.version,
+            model_version="v3" if use_value else model.version,
+            devig_method=value_devig if use_value else DevigMethod.POWER,
             value_min_edge=settings.value_min_edge,
             value_min_odds=settings.value_min_odds,
         )
@@ -197,7 +203,7 @@ def build_scheduler(
                 from app.clv_trueup import true_up_clv
 
                 try:
-                    await true_up_clv(loader, session_factory, captured_keys)
+                    await true_up_clv(loader, session_factory, captured_keys, value_devig)
                 except Exception as exc:
                     logger.error("clv true-up failed: %s", type(exc).__name__)
 

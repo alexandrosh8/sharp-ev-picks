@@ -1,11 +1,13 @@
 """Walk-forward backtest engine: settlement, ROI/CLV stats, no-leakage."""
 
+from collections.abc import Sequence
 from datetime import date, timedelta
 
 import pytest
 
 from app.backtesting.walkforward import (
     Bet,
+    PricedFn,
     ThresholdStats,
     bankroll_path_from_bets,
     run_walkforward,
@@ -77,7 +79,7 @@ def test_walkforward_no_leakage_and_settles() -> None:
         h, a = teams[w % 6], teams[(w + 1) % 6]
         matches.append(row(base + timedelta(days=w * 2), h, a, 2, 0, 1.5, 4.0, 6.0))
 
-    def fit_fn(history, as_of):  # noqa: ANN001, ANN202
+    def fit_fn(history: Sequence[MatchRow], as_of: date) -> PricedFn:
         # no leakage: the fit window must never include the as_of match or later
         assert all(h.match_date < as_of for h in history)
         return lambda home, away: (0.80, 0.13, 0.07)

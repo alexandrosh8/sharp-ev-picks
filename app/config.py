@@ -57,9 +57,14 @@ class Settings(BaseSettings):
     # "value" = sharp-vs-soft line shopping (BACKTESTED, positive holdout CLV —
     #           docs/backtesting/value-findings.md). The validated default.
     # "model" = Dixon-Coles goals model (negative CLV in backtest; screens only).
+    #
+    # Defaults below are the v3 train-chosen optimum (shin devig, edge >= 0.03:
+    # holdout ROI +22.4%, incremental CLV +0.107 > 2SE — few, high-conviction
+    # picks). Volume tier: VALUE_MIN_EDGE=0.015 (v2 holdout n=379, CLV +0.019).
     pick_strategy: str = "value"
-    value_min_edge: float = 0.015
+    value_min_edge: float = 0.03
     value_min_odds: float = 1.30
+    value_devig: str = "shin"  # power|shin|multiplicative|additive
 
     # --- Odds sources (read-only access) -----------------------------------------
     # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);

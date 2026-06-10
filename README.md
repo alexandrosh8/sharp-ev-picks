@@ -34,11 +34,14 @@ uv run uvicorn app.main:app
 The honest result of backtesting (`docs/backtesting/`): a goals model
 (Dixon-Coles) does **not** beat the market — negative CLV. But **sharp-vs-soft
 line shopping does**: price fair value from the sharpest book (Pinnacle), bet
-another book whose price beats it. Validated with review-corrected
-methodology (one bet/match, train/holdout split, incremental-CLV null) across
-**18 leagues**: held-out 2024-26, edge ≥ 0.015 → **n=379, +2.5% ROI,
-incremental CLV +0.019 (> 2SE), positive even vs the Max-of-books close.**
-Plan around CLV ~+2% as the realistic edge; small-sample ROI is noisy.
+another book whose price beats it. The v3 maximal-data run (18 leagues ×
+7 seasons × two markets, 46k matches; devig × threshold swept on TRAIN only,
+one-shot holdout) chose **shin devig, edge ≥ 0.03** — held-out 2024-26:
+**n=62, +22.4% ROI, incremental CLV +0.107 (> 2SE), positive even vs the
+Max-of-books close; both 1X2 and OU2.5 independently positive.** Those are
+the live defaults (~2-3 high-conviction picks/week). Volume tier
+`VALUE_MIN_EDGE=0.015`: n=379, +2.5% ROI, incremental CLV +0.019. The number
+to trust is the CLV — small-sample ROI is noisy.
 
 The strategy is wired into the running app (`PICK_STRATEGY=value`, the
 default): the scheduler polls, persists picks, alerts, and a 30-minute CLV
@@ -93,15 +96,21 @@ Set `FOOTBALLDATA_NEW_LEAGUE_CODE` (BRA/ARG/USA/MEX/JPN/CHN) to train on an
 in-season non-European league. Production target: Ubuntu Linux VPS (Docker
 Compose, OpenClaw-compatible). See `docs/deployment/`.
 
+**New here? Follow `docs/HOW_TO_RUN.md`** — exact commands to verify the
+backtest, generate live picks, and run the full platform.
+
 ## Project status
 
 - [x] Phase A — Claude Code environment (CLAUDE.md, agents, skills, hooks, memory)
 - [x] Phase B — Repository-grounded research (odds sources, models, math)
-- [x] Phase C — Architecture + ADRs 0000-0011
+- [x] Phase C — Architecture + ADRs 0000-0012
 - [x] Phase D — Production scaffold: oracle-validated math core, schemas,
       14-table DB + alembic, read-only ingestion, idempotent alerts,
-      APScheduler pipeline, FastAPI, CI + safety audit (132 tests)
-- [ ] Next: roadmap phase 2 — live ingestion + persistence (`docs/roadmap.md`)
+      APScheduler pipeline, FastAPI, CI + safety audit
+- [x] Validated pick finder — sharp-vs-soft value strategy, v3 maximal-data
+      backtest (46k matches, holdout incremental CLV > 2SE), wired as the
+      default live pipeline with 30-min CLV true-up (173 tests)
+- [ ] Next: settlement engine (roadmap phase 4) + bankroll tracking (phase 6)
 
 ## Documentation
 

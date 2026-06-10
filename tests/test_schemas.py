@@ -22,7 +22,7 @@ def snapshot(**overrides: object) -> OddsSnapshotIn:
         "ingested_at": NOW,
     }
     base.update(overrides)
-    return OddsSnapshotIn(**base)  # type: ignore[arg-type]
+    return OddsSnapshotIn(**base)
 
 
 def test_naive_datetime_rejected() -> None:

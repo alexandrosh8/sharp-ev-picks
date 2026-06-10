@@ -181,7 +181,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     picks: list[PickOut] = []
     for (event_id, market), (prices, captured) in group_market_prices(snapshots).items():
         for v in find_value_bets(
-            prices, min_edge=deps.value_min_edge, min_odds=deps.value_min_odds
+            prices,
+            min_edge=deps.value_min_edge,
+            min_odds=deps.value_min_odds,
+            devig_method=deps.devig_method,
         ):
             cap = captured.get((v.selection, v.best_book))
             age = max((now - cap).total_seconds(), 0.0) if cap else 0.0

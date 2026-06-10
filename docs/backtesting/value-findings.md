@@ -1,11 +1,41 @@
-# Value-Strategy Findings — Review-Corrected (v2)
+# Value-Strategy Findings — Maximal-Data Optimization (v3)
 
-- **Date:** 2026-06-10 (v2 — after the 23-finding deep review; methodology
-  corrected, claims re-validated on held-out data)
+- **Date:** 2026-06-10 (v3 — maximal data: 7 seasons × 18 leagues × 2
+  markets; devig-method × threshold sweep on TRAIN only, one-shot holdout)
 - **Strategy:** sharp-vs-soft line shopping (`app/edge/value.py`,
   `scripts/value_backtest.py`). Fair value = devig(Pinnacle pre-match); bet
   the best available price (Max across books) when it beats fair by ≥
   threshold. **No goals model.**
+
+## v3 — the production configuration (chosen on TRAIN, confirmed on holdout)
+
+Maximal free dataset: 18 divisions × seasons 2019-20…2025-26 (33,077 train /
+13,143 test matches), **two markets per match** (1X2 and Over/Under 2.5 —
+football-data.co.uk carries Pinnacle + Max for both since 2019-20). The sweep
+ran devig ∈ {power, shin, multiplicative} × threshold ∈ {0.005…0.030} on
+TRAIN seasons 1920-2324 only and chose **shin devig, edge ≥ 0.03** (best
+train ROI with n ≥ 150: +17.1%, n=267, incremental CLV +0.0624). Evaluated
+ONCE on held-out 2425+2526:
+
+|                               | n      | hit%     | ROI         | CLV vs Pinnacle close | CLV vs Max close     | incremental CLV     |
+| ----------------------------- | ------ | -------- | ----------- | --------------------- | -------------------- | ------------------- |
+| baseline (bet everything)     | 5271   | 38.5     | −1.59%      | +0.0061 ± 0.0025      | −0.0006              | —                   |
+| **picks (shin, edge ≥ 0.03)** | **62** | **50.0** | **+22.39%** | **+0.1127 ± 0.0391**  | **+0.0829 ± 0.0419** | **+0.1066 (> 2SE)** |
+| — 1x2 only                    | 34     | 41.2     | +26.47%     | +0.1101               | +0.0924              | +0.1040             |
+| — ou25 only                   | 28     | 60.7     | +17.43%     | +0.1159               | +0.0713              | +0.1098             |
+
+**Computed verdict: POSITIVE selection skill on held-out data** — incremental
+CLV +0.1066 clears 2SE and the picks beat even the Max-of-books close. Both
+markets are independently positive. The train sweep was monotone in
+threshold for every devig method (higher bar → higher ROI and CLV), so the
+chosen corner is a robust pattern, not a lucky cell.
+
+These are the live defaults (`app/config.py`): `PICK_STRATEGY=value`,
+`VALUE_DEVIG=shin`, `VALUE_MIN_EDGE=0.03` → ~120 high-conviction picks/year
+across 18 leagues (≈2-3/week). For more volume at a thinner edge, set
+`VALUE_MIN_EDGE=0.015` (the v2-validated tier below: n=379, ROI +2.5%,
+incremental CLV +0.019). **ROI at n=62 is noise-dominated — the number to
+trust is the incremental CLV; plan around CLV, not the +22% point estimate.**
 
 ## Corrected methodology (what changed in v2 and why)
 
@@ -27,15 +57,15 @@ found and we fixed:
 5. The printed verdict is **computed from the held-out numbers** — the
    script can and will print "NO PROVEN EDGE" if that's what the data says.
 
-## Broader validation (18 leagues) — the number to trust
+## v2 — volume tier (edge ≥ 0.015, power devig, 18 leagues, 1X2 only)
 
 Re-run across 18 divisions (top + second tiers incl. E2/E3/SC0/D2/I2/SP2/F2/
 N1/B1/P1/T1/G1) for 3x the held-out sample:
 
-| | n | hit% | ROI | CLV vs Pinnacle close | CLV vs Max close | incremental CLV |
-| --- | --- | --- | --- | --- | --- | --- |
-| baseline (bet everything) | 4360 | 43.0 | -0.03% | +0.0057 ± 0.0025 | -0.0017 | — |
-| **picks (edge ≥ 0.015)** | **379** | **49.3** | **+2.46%** | **+0.0249 ± 0.0110** | **+0.0123** | **+0.0192 (> 2SE)** |
+|                           | n       | hit%     | ROI        | CLV vs Pinnacle close | CLV vs Max close | incremental CLV     |
+| ------------------------- | ------- | -------- | ---------- | --------------------- | ---------------- | ------------------- |
+| baseline (bet everything) | 4360    | 43.0     | -0.03%     | +0.0057 ± 0.0025      | -0.0017          | —                   |
+| **picks (edge ≥ 0.015)**  | **379** | **49.3** | **+2.46%** | **+0.0249 ± 0.0110**  | **+0.0123**      | **+0.0192 (> 2SE)** |
 
 With 3x the data the selection skill stays conclusive (incremental CLV
 +0.0192 > 2SE, positive even vs the Max-of-books close) while the ROI

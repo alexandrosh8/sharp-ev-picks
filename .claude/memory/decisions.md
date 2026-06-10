@@ -3,6 +3,23 @@
 - 2026-06-10 — Project is a **manual-betting +EV picks decision-support
   platform** (never an auto-betting bot, never "paper trading" by default).
   Enforcement layers: ADR-0002.
+- 2026-06-10 (v3 FINAL, maximal-data optimization) — **Production config =
+  shin devig, edge ≥ 0.03** (`VALUE_DEVIG=shin`, `VALUE_MIN_EDGE=0.03`),
+  chosen by sweeping devig×threshold on TRAIN seasons 1920-2324 only across
+  18 leagues × 2 markets (1X2 + OU2.5, 33k train matches) and confirmed
+  ONE-SHOT on holdout 2425-2526: n=62, ROI +22.4%, **incremental CLV +0.1066
+  (>2SE)**, beats Max-of-books close, both markets independently positive.
+  ~120 picks/yr (high conviction). Volume tier VALUE_MIN_EDGE=0.015 stays
+  validated (n=379, CLV +0.019). CLV true-up uses the SAME devig so live CLV
+  is backtest-comparable. Trust CLV, not small-n ROI.
+  `docs/backtesting/value-findings.md`, `docs/HOW_TO_RUN.md`.
+- 2026-06-10 (final repo sweep) — **No repo qualifies for binding**
+  (`docs/research/value-platform-repo-research.md`): all 5 inspected are
+  reference-only; no free Pinnacle feed exists on GitHub (PS3838 needs a
+  funded account + has NO read-only auth scope → never bind, hard rule 3);
+  multi-book "datasets" all dropped the PSH/PSC columns we already get from
+  football-data.co.uk. Noted for later: goto_conversion (devig alternative),
+  RapidAPI pinnacle-odds proxy (unverified ToS/limits).
 - 2026-06-10 — Clean-room core: `app/` code written fresh from researched
   repos/literature; sibling projects (kestrel, Betting Picks) are NOT ported.
 - 2026-06-10 (later, user direction) — **Proven libraries used DIRECTLY**:
