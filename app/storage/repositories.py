@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +18,15 @@ from sqlalchemy.orm import aliased
 
 from app.ingestion.base import EventTeams
 from app.schemas.picks import PickOut
-from app.storage.models import Event, League, ModelVersion, Pick, Sport, Team
+from app.storage.models import (
+    Event,
+    League,
+    ModelVersion,
+    Pick,
+    ResultTracking,
+    Sport,
+    Team,
+)
 
 
 async def _get_or_create_sport(session: AsyncSession, key: str, name: str) -> int:
@@ -168,6 +176,66 @@ async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, date
     if changed:
         await session.flush()
     return changed
+
+
+async def performance_report(session: AsyncSession) -> dict[str, Any]:
+    """ROI + stake-weighted log-CLV over all settled picks (phase 4 report).
+
+    Staking/weighting uses the platform's recommended stake — the same
+    sizing the backtests report — while pnl/roi per pick already reflect
+    the user's actual stake when they logged one. Decimals serialize as
+    strings; undefined ratios are None.
+    """
+    rows = (
+        await session.execute(
+            select(
+                ResultTracking.outcome,
+                ResultTracking.pnl,
+                Pick.recommended_stake_amount,
+                Pick.clv_log,
+                Pick.beat_close,
+            ).join(Pick, ResultTracking.pick_id == Pick.id)
+        )
+    ).all()
+    n_pending = await session.scalar(
+        select(func.count()).select_from(Pick).where(Pick.status == "alerted")
+    )
+
+    counts = {"won": 0, "lost": 0, "void": 0, "push": 0}
+    total_staked = Decimal("0")
+    total_pnl = Decimal("0")
+    clv_weighted = Decimal("0")
+    clv_stake = Decimal("0")
+    beat_known = beat_true = 0
+    for outcome, pnl, stake, clv_log, beat_close in rows:
+        if outcome in counts:
+            counts[outcome] += 1
+        total_staked += stake
+        total_pnl += pnl if pnl is not None else Decimal("0")
+        if clv_log is not None:
+            clv_weighted += stake * clv_log
+            clv_stake += stake
+        if beat_close is not None:
+            beat_known += 1
+            beat_true += int(beat_close)
+
+    return {
+        "n_settled": len(rows),
+        **counts,
+        "n_pending": int(n_pending or 0),
+        "total_staked": str(total_staked),
+        "total_pnl": str(total_pnl),
+        "roi": _ratio(total_pnl, total_staked),
+        "stake_weighted_clv_log": _ratio(clv_weighted, clv_stake),
+        "beat_close_rate": _ratio(Decimal(beat_true), Decimal(beat_known)),
+    }
+
+
+def _ratio(numerator: Decimal, denominator: Decimal) -> str | None:
+    """Exact ratio without Decimal trailing-zero noise; None when undefined."""
+    if not denominator:
+        return None
+    return format((numerator / denominator).normalize(), "f")
 
 
 async def persist_pick(

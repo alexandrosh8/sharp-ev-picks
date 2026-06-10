@@ -363,6 +363,18 @@
         <div class="v" id="c-settled">–</div>
         <div class="k">Settled</div>
       </div>
+      <div class="card">
+        <div class="v" id="c-record">–</div>
+        <div class="k">Record W-L-P</div>
+      </div>
+      <div class="card">
+        <div class="v" id="c-pnl">–</div>
+        <div class="k">P&amp;L / ROI (settled)</div>
+      </div>
+      <div class="card">
+        <div class="v" id="c-swclv">–</div>
+        <div class="k">Stake-wtd CLV (settled)</div>
+      </div>
     </div>
 
     <div class="controls">
@@ -562,15 +574,77 @@
               ),
             );
           }
-          td(
+          const statusCell = td(
             tr,
             badge(
               p.status === "alerted" ? "open" : p.status,
               p.status === "alerted" ? "b-cyan" : "b-gray",
             ),
           );
+          // Manual settle: past-kickoff open picks (auto-settlement covers
+          // football; NBA/euroleague have no free results feed).
+          if (p.status === "alerted" && new Date(p.starts_at) < Date.now()) {
+            const btn = document.createElement("button");
+            btn.textContent = "settle";
+            btn.style.marginLeft = "8px";
+            btn.addEventListener("click", () => settleEvent(p));
+            statusCell.appendChild(btn);
+          }
           tbody.appendChild(tr);
         });
+      }
+
+      async function settleEvent(p) {
+        const raw = prompt(
+          "Final score for " + p.event + " (home-away, e.g. 2-1):",
+          "",
+        );
+        if (raw === null) return;
+        const m = raw.trim().match(/^(\d{1,3})\s*-\s*(\d{1,3})$/);
+        if (!m) {
+          alert("Use the form home-away, e.g. 2-1");
+          return;
+        }
+        try {
+          const res = await fetch("/events/" + p.event_id + "/result", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              home_score: Number(m[1]),
+              away_score: Number(m[2]),
+            }),
+          });
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          await load();
+        } catch (err) {
+          alert("Settle failed: " + err.message);
+        }
+      }
+
+      function summarizePerf(perf) {
+        if (!perf) return;
+        $("c-settled").textContent = String(perf.n_settled);
+        $("c-record").textContent =
+          perf.won + "-" + perf.lost + "-" + (perf.push + perf.void);
+        const pnl = Number(perf.total_pnl);
+        const pnlEl = $("c-pnl");
+        pnlEl.textContent = perf.n_settled
+          ? (pnl >= 0 ? "+" : "") +
+            pnl.toFixed(2) +
+            (perf.roi !== null
+              ? " / " + (Number(perf.roi) * 100).toFixed(1) + "%"
+              : "")
+          : "–";
+        pnlEl.style.color = pnl < 0 ? "var(--red)" : "";
+        const clvEl = $("c-swclv");
+        if (perf.stake_weighted_clv_log === null) clvEl.textContent = "–";
+        else {
+          const clvPct =
+            (Math.exp(Number(perf.stake_weighted_clv_log)) - 1) * 100;
+          clvEl.textContent =
+            (clvPct >= 0 ? "+" : "") + clvPct.toFixed(2) + "%";
+          clvEl.style.color = clvPct < 0 ? "var(--red)" : "";
+        }
       }
 
       function summarize() {
@@ -597,10 +671,14 @@
 
       async function load() {
         try {
-          const res = await fetch("/picks?limit=200");
+          const [res, perfRes] = await Promise.all([
+            fetch("/picks?limit=200"),
+            fetch("/performance"),
+          ]);
           if (!res.ok) throw new Error("HTTP " + res.status);
           PICKS = await res.json();
           summarize();
+          summarizePerf(perfRes.ok ? await perfRes.json() : null);
           render();
           $("stamp").textContent =
             "updated " +

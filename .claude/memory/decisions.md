@@ -1,5 +1,21 @@
 # Decisions Log
 
+- 2026-06-10 — **Settlement engine shipped (phase 4)**, `app/settlement/`:
+  outcomes.py is pure stdlib (same boundary as app/probabilities). Key
+  semantics: INTEGER-line spreads selections are European handicap legs —
+  adjusted draw LOSES for team legs ("Draw (line)" wins it); AH is half-line
+  only (push lines rejected upstream); totals push on exact integer line;
+  DNB draw = push. Free results: league slug -> source map (world-cup ->
+  martj42 intl CSV; brazil-serie-a -> football-data new/BRA.csv; European
+  slugs -> mmz4281 season CSVs); nba/euroleague have NO free feed -> manual
+  `POST /events/{id}/result` + dashboard settle button. Matching: normalized
+  names ±1 day, unique-containment fallback, ambiguity refuses. Settler
+  refuses empty score book (feed outage ≠ quiet day); idempotent via
+  uq_result_tracking_pick; 2h post-kickoff delay; pnl uses manual_bet_logs
+  stake/odds when logged, else recommendation; settling freezes CLV (true-up
+  touches only status='alerted'). Report: GET /performance — ROI +
+  recommended-stake-weighted clv_log. Branch feat/settlement-engine.
+
 - 2026-06-10 (END OF SESSION, commit 5cc61d6) — **v4 config live**:
   VALUE_DEVIG=differential_margin_weighting (7-method train sweep with 1.60
   floor; holdout n=61 ROI +21.1% incCLV +0.1058 >2SE; shin indistinguishable;

@@ -1,0 +1,352 @@
+"""Settlement engine against compose Postgres (rollback-isolated; skips
+when the DB is absent) — mirrors tests/test_persistence.py."""
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import httpx
+import pytest
+from sqlalchemy import insert, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.ingestion.base import EventTeams
+from app.schemas.base import Market
+from app.schemas.picks import PickOut, StakeBreakdownOut
+from app.settlement.engine import (
+    run_settlement_cycle,
+    settle_event_picks,
+    settle_open_picks,
+)
+from app.settlement.results import FinalScore, ScoreBook
+from app.storage.models import ManualBetLog, Pick, ResultTracking
+from app.storage.repositories import persist_pick
+
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+
+NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+KICKOFF = NOW - timedelta(hours=6)
+HOME = "Settle Alpha"
+AWAY = "Settle Beta"
+
+
+def make_pick(
+    event_id: str,
+    market: Market = Market.TOTALS,
+    selection: str = "Over 2.5",
+) -> PickOut:
+    return PickOut(
+        pick_id="p-settle",
+        sport="soccer",
+        league="test-league-settlement",
+        event=f"{HOME} vs {AWAY}",
+        event_id=event_id,
+        market=market,
+        selection=selection,
+        bookmaker="testbook",
+        decimal_odds=2.10,
+        model_probability=0.55,
+        fair_probability=0.50,
+        edge=0.05,
+        ev=0.155,
+        confidence=0.70,
+        recommended_stake_fraction=0.02,
+        recommended_stake_amount=Decimal("20.00"),
+        stake_breakdown=StakeBreakdownOut(raw_kelly=0.1, fractional=0.025, capped=True, final=0.02),
+        odds_age_seconds=30.0,
+        liquidity=None,
+        reason_summary="settlement test",
+        created_at=NOW - timedelta(hours=8),
+    )
+
+
+def book_with_score(hs: int = 2, as_: int = 1) -> ScoreBook:
+    return ScoreBook(
+        [
+            FinalScore(
+                home_team=HOME,
+                away_team=AWAY,
+                match_date=KICKOFF.date(),
+                home_score=hs,
+                away_score=as_,
+            )
+        ]
+    )
+
+
+@pytest.fixture
+async def session():  # type: ignore[no-untyped-def]
+    engine = create_async_engine(DB_URL)
+    try:
+        async with engine.connect() as conn:
+            await conn.exec_driver_sql("SELECT 1")
+    except Exception:
+        await engine.dispose()
+        pytest.skip("compose Postgres not reachable on :5433")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        await s.begin()
+        try:
+            yield s
+        finally:
+            await s.rollback()
+    await engine.dispose()
+
+
+async def seed_pick(session, event_id: str, **kwargs) -> Pick:  # type: ignore[no-untyped-def]
+    teams = EventTeams(home=HOME, away=AWAY, league="test-league-settlement", starts_at=KICKOFF)
+    assert await persist_pick(session, make_pick(event_id, **kwargs), teams, "value", "test-v")
+    pick = await session.scalar(
+        select(Pick).where(Pick.reason_summary == "settlement test").order_by(Pick.id.desc())
+    )
+    assert pick is not None
+    return pick
+
+
+async def test_settles_past_pick_with_result_row(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-1")
+    n = await settle_open_picks(session, book_with_score(2, 1), NOW)
+    assert n == 1
+    await session.refresh(pick)
+    assert pick.status == "settled"
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "won"  # Over 2.5 with 3 goals
+    assert row.pnl == Decimal("22.00")  # 20 @ 2.10
+    assert row.roi == Decimal("1.1")
+    assert row.settled_at == NOW
+
+
+async def test_settlement_is_idempotent(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-2")
+    assert await settle_open_picks(session, book_with_score(), NOW) == 1
+    assert await settle_open_picks(session, book_with_score(), NOW) == 0
+    rows = (
+        await session.scalars(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    ).all()
+    assert len(rows) == 1
+
+
+async def test_uses_manual_bet_log_stake_and_odds(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-3")
+    await session.execute(
+        insert(ManualBetLog).values(
+            pick_id=pick.id,
+            bet_placed=True,
+            actual_stake=Decimal("50.00"),
+            actual_odds=Decimal("2.50"),
+        )
+    )
+    await settle_open_picks(session, book_with_score(2, 1), NOW)
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.pnl == Decimal("75.00")  # 50 @ 2.50 won
+
+
+async def test_lost_pick_settles_negative(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-4")
+    await settle_open_picks(session, book_with_score(1, 0), NOW)  # 1 goal -> Over 2.5 lost
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "lost"
+    assert row.pnl == Decimal("-20.00")
+
+
+async def test_future_kickoff_stays_open(session) -> None:  # type: ignore[no-untyped-def]
+    teams = EventTeams(
+        home=HOME, away=AWAY, league="test-league-settlement", starts_at=NOW + timedelta(hours=3)
+    )
+    assert await persist_pick(session, make_pick("evt-settle-5"), teams, "value", "test-v")
+    book = ScoreBook(
+        [
+            FinalScore(
+                home_team=HOME,
+                away_team=AWAY,
+                match_date=NOW.date(),
+                home_score=2,
+                away_score=1,
+            )
+        ]
+    )
+    assert await settle_open_picks(session, book, NOW) == 0
+
+
+async def test_missing_score_stays_open(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-6")
+    other = ScoreBook(
+        [
+            FinalScore(
+                home_team="Unrelated FC",
+                away_team="Nobody United",
+                match_date=KICKOFF.date(),
+                home_score=1,
+                away_score=0,
+            )
+        ]
+    )
+    assert await settle_open_picks(session, other, NOW) == 0
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+
+
+async def test_empty_book_refuses_to_settle(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-7")
+    with caplog.at_level("ERROR"):
+        assert await settle_open_picks(session, ScoreBook([]), NOW) == 0
+    assert any("empty score book" in r.message for r in caplog.records)
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+
+
+async def test_unparseable_selection_skipped_not_guessed(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-8", market=Market.CORRECT_SCORE, selection="2:1")
+    with caplog.at_level("WARNING"):
+        assert await settle_open_picks(session, book_with_score(), NOW) == 0
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+
+
+# --- full cycle (providers -> book -> settle), as the scheduler job runs it ----
+
+
+@pytest.fixture
+async def factory():  # type: ignore[no-untyped-def]
+    engine = create_async_engine(DB_URL)
+    try:
+        async with engine.connect() as probe:
+            await probe.exec_driver_sql("SELECT 1")
+    except Exception:
+        await engine.dispose()
+        pytest.skip("compose Postgres not reachable on :5433")
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        maker = async_sessionmaker(
+            bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        )
+        try:
+            yield maker
+        finally:
+            await trans.rollback()
+    await engine.dispose()
+
+
+CYCLE_CSV = (
+    "Country,League,Date,Home,Away,HG,AG,Res,PSCH,PSCD,PSCA\n"
+    f"Brazil,Serie A,{KICKOFF.strftime('%d/%m/%Y')},{HOME},{AWAY},2,1,H,1.9,3.4,4.2\n"
+)
+
+
+async def test_run_settlement_cycle_end_to_end(factory) -> None:  # type: ignore[no-untyped-def]
+    async with factory() as session:
+        await seed_pick(session, "evt-settle-cycle")
+        await session.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/new/BRA.csv"):
+            return httpx.Response(200, text=CYCLE_CSV)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        settled = await run_settlement_cycle(
+            client, factory, slugs=["brazil-serie-a"], seasons=[], now=NOW
+        )
+    assert settled == 1
+    async with factory() as session:
+        row = await session.scalar(
+            select(ResultTracking)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .where(Pick.reason_summary == "settlement test")
+        )
+        assert row is not None
+        assert row.outcome == "won"
+
+
+async def test_settle_event_picks_settles_all_open_picks_of_event(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-manual-1")  # totals Over 2.5
+    teams = EventTeams(home=HOME, away=AWAY, league="test-league-settlement", starts_at=KICKOFF)
+    assert await persist_pick(
+        session,
+        make_pick("evt-manual-1", market=Market.H2H, selection=HOME),
+        teams,
+        "value",
+        "test-v",
+    )
+    settled, skipped = await settle_event_picks(session, pick.event_id, 2, 1, NOW)
+    assert (settled, skipped) == (2, 0)
+    rows = (
+        await session.scalars(
+            select(ResultTracking)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .where(Pick.event_id == pick.event_id)
+        )
+    ).all()
+    assert sorted(r.outcome for r in rows) == ["won", "won"]  # 2-1: Over 2.5 + home win
+
+
+async def test_settle_event_picks_skips_unparseable(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-manual-2", market=Market.CORRECT_SCORE, selection="2:1")
+    settled, skipped = await settle_event_picks(session, pick.event_id, 2, 1, NOW)
+    assert (settled, skipped) == (0, 1)
+
+
+async def test_performance_report_aggregates(session) -> None:  # type: ignore[no-untyped-def]
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import update as sa_update
+
+    from app.storage.repositories import performance_report
+
+    # The dev warehouse may hold real picks/results; neutralize them inside
+    # this rolled-back transaction so the aggregates are deterministic.
+    await session.execute(sa_delete(ResultTracking))
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+
+    won = await seed_pick(session, "evt-perf-1")  # Over 2.5, odds 2.10, stake 20
+    won.clv_log = Decimal("0.05")
+    won.beat_close = True
+    lost = await seed_pick(session, "evt-perf-2")
+    lost.clv_log = Decimal("-0.01")
+    lost.beat_close = False
+    book = ScoreBook(
+        [
+            FinalScore(HOME, AWAY, KICKOFF.date(), 2, 1),  # only evt-perf-1's event? no —
+        ]
+    )
+    # Both picks share team names/date, so both settle from one score (2-1):
+    # but evt-perf-2 needs a loss -> settle it manually as 1-0 first.
+    settled, _ = await settle_event_picks(session, lost.event_id, 1, 0, NOW)
+    assert settled == 1
+    assert await settle_open_picks(session, book, NOW) == 1
+
+    report = await performance_report(session)
+    assert report["n_settled"] == 2
+    assert report["won"] == 1
+    assert report["lost"] == 1
+    assert report["total_staked"] == "40.00"
+    assert report["total_pnl"] == "2.00"  # +22 - 20
+    assert report["roi"] == "0.05"  # 2/40
+    # stake-weighted clv: equal stakes -> mean of 0.05 and -0.01 = 0.02
+    assert report["stake_weighted_clv_log"] == "0.02"
+    assert report["beat_close_rate"] == "0.5"
+    assert report["n_pending"] == 0
+
+
+async def test_run_settlement_cycle_refuses_when_providers_empty(factory, caplog) -> None:  # type: ignore[no-untyped-def]
+    async with factory() as session:
+        pick = await seed_pick(session, "evt-settle-cycle-2")
+        await session.commit()
+        pick_id = pick.id
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(404))
+    ) as client:
+        with caplog.at_level("ERROR"):
+            settled = await run_settlement_cycle(
+                client, factory, slugs=["brazil-serie-a"], seasons=[], now=NOW
+            )
+    assert settled == 0
+    assert any("no scores" in r.message for r in caplog.records)
+    async with factory() as session:
+        refreshed = await session.get(Pick, pick_id)
+        assert refreshed is not None
+        assert refreshed.status == "alerted"

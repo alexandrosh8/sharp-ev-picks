@@ -19,6 +19,16 @@ class EventIn(InternalModel):
     _utc_starts = field_validator("starts_at")(to_utc)
 
 
+class EventResultIn(InternalModel):
+    """User-entered final score for one event — settles all its open picks.
+
+    The manual path for leagues without a free results feed (e.g. NBA).
+    """
+
+    home_score: int = Field(ge=0, le=250)
+    away_score: int = Field(ge=0, le=250)
+
+
 class ResultIn(InternalModel):
     """User-entered settlement of a pick they bet manually (or skipped).
 

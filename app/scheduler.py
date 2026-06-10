@@ -231,14 +231,36 @@ def build_scheduler(
             )
 
     async def settle_results() -> None:
-        # Roadmap phase 4: load results, settle picks, fill CLV columns.
-        logger.info("settle_results: settlement engine arrives in roadmap phase 4")
+        # Phase 4: free results sources -> outcome mapping -> result_tracking.
+        # Leagues without a free results feed (nba, euroleague) settle
+        # manually via POST /events/{id}/result on the dashboard.
+        if session_factory is None:
+            logger.info("settle_results: no DB session factory; skipping")
+            return
+        from app.settlement.engine import run_settlement_cycle
+
+        try:
+            await run_settlement_cycle(
+                http_client,
+                session_factory,
+                slugs=_csv(settings.oddsportal_football_leagues),
+                seasons=_csv(settings.footballdata_seasons),
+            )
+        except Exception as exc:
+            logger.error("settle_results failed: %s", type(exc).__name__)
 
     async def snapshot_bankroll() -> None:
         # Roadmap phase 6: persist bankroll_snapshots from manual entries.
         logger.info("snapshot_bankroll: bankroll tracking arrives in roadmap phase 6")
 
-    scheduler.add_job(settle_results, CronTrigger(minute=15), id="settle_results")
+    scheduler.add_job(
+        settle_results,
+        CronTrigger(minute=15),
+        id="settle_results",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=None,  # run on Mac wake, don't skip
+    )
     scheduler.add_job(snapshot_bankroll, CronTrigger(hour=0, minute=30), id="snapshot_bankroll")
     return scheduler
 

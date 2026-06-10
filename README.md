@@ -111,7 +111,10 @@ backtest, generate live picks, and run the full platform.
 - [x] Validated pick finder — sharp-vs-soft value strategy, v3 maximal-data
       backtest (46k matches, holdout incremental CLV > 2SE), wired as the
       default live pipeline with 30-min CLV true-up (173 tests)
-- [ ] Next: settlement engine (roadmap phase 4) + bankroll tracking (phase 6)
+- [x] Settlement engine (phase 4) — auto-settles from free results sources
+      (World Cup, Brazil, European leagues), manual settle button for
+      NBA/euroleague, ROI + stake-weighted CLV report on the dashboard
+- [ ] Next: bankroll tracking (phase 6) + NBA model (phase 5)
 
 ## Documentation
 

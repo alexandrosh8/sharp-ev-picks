@@ -37,13 +37,20 @@ derivation (1X2/totals first); per-league calibration reports
 backtest report in docs/backtesting/ with CLV — no live picks until
 calibration gates pass.
 
-## Phase 4 — Result tracking + CLV loop ⏳
+## Phase 4 — Result tracking + CLV loop ✅ (2026-06-10)
 
-**Deliverables:** settlement engine (results loader, outcome mapping),
-football CLV true-up from football-data PSC\* closing columns, ROI +
-stake-weighted log-CLV reports, settle_results job goes real.
-**Acceptance:** user-recorded results produce ROI/CLV reports; every settled
-pick carries closing_odds/clv_log/beat_close.
+**Delivered:** settlement engine (`app/settlement/`): pure outcome mapping
+for every live market (1X2/ML, totals, BTTS, DNB, DC, AH half-lines, EH
+3-way), free results sources mapped from league slugs (martj42 international
+CSV for the World Cup; football-data.co.uk new-league + season CSVs for
+clubs) into a normalized-name ±1-day ScoreBook, hourly `settle_results` job
+(silent-empty refusal, idempotent via `uq_result_tracking_pick`), manual
+event-level settlement `POST /events/{id}/result` + dashboard settle button
+(covers NBA/euroleague — no free feed), `GET /performance` ROI +
+stake-weighted log-CLV report + dashboard cards. Live CLV true-up was
+already running (`app/clv_trueup.py`); settling freezes a pick's CLV.
+**Acceptance met:** auto- and user-recorded results produce ROI/CLV reports;
+settled picks carry outcome/pnl/roi/settled_at and frozen clv_log/beat_close.
 
 ## Phase 5 — NBA MVP model ⏳
 

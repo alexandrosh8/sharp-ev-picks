@@ -6,6 +6,7 @@ place a bet.
 """
 
 import logging
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
@@ -16,9 +17,10 @@ from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
-from app.schemas.events import ResultIn
-from app.storage.models import ManualBetLog, Pick, ResultTracking
-from app.storage.repositories import latest_picks_with_events
+from app.schemas.events import EventResultIn, ResultIn
+from app.settlement.engine import settle_event_picks
+from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
+from app.storage.repositories import latest_picks_with_events, performance_report
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,35 @@ async def latest_picks(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[dict[str, Any]]:
     return await latest_picks_with_events(session, limit)
+
+
+@router.get("/performance")
+async def performance(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, Any]:
+    """ROI + stake-weighted log-CLV over settled picks (phase 4 report)."""
+    return await performance_report(session)
+
+
+@router.post("/events/{event_id}/result")
+async def settle_event(
+    event_id: int,
+    payload: EventResultIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, int]:
+    """Settle ALL open picks of an event from a user-entered final score.
+
+    Manual settlement path (dashboard settle button) — records outcomes
+    only; nothing here can place a bet.
+    """
+    event = await session.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    settled, skipped = await settle_event_picks(
+        session, event_id, payload.home_score, payload.away_score, datetime.now(tz=UTC)
+    )
+    await session.commit()
+    return {"settled": settled, "skipped": skipped}
 
 
 @router.post("/picks/{pick_id}/result", status_code=201)

@@ -67,3 +67,15 @@ def test_result_payload_validation_rejects_naive_datetime() -> None:
         },
     )
     assert response.status_code == 422
+
+
+def test_event_result_rejects_negative_and_missing_scores() -> None:
+    client = TestClient(make_app())
+    assert (
+        client.post("/events/1/result", json={"home_score": -1, "away_score": 0}).status_code == 422
+    )
+    assert client.post("/events/1/result", json={"home_score": 2}).status_code == 422
+    assert (
+        client.post("/events/1/result", json={"home_score": 2, "away_score": "x"}).status_code
+        == 422
+    )
