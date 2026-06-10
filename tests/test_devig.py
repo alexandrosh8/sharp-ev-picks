@@ -85,3 +85,22 @@ def test_odds_at_or_below_one_raise(bad: list[float]) -> None:
 def test_fewer_than_two_outcomes_raise(bad: list[float]) -> None:
     with pytest.raises(ValueError):
         devig(bad)
+
+
+# --- Test oracle: mberk/shin reference implementation (MIT, inspected
+# 2026-06-10). Exact expected values from its cross-validated Rust+Python
+# test suite — our clean-room Shin must agree.
+
+
+def test_shin_oracle_three_way() -> None:
+    probs = devig([2.6, 2.4, 4.3], method=DevigMethod.SHIN)
+    expected = [0.37299406033208965, 0.4047794109200184, 0.2222265287474275]
+    assert probs == pytest.approx(expected, abs=1e-6)
+
+
+def test_shin_oracle_two_way_matches_additive_equivalence() -> None:
+    # For two outcomes, Shin reduces to p_i = 1/o_i - (booksum - 1)/2
+    # (documented equivalence in the mberk/shin test suite).
+    probs = devig([1.5, 2.74], method=DevigMethod.SHIN)
+    expected = [0.6508515815085157, 0.3491484184914841]
+    assert probs == pytest.approx(expected, abs=1e-6)

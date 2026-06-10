@@ -15,6 +15,13 @@ def test_full_kelly_exact_value() -> None:
     assert kelly_fraction(0.55, 2.0) == pytest.approx(0.10, abs=1e-12)
 
 
+def test_kelly_sign_guards_against_p_q_swap() -> None:
+    # Regression guard: sedemmler/WagerBrain (inspected 2026-06-10) ships
+    # (b*q - p)/b — a p/q swap returning -0.10 here. A positive-edge bet
+    # must NEVER produce a non-positive Kelly fraction.
+    assert kelly_fraction(0.55, 2.0) > 0.0
+
+
 def test_no_edge_gives_zero() -> None:
     assert kelly_fraction(0.50, 2.0) == 0.0
 
