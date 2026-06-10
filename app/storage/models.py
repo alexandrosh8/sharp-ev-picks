@@ -1,0 +1,302 @@
+"""SQLAlchemy ORM models — the 14-table warehouse (docs/db-schema.md).
+
+Conventions (postgres-schema skill): TIMESTAMPTZ everywhere, NUMERIC for
+odds/probabilities/money (never float columns), append-only odds_snapshots,
+and no credential-shaped columns anywhere — manual_bet_logs records only
+user-entered facts about bets THEY placed manually.
+"""
+
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Identity,
+    Index,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+ODDS = Numeric(10, 4)
+PROB = Numeric(8, 6)
+MONEY = Numeric(12, 2)
+METRIC = Numeric(12, 6)
+
+
+class Base(DeclarativeBase):
+    type_annotation_map = {
+        datetime: DateTime(timezone=True),
+        dict[str, Any]: JSONB,
+    }
+
+
+class Sport(Base):
+    __tablename__ = "sports"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True)  # e.g. "soccer", "basketball_nba"
+    name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class League(Base):
+    __tablename__ = "leagues"
+    __table_args__ = (UniqueConstraint("sport_id", "key", name="uq_leagues_sport_key"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    sport_id: Mapped[int] = mapped_column(ForeignKey("sports.id"))
+    key: Mapped[str] = mapped_column(String(64))  # e.g. "soccer_epl"
+    name: Mapped[str] = mapped_column(String(128))
+    country: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class Team(Base):
+    __tablename__ = "teams"
+    __table_args__ = (
+        UniqueConstraint("sport_id", "normalized_name", name="uq_teams_sport_normalized"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    sport_id: Mapped[int] = mapped_column(ForeignKey("sports.id"))
+    league_id: Mapped[int | None] = mapped_column(ForeignKey("leagues.id"))
+    name: Mapped[str] = mapped_column(String(128))
+    normalized_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class Event(Base):
+    __tablename__ = "events"
+    __table_args__ = (
+        UniqueConstraint("external_ref", name="uq_events_external_ref"),
+        Index("idx_events_starts_at", "starts_at"),
+        Index("idx_events_league_starts", "league_id", "starts_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    sport_id: Mapped[int] = mapped_column(ForeignKey("sports.id"))
+    league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"))
+    home_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    away_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    external_ref: Mapped[str] = mapped_column(String(128))  # provider event key
+    status: Mapped[str] = mapped_column(String(32), server_default="scheduled")
+    starts_at: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(onupdate=func.now())
+
+
+class OddsSnapshot(Base):
+    """Append-only price observations. Never updated, never deleted."""
+
+    __tablename__ = "odds_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "bookmaker",
+            "market",
+            "selection",
+            "captured_at",
+            name="uq_odds_snapshot_observation",
+        ),
+        Index("idx_odds_event_market_captured", "event_id", "market", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
+    bookmaker: Mapped[str] = mapped_column(String(64))
+    market: Mapped[str] = mapped_column(String(32))
+    selection: Mapped[str] = mapped_column(String(64))
+    decimal_odds: Mapped[Decimal] = mapped_column(ODDS)
+    liquidity: Mapped[Decimal | None] = mapped_column(MONEY)
+    captured_at: Mapped[datetime]  # provider-reported price time
+    ingested_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    is_closing: Mapped[bool] = mapped_column(Boolean, server_default="false")
+
+
+class ModelVersion(Base):
+    __tablename__ = "model_versions"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_model_versions_name_version"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))  # e.g. "football-dixon-coles"
+    version: Mapped[str] = mapped_column(String(64))
+    sport_id: Mapped[int] = mapped_column(ForeignKey("sports.id"))
+    trained_at: Mapped[datetime | None]
+    training_window_start: Mapped[datetime | None]
+    training_window_end: Mapped[datetime | None]
+    features_hash: Mapped[str | None] = mapped_column(String(64))
+    hyperparameters: Mapped[dict[str, Any] | None]
+    calibration_method: Mapped[str | None] = mapped_column(String(64))
+    metrics: Mapped[dict[str, Any] | None]  # brier, log_loss, ece per market
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ModelPrediction(Base):
+    __tablename__ = "model_predictions"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "model_version_id",
+            "market",
+            "selection",
+            name="uq_model_predictions_unique",
+        ),
+        Index("idx_predictions_event", "event_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
+    model_version_id: Mapped[int] = mapped_column(ForeignKey("model_versions.id"))
+    market: Mapped[str] = mapped_column(String(32))
+    selection: Mapped[str] = mapped_column(String(64))
+    probability: Mapped[Decimal] = mapped_column(PROB)
+    confidence: Mapped[Decimal | None] = mapped_column(PROB)
+    predicted_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class DetectedEdge(Base):
+    """Every gate evaluation — accepted AND rejected, for auditability."""
+
+    __tablename__ = "detected_edges"
+    __table_args__ = (Index("idx_detected_edges_event", "event_id", "detected_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
+    model_prediction_id: Mapped[int] = mapped_column(ForeignKey("model_predictions.id"))
+    odds_snapshot_id: Mapped[int] = mapped_column(ForeignKey("odds_snapshots.id"))
+    devig_method: Mapped[str] = mapped_column(String(32))
+    fair_probability: Mapped[Decimal] = mapped_column(PROB)
+    edge: Mapped[Decimal] = mapped_column(METRIC)
+    ev: Mapped[Decimal] = mapped_column(METRIC)
+    accepted: Mapped[bool] = mapped_column(Boolean)
+    reject_reasons: Mapped[dict[str, Any] | None]  # {"reasons": [...]}
+    detected_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class Pick(Base):
+    __tablename__ = "picks"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "market",
+            "selection",
+            "model_version_id",
+            name="uq_picks_event_market_selection_model",
+        ),
+        Index("idx_picks_created", "created_at"),
+        Index("idx_picks_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
+    model_version_id: Mapped[int] = mapped_column(ForeignKey("model_versions.id"))
+    detected_edge_id: Mapped[int | None] = mapped_column(ForeignKey("detected_edges.id"))
+    market: Mapped[str] = mapped_column(String(32))
+    selection: Mapped[str] = mapped_column(String(64))
+    bookmaker: Mapped[str] = mapped_column(String(64))
+    decimal_odds: Mapped[Decimal] = mapped_column(ODDS)
+    model_probability: Mapped[Decimal] = mapped_column(PROB)
+    fair_probability: Mapped[Decimal] = mapped_column(PROB)
+    edge: Mapped[Decimal] = mapped_column(METRIC)
+    ev: Mapped[Decimal] = mapped_column(METRIC)
+    confidence: Mapped[Decimal] = mapped_column(PROB)
+    recommended_stake_fraction: Mapped[Decimal] = mapped_column(PROB)
+    recommended_stake_amount: Mapped[Decimal] = mapped_column(MONEY)
+    stake_breakdown: Mapped[dict[str, Any] | None]
+    reason_summary: Mapped[str] = mapped_column(Text, server_default="")
+    status: Mapped[str] = mapped_column(String(32), server_default="pending")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # --- CLV (filled at/after market close) ---------------------------------
+    closing_odds: Mapped[Decimal | None] = mapped_column(ODDS)
+    closing_fair_probability: Mapped[Decimal | None] = mapped_column(PROB)
+    clv_log: Mapped[Decimal | None] = mapped_column(METRIC)
+    beat_close: Mapped[bool | None] = mapped_column(Boolean)
+
+
+class ManualBetLog(Base):
+    """What the user chose to do with a pick — entered manually by the user.
+
+    Holds NO credentials, cookies, or account identifiers (ADR-0002).
+    """
+
+    __tablename__ = "manual_bet_logs"
+    __table_args__ = (Index("idx_manual_bet_logs_pick", "pick_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    pick_id: Mapped[int] = mapped_column(ForeignKey("picks.id"))
+    bet_placed: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    actual_stake: Mapped[Decimal | None] = mapped_column(MONEY)
+    actual_odds: Mapped[Decimal | None] = mapped_column(ODDS)
+    bookmaker_used: Mapped[str | None] = mapped_column(String(64))
+    placed_at: Mapped[datetime | None]
+    notes: Mapped[str] = mapped_column(Text, server_default="")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ResultTracking(Base):
+    __tablename__ = "result_tracking"
+    __table_args__ = (UniqueConstraint("pick_id", name="uq_result_tracking_pick"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    pick_id: Mapped[int] = mapped_column(ForeignKey("picks.id"))
+    outcome: Mapped[str] = mapped_column(String(16))  # won | lost | void | push
+    pnl: Mapped[Decimal | None] = mapped_column(MONEY)  # vs actual or recommended stake
+    roi: Mapped[Decimal | None] = mapped_column(METRIC)
+    settled_at: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class BankrollSnapshot(Base):
+    __tablename__ = "bankroll_snapshots"
+    __table_args__ = (UniqueConstraint("snapshot_date", name="uq_bankroll_snapshots_date"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    snapshot_date: Mapped[date] = mapped_column(Date)
+    balance: Mapped[Decimal] = mapped_column(MONEY)
+    note: Mapped[str] = mapped_column(Text, server_default="")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_alerts_dedupe_key"),
+        Index("idx_alerts_pick", "pick_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    pick_id: Mapped[int] = mapped_column(ForeignKey("picks.id"))
+    channel: Mapped[str] = mapped_column(String(32))  # telegram | webhook
+    dedupe_key: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))  # sent | failed | skipped
+    sent_at: Mapped[datetime | None]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class BacktestRun(Base):
+    __tablename__ = "backtest_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    model_version_id: Mapped[int | None] = mapped_column(ForeignKey("model_versions.id"))
+    window_start: Mapped[datetime]
+    window_end: Mapped[datetime]
+    gate_policy: Mapped[dict[str, Any] | None]
+    cost_assumptions: Mapped[dict[str, Any] | None]  # slippage, commission
+    n_picks: Mapped[int | None] = mapped_column(BigInteger)
+    roi: Mapped[Decimal | None] = mapped_column(METRIC)
+    clv_log_mean: Mapped[Decimal | None] = mapped_column(METRIC)
+    max_drawdown: Mapped[Decimal | None] = mapped_column(METRIC)
+    metrics: Mapped[dict[str, Any] | None]
+    seed: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

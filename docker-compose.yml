@@ -9,7 +9,8 @@ services:
       POSTGRES_DB: betting_ai
       TZ: UTC
     ports:
-      - "127.0.0.1:5432:5432"
+      # host 5433 — 5432 is taken by the weatherbot project's postgres
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,7 +23,8 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "127.0.0.1:6379:6379"
+      # host 6380 — 6379 is taken by the weatherbot project's redis
+      - "127.0.0.1:6380:6379"
     volumes:
       - redisdata:/data
     healthcheck:
