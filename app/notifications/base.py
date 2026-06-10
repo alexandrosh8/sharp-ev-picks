@@ -28,8 +28,13 @@ class AlertSink(Protocol):
 
 
 def build_pick_alert(pick: PickOut) -> Alert:
-    """Render a pick into an alert with a stable idempotency key."""
-    raw_key = f"{pick.pick_id}|{pick.bookmaker}|{pick.market}|{pick.selection}|{pick.decimal_odds}"
+    """Render a pick into an alert with a stable idempotency key.
+
+    The key deliberately EXCLUDES pick_id (a fresh uuid per cycle): the same
+    market state must not re-alert every poll; a price change produces a new
+    key and a fresh alert.
+    """
+    raw_key = f"{pick.event_id}|{pick.bookmaker}|{pick.market}|{pick.selection}|{pick.decimal_odds}"
     dedupe_key = hashlib.sha256(raw_key.encode()).hexdigest()[:32]
     title = f"+EV pick: {pick.event} — {pick.selection} @ {pick.decimal_odds:.2f}"
     body = "\n".join(
