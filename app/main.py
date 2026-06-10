@@ -21,13 +21,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logging.basicConfig(level=settings.log_level)
 
     engine = create_engine(settings)
+    session_factory = create_session_factory(engine)
     app.state.settings = settings
     app.state.engine = engine
-    app.state.session_factory = create_session_factory(engine)
+    app.state.session_factory = session_factory
 
     http_client = httpx.AsyncClient()
     redis = Redis.from_url(settings.redis_url)
-    scheduler = build_scheduler(settings, http_client, redis)
+    scheduler = build_scheduler(settings, http_client, redis, session_factory=session_factory)
     scheduler.start()
     try:
         yield

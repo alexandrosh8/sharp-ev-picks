@@ -22,6 +22,10 @@ from tenacity import (
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.football-data.co.uk/mmz4281"
+# "New leagues" feed — one all-seasons CSV per country, different schema
+# (Home/Away/HG/AG/Res + PSCH/PSCD/PSCA). Covers in-season non-European
+# leagues (Brazil, Argentina, USA, ...) the European mmz4281 files don't.
+NEW_LEAGUES_BASE_URL = "https://www.football-data.co.uk/new"
 
 # League code -> human name (football-data.co.uk codes)
 LEAGUES = {
@@ -33,6 +37,16 @@ LEAGUES = {
     "F1": "France Ligue 1",
     "N1": "Netherlands Eredivisie",
     "P1": "Portugal Primeira Liga",
+}
+
+# New-leagues country code -> human name
+NEW_LEAGUES = {
+    "BRA": "Brazil Serie A",
+    "ARG": "Argentina Primera Division",
+    "USA": "USA MLS",
+    "MEX": "Mexico Liga MX",
+    "JPN": "Japan J-League",
+    "CHN": "China Super League",
 }
 
 
@@ -102,6 +116,57 @@ def parse_season_csv(text: str) -> list[MatchRow]:
             )
         except (KeyError, ValueError) as exc:
             logger.warning("skipping malformed row: %s", type(exc).__name__)
+    return rows
+
+
+def new_league_url(country_code: str) -> str:
+    """All-seasons CSV for a non-European league (e.g. 'BRA' -> brazil)."""
+    if country_code not in NEW_LEAGUES:
+        raise ValueError(f"unknown new-league code: {country_code}")
+    return f"{NEW_LEAGUES_BASE_URL}/{country_code}.csv"
+
+
+@retry(
+    retry=retry_if_exception_type(httpx.TransportError),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential_jitter(initial=0.5, max=8.0),
+    reraise=True,
+)
+async def fetch_new_league_csv(client: httpx.AsyncClient, country_code: str) -> str:
+    response = await client.get(new_league_url(country_code), timeout=30.0)
+    response.raise_for_status()
+    return response.text
+
+
+def parse_new_league_csv(text: str) -> list[MatchRow]:
+    """Parse the new-leagues schema: Home/Away/HG/AG/Res + PSCH/PSCD/PSCA."""
+    rows: list[MatchRow] = []
+    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
+    for raw in reader:
+        if not raw.get("Home") or not raw.get("Date") or not raw.get("HG"):
+            continue
+        parsed_date = _parse_date(raw["Date"])
+        if parsed_date is None:
+            continue
+        try:
+            rows.append(
+                MatchRow(
+                    match_date=parsed_date,
+                    home_team=raw["Home"].strip(),
+                    away_team=raw["Away"].strip(),
+                    home_goals=int(raw["HG"]),
+                    away_goals=int(raw["AG"]),
+                    result=raw["Res"].strip(),
+                    b365_home=_opt_float(raw.get("B365CH")),
+                    b365_draw=_opt_float(raw.get("B365CD")),
+                    b365_away=_opt_float(raw.get("B365CA")),
+                    pinnacle_closing_home=_opt_float(raw.get("PSCH")),
+                    pinnacle_closing_draw=_opt_float(raw.get("PSCD")),
+                    pinnacle_closing_away=_opt_float(raw.get("PSCA")),
+                )
+            )
+        except (KeyError, ValueError) as exc:
+            logger.warning("skipping malformed new-league row: %s", type(exc).__name__)
     return rows
 
 

@@ -12,10 +12,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from app.backtesting import clv as _clv  # noqa: F401  (settlement uses this module)
 from app.edge.gates import GatePolicy, PickCandidate, evaluate
-from app.ingestion.base import OddsLoader
+from app.ingestion.base import EventDirectory, OddsLoader
 from app.models.base import ProbabilityModel
 from app.notifications.base import build_pick_alert
 from app.notifications.dispatcher import AlertDispatcher
@@ -24,6 +25,10 @@ from app.risk.exposure import DailyExposureLedger
 from app.risk.staking import StakePolicy, recommended_stake, stake_amount
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +45,10 @@ class PipelineDeps:
     devig_method: DevigMethod = DevigMethod.POWER
     sport: str = "soccer"
     league: str = ""
+    directory: EventDirectory | None = None  # resolves event_id -> readable "Home vs Away"
+    session_factory: "async_sessionmaker | None" = None  # set => persist picks to DB
+    model_name: str = "model"
+    model_version: str = "0"
 
 
 async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
@@ -85,11 +94,17 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 logger.info("daily exposure cap reached; skipping %s", snap.selection)
                 continue
 
+            event_label = snap.event_id
+            if deps.directory is not None:
+                teams = deps.directory.lookup(snap.event_id)
+                if teams is not None:
+                    event_label = f"{teams.home} vs {teams.away}"
+
             pick = PickOut(
                 pick_id=str(uuid.uuid4()),
                 sport=deps.sport,
                 league=deps.league or sport_key,
-                event=snap.event_id,
+                event=event_label,
                 event_id=snap.event_id,
                 market=snap.market,
                 selection=snap.selection,
@@ -117,10 +132,28 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 created_at=now,
             )
             picks.append(pick)
+            await _maybe_persist(deps, pick, snap.event_id)
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     logger.info("pipeline cycle for %s: %d picks", sport_key, len(picks))
     return picks
+
+
+async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> None:
+    """Persist the pick to the DB when a session factory + directory are set."""
+    if deps.session_factory is None or deps.directory is None:
+        return
+    teams = deps.directory.lookup(event_id)
+    if teams is None:
+        return
+    from app.storage.repositories import persist_pick
+
+    try:
+        async with deps.session_factory() as session:
+            await persist_pick(session, pick, teams, deps.model_name, deps.model_version)
+            await session.commit()
+    except Exception as exc:  # persistence must never break alerting
+        logger.error("pick persistence failed for %s: %s", pick.pick_id, type(exc).__name__)
 
 
 def _fair_probabilities(

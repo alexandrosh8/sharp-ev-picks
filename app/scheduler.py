@@ -14,6 +14,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -22,9 +23,18 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from redis.asyncio import Redis
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.config import Settings, gate_policy, stake_policy
 from app.ingestion.base import EventDirectory, OddsLoader
-from app.ingestion.football_data import MatchRow, fetch_season_csv, parse_season_csv
+from app.ingestion.football_data import (
+    MatchRow,
+    fetch_new_league_csv,
+    fetch_season_csv,
+    parse_new_league_csv,
+    parse_season_csv,
+)
 from app.ingestion.odds_api import OddsApiClient
 from app.ingestion.oddsportal import OddsPortalLoader
 from app.models.base import NullModel, ProbabilityModel
@@ -56,8 +66,20 @@ def _dispatcher(
 async def fetch_football_history(
     settings: Settings, http_client: httpx.AsyncClient
 ) -> list[MatchRow]:
-    """Download configured football-data.co.uk seasons (free, Pinnacle close)."""
+    """Download configured football-data.co.uk history (free, Pinnacle close).
+
+    Uses the "new leagues" all-seasons CSV when FOOTBALLDATA_NEW_LEAGUE_CODE is
+    set (in-season non-European leagues), else the European mmz4281 seasons.
+    """
     rows: list[MatchRow] = []
+    new_code = settings.footballdata_new_league_code.strip()
+    if new_code:
+        try:
+            text = await fetch_new_league_csv(http_client, new_code)
+            rows.extend(parse_new_league_csv(text))
+        except httpx.HTTPError as exc:
+            logger.error("football-data new/%s fetch failed: %s", new_code, type(exc).__name__)
+        return rows
     for code in _csv(settings.footballdata_league_codes):
         for season in _csv(settings.footballdata_seasons):
             try:
@@ -74,6 +96,7 @@ def build_scheduler(
     settings: Settings,
     http_client: httpx.AsyncClient,
     redis: Redis,
+    session_factory: "async_sessionmaker | None" = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -81,6 +104,7 @@ def build_scheduler(
     model: ProbabilityModel = NullModel()
     sport_keys: tuple[str, ...] = ()
     league_label = ""
+    directory: EventDirectory | None = None
 
     if settings.odds_source == "oddsportal":
         directory = EventDirectory()
@@ -136,6 +160,10 @@ def build_scheduler(
             ledger=DailyExposureLedger(max_daily_fraction=settings.max_daily_exposure_percent),
             bankroll=Decimal(str(settings.bankroll_base)),
             league=league_label,
+            directory=directory,
+            session_factory=session_factory,
+            model_name=model.name,
+            model_version=model.version,
         )
 
         async def poll_odds() -> None:

@@ -39,15 +39,32 @@ The live spine uses the proven open-source repos directly (ADR-0011/0012):
 - **penaltyblog** Dixon-Coles prices football, fitted on free
   football-data.co.uk history → `app/models/football_dc.py`.
 - These feed the existing devig → edge-gate → fractional-Kelly → alert
-  pipeline. See it run end-to-end:
+  pipeline, and picks persist to Postgres and serve via `GET /picks`.
+
+See the full live loop on an in-season league (historical fit + live scrape +
+real picks + DB persistence):
 
 ```bash
-uv run python scripts/master_demo.py --league brazil-serie-a
+uv run python scripts/run_live.py --persist            # Brazil Serie A
+uv run python scripts/run_live.py --code ARG --slug argentina-primera-division
+```
+
+Or run the whole app (scheduler polls live, persists, serves the API):
+
+```bash
+export ODDS_SOURCE=oddsportal
+export ODDSPORTAL_FOOTBALL_LEAGUES=brazil-serie-a
+export FOOTBALLDATA_NEW_LEAGUE_CODE=BRA          # train DC on Brazil history
+uv run uvicorn app.main:app
+curl localhost:8000/picks
+curl -X POST localhost:8000/picks/1/result -H 'content-type: application/json' \
+  -d '{"pick_id":"1","outcome":"won","bet_placed":true,"actual_stake":"10","actual_odds":2.1,"settled_at":"2026-06-10T20:00:00Z"}'
 ```
 
 `ODDS_SOURCE=oddsportal` (free, default) or `odds_api` (The Odds API).
-Production target: Ubuntu Linux VPS (Docker Compose, OpenClaw-compatible).
-See `docs/deployment/`.
+Set `FOOTBALLDATA_NEW_LEAGUE_CODE` (BRA/ARG/USA/MEX/JPN/CHN) to train on an
+in-season non-European league. Production target: Ubuntu Linux VPS (Docker
+Compose, OpenClaw-compatible). See `docs/deployment/`.
 
 ## Project status
 

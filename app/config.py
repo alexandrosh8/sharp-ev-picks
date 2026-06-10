@@ -58,8 +58,11 @@ class Settings(BaseSettings):
     # "odds_api"   = The Odds API (needs keys below).
     odds_source: str = "oddsportal"
     oddsportal_football_leagues: str = "england-premier-league"  # csv of slugs
-    footballdata_league_codes: str = "E0"  # csv, football-data.co.uk divisions
+    footballdata_league_codes: str = "E0"  # csv, European mmz4281 divisions
     footballdata_seasons: str = "2425,2526"  # csv, football-data 4-digit seasons
+    # Optional: train on a "new leagues" country code (e.g. BRA) instead of the
+    # European codes — use for in-season non-European leagues. Empty = European.
+    footballdata_new_league_code: str = ""
     football_totals_line: float = 2.5
     model_confidence: float = 0.65
 
