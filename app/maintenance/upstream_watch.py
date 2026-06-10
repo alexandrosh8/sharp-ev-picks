@@ -23,7 +23,10 @@ from app.notifications.base import Alert
 
 logger = logging.getLogger(__name__)
 
-WATCHED_PACKAGES: tuple[str, ...] = ("penaltyblog", "oddsharvester")
+# lightgbm/xgboost are the phase-5 NBA model libraries (ADR-0005/0009);
+# not installed until then — installed_version() returns None and the
+# watch skips them, so coverage starts automatically with phase 5.
+WATCHED_PACKAGES: tuple[str, ...] = ("penaltyblog", "oddsharvester", "lightgbm", "xgboost")
 
 # Surfaced by GET /health and the dashboard banner. Reset on every check;
 # in-memory only (the daily job repopulates after a restart).
