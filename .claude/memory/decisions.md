@@ -19,6 +19,20 @@
 - 2026-06-10 — **Fixed .gitignore bug**: `models/` (unanchored) was ignoring
   the whole `app/models/` source package — every fresh clone was broken.
   Anchored to `/models/`; verified via throwaway clone. [[gitignore-models-trap]]
+- 2026-06-10 — **BACKTEST PROVES no edge** (`docs/backtesting/findings.md`):
+  walk-forward Dixon-Coles vs Bet365, CLV vs Pinnacle close. EPL ROI −3.4%,
+  CLV −0.075; Championship ROI −9.1%, CLV −0.072 — both conclusive negative.
+  The naive goals-only model does NOT beat the market; threshold/devig/blend
+  tuning can't fix it (it's an information problem). A "solid pick finder"
+  needs xG/injuries + proven positive CLV. **Why:** so we never claim edge we
+  can't prove. **How to apply:** track clv_log on every pick; only trust a
+  model version that shows persistent positive CLV in scripts/backtest.py.
+- 2026-06-10 — **Repo discovery** (`docs/research/pickbot-repo-discovery.md`):
+  evaluated Elo/xG/injury/backtest repos. xG (StatsBomb) license-blocked for
+  commercial use; injuries (EasySoccerData MIT/GPL conflict, transfermarkt/FIFA
+  no-license) rejected for binding per "no unclear/unsafe repos" rule. Only
+  martj42 international_results (CC0) bound — World Cup model. Bound: backtest
+  engine, intl loader, neutral-venue DC, WC picks script.
 - 2026-06-10 — **App runs fully on live in-season data**: added
   football-data "new leagues" loader (BRA/ARG/...), pick DB persistence
   (`app/storage/repositories.py`, get-or-create entities + ON CONFLICT dedupe),
