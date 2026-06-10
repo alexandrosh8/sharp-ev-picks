@@ -10,6 +10,15 @@
   dependencies — ADR-0011. Exceptions (evidence-based): WagerBrain (Kelly
   p/q-swap bug) and betfairlightweight (ships bet execution) stay out.
   Existing pure-math core stays; parity-tested against penaltyblog (1e-8).
+- 2026-06-10 (/goal — master app) — **Bound the proven engines** as the live
+  spine (ADR-0012): OddsHarvester→`app/ingestion/oddsportal.py` (free
+  OddsPortal odds), penaltyblog Dixon-Coles→`app/models/football_dc.py`,
+  wired in `app/scheduler.py` via ODDS_SOURCE. Verified live: 760 EPL matches
+  fitted, 150 Brazil Serie A snapshots scraped. `scripts/master_demo.py` is
+  the proof. Needs `playwright install chromium` for live scraping.
+- 2026-06-10 — **Fixed .gitignore bug**: `models/` (unanchored) was ignoring
+  the whole `app/models/` source package — every fresh clone was broken.
+  Anchored to `/models/`; verified via throwaway clone. [[gitignore-models-trap]]
 - 2026-06-10 — Free-first odds ingestion; paid Odds API keys optional
   (ADR-0010 when research completes).
 - 2026-06-10 — Hooks design accepted: ADR-0003.
