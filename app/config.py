@@ -53,7 +53,16 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     webhook_url: str = ""
 
-    # --- Odds sources (read-only access; all optional) ---------------------------
+    # --- Odds sources (read-only access) -----------------------------------------
+    # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);
+    # "odds_api"   = The Odds API (needs keys below).
+    odds_source: str = "oddsportal"
+    oddsportal_football_leagues: str = "england-premier-league"  # csv of slugs
+    footballdata_league_codes: str = "E0"  # csv, football-data.co.uk divisions
+    footballdata_seasons: str = "2425,2526"  # csv, football-data 4-digit seasons
+    football_totals_line: float = 2.5
+    model_confidence: float = 0.65
+
     odds_api_key: str = ""
     odds_api_key_1: str = ""
     odds_api_key_2: str = ""

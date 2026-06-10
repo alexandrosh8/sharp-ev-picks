@@ -66,5 +66,5 @@ warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "fakeredis.*", "scipy.*"]
+module = ["apscheduler.*", "fakeredis.*", "scipy.*", "oddsharvester.*", "penaltyblog.*"]
 ignore_missing_imports = true

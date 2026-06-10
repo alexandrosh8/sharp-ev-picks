@@ -23,10 +23,29 @@ git clone <repo>
 cd betting-ai
 cp .env.example .env
 docker compose up -d postgres redis
-uv sync
-uv run python -m app.main
+uv sync --extra football --extra backfill
+uv run playwright install chromium
+uv run alembic upgrade head
+uv run uvicorn app.main:app
 ```
 
+## Proven engines, bound together (the master app)
+
+The live spine uses the proven open-source repos directly (ADR-0011/0012):
+
+- **OddsHarvester** scrapes FREE pre-match odds from oddsportal.com →
+  `app/ingestion/oddsportal.py` (read-only; oddsportal is an aggregator, not
+  a bookmaker).
+- **penaltyblog** Dixon-Coles prices football, fitted on free
+  football-data.co.uk history → `app/models/football_dc.py`.
+- These feed the existing devig → edge-gate → fractional-Kelly → alert
+  pipeline. See it run end-to-end:
+
+```bash
+uv run python scripts/master_demo.py --league brazil-serie-a
+```
+
+`ODDS_SOURCE=oddsportal` (free, default) or `odds_api` (The Odds API).
 Production target: Ubuntu Linux VPS (Docker Compose, OpenClaw-compatible).
 See `docs/deployment/`.
 

@@ -16,8 +16,9 @@ build/
 dist/
 
 # Data & model artifacts (large/binary — never committed)
-data/
-models/
+# Anchored to repo root so they do NOT match the app/models/ source package.
+/data/
+/models/
 *.parquet
 *.sqlite
 *.sqlite3

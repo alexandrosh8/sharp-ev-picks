@@ -144,10 +144,17 @@ walkforward-backtest, betting-feature-engineering, calibration-eval.
 
 ## Data sources
 
-- Free-first policy: see `docs/research/free-odds-sources.md` and ADR-0010.
+- Free-first policy: see `docs/research/free-odds-sources.md`, ADR-0010, ADR-0012.
+- **Master-app spine (proven repos, used directly):** OddsHarvester scrapes
+  free OddsPortal odds (`app/ingestion/oddsportal.py`); penaltyblog
+  Dixon-Coles prices football (`app/models/football_dc.py`); both bound in
+  `app/scheduler.py`. `ODDS_SOURCE=oddsportal` (free default) or `odds_api`.
 - **API-Football is SUSPENDED — never call it, never add its key.**
 - The Odds API keys are optional (`ODDS_API_KEY_1..3` rotation); design for
   free-tier credit budgets.
+- Live OddsPortal scraping needs Playwright Chromium
+  (`uv run playwright install chromium`); it is ToS-sensitive and DOM-fragile
+  — treat scrape gaps as expected, never bypass anti-bot protections.
 
 ## Deployment
 
