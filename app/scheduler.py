@@ -253,6 +253,21 @@ def build_scheduler(
         # Roadmap phase 6: persist bankroll_snapshots from manual entries.
         logger.info("snapshot_bankroll: bankroll tracking arrives in roadmap phase 6")
 
+    upstream_dispatcher = _dispatcher(settings, http_client, redis)
+
+    async def upstream_watch() -> None:
+        # Daily PyPI release check for the bound engines (penaltyblog,
+        # oddsharvester). Notifies once per release (Redis dedupe) and
+        # surfaces on /health + dashboard; NEVER auto-installs — upgrades
+        # go through scripts/upgrade_deps.sh (full test gate).
+        from app.maintenance.upstream_watch import check_upstream, update_alert
+
+        try:
+            for notice in await check_upstream(http_client):
+                await upstream_dispatcher.dispatch(update_alert(notice))
+        except Exception as exc:
+            logger.error("upstream watch failed: %s", type(exc).__name__)
+
     scheduler.add_job(
         settle_results,
         CronTrigger(minute=15),
@@ -262,6 +277,15 @@ def build_scheduler(
         misfire_grace_time=None,  # run on Mac wake, don't skip
     )
     scheduler.add_job(snapshot_bankroll, CronTrigger(hour=0, minute=30), id="snapshot_bankroll")
+    scheduler.add_job(
+        upstream_watch,
+        CronTrigger(hour=8, minute=5),
+        id="upstream_watch",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=None,  # run on Mac wake, don't skip
+    )
+    scheduler.add_job(upstream_watch, DateTrigger(), id="upstream_watch_initial")
     return scheduler
 
 

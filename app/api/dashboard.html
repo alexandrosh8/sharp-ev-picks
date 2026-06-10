@@ -346,6 +346,8 @@
       odds ≥ 1.60 · times: Cyprus (Asia/Nicosia)
     </div>
 
+    <div class="banner" id="upstream-banner" style="display: none"></div>
+
     <div class="cards">
       <div class="card">
         <div class="v" id="c-open">–</div>
@@ -653,6 +655,26 @@
         }
       }
 
+      function summarizeUpstream(health) {
+        const el = $("upstream-banner");
+        const updates =
+          health && health.upstream ? health.upstream.updates || [] : [];
+        if (!updates.length) {
+          el.style.display = "none";
+          return;
+        }
+        el.style.display = "";
+        el.textContent =
+          "📦 dependency update available: " +
+          updates
+            .map(
+              (u) =>
+                u.package + " " + u.latest + " (installed " + u.installed + ")",
+            )
+            .join(" · ") +
+          " — run: bash scripts/upgrade_deps.sh (tested upgrade, auto-rollback on failure)";
+      }
+
       function summarize() {
         const open = PICKS.filter((p) => p.status === "alerted");
         $("c-open").textContent = String(open.length);
@@ -677,14 +699,16 @@
 
       async function load() {
         try {
-          const [res, perfRes] = await Promise.all([
+          const [res, perfRes, healthRes] = await Promise.all([
             fetch("/picks?limit=200"),
             fetch("/performance"),
+            fetch("/health"),
           ]);
           if (!res.ok) throw new Error("HTTP " + res.status);
           PICKS = await res.json();
           summarize();
           summarizePerf(perfRes.ok ? await perfRes.json() : null);
+          summarizeUpstream(healthRes.ok ? await healthRes.json() : null);
           render();
           $("stamp").textContent =
             "updated " +
