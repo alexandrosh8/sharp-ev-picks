@@ -41,9 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="betting-ai — manual-betting +EV picks (decision support)",
-        description=(
-            "Generates +EV picks for manual review. This system NEVER places bets."
-        ),
+        description=("Generates +EV picks for manual review. This system NEVER places bets."),
         lifespan=lifespan,
     )
     app.include_router(router)

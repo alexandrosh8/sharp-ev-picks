@@ -32,9 +32,7 @@ async def latest_picks(
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[dict[str, Any]]:
-    result = await session.execute(
-        select(Pick).order_by(Pick.created_at.desc()).limit(limit)
-    )
+    result = await session.execute(select(Pick).order_by(Pick.created_at.desc()).limit(limit))
     picks = result.scalars().all()
     return [
         {
@@ -103,8 +101,6 @@ async def record_result(
             settled_at=payload.settled_at,
         )
     )
-    await session.execute(
-        update(Pick).where(Pick.id == pick_id).values(status="settled")
-    )
+    await session.execute(update(Pick).where(Pick.id == pick_id).values(status="settled"))
     await session.commit()
     return {"status": "recorded", "outcome": str(payload.outcome)}

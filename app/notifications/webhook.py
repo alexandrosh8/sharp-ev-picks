@@ -41,7 +41,5 @@ class WebhookSink:
                 return False
             return True
         except httpx.HTTPError as exc:
-            logger.error(
-                "webhook send error for pick %s: %s", alert.pick_id, type(exc).__name__
-            )
+            logger.error("webhook send error for pick %s: %s", alert.pick_id, type(exc).__name__)
             return False

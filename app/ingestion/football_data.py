@@ -67,9 +67,7 @@ def season_url(league_code: str, season: str) -> str:
     wait=wait_exponential_jitter(initial=0.5, max=8.0),
     reraise=True,
 )
-async def fetch_season_csv(
-    client: httpx.AsyncClient, league_code: str, season: str
-) -> str:
+async def fetch_season_csv(client: httpx.AsyncClient, league_code: str, season: str) -> str:
     response = await client.get(season_url(league_code, season), timeout=30.0)
     response.raise_for_status()
     return response.text

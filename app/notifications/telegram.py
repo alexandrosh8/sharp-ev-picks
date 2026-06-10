@@ -47,7 +47,5 @@ class TelegramSink:
                 return False
             return True
         except httpx.HTTPError as exc:
-            logger.error(
-                "telegram send error for pick %s: %s", alert.pick_id, type(exc).__name__
-            )
+            logger.error("telegram send error for pick %s: %s", alert.pick_id, type(exc).__name__)
             return False

@@ -54,9 +54,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     picks: list[PickOut] = []
 
     for event_id in sorted({s.event_id for s in snapshots}):
-        predictions = {
-            (p.market, p.selection): p for p in await deps.model.predict(event_id)
-        }
+        predictions = {(p.market, p.selection): p for p in await deps.model.predict(event_id)}
         if not predictions:
             continue
         for snap in (s for s in snapshots if s.event_id == event_id):

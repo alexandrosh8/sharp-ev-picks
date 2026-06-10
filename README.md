@@ -33,9 +33,12 @@ See `docs/deployment/`.
 ## Project status
 
 - [x] Phase A — Claude Code environment (CLAUDE.md, agents, skills, hooks, memory)
-- [ ] Phase B — Repository-grounded research (odds sources, models, math)
-- [ ] Phase C — Architecture + ADRs
-- [ ] Phase D — Production scaffold (math core, schemas, DB, ingestion, alerts, API)
+- [x] Phase B — Repository-grounded research (odds sources, models, math)
+- [x] Phase C — Architecture + ADRs 0000-0011
+- [x] Phase D — Production scaffold: oracle-validated math core, schemas,
+      14-table DB + alembic, read-only ingestion, idempotent alerts,
+      APScheduler pipeline, FastAPI, CI + safety audit (132 tests)
+- [ ] Next: roadmap phase 2 — live ingestion + persistence (`docs/roadmap.md`)
 
 ## Documentation
 
