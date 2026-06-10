@@ -28,9 +28,10 @@ ScrapeFn = Callable[..., Awaitable[Any]]
 # separately via OddsSnapshotIn.market_detail. HALF-LINE Asian handicaps
 # (±0.5, ±1.5, …) and European handicaps (3-way incl. handicap-draw) are
 # full markets — direct devig is valid. INTEGER/QUARTER AH lines carry push
-# outcomes (probabilities do not sum to 1) and are rejected at construction;
-# pricing those would need the penaltyblog score-grid bridge
-# (docs/research/value-platform-repo-research.md).
+# outcomes (probabilities do not sum to 1) and are rejected at construction.
+# The pricing bridge for them now EXISTS (app/models/ah_bridge.py, 2026-06-10:
+# devigged 1X2+OU2.5 -> goal grid -> split-stake EV); they stay rejected here
+# until the value pipeline EV path is wired and backtest-validated.
 _EXACT_MARKETS: dict[str, Market] = {
     "1x2": Market.H2H,  # football/basketball 3-way
     "home_away": Market.H2H,  # basketball moneyline (OddsHarvester has no "moneyline" key)

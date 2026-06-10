@@ -103,7 +103,12 @@ def _power(q: _FloatArray) -> _FloatArray:
 
 def _odds_ratio(q: _FloatArray) -> _FloatArray:
     """Keith Cheung's odds-ratio method (Buchdahl, Wisdom of the Crowds):
-    p_i = q_i / (c + q_i - c*q_i), c solved so probabilities sum to 1."""
+    p_i = q_i / (c + q_i - c*q_i), c solved so probabilities sum to 1.
+
+    NOTE: mathematically identical to _logarithmic — constant odds-ratio
+    scaling IS a constant logit shift (logit(p) = logit(q) - ln c). Both are
+    kept for parity with penaltyblog's method names; sweeps will show
+    identical rows for the two (tests/test_devig.py locks this in)."""
 
     def probs_for(c: float) -> _FloatArray:
         return q / (c + q - c * q)
@@ -168,7 +173,10 @@ def _shin(q: _FloatArray) -> _FloatArray:
     if booksum <= 1.0 + 1e-12:
         if abs(booksum - 1.0) < 1e-12:
             return q.copy()
-        logger.warning("shin devig on underround book (booksum=%.6f); falling back", booksum)
+        # Documented-expected path (Max-of-books composites are routinely
+        # underround) — debug, not warning: a 46k-match backtest emitted
+        # 154k of these lines at warning level.
+        logger.debug("shin devig on underround book (booksum=%.6f); falling back", booksum)
         return _multiplicative(q)
 
     def probs_for(z: float) -> _FloatArray:

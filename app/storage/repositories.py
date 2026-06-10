@@ -201,7 +201,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         select(func.count()).select_from(Pick).where(Pick.status == "alerted")
     )
 
-    counts = {"won": 0, "lost": 0, "void": 0, "push": 0}
+    counts = {"won": 0, "lost": 0, "void": 0, "push": 0, "half_won": 0, "half_lost": 0}
     total_staked = Decimal("0")
     total_pnl = Decimal("0")
     clv_weighted = Decimal("0")

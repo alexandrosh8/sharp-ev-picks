@@ -624,8 +624,14 @@
       function summarizePerf(perf) {
         if (!perf) return;
         $("c-settled").textContent = String(perf.n_settled);
+        const halves = (perf.half_won || 0) + (perf.half_lost || 0);
         $("c-record").textContent =
-          perf.won + "-" + perf.lost + "-" + (perf.push + perf.void);
+          perf.won +
+          "-" +
+          perf.lost +
+          "-" +
+          (perf.push + perf.void) +
+          (halves ? " (+" + halves + " half)" : "");
         const pnl = Number(perf.total_pnl);
         const pnlEl = $("c-pnl");
         pnlEl.textContent = perf.n_settled

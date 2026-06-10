@@ -125,6 +125,33 @@ def test_european_handicap_draw_leg() -> None:
     assert settle("spreads", "Draw (-1)", 3, 1) is Outcome.LOST
 
 
+# --- spreads: quarter lines (Asian split stakes) --------------------------------
+
+
+def test_quarter_line_splits_into_adjacent_half_stakes() -> None:
+    # -0.25 = half stake at 0.0 + half at -0.5
+    assert settle("spreads", f"{HOME} -0.25", 2, 1) is Outcome.WON
+    assert settle("spreads", f"{HOME} -0.25", 1, 1) is Outcome.HALF_LOST  # 0.0 pushes, -0.5 loses
+    assert settle("spreads", f"{HOME} -0.25", 0, 1) is Outcome.LOST
+    # -0.75 = half at -0.5 + half at -1.0
+    assert settle("spreads", f"{HOME} -0.75", 2, 1) is Outcome.HALF_WON  # -0.5 wins, -1.0 pushes
+    assert settle("spreads", f"{HOME} -0.75", 3, 1) is Outcome.WON
+    assert settle("spreads", f"{HOME} -0.75", 1, 1) is Outcome.LOST
+    # -1.25 = half at -1.0 + half at -1.5
+    assert settle("spreads", f"{HOME} -1.25", 2, 1) is Outcome.HALF_LOST
+    assert settle("spreads", f"{HOME} -1.25", 3, 1) is Outcome.WON
+
+
+def test_quarter_line_receiving_side() -> None:
+    # away +0.25 = half at 0.0 + half at +0.5
+    assert settle("spreads", f"{AWAY} +0.25", 1, 1) is Outcome.HALF_WON  # 0.0 pushes, +0.5 wins
+    assert settle("spreads", f"{AWAY} +0.25", 0, 1) is Outcome.WON
+    assert settle("spreads", f"{AWAY} +0.25", 2, 1) is Outcome.LOST
+    # quarter-line integer components PUSH on tie (Asian), unlike whole-line
+    # selections which are European handicap (3-way) by loader config
+    assert settle("spreads", f"{AWAY} -0.25", 1, 1) is Outcome.HALF_LOST
+
+
 # --- errors --------------------------------------------------------------------
 
 
@@ -154,3 +181,11 @@ def test_pnl_and_roi() -> None:
     assert pick_roi(Decimal("22.00"), stake) == Decimal("1.1")
     assert pick_roi(Decimal("-20.00"), stake) == Decimal("-1")
     assert pick_roi(Decimal("0.00"), Decimal("0")) is None
+
+
+def test_pnl_half_stakes() -> None:
+    stake = Decimal("20.00")
+    # half the stake wins at the odds, half is returned
+    assert pick_pnl(Outcome.HALF_WON, stake, Decimal("2.10")) == Decimal("11.00")
+    # half the stake is lost, half is returned
+    assert pick_pnl(Outcome.HALF_LOST, stake, Decimal("2.10")) == Decimal("-10.00")

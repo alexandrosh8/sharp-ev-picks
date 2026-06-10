@@ -227,7 +227,10 @@ async def main() -> None:
     markets = tuple(x.strip() for x in args.markets.split(",") if x.strip())
     min_odds = args.min_odds
 
-    print(f"\nVALUE BACKTEST v3 — {len(leagues)} leagues, markets {markets}, min_odds {min_odds}")
+    print(f"\nVALUE BACKTEST — {len(leagues)} leagues, markets {markets}, min_odds {min_odds}")
+    if min_odds < 1.6:
+        print("NOTE: production v4 config was selected WITH --min-odds 1.6 (odds floor);")
+        print("      at the default floor the sweep may pick a different (equivalent) devig.")
     print(f"TRAIN {train_s} (devig x threshold sweep) | TEST {test_s} (held out, one shot)")
     print("One bet per (match, market); CLV vs Pinnacle close AND Max-of-books close.\n")
 

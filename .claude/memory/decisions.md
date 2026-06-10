@@ -1,5 +1,27 @@
 # Decisions Log
 
+- 2026-06-10 (evening) — **Upstream check + backtest re-verify + quarter-AH
+  bridge**. Upstream: penaltyblog 1.11.0 and oddsharvester 0.3.0 are BOTH the
+  latest releases (verified PyPI+GitHub 2026-06-10) — no upgrade exists;
+  matchflow = nested event-JSON query engine, REJECTED as orthogonal to our
+  odds pipeline. OddsHarvester issue #69 (1x2 arrays empty since 2026-05-28)
+  does NOT reproduce for us — monitor. Unreleased upstream commit 9975ca4
+  independently validates our browser_timezone_id="UTC" fix. Backtest re-run
+  (46,220 matches): verdict REPRODUCED — holdout n=62 ROI +22.4%, incCLV
+  +0.1066 >2SE, beats Max-of-books close; plain `value_backtest.py` runs
+  min_odds=1.0 (v4 config needs `--min-odds 1.6`; script now prints a note).
+  **odds_ratio ≡ logarithmic devig is a mathematical identity** (constant
+  OR-scaling = constant logit shift) — locked by test, identical sweep rows
+  are NOT a bug. Shin underround fallback demoted warning→debug (154k-line
+  backtest log flood). **Quarter-line AH bridge BUILT**:
+  `app/models/ah_bridge.py` (goal_expectancy_from_market →
+  create_dixon_coles_grid → asian_handicap_price; EV = win·(o−1) − lose with
+  stake-weighted win/push/lose; sign: line = handicap the side RECEIVES) +
+  split-stake settlement (Outcome.HALF_WON/HALF_LOST; quarter components
+  push on adjusted tie, whole-line selections stay EH-semantics). Loader
+  still REJECTS quarter keys — enable only after the pipeline EV path is
+  wired and backtest-validated (next step).
+
 - 2026-06-10 — **Settlement engine shipped (phase 4)**, `app/settlement/`:
   outcomes.py is pure stdlib (same boundary as app/probabilities). Key
   semantics: INTEGER-line spreads selections are European handicap legs —

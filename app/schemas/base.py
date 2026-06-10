@@ -41,3 +41,6 @@ class Outcome(StrEnum):
     LOST = "lost"
     VOID = "void"
     PUSH = "push"
+    # Asian quarter-line split stakes: half wins/loses, half is returned.
+    HALF_WON = "half_won"
+    HALF_LOST = "half_lost"

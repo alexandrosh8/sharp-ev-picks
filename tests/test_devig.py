@@ -104,3 +104,28 @@ def test_shin_oracle_two_way_matches_additive_equivalence() -> None:
     probs = devig([1.5, 2.74], method=DevigMethod.SHIN)
     expected = [0.6508515815085157, 0.3491484184914841]
     assert probs == pytest.approx(expected, abs=1e-6)
+
+
+def test_shin_underround_falls_back_quietly(caplog: pytest.LogCaptureFixture) -> None:
+    # Max-of-books composite odds are routinely underround; Shin's fallback
+    # there is documented-expected and must NOT warn (a backtest produced
+    # 154k warning lines before this was demoted to debug).
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="app.probabilities.devig"):
+        probs = devig([2.6, 3.9, 3.4], method=DevigMethod.SHIN)  # booksum ~0.94
+    assert math.isclose(sum(probs), 1.0, abs_tol=1e-9)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("underround" in r.message for r in caplog.records)  # still visible at debug
+
+
+def test_odds_ratio_and_logarithmic_are_equivalent_methods() -> None:
+    # Mathematical identity, not a bug: constant odds-ratio scaling
+    # p = q/(c + q - c*q) IS a constant logit shift
+    # (logit(p) = logit(q) - ln c), so both solvers find the same root.
+    # Locked as a test so a backtest sweep showing identical rows for the
+    # two methods is never mistaken for a dispatch defect.
+    for odds in ([2.6, 2.4, 4.3], [1.5, 2.74], [2.05, 3.6, 3.55, 8.0]):
+        a = devig(odds, method=DevigMethod.ODDS_RATIO)
+        b = devig(odds, method=DevigMethod.LOGARITHMIC)
+        assert a == pytest.approx(b, abs=1e-9)

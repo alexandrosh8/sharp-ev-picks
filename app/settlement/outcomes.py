@@ -53,11 +53,16 @@ def settle_selection(
 
 
 def pick_pnl(outcome: Outcome, stake: Decimal, decimal_odds: Decimal) -> Decimal:
-    """Profit/loss of a stake at decimal odds. Push/void return the stake."""
+    """Profit/loss of a stake at decimal odds. Push/void return the stake;
+    half outcomes (Asian quarter lines) settle half the stake, return half."""
     if outcome is Outcome.WON:
         return (stake * (decimal_odds - 1)).quantize(Decimal("0.01"))
     if outcome is Outcome.LOST:
         return (-stake).quantize(Decimal("0.01"))
+    if outcome is Outcome.HALF_WON:
+        return (stake / 2 * (decimal_odds - 1)).quantize(Decimal("0.01"))
+    if outcome is Outcome.HALF_LOST:
+        return (-stake / 2).quantize(Decimal("0.01"))
     return Decimal("0.00")  # void | push
 
 
@@ -132,13 +137,40 @@ def _settle_spreads(selection: str, home: str, away: str, hs: int, as_: int) -> 
         raise ValueError(f"spreads selection {selection!r} unparseable")
     line = float(raw_line)
     if team == home:
-        margin = (hs + line) - as_
+        base = float(hs - as_)
     elif team == away:
-        margin = (as_ + line) - hs
+        base = float(as_ - hs)
     else:
         raise ValueError(f"spreads selection {selection!r} matches neither team")
+
+    if not (line * 2).is_integer():
+        # Asian QUARTER line: two half-stakes on the adjacent half-lines
+        # (e.g. -0.25 = 0.0 and -0.5). Integer components PUSH on the
+        # adjusted tie here (Asian), unlike standalone integer-line
+        # selections which are European handicap (see below).
+        components = {_ah_component(base + line - 0.25), _ah_component(base + line + 0.25)}
+        if components == {Outcome.WON}:
+            return Outcome.WON
+        if components == {Outcome.LOST}:
+            return Outcome.LOST
+        if components == {Outcome.WON, Outcome.PUSH}:
+            return Outcome.HALF_WON
+        if components == {Outcome.LOST, Outcome.PUSH}:
+            return Outcome.HALF_LOST
+        raise ValueError(f"impossible quarter-line split for {selection!r}")  # defensive
+
+    margin = base + line
     if margin > 0:
         return Outcome.WON
-    # margin == 0 only on integer lines = European handicap team leg -> LOST
+    # margin == 0 only on whole lines = European handicap team leg -> LOST
     # (see module docstring; Asian push lines are rejected upstream).
+    return Outcome.LOST
+
+
+def _ah_component(margin: float) -> Outcome:
+    """One half-stake of an Asian handicap: adjusted tie is a PUSH."""
+    if margin > 0:
+        return Outcome.WON
+    if margin == 0:
+        return Outcome.PUSH
     return Outcome.LOST
