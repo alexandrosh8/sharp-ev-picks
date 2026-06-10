@@ -1,60 +1,78 @@
-# Value-Strategy Findings — A Pick Finder That DOES Beat the Market
+# Value-Strategy Findings — Review-Corrected (v2)
 
-- **Date:** 2026-06-10
+- **Date:** 2026-06-10 (v2 — after the 23-finding deep review; methodology
+  corrected, claims re-validated on held-out data)
 - **Strategy:** sharp-vs-soft line shopping (`app/edge/value.py`,
-  `scripts/value_backtest.py`). Fair value = devig(Pinnacle pre-match). Bet the
-  best available price (Max across all books) when it beats Pinnacle fair by
-  ≥ threshold. Settle on the real result; CLV vs the Pinnacle **closing** line.
-  **No goals model** — this prices off the sharpest market, not a prediction.
+  `scripts/value_backtest.py`). Fair value = devig(Pinnacle pre-match); bet
+  the best available price (Max across books) when it beats fair by ≥
+  threshold. **No goals model.**
 
-## Result: positive, conclusive CLV (11,667 matches, 6 leagues, 5 seasons)
+## Corrected methodology (what changed in v2 and why)
 
-| min edge  | bets     | hit%     | ROI%            | mean CLV (95% CI)    | beats close % |
-| --------- | -------- | -------- | --------------- | -------------------- | ------------- |
-| 0.000     | 9756     | 41.0     | +0.35           | +0.0120 ± 0.0016     | 61.8          |
-| **0.010** | **1684** | **51.8** | **+6.75**       | **+0.0325 ± 0.0035** | **74.1**      |
-| **0.015** | **615**  | **57.1** | **+9.25**       | **+0.0428 ± 0.0065** | **77.4**      |
-| 0.020     | 227      | 58.6     | +5.78           | +0.0529 ± 0.0123     | 83.3          |
-| 0.030     | 64       | 54.7     | −5.08 (small n) | +0.0892 ± 0.0331     | 92.2          |
+The first version of this document overstated the result. The deep review
+found and we fixed:
 
-**The CLV is positive and its 95% interval excludes zero by a wide margin at
-every actionable threshold.** Positive CLV is the gold-standard leading
-indicator of a real edge — and here the picks beat even Pinnacle's _closing_
-line ~74–77% of the time. This is the opposite of the goals model
-(`findings.md`: CLV −0.075, beats close 20%).
+1. **One bet per match** (highest-edge selection only) — H/D/A bets on the
+   same match are correlated; counting them separately inflated n and
+   narrowed the CI illegitimately.
+2. **The right null is "bet everything", not zero.** Betting the Max line on
+   every match already shows +0.009–0.016 CLV mechanically (best-of-N-books
+   premium). Selection skill = CLV **incremental** to that baseline.
+3. **Dual CLV references**: vs devig(Pinnacle close) _and_ vs
+   devig(Max-of-books close). The second strips the best-price premium
+   entirely — the strictest test.
+4. **No in-sample headline.** Thresholds are swept on TRAIN seasons
+   (2021-24); the chosen threshold is evaluated ONCE on held-out TEST
+   seasons (2024-26).
+5. The printed verdict is **computed from the held-out numbers** — the
+   script can and will print "NO PROVEN EDGE" if that's what the data says.
 
-## Why this works and the goals model didn't
+## Held-out result (6 leagues; train 2122-2324, test 2425-2526)
 
-- The goals model tried to _out-predict_ a sharp market with a thin
-  information set (goals only) → it can't, so its "edges" are model error.
-- This strategy doesn't predict at all. It takes the sharpest available price
-  (Pinnacle) as the best estimate of truth, then finds another book that is
-  momentarily too generous on the same outcome. That gap is real
-  inefficiency, and it persists to the close ~3/4 of the time.
-- This is the foundation of professional value betting ("beating the closing
-  line by line-shopping"), now validated on this data.
+Train sweep chose **edge ≥ 0.015** (best train ROI with n ≥ 100). Held-out:
 
-## Recommended operating point
+|                           | n       | hit%     | ROI         | CLV vs Pinnacle close | CLV vs Max close     | incremental CLV     |
+| ------------------------- | ------- | -------- | ----------- | --------------------- | -------------------- | ------------------- |
+| baseline (bet everything) | 1994    | 43.6     | −1.17%      | +0.0090 ± 0.0035      | +0.0055              | —                   |
+| **picks (edge ≥ 0.015)**  | **126** | **59.5** | **+12.67%** | **+0.0351 ± 0.0194**  | **+0.0278 ± 0.0193** | **+0.0261 (> 2SE)** |
 
-**edge ≥ 0.015** is the sweet spot: 615 bets over 5 seasons (≈120/year/6
-leagues), +9.25% backtested ROI, +0.043 CLV, 77% beat-close. Higher thresholds
-have better CLV but tiny samples.
+**Computed verdict: POSITIVE selection skill on held-out data** — the picks'
+CLV clears the bet-everything baseline by more than 2 standard errors, ROI is
+positive, and the edge survives even the Max-of-books closing reference
+(i.e., it is not just the best-price premium).
 
-## Honest caveats (do not over-trust the headline ROI)
+## Engine hardening (same review, `app/edge/value.py`)
 
-1. **Best-price assumption.** The backtest bets the Max line — the single best
-   price across all tracked books. Capturing it live requires accounts at many
-   books and prompt action. Realized prices are often a notch lower.
-2. **Soft books limit winners.** Books that consistently offer beatable prices
-   restrict or close winning accounts; sustained volume is harder than the
-   backtest implies. CLV stays the honest metric — track it.
-3. **No execution here.** This is manual decision support: the bot finds the
-   value and names the book/price; the user reviews and places any bet. The
-   system never places bets and nothing is a guarantee of profit.
+- **Exchange commission netted out** before any comparison/edge/EV
+  (Betfair 5%, Smarkets/Matchbook 2%, configurable) — gross exchange prices
+  otherwise fake edges the size of min_edge.
+- **No-Pinnacle fallback is a ≥3-book median consensus**, never a single
+  lowest-overround book — one stale quote can no longer contaminate fair
+  value for every selection (the review's worked example is now a test).
+- **Anchors with implausible overround** (underround or > 0.12) are rejected;
+  the market is skipped.
+- **min_odds gate (default 1.30)** — ultra-short "edges" are devig noise.
+- 14 unit tests cover these paths, including the review's adversarial cases.
+
+## Honest caveats (unchanged in spirit, sharpened in detail)
+
+1. **n = 126 on holdout is modest**; the CLV CI excludes zero but not by
+   much against the Max-close reference. Keep tracking live CLV per pick.
+2. **Best-price assumption**: capturing the Max line live needs many book
+   accounts and prompt action; realized prices are often a notch lower.
+3. **Soft books limit/close winning accounts** — the structural constraint on
+   every value bettor; volume is harder than the table implies (~120
+   bets/year across 6 leagues at this threshold).
+4. The OddsPortal free scrape only supports this where a match lists enough
+   books (and rarely Pinnacle); The Odds API `regions=eu` is the better live
+   feed for the validated Pinnacle-anchored path.
+5. Decision-support only: the system finds the value and names the
+   book/price; the user reviews and places any bet. Nothing is a guarantee
+   of profit.
 
 ## How it's wired
 
-- `app/edge/value.py::find_value_bets` — pure, tested value detection.
-- `scripts/value_backtest.py` — the validation above (re-runnable).
-- `scripts/value_picks.py` — LIVE picks: scrape multi-book odds → find value →
-  ranked list with the exact book and price to take.
+- `app/edge/value.py::find_value_bets` — pure, review-hardened, 14 tests.
+- `scripts/value_backtest.py` — the v2 validation above (re-runnable).
+- `scripts/value_picks.py` — LIVE picks with min-odds gate; names the exact
+  book and price.

@@ -9,6 +9,10 @@ real result, measure ROI and CLV vs the Pinnacle close. Sweeps edge thresholds.
 
 Honest by design: prints REAL numbers, including when the strategy does NOT
 beat the closing line. This is decision-support validation, not a profit claim.
+
+Known sample bias: newly promoted teams are unpriceable until they accumulate
+history inside the rolling window, so early-season matches involving them are
+skipped — the evaluated sample slightly over-represents established teams.
 """
 
 import argparse

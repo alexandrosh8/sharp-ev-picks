@@ -68,6 +68,9 @@ async def main() -> None:
         print(f"\n[1/4] HISTORICAL DATA — football-data.co.uk new/{args.code}.csv ...")
         text = await fetch_new_league_csv(client, args.code)
         rows = parse_new_league_csv(text)
+        if not rows:
+            print(f"      no historical matches parsed for {args.code} — aborting")
+            return
         print(
             f"      {len(rows)} historical matches ({rows[0].match_date} .. {rows[-1].match_date})"
         )
@@ -107,7 +110,8 @@ async def main() -> None:
             min_ev=args.min_ev if args.min_ev is not None else settings.min_ev,
             min_confidence=settings.min_confidence,
             max_odds_age_seconds=1e12,  # scraped odds carry oddsportal's own time
-            min_liquidity=settings.min_liquidity,
+            min_liquidity=0.0,  # the scraper provides no liquidity data — a
+            # configured MIN_LIQUIDITY > 0 would silently reject every pick
         )
         deps = PipelineDeps(
             loader=StaticLoader(snapshots),

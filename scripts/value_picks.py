@@ -63,6 +63,7 @@ async def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--league", default="brazil-serie-a", help="oddsportal slug")
     p.add_argument("--min-edge", type=float, default=0.015)
+    p.add_argument("--min-odds", type=float, default=1.30, help="ignore ultra-short prices")
     p.add_argument("--top", type=int, default=25)
     p.add_argument("--max-pages", type=int, default=2)
     args = p.parse_args()
@@ -79,6 +80,9 @@ async def main() -> None:
         away = (m.get("away_team") or "").strip()
         if not home or not away:
             continue
+        # degenerate names would collapse the 3-way market into 2 keys
+        if home == away or "draw" in (home.lower(), away.lower()):
+            continue
         prices: dict[str, dict[str, float]] = {home: {}, "Draw": {}, away: {}}
         for entry in m.get("1x2_market") or []:
             if not isinstance(entry, dict):
@@ -90,7 +94,7 @@ async def main() -> None:
                     prices[sel][book] = odds
         if any(len(v) < 1 for v in prices.values()):
             continue
-        for v in find_value_bets(prices, min_edge=args.min_edge):
+        for v in find_value_bets(prices, min_edge=args.min_edge, min_odds=args.min_odds):
             picks.append(
                 LivePick(
                     match_date=str(m.get("match_date", "")),

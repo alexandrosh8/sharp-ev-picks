@@ -110,9 +110,12 @@ def run_walkforward(
             if len(history) >= 100:
                 try:
                     priced_fn = fit_fn(history, m.match_date)
-                    last_fit = m.match_date
                 except Exception:
                     priced_fn = None
+            else:
+                # window too thin: do NOT silently reuse a stale model
+                priced_fn = None
+            last_fit = m.match_date
 
         if priced_fn is None:
             continue

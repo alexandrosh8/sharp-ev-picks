@@ -128,19 +128,37 @@ class DixonColesFootballModel:
         )
 
     def resolve_team(self, name: str) -> str | None:
-        """Map a loader team name (e.g. OddsPortal) to a trained team name."""
+        """Map a loader team name (e.g. OddsPortal) to a trained team name.
+
+        Resolution order: exact normalized match > alias (alias values are
+        normalized at lookup, so raw-name aliases work) > UNIQUE longest
+        token-containment. Ambiguous containment resolves to None — silently
+        pricing the wrong team is worse than no prediction (review finding).
+        """
         norm = _normalize(name)
         if norm in self._trained:
             return self._trained[norm]
         alias = self._aliases.get(norm)
-        if alias and alias in self._trained:
-            return self._trained[alias]
-        # containment heuristic: trained name tokens within the longer name
+        if alias:
+            alias_norm = _normalize(alias)
+            if alias_norm in self._trained:
+                return self._trained[alias_norm]
+        # containment heuristic: trained name tokens within the longer name,
+        # accepted only when there is a single longest unambiguous candidate.
         tokens = set(norm.split())
-        for trained_norm, raw in self._trained.items():
-            if set(trained_norm.split()) <= tokens:
-                return raw
-        return None
+        candidates = [
+            (trained_norm, raw)
+            for trained_norm, raw in self._trained.items()
+            if set(trained_norm.split()) <= tokens
+        ]
+        if not candidates:
+            return None
+        best_len = max(len(t.split()) for t, _ in candidates)
+        best = [(t, r) for t, r in candidates if len(t.split()) == best_len]
+        if len(best) != 1:
+            logger.debug("ambiguous team resolution for %r: %s", name, sorted(t for t, _ in best))
+            return None
+        return best[0][1]
 
     async def predict(self, event_id: str) -> Sequence[PredictedProbability]:
         if self._model is None:

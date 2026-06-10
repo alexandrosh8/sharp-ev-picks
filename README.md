@@ -34,9 +34,10 @@ uv run uvicorn app.main:app
 The honest result of backtesting (`docs/backtesting/`): a goals model
 (Dixon-Coles) does **not** beat the market — negative CLV. But **sharp-vs-soft
 line shopping does**: price fair value from the sharpest book (Pinnacle), bet
-another book whose price beats it. Backtested on 11,667 matches / 6 leagues /
-5 seasons: at edge ≥ 0.015 → **+9.25% ROI, CLV +0.043 (conclusive), beats the
-close 77%**.
+another book whose price beats it. Validated with review-corrected
+methodology (one bet/match, train/holdout split, incremental-CLV null):
+**held-out 2024-26, edge ≥ 0.015 → +12.7% ROI on 126 bets, incremental CLV
++0.026 (> 2SE) — positive even against the Max-of-books close.**
 
 ```bash
 uv run python scripts/value_backtest.py     # prove it (re-runnable)

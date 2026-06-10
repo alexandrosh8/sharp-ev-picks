@@ -104,10 +104,16 @@ class OddsPortalLoader:
         for market_key in self._markets:
             entries = match.get(f"{market_key}_market") or []
             market = _MARKETS[market_key]
+            seen_books: set[str] = set()
             for entry in entries:
                 if not isinstance(entry, dict):
                     continue
                 bookmaker = str(entry.get("bookmaker_name") or "unknown")
+                # OddsHarvester can emit duplicate bookmaker rows (e.g. odds
+                # history); duplicates would corrupt devig (6-leg "markets").
+                if bookmaker in seen_books:
+                    continue
+                seen_books.add(bookmaker)
                 for label, selection in _selections(market_key, home, away):
                     odds = _parse_odds(entry.get(label))
                     if odds is None:
@@ -149,10 +155,21 @@ def _parse_odds(raw: Any) -> float | None:
 
 
 def _parse_ts(raw: Any) -> datetime | None:
+    """Parse OddsHarvester timestamps. The installed version emits
+    'YYYY-MM-DD HH:MM:SS UTC' (not ISO) — handle both, plus epoch floats."""
     if not raw:
         return None
+    text = str(raw).strip()
+    # epoch seconds (odds-history rows)
     try:
-        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return datetime.fromtimestamp(float(text), tz=UTC)
+    except (ValueError, OverflowError, OSError):
+        pass
+    cleaned = text.replace("Z", "+00:00")
+    if cleaned.endswith(" UTC"):
+        cleaned = cleaned[:-4]
+    try:
+        parsed = datetime.fromisoformat(cleaned)
     except ValueError:
         return None
     if parsed.tzinfo is None:

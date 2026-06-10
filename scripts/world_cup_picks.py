@@ -34,7 +34,8 @@ from app.models.football_dc import DixonColesFootballModel
 from app.probabilities.devig import DevigMethod, devig
 from app.schemas.base import Market
 
-# oddsportal name (normalized) -> martj42 dataset name
+# oddsportal name (normalized) -> martj42 dataset name (values are normalized
+# at lookup by DixonColesFootballModel.resolve_team)
 WC_ALIASES = {
     "usa": "United States",
     "south korea": "South Korea",
@@ -43,6 +44,18 @@ WC_ALIASES = {
     "cape verde": "Cape Verde",
     "dr congo": "DR Congo",
 }
+
+# WC 2026 host nations: when they play "at home" the dataset marks the match
+# non-neutral; used as the default when a fixture lookup misses.
+HOST_NATIONS = {"united states", "canada", "mexico"}
+
+HONESTY = (
+    "HONESTY: our walk-forward backtest shows a goals-only Dixon-Coles model does NOT\n"
+    "beat the closing line (negative CLV) even in club leagues with far more data.\n"
+    "International football has thinner data, a brand-new 48-team format, and NO\n"
+    "injury/lineup input. Treat these as a model-vs-market SCREEN for manual review,\n"
+    "not proven +EV edges. Decision-support only — nothing here places bets."
+)
 
 
 @dataclass
@@ -90,7 +103,7 @@ async def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level="ERROR")
-    print(__doc__.split("\n\n")[2])  # print the HONESTY paragraph up front
+    print(HONESTY)
     print()
 
     directory = EventDirectory()
@@ -118,10 +131,18 @@ async def main() -> None:
         home, away = (m.get("home_team") or "").strip(), (m.get("away_team") or "").strip()
         if not home or not away:
             continue
-        if model.resolve_team(home) is None or model.resolve_team(away) is None:
+        resolved_home = model.resolve_team(home)
+        resolved_away = model.resolve_team(away)
+        if resolved_home is None or resolved_away is None:
             unresolved += 1
             continue
-        neutral_flag = fixture_neutral.get((_norm(home), _norm(away)), True)
+        # Fixture lookup uses the RESOLVED dataset names (oddsportal names like
+        # "USA" would never match martj42's "United States"). When the lookup
+        # still misses, default by host nation: hosts at home are NOT neutral.
+        neutral_flag = fixture_neutral.get(
+            (_norm(resolved_home), _norm(resolved_away)),
+            _norm(resolved_home) not in HOST_NATIONS,
+        )
         preds = {
             p.selection: p.probability
             for p in model.predict_match(home, away, neutral=neutral_flag)

@@ -157,9 +157,12 @@ def parse_new_league_csv(text: str) -> list[MatchRow]:
                     home_goals=int(raw["HG"]),
                     away_goals=int(raw["AG"]),
                     result=raw["Res"].strip(),
-                    b365_home=_opt_float(raw.get("B365CH")),
-                    b365_draw=_opt_float(raw.get("B365CD")),
-                    b365_away=_opt_float(raw.get("B365CA")),
+                    # The new-leagues feed carries CLOSING odds only (B365C*/
+                    # PSC*); MatchRow.b365_* means PRE-MATCH prices, so they
+                    # stay None here — backtests must not bet at the close.
+                    b365_home=None,
+                    b365_draw=None,
+                    b365_away=None,
                     pinnacle_closing_home=_opt_float(raw.get("PSCH")),
                     pinnacle_closing_draw=_opt_float(raw.get("PSCD")),
                     pinnacle_closing_away=_opt_float(raw.get("PSCA")),

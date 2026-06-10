@@ -19,6 +19,16 @@
 - 2026-06-10 — **Fixed .gitignore bug**: `models/` (unanchored) was ignoring
   the whole `app/models/` source package — every fresh clone was broken.
   Anchored to `/models/`; verified via throwaway clone. [[gitignore-models-trap]]
+- 2026-06-10 (v2, post-review) — **Deep review confirmed 23 findings; all
+  fixed.** Key: exchange commission now netted (value.py), no-Pinnacle
+  fallback = ≥3-book median consensus (one bad quote can't fake edges),
+  resolve_team requires unique-longest match (no wrong-team pricing), alias
+  values normalized, oddsportal timestamps/dedupe fixed, new-league closing
+  odds no longer mislabeled as pre-match. **Backtest v2** (one bet/match,
+  train 2122-2324 / holdout 2425-2526, incremental-CLV null, computed
+  verdict): holdout edge>=0.015 → n=126, ROI +12.67%, incremental CLV +0.0261
+  (>2SE), positive vs Max-of-books close. Strategy SURVIVES the stricter
+  test. Caveat: modest holdout n; track live CLV.
 - 2026-06-10 — **THE solid pick finder = sharp-vs-soft line shopping**
   (`app/edge/value.py`, `docs/backtesting/value-findings.md`). NOT a goals
   model. Fair value from the sharpest book (Pinnacle pref / lowest-overround

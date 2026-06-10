@@ -67,25 +67,28 @@ def parse_results(text: str) -> list[InternationalMatch]:
     matches: list[InternationalMatch] = []
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     for raw in reader:
-        hs, as_ = raw.get("home_score", ""), raw.get("away_score", "")
+        # truncated rows surface as None via DictReader restval — never abort
+        # the whole parse over one malformed line
+        hs = raw.get("home_score") or ""
+        as_ = raw.get("away_score") or ""
         if hs in ("", "NA") or as_ in ("", "NA"):
             continue
-        parsed = _parse_iso_date(raw.get("date", ""))
+        parsed = _parse_iso_date(raw.get("date") or "")
         if parsed is None:
             continue
         try:
             matches.append(
                 InternationalMatch(
                     match_date=parsed,
-                    home_team=raw["home_team"].strip(),
-                    away_team=raw["away_team"].strip(),
+                    home_team=(raw.get("home_team") or "").strip(),
+                    away_team=(raw.get("away_team") or "").strip(),
                     home_goals=int(hs),
                     away_goals=int(as_),
-                    tournament=raw.get("tournament", "").strip(),
-                    neutral=str(raw.get("neutral", "")).strip().upper() == "TRUE",
+                    tournament=(raw.get("tournament") or "").strip(),
+                    neutral=str(raw.get("neutral") or "").strip().upper() == "TRUE",
                 )
             )
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             continue
     return matches
 
@@ -97,14 +100,15 @@ def parse_fixtures(
     fixtures: list[Fixture] = []
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     for raw in reader:
-        if raw.get("tournament", "").strip() != tournament:
+        if (raw.get("tournament") or "").strip() != tournament:
             continue
-        if raw.get("home_score", "") not in ("", "NA"):
+        if (raw.get("home_score") or "") not in ("", "NA"):
             continue  # already played
-        parsed = _parse_iso_date(raw.get("date", ""))
+        parsed = _parse_iso_date(raw.get("date") or "")
         if parsed is None or (on_or_after and parsed < on_or_after):
             continue
-        home, away = raw.get("home_team", "").strip(), raw.get("away_team", "").strip()
+        home = (raw.get("home_team") or "").strip()
+        away = (raw.get("away_team") or "").strip()
         if not home or not away:
             continue
         fixtures.append(
