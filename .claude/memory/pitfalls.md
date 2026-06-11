@@ -25,3 +25,16 @@
   OddsHarvester's run_scraper (done in app/ingestion/oddsportal.py and both
   pick scripts). Verified vs published WC2026 kickoffs. This was also the
   root cause of the "future captured_at" clamp.
+
+- **OddsHarvester 0.3.0 quirk patches live in app/ingestion/oddsportal.py**
+  (`_patch_upstream_quirks`, 2026-06-11): the PyPI package is patched at
+  runtime, NOT forked. Fixes: OneTrust consent DOM (hidden `ot-*` nodes)
+  polluting tab/More selectors — the 'More' fallback clicked the consent
+  dialog; `wait_for_market_switch` never passing (first-`.active`-match
+  check) costing a warning + 9s per market; team crests resolving as
+  bookmaker names via the bare `<img alt>` fallback when table scoping
+  misses (phantom "Racing"/"Al-Mabarrah" books). RE-VERIFY all patches after
+  any oddsharvester version bump — they replace two upstream methods
+  wholesale. Expected scrape gaps (market tab absent, submarket absent,
+  bookies-filter nav absent) are downgraded to INFO by design; the durable
+  DOM-break alarm is the per-market snapshot counts each cycle.
