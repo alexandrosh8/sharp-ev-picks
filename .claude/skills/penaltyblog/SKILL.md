@@ -44,7 +44,7 @@ Properties: `home_win`, `draw`, `away_win`, `home_draw_away` (tuple),
 `win_to_nil_home/away`, `expected_points_home/away`,
 `home_goal_distribution`, `away_goal_distribution`, `total_goals_distribution`,
 `exact_score`.
-Methods: `total_goals("over"|"under", line)`, `totals(line)->(over,push,under)`,
+Methods: `total_goals("over"|"under", line)`, `totals(line)->(under,push,over)`,
 `asian_handicap(...)`, `asian_handicap_probs(...)`.
 
 ## implied — devig
@@ -91,6 +91,11 @@ metrics: `rps_average`, `rps_array`, `multiclass_brier_score`,
 - **No py.typed marker** — mypy can't analyze it; it's in the ignore-missing
   list in `pyproject.toml`.
 - **`calculate_implied` rejects a str** — pass a `list[float]`, not a string.
+- **`total_goals("over"|"under", line)` silently EXCLUDES push mass** on
+  integer lines (over + under sum to < 1). For integer/quarter totals lines
+  use `totals(line)`, which returns the full `(under, push, over)` split
+  (verified against penaltyblog 1.11.0: `totals(3.0)` on
+  `create_dixon_coles_grid(1.5, 1.1, -0.05)` → (0.518, 0.218, 0.264)).
 
 ## Forbidden mistakes
 
