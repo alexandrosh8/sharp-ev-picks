@@ -93,11 +93,15 @@ async def test_pacing_knobs_reach_scraper() -> None:
         scrape_fn=fake_scrape,
         concurrency_tasks=5,
         request_delay=0.8,
+        locale="en-GB",
     )
     await loader.fetch_odds("soccer")
     (call,) = fake_scrape.calls  # type: ignore[attr-defined]
     assert call["concurrency_tasks"] == 5
     assert call["request_delay"] == 0.8
+    # Coherent human fingerprint: locale forwarded, paired with UTC timezone.
+    assert call["browser_locale_timezone"] == "en-GB"
+    assert call["browser_timezone_id"] == "UTC"
 
 
 async def test_unknown_sport_key_returns_empty() -> None:

@@ -146,6 +146,7 @@ class OddsPortalLoader:
         days_ahead: int | None = None,
         concurrency_tasks: int = 3,
         request_delay: float = 1.0,
+        locale: str = "en-GB",
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -181,6 +182,13 @@ class OddsPortalLoader:
         # These tune OddsHarvester's OWN scheduler — never anti-bot bypass.
         self._concurrency_tasks = concurrency_tasks
         self._request_delay = request_delay
+        # Browser locale: paired with the forced UTC timezone for a COHERENT
+        # human fingerprint (UTC = London -> en-GB). A real browser always
+        # sends a locale; leaving it None is itself an automation tell.
+        # OddsHarvester already rotates realistic UAs, randomizes the viewport,
+        # jitters delays, and runs a webdriver-hiding init script — we add the
+        # missing locale, never anything that DEFEATS bot detection.
+        self._locale = locale
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
@@ -220,6 +228,7 @@ class OddsPortalLoader:
                 # while labeled UTC. Also keeps dated pages aligned to the
                 # UTC dates computed above (upstream gotcha doc §10).
                 browser_timezone_id="UTC",
+                browser_locale_timezone=self._locale,  # playwright locale
                 concurrency_tasks=self._concurrency_tasks,
                 request_delay=self._request_delay,
             )
@@ -281,6 +290,7 @@ class OddsPortalLoader:
             markets=list(self._markets_for(sport_key)),
             headless=self._headless,
             browser_timezone_id="UTC",  # see fetch_odds — host tz leaks otherwise
+            browser_locale_timezone=self._locale,  # playwright locale (coherent fp)
             concurrency_tasks=self._concurrency_tasks,
             request_delay=self._request_delay,
         )

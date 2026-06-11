@@ -129,6 +129,7 @@ def build_scheduler(
             days_ahead=settings.oddsportal_days_ahead,
             concurrency_tasks=settings.oddsportal_concurrency,
             request_delay=settings.oddsportal_request_delay,
+            locale=settings.oddsportal_locale,
         )
         league_label = settings.oddsportal_football_leagues
 

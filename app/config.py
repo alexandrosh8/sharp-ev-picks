@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     # — anti-bot bypassing remains forbidden everywhere.
     oddsportal_concurrency: int = 3
     oddsportal_request_delay: float = 1.0
+    # Browser locale, paired with the loader's forced UTC timezone for a
+    # coherent human fingerprint (UTC = London -> en-GB).
+    oddsportal_locale: str = "en-GB"
     # Seconds between poll cycles. With max_instances=1 + coalesce, a value
     # below the cycle duration just runs cycles back-to-back — effective
     # freshness is one cycle length; the scrape itself is the floor.
