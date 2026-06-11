@@ -16,7 +16,7 @@
         --line: #1a241a;
         --text: #cfe3cf;
         --dim: #5e7a5e;
-        --faint: #3a4f3a;
+        --faint: #6b8a6b; /* ~4.9:1 on the panel bg — WCAG AA for the 10px text that uses it */
         --green: #00ff9d;
         --green-soft: #2bd576;
         --red: #ff5c57;
@@ -80,6 +80,14 @@
         font-size: 11px;
         letter-spacing: 0.15em;
       }
+      .live.down {
+        color: var(--red);
+      }
+      .live.down i {
+        background: var(--red);
+        box-shadow: 0 0 8px rgba(255, 92, 87, 0.7);
+        animation: none;
+      }
       .live i {
         width: 7px;
         height: 7px;
@@ -109,9 +117,6 @@
         border-radius: 4px;
         background: rgba(255, 180, 84, 0.04);
         letter-spacing: 0.03em;
-      }
-      .banner b {
-        color: var(--amber);
       }
       .banner.offline {
         color: var(--red);
@@ -380,7 +385,7 @@
   <body>
     <header>
       <span class="brand">PICKS&nbsp;TERMINAL</span>
-      <span class="live"><i></i>POLLING</span>
+      <span class="live" id="eng-badge"><i aria-hidden="true"></i>POLLING</span>
     </header>
     <div class="sub">
       sharp-vs-soft value · fair price = devig(sharpest book) · CLV-tracked ·
@@ -394,15 +399,15 @@
     <div class="cards">
       <div class="card">
         <div class="v" id="c-open">–</div>
-        <div class="k">Open picks</div>
+        <div class="k" id="c-open-k">Open picks (verified)</div>
       </div>
       <div class="card">
         <div class="v" id="c-edge">–</div>
-        <div class="k">Avg edge (open)</div>
+        <div class="k">Avg live edge (open)</div>
       </div>
       <div class="card">
         <div class="v" id="c-clv">–</div>
-        <div class="k" id="c-clv-k">Beat close (all picks)</div>
+        <div class="k" id="c-clv-k">Beat close (final+live)</div>
       </div>
       <div class="card">
         <div class="v" id="c-settled">–</div>
@@ -410,7 +415,7 @@
       </div>
       <div class="card">
         <div class="v" id="c-record">–</div>
-        <div class="k">Record W-L-P</div>
+        <div class="k">Record W-L-P/V</div>
       </div>
       <div class="card">
         <div class="v" id="c-pnl">–</div>
@@ -423,7 +428,7 @@
     </div>
 
     <div class="controls">
-      <select id="f-status">
+      <select id="f-status" aria-label="Filter picks by status">
         <option value="">ALL STATUSES</option>
         <option value="alerted" selected>OPEN (VERIFIED)</option>
         <option value="alerted-all">OPEN (INCL. UNVERIFIED)</option>
@@ -432,7 +437,8 @@
       <input
         type="search"
         id="f-search"
-        placeholder="search match / team / book / league…"
+        aria-label="Search picks"
+        placeholder="search match / team / book / league / market…"
       />
       <button id="refresh">Refresh</button>
       <span class="stamp" id="stamp">loading…</span>
@@ -457,7 +463,7 @@
         </thead>
         <tbody id="rows">
           <tr>
-            <td colspan="12" class="empty">loading…</td>
+            <td colspan="11" class="empty">loading…</td>
           </tr>
         </tbody>
       </table>
@@ -477,7 +483,7 @@
       const MARKETS = {
         h2h: "1X2 / ML",
         totals: "O/U",
-        spreads: "AH",
+        spreads: "AH/EH", // Market.SPREADS carries BOTH Asian and 3-way European handicap
         btts: "BTTS",
         dnb: "DNB",
         double_chance: "DC",
@@ -536,7 +542,8 @@
       // min), else picks flicker out of the default view between cycles.
       const VERIFIED_WITHIN_MS = 45 * 60 * 1000;
       function isVerified(p) {
-        if (p.status !== "alerted") return true; // settled rows keep history
+        // Defensive only: render() invokes this solely for alerted rows.
+        if (p.status !== "alerted") return true;
         if (!p.revalidated_at) return false;
         return Date.now() - new Date(p.revalidated_at) < VERIFIED_WITHIN_MS;
       }
@@ -552,7 +559,14 @@
                 : p.status === status)) &&
             (status !== "alerted" || isVerified(p)) &&
             (!q ||
-              [p.event, p.selection, p.bookmaker, p.league, p.market]
+              [
+                p.event,
+                p.selection,
+                p.bookmaker,
+                p.league,
+                p.market,
+                MARKETS[p.market] || "", // searchable by the DISPLAYED label too
+              ]
                 .join(" ")
                 .toLowerCase()
                 .includes(q)),
@@ -565,7 +579,7 @@
           td(
             tr,
             $("f-status").value === "alerted"
-              ? "No VERIFIED open picks right now. Picks appear here once the current poll cycle re-checks their odds (one full cycle, up to ~20 min); older unverified ones are under OPEN (INCL. UNVERIFIED)."
+              ? "No VERIFIED open picks right now. Picks appear here once the current poll cycle re-checks their odds (one full cycle, up to ~40 min); older unverified ones are under OPEN (INCL. UNVERIFIED)."
               : "No picks match. New picks appear when a book beats the sharp fair price — check back after the next poll cycle.",
             "empty",
           ).colSpan = 11;
@@ -580,8 +594,17 @@
           const ko = document.createElement("div");
           ko.className = "ko";
           const when = document.createElement("span");
-          when.textContent = fmtLocal(p.starts_at);
-          const cd = countdown(p.starts_at);
+          // When the loader didn't know the kickoff, the event stores the
+          // pick's own created_at as a placeholder (repositories.
+          // _get_or_create_event) — show TBD instead of a fake "started"
+          // time, and suppress the settle button below.
+          const kickoffKnown =
+            new Date(p.starts_at).getTime() !==
+            new Date(p.created_at).getTime();
+          when.textContent = kickoffKnown ? fmtLocal(p.starts_at) : "TBD";
+          const cd = kickoffKnown
+            ? countdown(p.starts_at)
+            : { text: "kickoff unknown", soon: false };
           const rel = document.createElement("small");
           rel.textContent = cd.text;
           if (cd.soon) rel.className = "soon";
@@ -602,11 +625,24 @@
           td(tr, MARKETS[p.market] || p.market);
           const selCell = document.createElement("div");
           selCell.className = "selwrap";
+          // Surface the pick's WHY on hover: the pipeline's reason summary
+          // (anchor book, fair price, effective price) + anchor confidence
+          // (0.9 backtested named sharp vs 0.7 consensus).
+          const why = [];
+          if (p.reason_summary) why.push(p.reason_summary);
+          if (p.confidence !== null && p.confidence !== undefined)
+            why.push(
+              "anchor: " +
+                (Number(p.confidence) >= 0.9 ? "sharp" : "consensus") +
+                " (" +
+                Number(p.confidence).toFixed(1) +
+                ")",
+            );
+          if (why.length) selCell.title = why.join("\n");
           const selName = document.createElement("span");
           selName.className = "sel";
           selName.textContent = p.selection;
           const pickedAgo = document.createElement("small");
-          pickedAgo.style.display = "block";
           pickedAgo.style.color = "var(--faint)";
           const ageH = (Date.now() - new Date(p.created_at)) / 3.6e6;
           // Age of the PICK (when it was first found) — not a verification
@@ -666,6 +702,10 @@
           td(tr, oddsCell);
           // Fair % with EV folded in as a sub-line (one column fewer keeps
           // Status/Settle on-screen without horizontal scrolling).
+          // NB: model_probability IS the devigged sharp fair prob in the
+          // value pipeline (the validated default); under PICK_STRATEGY=
+          // model it would hold the model's own probability instead — keep
+          // in mind if the model pipeline ever goes live (it is screens-only).
           const fairCell = document.createElement("div");
           const fairPct = document.createElement("span");
           fairPct.textContent = pct(p.model_probability);
@@ -697,16 +737,26 @@
               ")",
           );
 
-          if (p.clv_log === null) td(tr, badge("pending", "b-gray"));
-          else {
+          if (p.clv_log === null) {
+            // Open picks await their first true-up; anything else with no
+            // CLV row never got one and never will — "pending" would lie.
+            td(tr, badge(p.status === "alerted" ? "pending" : "n/a", "b-gray"));
+          } else {
             const clvPct = (Math.exp(Number(p.clv_log)) - 1) * 100;
-            td(
+            const cell = td(
               tr,
               badge(
-                (clvPct >= 0 ? "+" : "") + clvPct.toFixed(1) + "%",
+                (p.status === "alerted" ? "live " : "") +
+                  (clvPct >= 0 ? "+" : "") +
+                  clvPct.toFixed(1) +
+                  "%",
                 p.beat_close ? "b-green" : "b-red",
               ),
             );
+            cell.title =
+              p.status === "alerted"
+                ? "provisional — re-priced every cycle until kickoff; final CLV is the last price before the market closes"
+                : "closing-line value: pick price vs the de-vigged closing fair price";
           }
           const statusCell = td(
             tr,
@@ -716,8 +766,13 @@
             ),
           );
           // Manual settle: past-kickoff open picks (auto-settlement covers
-          // football; NBA/euroleague have no free results feed).
-          if (p.status === "alerted" && new Date(p.starts_at) < Date.now()) {
+          // football; NBA/euroleague have no free results feed). Placeholder
+          // kickoffs must not invite settling an unstarted match.
+          if (
+            p.status === "alerted" &&
+            kickoffKnown &&
+            new Date(p.starts_at) < Date.now()
+          ) {
             const btn = document.createElement("button");
             btn.textContent = "settle";
             btn.style.marginLeft = "8px";
@@ -758,14 +813,17 @@
       function summarizePerf(perf) {
         if (!perf) return;
         $("c-settled").textContent = String(perf.n_settled);
-        const halves = (perf.half_won || 0) + (perf.half_lost || 0);
+        // Halves are directional (quarter-line AH): show wins and losses
+        // separately, not a meaningless combined count.
+        const hw = perf.half_won || 0;
+        const hl = perf.half_lost || 0;
         $("c-record").textContent =
           perf.won +
           "-" +
           perf.lost +
           "-" +
           (perf.push + perf.void) +
-          (halves ? " (+" + halves + " half)" : "");
+          (hw || hl ? " (½: " + hw + "W " + hl + "L)" : "");
         const pnl = Number(perf.total_pnl);
         const pnlEl = $("c-pnl");
         pnlEl.textContent = perf.n_settled
@@ -781,14 +839,23 @@
         else {
           const clvPct =
             (Math.exp(Number(perf.stake_weighted_clv_log)) - 1) * 100;
+          // toFixed(1): one precision for every percentage on the page.
           clvEl.textContent =
-            (clvPct >= 0 ? "+" : "") + clvPct.toFixed(2) + "%";
+            (clvPct >= 0 ? "+" : "") + clvPct.toFixed(1) + "%";
           clvEl.style.color = clvPct < 0 ? "var(--red)" : "";
         }
       }
 
       function summarizeLiveness(health) {
         const el = $("liveness-banner");
+        // /health itself failing is NOT evidence the scheduler is dead —
+        // don't diagnose a poll problem we can't see.
+        if (health === null) {
+          el.style.display = "";
+          el.textContent =
+            "⚠ health endpoint unavailable — cannot assess poll freshness";
+          return;
+        }
         const polls = health && health.polls ? health.polls : {};
         const stamps = Object.values(polls)
           .map((p) => new Date(p.finished_at).getTime())
@@ -814,8 +881,16 @@
 
       function summarizeUpstream(health) {
         const el = $("upstream-banner");
-        const updates =
-          health && health.upstream ? health.upstream.updates || [] : [];
+        const upstream = health && health.upstream ? health.upstream : {};
+        // A failing dependency check must not look identical to "all
+        // dependencies current".
+        if (upstream.error) {
+          el.style.display = "";
+          el.textContent =
+            "⚠ dependency update check failing: " + upstream.error;
+          return;
+        }
+        const updates = upstream.updates || [];
         if (!updates.length) {
           el.style.display = "none";
           return;
@@ -833,30 +908,51 @@
       }
 
       function summarize() {
+        // Cards derived from /picks are scoped to the latest-200 window the
+        // endpoint serves — captions must say so once the table can exceed
+        // it. (#c-settled is owned by summarizePerf: the all-time DB count.)
         const open = PICKS.filter((p) => p.status === "alerted");
-        $("c-open").textContent = String(open.length);
-        $("c-settled").textContent = String(
-          PICKS.filter((p) => p.status === "settled").length,
-        );
-        $("c-edge").textContent = open.length
-          ? pct(open.reduce((a, p) => a + Number(p.edge), 0) / open.length)
+        const verified = open.filter(isVerified);
+        // Match the default OPEN (VERIFIED) view; surface the rest in the
+        // caption instead of silently disagreeing with the table below.
+        $("c-open").textContent = String(verified.length);
+        $("c-open-k").textContent =
+          "Open picks (verified)" +
+          (open.length > verified.length
+            ? " · " + (open.length - verified.length) + " unverified"
+            : "");
+        // Live edge where a re-priced value exists; alert-time edge as
+        // fallback for picks awaiting their first revalidation.
+        $("c-edge").textContent = verified.length
+          ? pct(
+              verified.reduce(
+                (a, p) => a + Number(p.current_edge ?? p.edge),
+                0,
+              ) / verified.length,
+            )
           : "–";
-        // CLV record counts ALL picks ever trued-up (incl. superseded
-        // history); "pending" = open picks awaiting their first 30-min
-        // true-up pass since creation.
+        // CLV record over the picks window (final + live-provisional);
+        // "pending" = open picks awaiting their first true-up (runs inside
+        // every poll cycle).
         const withClv = PICKS.filter((p) => p.clv_log !== null);
         $("c-clv").textContent = withClv.length
           ? withClv.filter((p) => p.beat_close).length + " / " + withClv.length
           : "–";
         const pending = open.filter((p) => p.clv_log === null).length;
         $("c-clv-k").textContent =
-          "Beat close (all picks)" +
+          "Beat close (last " +
+          PICKS.length +
+          " · final+live)" +
           (pending ? " · " + pending + " pending" : "");
       }
 
       let LAST_OK = null; // last successful refresh — shown when offline
+      let LOAD_SEQ = 0; // out-of-order guard: a slow stale response must
+      // never overwrite data from a newer one (manual Refresh + 60s timer
+      // can overlap).
 
       async function load() {
+        const seq = ++LOAD_SEQ;
         try {
           const [res, perfRes, healthRes] = await Promise.all([
             fetch("/picks?limit=200"),
@@ -864,15 +960,20 @@
             fetch("/health"),
           ]);
           if (!res.ok) throw new Error("HTTP " + res.status);
-          PICKS = await res.json();
-          summarize();
-          summarizePerf(perfRes.ok ? await perfRes.json() : null);
+          const picks = await res.json();
+          const perf = perfRes.ok ? await perfRes.json() : null;
           const health = healthRes.ok ? await healthRes.json() : null;
+          if (seq !== LOAD_SEQ) return; // a newer load already landed
+          PICKS = picks;
+          summarize();
+          summarizePerf(perf);
           summarizeUpstream(health);
           summarizeLiveness(health);
           render();
           LAST_OK = new Date();
           $("offline-banner").style.display = "none";
+          $("eng-badge").classList.remove("down");
+          $("eng-badge").lastChild.textContent = "POLLING";
           $("stamp").textContent =
             "updated " +
             LAST_OK.toLocaleTimeString(undefined, {
@@ -880,10 +981,13 @@
               hour12: false,
             });
         } catch (err) {
+          if (seq !== LOAD_SEQ) return; // stale failure; a newer load owns the UI
           // Backend unreachable: say so LOUDLY — otherwise the frozen table
           // keeps wearing its last "verified / still value" look while
           // nothing is actually re-checking prices. Re-render too, so
           // isVerified() ages out stale rows from the default view.
+          $("eng-badge").classList.add("down");
+          $("eng-badge").lastChild.textContent = "OFFLINE";
           const banner = $("offline-banner");
           banner.style.display = "";
           banner.textContent =
