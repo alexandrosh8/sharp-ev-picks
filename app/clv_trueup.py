@@ -97,6 +97,53 @@ async def revalidate_open_picks(
     return updated
 
 
+# One match page per link per cycle; cap keeps a pathological backlog of
+# far-future open picks from dominating cycle time (oldest picks wait a
+# cycle — they are re-priced round-robin as earlier ones settle/expire).
+OFFWINDOW_LINK_CAP = 25
+
+
+async def revalidate_offwindow_picks(
+    loader: OddsLoader,
+    session_factory: "async_sessionmaker",
+    sport_key: str,
+    covered_event_ids: set[str],
+    devig_method: DevigMethod = DevigMethod.SHIN,
+) -> int:
+    """Re-price open picks whose games were NOT in this cycle's scrape
+    (taken weeks ahead of kickoff): scrape their match pages directly.
+
+    Requires the loader to support fetch_match_odds (OddsPortalLoader);
+    other loaders silently skip. Returns rows updated.
+    """
+    fetch = getattr(loader, "fetch_match_odds", None)
+    if fetch is None:
+        return 0
+    now = datetime.now(tz=UTC)
+    async with session_factory() as session:
+        refs = (
+            (
+                await session.execute(
+                    select(Event.external_ref)
+                    .join(Pick, Pick.event_id == Event.id)
+                    .where(Pick.status == "alerted", Event.starts_at > now)
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+    links = [ref for ref in refs if ref.startswith("http") and ref not in covered_event_ids][
+        :OFFWINDOW_LINK_CAP
+    ]
+    if not links:
+        return 0
+    snapshots = await fetch(sport_key, links)
+    # Same devig as the live pipeline (passed from the composition root) so
+    # off-window re-pricing stays comparable to in-window CLV numbers.
+    return await revalidate_open_picks(session_factory, snapshots, devig_method)
+
+
 async def true_up_clv(
     loader: OddsLoader,
     session_factory: "async_sessionmaker",

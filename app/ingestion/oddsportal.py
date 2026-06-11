@@ -248,6 +248,37 @@ class OddsPortalLoader:
         )
         return snapshots
 
+    async def fetch_match_odds(
+        self, sport_key: str, match_links: Sequence[str]
+    ) -> list[OddsSnapshotIn]:
+        """Scrape SPECIFIC match pages (open picks outside the dated window
+        still need fresh prices). Links from other sports are filtered out
+        — oddsportal URLs embed the sport segment."""
+        if sport_key not in self._config:
+            return []
+        sport, _leagues = self._config[sport_key]
+        links = [link for link in match_links if f"/{sport}/" in link]
+        if not links:
+            return []
+        now = datetime.now(tz=UTC)
+        result = await self._scrape(
+            sport=sport,
+            match_links=links,
+            markets=list(self._markets_for(sport_key)),
+            headless=self._headless,
+            browser_timezone_id="UTC",  # see fetch_odds — host tz leaks otherwise
+        )
+        snapshots: list[OddsSnapshotIn] = []
+        for match in getattr(result, "success", None) or []:
+            snapshots.extend(self._convert_match(match, now, self._markets_for(sport_key)))
+        logger.info(
+            "oddsportal %s match-link revalidation: %d links -> %d snapshots",
+            sport_key,
+            len(links),
+            len(snapshots),
+        )
+        return snapshots
+
     def _convert_match(
         self, match: dict[str, Any], now: datetime, markets: Sequence[str]
     ) -> list[OddsSnapshotIn]:

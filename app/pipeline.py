@@ -302,12 +302,21 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     # Re-price every OPEN pick from this cycle's snapshots: CLV true-up +
-    # current odds/edge ("still worth betting?") — no second scrape.
+    # current odds/edge ("still worth betting?") — no second scrape. Picks
+    # on games OUTSIDE the dated window (taken weeks ahead) get their match
+    # pages scraped directly so they revalidate every cycle too.
     if deps.session_factory is not None:
-        from app.clv_trueup import revalidate_open_picks
+        from app.clv_trueup import revalidate_offwindow_picks, revalidate_open_picks
 
         try:
             await revalidate_open_picks(deps.session_factory, snapshots, deps.devig_method)
+            await revalidate_offwindow_picks(
+                deps.loader,
+                deps.session_factory,
+                sport_key,
+                covered_event_ids={s.event_id for s in snapshots},
+                devig_method=deps.devig_method,
+            )
         except Exception as exc:  # revalidation must never break picking
             logger.error("open-pick revalidation failed: %s", type(exc).__name__)
 

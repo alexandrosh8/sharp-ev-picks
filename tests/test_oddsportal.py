@@ -304,3 +304,42 @@ def test_all_leagues_requires_dated_scraping() -> None:
             directory=EventDirectory(),
             leagues_by_sport_key={"soccer": ("football", ["all"])},
         )
+
+
+async def test_fetch_match_odds_scrapes_specific_links_for_own_sport() -> None:
+    # Open picks outside the dated window are re-priced via their match
+    # pages directly; links from other sports are filtered out.
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["all"])},
+        scrape_fn=fake_scrape,
+        days_ahead=1,
+    )
+    links = [
+        "https://www.oddsportal.com/football/world/world-cup/a-vs-b/XYZ/",
+        "https://www.oddsportal.com/basketball/usa/nba/c-vs-d/QRS/",
+    ]
+    snapshots = await loader.fetch_match_odds("soccer", links)
+    assert len(calls) == 1
+    assert calls[0]["match_links"] == [links[0]]  # basketball link filtered
+    assert "leagues" not in calls[0] or calls[0].get("leagues") is None
+    assert snapshots  # MATCH converted normally
+
+
+async def test_fetch_match_odds_no_matching_links_skips_scrape() -> None:
+    async def fake_scrape(**kwargs: Any) -> Any:  # pragma: no cover - must not run
+        raise AssertionError("should not scrape")
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["all"])},
+        scrape_fn=fake_scrape,
+        days_ahead=1,
+    )
+    assert await loader.fetch_match_odds("soccer", ["https://x/basketball/y/"]) == []
