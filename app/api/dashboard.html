@@ -113,6 +113,11 @@
       .banner b {
         color: var(--amber);
       }
+      .banner.offline {
+        color: var(--red);
+        border-color: rgba(255, 92, 87, 0.45);
+        background: rgba(255, 92, 87, 0.06);
+      }
 
       .cards {
         display: grid;
@@ -382,6 +387,7 @@
       odds ≥ 1.60 · times: Cyprus (Asia/Nicosia)
     </div>
 
+    <div class="banner offline" id="offline-banner" style="display: none"></div>
     <div class="banner" id="liveness-banner" style="display: none"></div>
     <div class="banner" id="upstream-banner" style="display: none"></div>
 
@@ -603,9 +609,16 @@
           pickedAgo.style.display = "block";
           pickedAgo.style.color = "var(--faint)";
           const ageH = (Date.now() - new Date(p.created_at)) / 3.6e6;
+          // Age of the PICK (when it was first found) — not a verification
+          // timestamp; the live re-check is the "now …" line in the Odds
+          // column, and freshness gates the default VERIFIED view.
           pickedAgo.textContent =
+            "found " +
             (ageH < 1 ? Math.round(ageH * 60) + "m" : Math.round(ageH) + "h") +
-            " ago · verify";
+            " ago";
+          pickedAgo.title =
+            "when this pick was first alerted — always confirm the live price " +
+            "at the bookmaker before betting";
           if (ageH > 6) pickedAgo.style.color = "var(--amber)";
           selCell.append(selName, pickedAgo);
           td(tr, selCell);
@@ -841,6 +854,8 @@
           (pending ? " · " + pending + " pending" : "");
       }
 
+      let LAST_OK = null; // last successful refresh — shown when offline
+
       async function load() {
         try {
           const [res, perfRes, healthRes] = await Promise.all([
@@ -856,10 +871,33 @@
           summarizeUpstream(health);
           summarizeLiveness(health);
           render();
+          LAST_OK = new Date();
+          $("offline-banner").style.display = "none";
           $("stamp").textContent =
             "updated " +
-            new Date().toLocaleTimeString(undefined, { timeZone: TZ });
+            LAST_OK.toLocaleTimeString(undefined, {
+              timeZone: TZ,
+              hour12: false,
+            });
         } catch (err) {
+          // Backend unreachable: say so LOUDLY — otherwise the frozen table
+          // keeps wearing its last "verified / still value" look while
+          // nothing is actually re-checking prices. Re-render too, so
+          // isVerified() ages out stale rows from the default view.
+          const banner = $("offline-banner");
+          banner.style.display = "";
+          banner.textContent =
+            "⛔ ENGINE OFFLINE — cannot reach the app (" +
+            err.message +
+            "). Data frozen at " +
+            (LAST_OK
+              ? LAST_OK.toLocaleTimeString(undefined, {
+                  timeZone: TZ,
+                  hour12: false,
+                })
+              : "page load") +
+            "; prices are NOT being re-verified. Start the app: bash scripts/run_app.sh";
+          render();
           $("stamp").textContent =
             "load failed (" + err.message + ") — retrying in 60s";
         }
