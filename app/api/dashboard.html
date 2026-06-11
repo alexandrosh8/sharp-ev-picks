@@ -35,7 +35,7 @@
       body {
         color: var(--text);
         font: 13px/1.55 var(--mono);
-        padding: 28px 32px 40px;
+        padding: 28px 18px 40px;
         min-height: 100vh;
         background:
           radial-gradient(
@@ -207,15 +207,16 @@
       table {
         border-collapse: collapse;
         width: 100%;
-        min-width: 1180px;
+        /* No hard min-width: the table must fit a 1280px laptop without
+           horizontal scroll (Status/Settle were landing off-screen). */
       }
       th {
         text-align: left;
         font-size: 10px;
-        letter-spacing: 0.16em;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
         color: var(--dim);
-        padding: 10px 12px;
+        padding: 9px 8px;
         border-bottom: 1px solid var(--line);
         position: sticky;
         top: 0;
@@ -223,10 +224,28 @@
         z-index: 2;
       }
       td {
-        padding: 9px 12px;
+        padding: 8px 8px;
         border-bottom: 1px solid rgba(26, 36, 26, 0.6);
         white-space: nowrap;
         font-variant-numeric: tabular-nums;
+      }
+      .matchwrap {
+        max-width: 180px;
+      }
+      .matchwrap .match,
+      .matchwrap .league {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .selwrap {
+        max-width: 150px;
+      }
+      .selwrap .sel,
+      .selwrap small {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       tbody tr {
         animation: rowin 0.35s ease both;
@@ -274,7 +293,24 @@
         font-weight: 700;
       }
       .edgecell {
-        min-width: 86px;
+        min-width: 70px;
+      }
+      td button {
+        font-family: inherit;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 1.4;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 2px 7px;
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        color: var(--cyan);
+        cursor: pointer;
+      }
+      td button:hover {
+        border-color: var(--cyan);
       }
       .edge {
         color: var(--green);
@@ -406,9 +442,8 @@
             <th>Pick</th>
             <th>Book</th>
             <th>Odds</th>
-            <th>Fair&nbsp;%</th>
+            <th>Fair&nbsp;/&nbsp;EV</th>
             <th>Edge</th>
-            <th>EV</th>
             <th>Stake</th>
             <th>CLV</th>
             <th>Status</th>
@@ -454,6 +489,7 @@
           day: "numeric",
           hour: "2-digit",
           minute: "2-digit",
+          hour12: false, // 24h: narrower column + terminal aesthetic
         });
       const pct = (x) => (Number(x) * 100).toFixed(1) + "%";
 
@@ -526,7 +562,7 @@
               ? "No VERIFIED open picks right now. Picks appear here once the current poll cycle re-checks their odds (one full cycle, up to ~20 min); older unverified ones are under OPEN (INCL. UNVERIFIED)."
               : "No picks match. New picks appear when a book beats the sharp fair price — check back after the next poll cycle.",
             "empty",
-          ).colSpan = 12;
+          ).colSpan = 11;
           tbody.appendChild(tr);
           return;
         }
@@ -547,6 +583,7 @@
           td(tr, ko);
 
           const m = document.createElement("div");
+          m.className = "matchwrap";
           const name = document.createElement("span");
           name.className = "match";
           name.textContent = p.event;
@@ -558,6 +595,7 @@
 
           td(tr, MARKETS[p.market] || p.market);
           const selCell = document.createElement("div");
+          selCell.className = "selwrap";
           const selName = document.createElement("span");
           selName.className = "sel";
           selName.textContent = p.selection;
@@ -566,9 +604,8 @@
           pickedAgo.style.color = "var(--faint)";
           const ageH = (Date.now() - new Date(p.created_at)) / 3.6e6;
           pickedAgo.textContent =
-            "picked " +
             (ageH < 1 ? Math.round(ageH * 60) + "m" : Math.round(ageH) + "h") +
-            " ago — verify price";
+            " ago · verify";
           if (ageH > 6) pickedAgo.style.color = "var(--amber)";
           selCell.append(selName, pickedAgo);
           td(tr, selCell);
@@ -585,27 +622,46 @@
             nowLine.style.display = "block";
             const curEdge =
               p.current_edge === null ? null : Number(p.current_edge);
+            // Colour carries the verdict (green = still value, amber = thin,
+            // red = edge gone) — keeps the column narrow enough that
+            // Status/Settle stay on-screen.
             let verdict = "";
             let color = "var(--faint)";
             if (curEdge !== null) {
-              if (curEdge >= 0.03) {
-                verdict = " still value +" + (curEdge * 100).toFixed(1) + "%";
-                color = "var(--green)";
-              } else if (curEdge > 0) {
-                verdict = " thin +" + (curEdge * 100).toFixed(1) + "%";
-                color = "var(--amber)";
-              } else {
-                verdict = " edge gone " + (curEdge * 100).toFixed(1) + "%";
-                color = "var(--red)";
-              }
+              verdict =
+                " · " +
+                (curEdge >= 0 ? "+" : "") +
+                (curEdge * 100).toFixed(1) +
+                "%";
+              if (curEdge >= 0.03) color = "var(--green)";
+              else if (curEdge > 0) color = "var(--amber)";
+              else color = "var(--red)";
             }
             nowLine.style.color = color;
+            nowLine.title =
+              curEdge === null
+                ? "current price at the pick's book"
+                : curEdge >= 0.03
+                  ? "still value at current price"
+                  : curEdge > 0
+                    ? "thin edge at current price"
+                    : "edge gone at current price";
             nowLine.textContent =
               "now " + Number(p.current_odds).toFixed(2) + verdict;
             oddsCell.appendChild(nowLine);
           }
           td(tr, oddsCell);
-          td(tr, pct(p.model_probability));
+          // Fair % with EV folded in as a sub-line (one column fewer keeps
+          // Status/Settle on-screen without horizontal scrolling).
+          const fairCell = document.createElement("div");
+          const fairPct = document.createElement("span");
+          fairPct.textContent = pct(p.model_probability);
+          const evLine = document.createElement("small");
+          evLine.style.display = "block";
+          evLine.style.color = "var(--faint)";
+          evLine.textContent = "EV +" + pct(p.ev);
+          fairCell.append(fairPct, evLine);
+          td(tr, fairCell);
 
           const e = Number(p.edge);
           const ed = document.createElement("div");
@@ -620,7 +676,6 @@
           ed.append(ev_, bar);
           td(tr, ed, "edgecell");
 
-          td(tr, "+" + pct(p.ev));
           td(
             tr,
             Number(p.recommended_stake_amount).toFixed(2) +
