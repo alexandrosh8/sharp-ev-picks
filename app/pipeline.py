@@ -151,8 +151,12 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 ),
                 created_at=now,
             )
+            if not await _maybe_persist(deps, pick, snap.event_id):
+                # Already persisted by an earlier cycle: hand the exposure
+                # grant back and don't re-alert — nothing new happened.
+                deps.ledger.release(now.date(), granted)
+                continue
             picks.append(pick)
-            await _maybe_persist(deps, pick, snap.event_id)
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     logger.info("pipeline cycle for %s: %d picks", sport_key, len(picks))
@@ -184,21 +188,31 @@ async def _refresh_kickoffs(deps: "PipelineDeps", event_ids: set[str]) -> None:
         logger.error("kickoff refresh failed: %s", type(exc).__name__)
 
 
-async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> None:
-    """Persist the pick to the DB when a session factory + directory are set."""
+async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> bool:
+    """Persist the pick to the DB when a session factory + directory are set.
+
+    Returns False only on a CONFIRMED dedupe (the pick already exists) so
+    the caller can hand back its exposure grant and skip re-alerting. Every
+    other path — persistence unavailable or failed — returns True: treating
+    uncertainty as "new" keeps the cap conservative and the alert flowing.
+    """
     if deps.session_factory is None or deps.directory is None:
-        return
+        return True
     teams = deps.directory.lookup(event_id)
     if teams is None:
-        return
-    from app.storage.repositories import persist_pick
+        return True
+    from app.storage import repositories
 
     try:
         async with deps.session_factory() as session:
-            await persist_pick(session, pick, teams, deps.model_name, deps.model_version)
+            is_new = await repositories.persist_pick(
+                session, pick, teams, deps.model_name, deps.model_version
+            )
             await session.commit()
+        return is_new
     except Exception as exc:  # persistence must never break alerting
         logger.error("pick persistence failed for %s: %s", pick.pick_id, type(exc).__name__)
+        return True
 
 
 async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
@@ -297,8 +311,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 ),
                 created_at=now,
             )
+            if not await _maybe_persist(deps, pick, event_id):
+                # Already persisted by an earlier cycle: hand the exposure
+                # grant back and don't re-alert — nothing new happened.
+                deps.ledger.release(now.date(), granted)
+                continue
             picks.append(pick)
-            await _maybe_persist(deps, pick, event_id)
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     # Re-price every OPEN pick from this cycle's snapshots: CLV true-up +

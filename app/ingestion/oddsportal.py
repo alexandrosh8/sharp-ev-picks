@@ -248,6 +248,12 @@ class OddsPortalLoader:
         )
         return snapshots
 
+    def sport_segment(self, sport_key: str) -> str | None:
+        """URL sport segment for a sport key ("soccer" -> "football") — lets
+        callers pre-filter match links before spending a scrape budget."""
+        cfg = self._config.get(sport_key)
+        return str(cfg[0]) if cfg else None
+
     async def fetch_match_odds(
         self, sport_key: str, match_links: Sequence[str]
     ) -> list[OddsSnapshotIn]:

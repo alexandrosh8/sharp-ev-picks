@@ -27,3 +27,15 @@ class DailyExposureLedger:
         if granted > 0.0:
             self._used[day] = self.used(day) + granted
         return granted
+
+    def release(self, day: date, fraction: float) -> None:
+        """Hand back an unused grant (e.g. the pick was a DB duplicate).
+
+        Without this, continuous polling re-reserves the same pick every
+        cycle and exhausts the daily cap on re-detections. Clamped at zero —
+        over-releasing must never mint capacity beyond the cap.
+        """
+        if fraction < 0.0:
+            raise ValueError(f"released fraction must be >= 0, got {fraction}")
+        if fraction > 0.0:
+            self._used[day] = max(self.used(day) - fraction, 0.0)

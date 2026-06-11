@@ -4,6 +4,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from app.edge.gates import GatePolicy
 from app.ingestion.base import EventDirectory, EventTeams
 from app.models.base import NullModel
@@ -125,6 +127,53 @@ async def test_value_pipeline_rerun_dedupes_alert() -> None:
     second = await run_value_pipeline(deps, "soccer")
     assert len(first) == len(second) == 1
     assert len(sink.sent) == 1  # same market state -> one alert
+
+
+async def test_duplicate_pick_releases_exposure_and_skips_alert(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """H1 regression: a pick already persisted (DB dedupe) must hand its
+    daily-exposure grant back and not re-alert. With 60s polling, leaking
+    one grant per cycle exhausts the daily cap within minutes and blocks
+    every genuinely NEW pick for the rest of the UTC day."""
+    import app.storage.repositories as repos
+
+    calls = {"n": 0}
+
+    async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return calls["n"] == 1  # first cycle inserts; later cycles dedupe
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+
+    class FakeSessionFactory:
+        """Minimal async-contextmanager session; revalidation calls against
+        it raise and are swallowed by the pipeline's try/except."""
+
+        def __call__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+            return False
+
+        async def commit(self) -> None:
+            return None
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+
+    day = datetime.now(tz=UTC).date()
+    first = await run_value_pipeline(deps, "soccer")
+    assert len(first) == 1
+    used_after_first = deps.ledger.used(day)
+    assert used_after_first > 0.0
+
+    second = await run_value_pipeline(deps, "soccer")
+    assert second == []  # duplicate is not a new pick this cycle
+    assert deps.ledger.used(day) == pytest.approx(used_after_first)  # grant returned
+    assert len(sink.sent) == 1  # no re-alert for an unchanged pick
 
 
 async def test_value_pipeline_skips_stale_odds() -> None:

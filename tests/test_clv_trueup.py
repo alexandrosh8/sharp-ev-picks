@@ -100,6 +100,28 @@ async def factory():  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
+def test_offwindow_links_filter_sport_before_cap() -> None:
+    # H3 regression: wrong-sport refs must not burn cap slots — a basketball
+    # backlog bigger than the cap used to starve football picks forever.
+    from app.clv_trueup import select_offwindow_links
+
+    basketball = [f"https://www.oddsportal.com/basketball/usa/m{i}" for i in range(30)]
+    football = ["https://www.oddsportal.com/football/world/target-match"]
+    links = select_offwindow_links(basketball + football, "football", set(), cap=25)
+    assert links == football
+
+
+def test_offwindow_links_respect_cap_covered_and_order() -> None:
+    from app.clv_trueup import select_offwindow_links
+
+    refs = [f"https://www.oddsportal.com/football/world/m{i}" for i in range(30)]
+    links = select_offwindow_links(refs, "football", {refs[0]}, cap=5)
+    assert len(links) == 5
+    assert refs[0] not in links  # covered by the cycle scrape
+    assert links[0] == refs[1]  # stalest-first query order preserved
+    assert select_offwindow_links(["evt-not-a-url"], "football", set(), cap=5) == []
+
+
 async def test_true_up_fills_clv_fields(factory) -> None:  # type: ignore[no-untyped-def]
     event_id = "evt-clv-trueup"
     async with factory() as session:
@@ -188,9 +210,7 @@ async def test_offwindow_open_picks_revalidated_via_match_links(factory) -> None
         await persist_pick(
             session,
             make_pick(event_id),
-            EventTeams(
-                home="Home FC", away="Away FC", starts_at=NOW + timedelta(days=12)
-            ),
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW + timedelta(days=12)),
             "value-sharp-vs-soft",
             "v2-test",
         )
@@ -206,9 +226,7 @@ async def test_offwindow_open_picks_revalidated_via_match_links(factory) -> None
             return self._snapshots
 
     loader = LinkLoader(closing_snapshots(event_id))
-    updated = await revalidate_offwindow_picks(
-        loader, factory, "soccer", covered_event_ids=set()
-    )
+    updated = await revalidate_offwindow_picks(loader, factory, "soccer", covered_event_ids=set())
     assert updated == 1
     assert loader.links_requested == [event_id]
 

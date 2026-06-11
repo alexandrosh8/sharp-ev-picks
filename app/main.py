@@ -19,6 +19,11 @@ from app.scheduler import build_scheduler
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()  # safety validator fires here, first
     logging.basicConfig(level=settings.log_level)
+    # httpx/httpcore DEBUG logs full request URLs — Telegram bot tokens and
+    # Odds API keys travel in URLs, so these stay at INFO no matter what
+    # LOG_LEVEL says (secret-hygiene rule: never log HTTP-client URLs).
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.INFO)
 
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)

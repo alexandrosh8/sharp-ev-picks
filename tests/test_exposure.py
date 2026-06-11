@@ -42,3 +42,27 @@ def test_negative_request_raises() -> None:
     ledger = DailyExposureLedger(max_daily_fraction=0.05)
     with pytest.raises(ValueError):
         ledger.reserve(DAY, -0.01)
+
+
+def test_release_returns_capacity() -> None:
+    # H1 regression: a grant for a pick that turns out to be a DB duplicate
+    # must be handed back, or continuous polling burns the cap on re-detections.
+    ledger = DailyExposureLedger(max_daily_fraction=0.05)
+    granted = ledger.reserve(DAY, 0.02)
+    ledger.release(DAY, granted)
+    assert ledger.used(DAY) == pytest.approx(0.0)
+    assert ledger.remaining(DAY) == pytest.approx(0.05)
+
+
+def test_release_clamps_at_zero() -> None:
+    ledger = DailyExposureLedger(max_daily_fraction=0.05)
+    ledger.reserve(DAY, 0.01)
+    ledger.release(DAY, 0.04)  # over-release must not create capacity debt
+    assert ledger.used(DAY) == pytest.approx(0.0)
+    assert ledger.remaining(DAY) == pytest.approx(0.05)
+
+
+def test_release_negative_raises() -> None:
+    ledger = DailyExposureLedger(max_daily_fraction=0.05)
+    with pytest.raises(ValueError):
+        ledger.release(DAY, -0.01)

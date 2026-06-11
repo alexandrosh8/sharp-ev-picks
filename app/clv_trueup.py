@@ -21,9 +21,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.backtesting.clv import clv_log
+from app.edge.value import effective_odds
 from app.ingestion.base import OddsLoader
 from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
@@ -85,10 +86,19 @@ async def revalidate_open_picks(
             books = prices_by_key.get(key) or {}
             # The pick's own book is the actionable price; if it dropped the
             # market, the best remaining price is what a bettor could take.
-            current = books.get(pick.bookmaker) or (max(books.values()) if books else None)
-            if current is not None and current > 1.0:
+            if pick.bookmaker in books:
+                current_book, current = pick.bookmaker, books[pick.bookmaker]
+            elif books:
+                current_book, current = max(books.items(), key=lambda kv: kv[1])
+            else:
+                current_book, current = None, None
+            if current_book is not None and current is not None and current > 1.0:
                 pick.current_odds = Decimal(f"{current:.4f}")
-                pick.current_edge = Decimal(f"{closing_fair - 1.0 / current:.6f}")
+                # Edge on the EFFECTIVE (commission-netted) price — pick-time
+                # edges are netted too, so "still value" verdicts compare
+                # like with like at exchanges.
+                current_eff = effective_odds(current_book, current)
+                pick.current_edge = Decimal(f"{closing_fair - 1.0 / current_eff:.6f}")
             pick.revalidated_at = now
             updated += 1
         await session.commit()
@@ -98,9 +108,25 @@ async def revalidate_open_picks(
 
 
 # One match page per link per cycle; cap keeps a pathological backlog of
-# far-future open picks from dominating cycle time (oldest picks wait a
-# cycle — they are re-priced round-robin as earlier ones settle/expire).
+# far-future open picks from dominating cycle time. The query orders by
+# stalest-revalidation-first (never-revalidated picks lead), so the cap is a
+# true round-robin: whoever waited longest goes next cycle.
 OFFWINDOW_LINK_CAP = 25
+
+
+def select_offwindow_links(
+    refs: Sequence[str],
+    sport_segment: str | None,
+    covered_event_ids: set[str],
+    cap: int = OFFWINDOW_LINK_CAP,
+) -> list[str]:
+    """Order-preserving choice of match links to scrape: http refs for THIS
+    sport that the cycle didn't already cover, capped AFTER filtering —
+    wrong-sport or already-covered rows must never burn cap slots."""
+    links = [ref for ref in refs if ref.startswith("http") and ref not in covered_event_ids]
+    if sport_segment:
+        links = [ref for ref in links if f"/{sport_segment}/" in ref]
+    return links[:cap]
 
 
 async def revalidate_offwindow_picks(
@@ -127,15 +153,16 @@ async def revalidate_offwindow_picks(
                     select(Event.external_ref)
                     .join(Pick, Pick.event_id == Event.id)
                     .where(Pick.status == "alerted", Event.starts_at > now)
-                    .distinct()
+                    .group_by(Event.external_ref)
+                    .order_by(func.min(Pick.revalidated_at).asc().nulls_first())
                 )
             )
             .scalars()
             .all()
         )
-    links = [ref for ref in refs if ref.startswith("http") and ref not in covered_event_ids][
-        :OFFWINDOW_LINK_CAP
-    ]
+    segment_for = getattr(loader, "sport_segment", None)
+    segment = segment_for(sport_key) if callable(segment_for) else None
+    links = select_offwindow_links(refs, segment, covered_event_ids)
     if not links:
         return 0
     snapshots = await fetch(sport_key, links)
