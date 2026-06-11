@@ -1,5 +1,22 @@
 # Decisions Log
 
+- 2026-06-11 (later) — **No-league-filter mode SHIPPED (user decision)**:
+  ODDSPORTAL_FOOTBALL/BASKETBALL_LEAGUES="all" -> league-less dated daily
+  pages /matches/{sport}/{YYYYMMDD}/ covering EVERY league, today+tomorrow
+  (ODDSPORTAL_DAYS_AHEAD=1; "all" requires dated mode, enforced).
+  Settlement "all" expands to every known results source. Far-future
+  fixtures no longer scraped — by design; cycle time scales with the daily
+  slate (watch busy weekends). days_ahead dates are %Y%m%d (CLI-validated
+  - live-tested; dashed format 404s). Live verify 2026-06-11: today's
+    Mexico-South Africa 19:00 UTC + Jun-12 games confirmed correct, 17
+    bookmakers x 7 markets per game (bookies_filter defaults ALL upstream),
+    628 snapshots, no picks past edge>=0.03 (opener efficiently priced).
+    Pipeline LAST_POLL liveness -> /health "polls" + dashboard stale-engine
+    banner + per-pick "picked Xh ago" age. NL/BE registered into the
+    OddsHarvester registry (register_extra_leagues; turkey/greece were
+    already upstream). App runs via nohup uvicorn on :8000 (pid changes;
+    restart after env changes).
+
 - 2026-06-11 — **League coverage + only-ML diagnosis**. "Only world-cup
   picks" root causes: config had 2 football leagues; Euro big-5 OFF-SEASON
   until mid-Aug, euroleague until Oct, Brazil/Argentina/Mexico pause during
