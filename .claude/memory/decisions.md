@@ -1,5 +1,16 @@
 # Decisions Log
 
+- 2026-06-11 (latest) — **Live pick revalidation SHIPPED**: every poll
+  re-prices ALL open picks. In-window picks from the cycle's own snapshots
+  (revalidate_open_picks — replaces the 30-min clv_trueup job, which was
+  REMOVED as redundant double-scraping); off-window picks (taken weeks
+  ahead) via direct match-page scrapes (fetch_match_odds + match_links,
+  external_ref IS the oddsportal URL; cap 25/cycle, sport-segment filter).
+  New picks columns current_odds/current_edge/revalidated_at (migration
+  a3c9d1e7b2f4, APPLIED to dev DB). current_edge = fresh_fair − 1/current
+  price at the pick's own book (best book fallback). Dashboard odds cell:
+  "now X.XX — still value/thin/edge gone". RESTART the app after pulling.
+
 - 2026-06-11 (later) — **No-league-filter mode SHIPPED (user decision)**:
   ODDSPORTAL_FOOTBALL/BASKETBALL_LEAGUES="all" -> league-less dated daily
   pages /matches/{sport}/{YYYYMMDD}/ covering EVERY league, today+tomorrow
