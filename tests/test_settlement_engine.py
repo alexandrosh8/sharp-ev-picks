@@ -205,6 +205,77 @@ async def test_unparseable_selection_skipped_not_guessed(session, caplog) -> Non
     assert pick.status == "alerted"
 
 
+# --- stale-TBD voiding (NULL kickoff older than 14 days) ----------------------
+
+
+async def test_voids_stale_null_kickoff_pick_and_keeps_fresh_tbd(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # A pick whose event NEVER gets a kickoff cannot auto-settle and would
+    # revalidate forever; after STALE_NULL_KICKOFF_AGE it is voided via the
+    # standard terminal shape (result row outcome='void' + status 'settled').
+    from sqlalchemy import update as sa_update
+
+    from app.settlement.engine import STALE_NULL_KICKOFF_AGE, void_stale_null_kickoff_picks
+
+    now = datetime.now(tz=UTC)
+    # the dev warehouse may hold real open (possibly TBD) picks; pause them
+    # inside this rolled-back transaction so only the seeded picks count
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    tbd_teams = EventTeams(home=HOME, away=AWAY, league="test-league-settlement")  # no kickoff
+    assert await persist_pick(session, make_pick("evt-void-stale"), tbd_teams, "value", "test-v")
+    stale = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+    assert stale is not None
+    assert await persist_pick(
+        session, make_pick("evt-void-fresh", selection="Under 2.5"), tbd_teams, "value", "test-v"
+    )
+    fresh = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+    assert fresh is not None
+    await session.execute(
+        sa_update(Pick)
+        .where(Pick.id == stale.id)
+        .values(created_at=now - STALE_NULL_KICKOFF_AGE - timedelta(days=1))
+    )
+
+    with caplog.at_level("INFO"):
+        assert await void_stale_null_kickoff_picks(session, now) == 1
+    await session.refresh(stale)
+    await session.refresh(fresh)
+    assert stale.status == "settled"
+    assert fresh.status == "alerted"  # TBD but younger than the deadline
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == stale.id))
+    assert row is not None
+    assert row.outcome == "void"
+    assert row.pnl == Decimal("0.00")  # stake treated as returned
+    assert row.settled_at == now
+    assert any("kickoff still unknown" in r.message for r in caplog.records)
+
+    # idempotent: a second pass finds nothing voidable
+    assert await void_stale_null_kickoff_picks(session, now) == 0
+
+
+async def test_void_leaves_known_kickoff_picks_alone(session) -> None:  # type: ignore[no-untyped-def]
+    # Voiding is for kickoff-UNKNOWN picks only: an old pick whose event has
+    # a real starts_at settles by score, never by the staleness deadline.
+    from sqlalchemy import update as sa_update
+
+    from app.settlement.engine import STALE_NULL_KICKOFF_AGE, void_stale_null_kickoff_picks
+
+    now = datetime.now(tz=UTC)
+    await session.execute(  # pause any real open picks (see test above)
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    pick = await seed_pick(session, "evt-void-known-kickoff")  # starts_at=KICKOFF
+    await session.execute(
+        sa_update(Pick)
+        .where(Pick.id == pick.id)
+        .values(created_at=now - STALE_NULL_KICKOFF_AGE - timedelta(days=30))
+    )
+    assert await void_stale_null_kickoff_picks(session, now) == 0
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+
+
 # --- full cycle (providers -> book -> settle), as the scheduler job runs it ----
 
 

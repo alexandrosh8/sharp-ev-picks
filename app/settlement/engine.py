@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.schemas.base import Outcome
 from app.settlement.outcomes import pick_pnl, pick_roi, settle_selection
 from app.settlement.results import ScoreBook, load_scores
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking, Team
@@ -38,6 +39,78 @@ SCORE_WINDOW = timedelta(days=14)
 # Full time + stoppage + a buffer for the results CSVs to update. Scores are
 # matched by date anyway; the delay just avoids settling in-play fixtures.
 SETTLE_DELAY = timedelta(hours=2)
+
+# Picks on events whose kickoff was NEVER reported (starts_at NULL, "TBD")
+# can neither auto-settle (settle_open_picks filters NULL out) nor stop
+# revalidating — without a deadline they consume off-window scrape slots
+# forever. After this age (from pick creation) the off-window selector stops
+# re-pricing them (app/clv_trueup.py) and void_stale_null_kickoff_picks
+# below closes them out.
+STALE_NULL_KICKOFF_AGE = timedelta(days=14)
+
+
+async def void_stale_null_kickoff_picks(
+    session: AsyncSession,
+    now: datetime,
+    max_age: timedelta = STALE_NULL_KICKOFF_AGE,
+) -> int:
+    """Void alerted picks whose event STILL has no kickoff after `max_age`.
+
+    Terminal-state convention (same shape as score settlement): an idempotent
+    result_tracking row — outcome 'void', stake returned, pnl 0 — plus the
+    status flip to 'settled', which freezes CLV and drops the pick from
+    revalidation. /performance already counts 'void' outcomes; no new
+    vocabulary. Returns the number of picks voided. Caller owns the
+    transaction.
+    """
+    cutoff = now - max_age
+    rows = (
+        (
+            await session.execute(
+                select(Pick)
+                .join(Event, Pick.event_id == Event.id)
+                .where(
+                    Pick.status == "alerted",
+                    Event.starts_at.is_(None),
+                    Pick.created_at < cutoff,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    voided = 0
+    for pick in rows:
+        stake, odds = await _stake_and_odds(session, pick)
+        pnl = pick_pnl(Outcome.VOID, stake, odds)  # stake returned -> 0.00
+        inserted = await session.execute(
+            pg_insert(ResultTracking)
+            .values(
+                pick_id=pick.id,
+                outcome=str(Outcome.VOID),
+                pnl=pnl,
+                roi=pick_roi(pnl, stake),
+                settled_at=now,
+            )
+            .on_conflict_do_nothing(constraint="uq_result_tracking_pick")
+            .returning(ResultTracking.id)
+        )
+        if inserted.scalar_one_or_none() is None:
+            continue  # already settled by a concurrent/manual path
+        pick.status = "settled"
+        logger.info(
+            "voided pick %d (%s %s): kickoff still unknown %d days after pick "
+            "creation — stake treated as returned",
+            pick.id,
+            pick.market,
+            pick.selection,
+            max_age.days,
+        )
+        voided += 1
+    if voided:
+        await session.flush()
+        logger.info("settlement cycle: %d stale TBD picks voided", voided)
+    return voided
 
 
 async def settle_open_picks(
@@ -61,6 +134,9 @@ async def settle_open_picks(
             .join(Event, Pick.event_id == Event.id)
             .join(home, Event.home_team_id == home.id)
             .join(away, Event.away_team_id == away.id)
+            # NULL starts_at (kickoff unknown) is filtered out here by SQL
+            # three-valued logic — correct: never auto-settle a game we
+            # cannot prove has finished. Manual settlement stays available.
             .where(Pick.status == "alerted", Event.starts_at <= now - delay)
         )
     ).all()
@@ -173,6 +249,11 @@ async def run_settlement_cycle(
     look like an outage, not like a quiet day).
     """
     now = now or datetime.now(tz=UTC)
+    # Stale-TBD voiding runs FIRST and independently of the score feed: a
+    # feed outage must not keep dead picks burning revalidation slots.
+    async with session_factory() as session:
+        await void_stale_null_kickoff_picks(session, now)
+        await session.commit()
     scores = await load_scores(client, slugs, seasons, on_or_after=(now - SCORE_WINDOW).date())
     if not scores:
         logger.error("settle_results: results providers returned no scores — nothing settled")

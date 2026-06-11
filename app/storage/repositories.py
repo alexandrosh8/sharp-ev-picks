@@ -73,14 +73,15 @@ async def _get_or_create_event(
     home_id: int,
     away_id: int,
     external_ref: str,
-    starts_at: datetime,
-    known_kickoff: bool = False,
+    starts_at: datetime | None,
 ) -> int:
+    """starts_at=None means the source reported no kickoff — stored as NULL
+    (the dashboard's "TBD" signal), never as a pick-time placeholder."""
     existing = await session.scalar(select(Event).where(Event.external_ref == external_ref))
     if existing is not None:
-        # Earlier rows may carry a pick-time placeholder; a real kickoff from
-        # the source upgrades it so the dashboard shows the true start.
-        if known_kickoff and existing.starts_at != starts_at:
+        # Earlier rows may be NULL (or carry a legacy placeholder); a real
+        # kickoff from the source upgrades them to the true start.
+        if starts_at is not None and existing.starts_at != starts_at:
             existing.starts_at = starts_at
             await session.flush()
         return existing.id
@@ -132,7 +133,8 @@ async def latest_picks_with_events(session: AsyncSession, limit: int = 50) -> li
             "event_id": p.event_id,
             "event": f"{home_name} vs {away_name}",
             "league": league_name,
-            "starts_at": starts_at.isoformat(),
+            # null = kickoff unknown ("TBD" row: no countdown, no settle)
+            "starts_at": starts_at.isoformat() if starts_at is not None else None,
             "market": p.market,
             "selection": p.selection,
             "bookmaker": p.bookmaker,
@@ -261,9 +263,8 @@ async def persist_pick(
         home_id,
         away_id,
         pick.event_id,
-        # real kickoff when the loader knows it; else pick time as placeholder
-        starts_at=teams.starts_at or pick.created_at,
-        known_kickoff=teams.starts_at is not None,
+        # real kickoff when the loader knows it; else NULL ("kickoff TBD")
+        starts_at=teams.starts_at,
     )
     model_version_id = await _get_or_create_model_version(
         session, sport_id, model_name, model_version

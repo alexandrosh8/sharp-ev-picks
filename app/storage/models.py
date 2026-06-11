@@ -90,7 +90,11 @@ class Event(Base):
     away_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
     external_ref: Mapped[str] = mapped_column(String(128))  # provider event key
     status: Mapped[str] = mapped_column(String(32), server_default="scheduled")
-    starts_at: Mapped[datetime]
+    # NULL = the source never reported a kickoff ("TBD" on the dashboard:
+    # no countdown, no settle button). Healed by refresh_event_kickoffs /
+    # _get_or_create_event once a scrape reports the real start. Never a
+    # pick-time placeholder — that rendered fake kickoffs as real.
+    starts_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(onupdate=func.now())
 
@@ -224,7 +228,13 @@ class Pick(Base):
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)
+    # revalidated_at is SUCCESS-only (the dashboard "verified" badge: the pick
+    # actually re-priced). revalidation_attempted_at advances on EVERY fetch
+    # of the event's match page — priced or not — and drives the off-window
+    # round-robin so dead links rotate to the back instead of starving the
+    # queue (app/clv_trueup.py).
     revalidated_at: Mapped[datetime | None]
+    revalidation_attempted_at: Mapped[datetime | None]
 
 
 class ManualBetLog(Base):

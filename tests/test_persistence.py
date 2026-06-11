@@ -138,6 +138,56 @@ async def test_refresh_event_kickoffs_upgrades_placeholder(session) -> None:  # 
     assert await refresh_event_kickoffs(session, {"evt-kickoff-fix": real_kickoff}) == 0
 
 
+async def test_unknown_kickoff_persists_null_and_serializes_null(session) -> None:  # type: ignore[no-untyped-def]
+    # When the source reports no kickoff, the event stores NULL — the REAL
+    # "kickoff unknown" signal. The old placeholder (pick-time timestamp) was
+    # undetectable client-side: Pick.created_at is a separate clock read, so
+    # starts_at == created_at never held and TBD rows rendered as started
+    # matches with live settle buttons.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    assert teams.starts_at is None
+    await persist_pick(session, make_pick("evt-kickoff-null"), teams, "value-sharp-vs-soft", "t-5")
+
+    row = await session.scalar(select(Event).where(Event.external_ref == "evt-kickoff-null"))
+    assert row is not None
+    assert row.starts_at is None  # NULL, not a fake pick-time kickoff
+
+    payload = await latest_picks_with_events(session, limit=200)
+    ours = [p for p in payload if p["event_id"] == row.id]
+    assert ours, "persisted pick missing from the /picks payload"
+    assert ours[0]["starts_at"] is None  # dashboard renders TBD, no settle
+
+
+async def test_unknown_kickoff_upgrades_once_source_reports_it(session) -> None:  # type: ignore[no-untyped-def]
+    # A NULL kickoff must heal through BOTH paths: a later pick that knows
+    # the kickoff (_get_or_create_event) and the per-cycle refresh.
+    teams_unknown = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(
+        session, make_pick("evt-kickoff-heal"), teams_unknown, "value-sharp-vs-soft", "t-6"
+    )
+
+    kickoff = datetime(2026, 6, 27, 18, 30, tzinfo=UTC)
+    teams_known = EventTeams(
+        home="Alpha FC", away="Beta United", league="test-league-persist", starts_at=kickoff
+    )
+    # same event re-detected, now with a known kickoff (dedupe path)
+    await persist_pick(
+        session, make_pick("evt-kickoff-heal"), teams_known, "value-sharp-vs-soft", "t-6"
+    )
+    row = await session.scalar(select(Event).where(Event.external_ref == "evt-kickoff-heal"))
+    assert row is not None
+    assert row.starts_at == kickoff
+
+    # and refresh_event_kickoffs upgrades a NULL row too
+    await persist_pick(
+        session, make_pick("evt-kickoff-heal2"), teams_unknown, "value-sharp-vs-soft", "t-6"
+    )
+    assert await refresh_event_kickoffs(session, {"evt-kickoff-heal2": kickoff}) == 1
+    row2 = await session.scalar(select(Event).where(Event.external_ref == "evt-kickoff-heal2"))
+    assert row2 is not None
+    assert row2.starts_at == kickoff
+
+
 async def test_latest_picks_payload_carries_event_fields(session) -> None:  # type: ignore[no-untyped-def]
     # The dashboard needs match label / league / kickoff — not bare event ids.
     kickoff = datetime(2026, 6, 11, 19, 0, tzinfo=UTC)
