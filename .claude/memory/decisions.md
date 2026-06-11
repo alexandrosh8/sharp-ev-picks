@@ -1,5 +1,38 @@
 # Decisions Log
 
+- 2026-06-11 (Wave-4 repo verdicts) — **six user-mandated repos evaluated,
+  NOTHING adoptable as a dependency** (full tables:
+  docs/research/betting-repo-research.md Wave 4 + nba-repo-evaluations.md).
+  ProphitBet REJECT 1/10 (leakage-inflated eval: shuffled k-fold +
+  closing-odds features + SMOTE-before-isotonic — never cite its numbers);
+  AlphaPy IDEA-ONLY 2/10 (abandoned for paid fork, zero tests, random-KFold
+  core); georgedouzas/sports-betting IDEA-ONLY 2.5/10 — **DOWNGRADES the
+  Wave-3 'walk-forward harness pattern' note**: its backtester settles at
+  decision odds, weaker than our walkforward-backtest skill; only the
+  TimeSeriesSplit-or-TypeError guard pattern survives;
+  GastonDeMichele/Polymarket-Sports-Bot REJECT 0/10 — **repo does not exist**
+  (404; SEO-spam cluster, see pitfalls.md); kyleskom + NBA_Betting verdicts
+  re-confirmed (see nba-repo-evaluations.md). Survivors for phase 5:
+  NBA_AI injury-PDF loader + ESPN lines client patterns, feature checklists,
+  and `sbrscrape` (needs its own evaluation before any use).
+
+- 2026-06-11 (NBA_AI repo verdict) — **NBA-Betting/NBA_AI = PARTIAL: mine
+  data loaders, reject modeling core** (full evaluation:
+  docs/research/nba-repo-evaluations.md, score 4/10, MIT, de facto frozen
+  since 2026-04-14 "stable release, no active development"). Safety clean
+  (GET-only; zero placement/login code). Leakage discipline is GOOD (strict
+  pre-game prior-states cutoff, no lines in features) — better than both
+  sibling repos. Adopt patterns for phase 5: (1) official NBA injury-report
+  PDF loader (nba_official_injuries.py — free official source, granular
+  status/body-part, URL-format + 403 quirks solved); (2) ESPN
+  scoreboard/summary free NBA lines client with lines-lock-at-tipoff caching
+  (betting.py); (3) rest/B2B/game-frequency + time-decay feature cross-check
+  (features.py). REJECT: ML spread-prediction core (our backtests show the
+  approach loses), zero calibration (hardcoded logistic win-prob, no
+  isotonic/Brier/CLV/devig), PyTorch Phase3/Phase5 stacks (GPU, no
+  checkpoints, orthogonal to LightGBM-first ADR-0005), Covers.com scraper
+  (ToS-grey, UA spoofing — reference-only).
+
 - 2026-06-11 (latest) — **Live pick revalidation SHIPPED**: every poll
   re-prices ALL open picks. In-window picks from the cycle's own snapshots
   (revalidate_open_picks — replaces the 30-min clv_trueup job, which was

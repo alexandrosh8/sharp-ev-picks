@@ -1,5 +1,11 @@
 # Pitfalls
 
+- **"Polymarket/sports trading bot" GitHub search results are an SEO-spam /
+  scam cluster** (2026-06-11): near-identical repos from throwaway accounts,
+  some auto-executing with committed `.env.bak` files. The user-suggested
+  GastonDeMichele/Polymarket-Sports-Bot does not even exist (404). Any future
+  repo from this cluster needs install-script scrutiny BEFORE cloning; never
+  run their code. See betting-repo-research.md Wave 4.
 - **Project path contains a space** (`Betting Picks Bot`) — always quote
   `"$CLAUDE_PROJECT_DIR"` in hooks/scripts; absolute quoted paths in shell.
 - **Standalone `github` MCP server has bad credentials** — use the
