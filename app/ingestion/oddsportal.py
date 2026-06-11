@@ -11,6 +11,7 @@ profile keep working; install with `uv sync --extra backfill`.
 """
 
 import logging
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -272,6 +273,66 @@ async def _patched_click_more_if_market_hidden(
         return False
 
 
+def _patched_extract_bookmaker_name(self: Any, block: Any) -> Any:
+    """Drop-in for OddsParser._extract_bookmaker_name: the loose fallbacks
+    (<a title>, <img alt>) only fire when the row carries odds cells.
+
+    When the bookmaker-table scoping misses its header testid and falls back
+    to the whole page, H2H/Previous-Matches team rows leak in and their crest
+    alt/title resolved as 'bookmakers' (Racing, Al-Mabarrah — 2026-06-11
+    live logs), tripping the incomplete-odds warning and risking a team name
+    being ingested as a book. Real bookmaker rows always carry odds cells.
+    """
+    from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
+
+    img_tag = block.find("img", class_=OddsPortalSelectors.BOOKMAKER_LOGO_CLASS)
+    if img_tag and img_tag.get("title"):
+        return img_tag["title"]
+
+    has_odds_cells = (
+        block.find("div", class_=re.compile(OddsPortalSelectors.ODDS_BLOCK_CLASS_PATTERN))
+        is not None
+    )
+    if not has_odds_cells:
+        return None  # team/peripheral row, not a bookmaker row
+
+    a_tag = block.find("a", attrs={"title": True})
+    if a_tag and a_tag["title"]:
+        name = a_tag["title"]
+        # Normalise CTA-style titles like "Go to Betfair Exchange website!"
+        if name.lower().startswith("go to ") and name.endswith("!"):
+            name = name[len("go to ") : -1].strip()
+            if name.lower().endswith(" website"):
+                name = name[: -len(" website")].strip()
+        return name
+
+    for img in block.find_all("img"):
+        alt = img.get("alt", "")
+        if alt and alt.lower() not in ("", "logo"):
+            return alt
+    return None
+
+
+class _ScrapeGapDowngradeFilter(logging.Filter):
+    """Downgrade expected scrape-gap messages to INFO (never drop them): a
+    match simply not offering a submarket is normal. The durable DOM-break
+    signal is the per-market snapshot count logged at the end of each cycle —
+    a real selector break craters those counts immediately."""
+
+    _NEEDLES = (
+        "Failed to find and click parent of element",
+        "Failed to find or select",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno > logging.INFO and any(
+            needle in record.getMessage() for needle in self._NEEDLES
+        ):
+            record.levelno = logging.INFO
+            record.levelname = "INFO"
+        return True
+
+
 class _ExchangeIncompleteOddsFilter(logging.Filter):
     """Drop the parser's incomplete-odds warning for exchange books only;
     other bookmakers' incomplete rows stay visible."""
@@ -282,6 +343,7 @@ class _ExchangeIncompleteOddsFilter(logging.Filter):
 
 
 _EXCHANGE_NOISE_FILTER = _ExchangeIncompleteOddsFilter()
+_SCRAPE_GAP_FILTER = _ScrapeGapDowngradeFilter()
 _upstream_patched = False
 
 
@@ -292,6 +354,7 @@ def _patch_upstream_quirks() -> None:
         return
     from oddsharvester.core.browser.market_navigation import MarketTabNavigator
     from oddsharvester.core.market_extraction.navigation_manager import NavigationManager
+    from oddsharvester.core.market_extraction.odds_parser import OddsParser
     from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
 
     OddsPortalSelectors.MARKET_TAB_SELECTORS = _patched_tab_selectors(
@@ -300,7 +363,10 @@ def _patch_upstream_quirks() -> None:
     NavigationManager.wait_for_market_switch = _patched_wait_for_market_switch
     MarketTabNavigator._wait_and_click = _patched_wait_and_click
     MarketTabNavigator._click_more_if_market_hidden = _patched_click_more_if_market_hidden
+    OddsParser._extract_bookmaker_name = _patched_extract_bookmaker_name
     logging.getLogger("OddsParser").addFilter(_EXCHANGE_NOISE_FILTER)
+    logging.getLogger("PageScroller").addFilter(_SCRAPE_GAP_FILTER)
+    logging.getLogger("OddsPortalMarketExtractor").addFilter(_SCRAPE_GAP_FILTER)
     _upstream_patched = True
 
 

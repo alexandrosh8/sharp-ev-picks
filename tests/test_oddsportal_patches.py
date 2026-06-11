@@ -141,6 +141,94 @@ async def test_market_switch_fails_honestly_when_market_absent(
 # --- patch application ----------------------------------------------------------
 
 
+def test_bookmaker_name_fallbacks_require_odds_cells() -> None:
+    """H2H/Previous-Matches team rows (crest <img alt>, team <a title>) must
+    NOT resolve as bookmakers when the scoping fallback lets them leak in;
+    rows with real odds cells keep the full fallback chain."""
+    from bs4 import BeautifulSoup
+
+    from app.ingestion.oddsportal import _patched_extract_bookmaker_name
+
+    def block(html: str) -> Any:
+        return BeautifulSoup(html, "html.parser").div
+
+    parser_self = SimpleNamespace(logger=logging.getLogger("test.OddsParser"))
+    odds_cell = '<div class="flex-center flex-col font-bold"><p>2.45</p></div>'
+
+    # primary strategy: bookmaker logo wins regardless of cells
+    assert (
+        _patched_extract_bookmaker_name(
+            parser_self,
+            block('<div><img class="bookmaker-logo" title="bet365"/></div>'),
+        )
+        == "bet365"
+    )
+    # fallback strategies allowed when the row carries odds cells
+    assert (
+        _patched_extract_bookmaker_name(
+            parser_self,
+            block(f'<div><a title="Go to Betfair Exchange website!"></a>{odds_cell}</div>'),
+        )
+        == "Betfair Exchange"
+    )
+    assert (
+        _patched_extract_bookmaker_name(
+            parser_self, block(f'<div><img alt="10bet"/>{odds_cell}</div>')
+        )
+        == "10bet"
+    )
+    # team rows: no odds cells -> no name, regardless of alt/title
+    assert (
+        _patched_extract_bookmaker_name(parser_self, block('<div><img alt="Racing"/></div>'))
+        is None
+    )
+    assert (
+        _patched_extract_bookmaker_name(
+            parser_self, block('<div><a title="Al-Mabarrah"><img alt="crest"/></a></div>')
+        )
+        is None
+    )
+
+
+def test_scrape_gap_filter_downgrades_expected_misses_to_info() -> None:
+    """A match not offering the submarket is an expected scrape gap — the
+    durable DOM-break signal is the per-market snapshot count per cycle."""
+    from app.ingestion.oddsportal import _ScrapeGapDowngradeFilter
+
+    f = _ScrapeGapDowngradeFilter()
+
+    scroller = logging.LogRecord(
+        "PageScroller",
+        logging.WARNING,
+        __file__,
+        0,
+        "Failed to find and click parent of element matching selector 'x' "
+        "with text 'Over/Under +2.5' within timeout.",
+        None,
+        None,
+    )
+    assert f.filter(scroller)
+    assert scroller.levelno == logging.INFO
+
+    extractor = logging.LogRecord(
+        "OddsPortalMarketExtractor",
+        logging.ERROR,
+        __file__,
+        0,
+        "Failed to find or select Over/Under +2.5 within Over/Under",
+        None,
+        None,
+    )
+    assert f.filter(extractor)
+    assert extractor.levelno == logging.INFO
+
+    other = logging.LogRecord(
+        "PageScroller", logging.WARNING, __file__, 0, "something else broke", None, None
+    )
+    assert f.filter(other)
+    assert other.levelno == logging.WARNING  # untouched
+
+
 def test_patch_upstream_quirks_applies_and_is_idempotent() -> None:
     from oddsharvester.core.browser.market_navigation import MarketTabNavigator
     from oddsharvester.core.market_extraction.navigation_manager import NavigationManager
