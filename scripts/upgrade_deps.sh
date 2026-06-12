@@ -14,8 +14,10 @@
 
 set -u
 
-REPO="/Users/alexis/code/Betting Picks Bot"
-cd "$REPO" || exit 1
+# Derive the repo from the script location (like safety_audit.sh) — this
+# script also runs on the VPS clone at /opt/betting-ai; never hardcode a path.
+cd "$(dirname "$0")/.." || exit 1
+REPO="$(pwd)"
 
 BACKUP="$(mktemp /tmp/uv.lock.backup.XXXXXX)"
 cp "$REPO/uv.lock" "$BACKUP" || exit 1
@@ -65,3 +67,7 @@ echo
 echo "[upgrade] review:  git diff uv.lock"
 echo "[upgrade] commit:  git add uv.lock   (then)   git commit -m 'chore: bump upstream engines (gated)'"
 echo "[upgrade] restart the app to run the new versions"
+echo "[upgrade] Docker: rebuild the image (docker compose up -d --build) — and"
+echo "[upgrade]   re-verify the Dockerfile's oddsharvester sandbox note: 0.3.0"
+echo "[upgrade]   launches Chromium with --no-sandbox/--disable-dev-shm-usage"
+echo "[upgrade]   when /.dockerenv exists; a bump must keep that behavior."

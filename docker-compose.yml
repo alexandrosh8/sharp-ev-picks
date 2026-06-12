@@ -1,15 +1,40 @@
 name: betting-ai
 
+# Two deployment shapes, one file:
+#   Mac dev   — `docker compose up -d postgres redis`; the app runs on the
+#               host (scripts/run_app.sh). The app service is behind the
+#               "prod" profile so a plain `docker compose up -d` never starts
+#               it by surprise locally.
+#   Ubuntu VPS — set COMPOSE_PROFILES=prod in the VPS .env (compose reads the
+#               project .env automatically), then plain `docker compose up -d
+#               --build` includes the app. Runbook:
+#               docs/deployment/openclaw-ubuntu.md
+#
+# POSTGRES_PASSWORD interpolates from the project .env (default betting_ai
+# for local dev). Set a real value in the VPS .env BEFORE first boot —
+# pgdata is initialized with the first password; changing it later requires
+# ALTER USER inside postgres.
+
+x-logging: &default-logging
+  # Docker's json-file driver is UNBOUNDED by default — a poll cycle every
+  # ~5 minutes logging for months would fill the VPS disk without this cap.
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: betting_ai
-      POSTGRES_PASSWORD: betting_ai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-betting_ai}
       POSTGRES_DB: betting_ai
       TZ: UTC
     ports:
-      # host 5433 — 5432 is taken by the weatherbot project's postgres
+      # host 5433 — 5432 is taken by the weatherbot project's postgres.
+      # 127.0.0.1 binds on every service: nothing is reachable from outside
+      # the box (OpenClaw coexistence + the dashboard has no auth of its own).
       - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -19,9 +44,26 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
+    # appendonly: alert-dedupe keys (7-day TTL) survive a redis crash between
+    # RDB snapshots — without AOF, a crash replays recent Telegram alerts
+    # (annoyance, not a safety issue). maxmemory caps VPS RAM; volatile-ttl
+    # evicts only TTL'd dedupe keys if the cap is ever hit.
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "volatile-ttl",
+      ]
+    environment:
+      TZ: UTC
     ports:
       # host 6380 — 6379 is taken by the weatherbot project's redis
       - "127.0.0.1:6380:6379"
@@ -33,16 +75,28 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   # Production app service (Stage 2 — Ubuntu/OpenClaw). For local Mac dev,
-  # run the app on the host: `uv run uvicorn app.main:app --reload`.
+  # run the app on the host instead: scripts/run_app.sh.
+  #
+  # ONE INSTANCE ONLY — never `--scale app=2`: two replicas would race the
+  # boot migration, double-scrape OddsPortal, and split the in-memory daily
+  # exposure ledger across processes (ADR-0007).
   app:
     build: .
     profiles: ["prod"]
     env_file: .env
+    # This environment block OVERRIDES .env on purpose (compose precedence:
+    # environment > env_file). .env keeps HOST-side URLs (localhost:5433 /
+    # localhost:6380) for host-run tools (alembic, scripts/, pytest); the
+    # container must dial the compose-network service hostnames instead.
+    # Do NOT delete this block as "duplicate" and do NOT point .env at
+    # postgres:/redis: — each breaks the other shape.
     environment:
       TZ: UTC
-      DATABASE_URL: postgresql+asyncpg://betting_ai:betting_ai@postgres:5432/betting_ai
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://betting_ai:${POSTGRES_PASSWORD:-betting_ai}@postgres:5432/betting_ai
       REDIS_URL: redis://redis:6379/0
     ports:
       - "127.0.0.1:8000:8000"
@@ -51,7 +105,32 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Entrypoint (scripts/docker_entrypoint.sh) runs `alembic upgrade head`
+    # before uvicorn — migrations apply on every boot, idempotently.
+    healthcheck:
+      # python:3.12-slim has no curl/wget — stdlib only. /health also exposes
+      # poll liveness (LAST_POLL), so an external watchdog can distinguish
+      # "process up" from "engine dead".
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # The server binds quickly; the first scrape cycle does NOT block startup.
+      start_period: 60s
+    # Chromium (scrape concurrency 3, 20-40 min cycles) is memory-hungry; cap
+    # it so a leak can never OOM a shared OpenClaw VPS. init: true reaps
+    # zombie Chromium helper processes after browser crashes.
+    mem_limit: 2g
+    cpus: 2
+    init: true
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   pgdata:

@@ -3,10 +3,13 @@
 .git/
 .venv/
 __pycache__/
+**/__pycache__/
 *.pyc
+**/*.pyc
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.playwright-mcp/
 data/
 models/
 logs/
@@ -16,3 +19,5 @@ tests/
 .claude/
 .github/
 .DS_Store
+Dockerfile
+docker-compose.yml

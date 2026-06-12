@@ -16,7 +16,11 @@ results, ROI, and Closing Line Value (CLV).
 > auto-betting flag — by design. All market-data integrations are read-only.
 > Betting involves risk; nothing here is a guarantee of profit.
 
-## Quickstart (Mac local development)
+## Running it
+
+### Local dev (Mac)
+
+The app runs on the host; only postgres/redis are containerized:
 
 ```bash
 git clone <repo>
@@ -28,6 +32,23 @@ uv run playwright install chromium
 uv run alembic upgrade head
 uv run uvicorn app.main:app
 ```
+
+(Or `bash scripts/run_app.sh` — frees port 8000 first. Mac dev only.)
+
+### Server (Ubuntu/OpenClaw)
+
+The whole platform runs as the Docker Compose stack — the app service builds
+its own image (Chromium baked in), runs migrations on every boot, and
+`restart: unless-stopped` keeps it alive across crashes and reboots:
+
+```bash
+cd /opt/betting-ai
+# one-time: create .env (0600) and uncomment COMPOSE_PROFILES=prod in it
+docker compose up -d --build
+```
+
+Full step-by-step (prereqs, .env keys, verify, logs, updates, backups,
+troubleshooting): **`docs/deployment/openclaw-ubuntu.md`**.
 
 ## The pick finder that actually works (backtested positive CLV)
 
