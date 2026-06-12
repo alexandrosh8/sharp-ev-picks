@@ -8,9 +8,14 @@ regressing) breaks these tests.
 import math
 
 import pytest
-from penaltyblog.models import create_dixon_coles_grid
 
-from app.models.ah_bridge import (
+pb_models = pytest.importorskip(
+    "penaltyblog.models",
+    reason="reference oracle needs the football extra — uv sync --extra football",
+)
+create_dixon_coles_grid = pb_models.create_dixon_coles_grid
+
+from app.models.ah_bridge import (  # noqa: E402
     MarketGoalExpectancy,
     asian_handicap_price,
     goal_expectancy_from_market,

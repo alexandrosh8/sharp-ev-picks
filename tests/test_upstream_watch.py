@@ -1,8 +1,19 @@
 """Upstream release watch: PyPI version check -> once-per-release alert."""
 
-import httpx
+import importlib.util
 
-from app.maintenance.upstream_watch import (
+import httpx
+import pytest
+
+# These resolve the REAL installed watched distributions; in an extras-free
+# profile (bare `uv sync`) they would fail, not test anything.
+requires_extras = pytest.mark.skipif(
+    importlib.util.find_spec("penaltyblog") is None
+    or importlib.util.find_spec("oddsharvester") is None,
+    reason="resolves installed watched packages — uv sync --extra football --extra backfill",
+)
+
+from app.maintenance.upstream_watch import (  # noqa: E402
     LAST_CHECK,
     UpdateNotice,
     check_upstream,
@@ -28,6 +39,7 @@ async def test_fetch_latest_version_reads_pypi_json() -> None:
         assert await fetch_latest_version(client, "penaltyblog") == "9.9.9"
 
 
+@requires_extras
 def test_installed_version_resolves_real_package() -> None:
     # penaltyblog is a pinned dependency of this project — must resolve.
     version = installed_version("penaltyblog")
@@ -35,6 +47,7 @@ def test_installed_version_resolves_real_package() -> None:
     assert version.count(".") >= 1
 
 
+@requires_extras
 async def test_check_upstream_reports_newer_release() -> None:
     transport = httpx.MockTransport(
         pypi_handler({"penaltyblog": "9.9.9", "oddsharvester": "9.9.9"})
@@ -61,6 +74,7 @@ async def test_check_upstream_quiet_when_current() -> None:
     assert LAST_CHECK["updates"] == []
 
 
+@requires_extras
 async def test_check_upstream_survives_pypi_outage() -> None:
     transport = httpx.MockTransport(lambda _: httpx.Response(503))
     async with httpx.AsyncClient(transport=transport) as client:

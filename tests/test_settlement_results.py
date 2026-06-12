@@ -3,6 +3,7 @@
 from datetime import UTC, date, datetime
 
 import httpx
+import pytest
 
 from app.ingestion.football_data import MatchRow
 from app.ingestion.international_results import InternationalMatch
@@ -113,7 +114,11 @@ def test_league_score_sources_use_oddsharvester_registry_keys() -> None:
     # Map keys must be REAL OddsHarvester league keys (incl. our registered
     # extensions), or live config slugs never match and auto-settlement
     # silently skips the league.
-    from oddsharvester.utils.sport_league_constants import SPORTS_LEAGUES_URLS_MAPPING
+    constants = pytest.importorskip(
+        "oddsharvester.utils.sport_league_constants",
+        reason="cross-checks the real registry — uv sync --extra backfill",
+    )
+    SPORTS_LEAGUES_URLS_MAPPING = constants.SPORTS_LEAGUES_URLS_MAPPING
 
     from app.ingestion.oddsportal import register_extra_leagues
     from app.settlement.results import _SLUG_SOURCES
