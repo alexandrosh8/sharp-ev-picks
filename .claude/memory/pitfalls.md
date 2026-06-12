@@ -1,5 +1,17 @@
 # Pitfalls
 
+- **Dixon-Coles rho conventions: penaltyblog 1.11.0 ships TWO OPPOSITE tau
+  parameterizations** (verified 2026-06-12). PAPER (DC 1997: tau(0,1)=
+  1+rho*lambda_home) lives in the compiled DixonColes model kernel
+  (compute_dixon_coles_probabilities) and basic goal_expectancy; TRANSPOSED
+  (tau(0,1)=1+rho*lambda_away) lives in goal_expectancy_extended and
+  create_dixon_coles_grid. NEVER mix rho across the two families — a fitted
+  DixonColes model rho fed into create_dixon_coles_grid silently mis-prices
+  the 1-0/0-1 cells (moves AH ±0.5/±1.0). The conventions coincide ONLY when
+  lambda_home == lambda_away. app/models/ah_bridge.py pairs extended->grid
+  (both transposed) and is consistent AS-IS. Pinned by
+  tests/test_penaltyblog_rho_convention.py — re-verify on any penaltyblog
+  bump.
 - **"Polymarket/sports trading bot" GitHub search results are an SEO-spam /
   scam cluster** (2026-06-11): near-identical repos from throwaway accounts,
   some auto-executing with committed `.env.bak` files. The user-suggested

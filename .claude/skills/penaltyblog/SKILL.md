@@ -96,6 +96,15 @@ metrics: `rps_average`, `rps_array`, `multiclass_brier_score`,
   use `totals(line)`, which returns the full `(under, push, over)` split
   (verified against penaltyblog 1.11.0: `totals(3.0)` on
   `create_dixon_coles_grid(1.5, 1.1, -0.05)` → (0.518, 0.218, 0.264)).
+- **TWO OPPOSITE Dixon-Coles rho conventions ship in 1.11.0** — never mix
+  rho across families. PAPER (tau(0,1)=1+rho·λ_home): the fitted
+  `DixonColes` model kernel + basic `goal_expectancy`. TRANSPOSED
+  (tau(0,1)=1+rho·λ_away): `goal_expectancy_extended` +
+  `create_dixon_coles_grid`. Feeding a fitted-model rho into
+  `create_dixon_coles_grid` silently mis-prices 1-0/0-1 (moves AH ±0.5/±1);
+  they coincide only when λ_home == λ_away. `app/models/ah_bridge.py`
+  (extended→grid) is consistent as-is. Pinned by
+  `tests/test_penaltyblog_rho_convention.py`.
 
 ## Forbidden mistakes
 
