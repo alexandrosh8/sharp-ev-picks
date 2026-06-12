@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.probabilities.devig import DevigMethod
 from app.schemas.base import Outcome
 from app.settlement.outcomes import pick_pnl, pick_roi, settle_selection
 from app.settlement.results import ScoreBook, load_scores
@@ -118,19 +119,32 @@ async def settle_open_picks(
     book: ScoreBook,
     now: datetime,
     delay: timedelta = SETTLE_DELAY,
+    devig_method: DevigMethod | None = None,
 ) -> int:
     """Settle every alerted pick whose event finished and has a known score.
 
     Returns the number of picks settled. The caller owns the transaction.
+
+    Closing-line source preference: when `devig_method` is given, every pick
+    that settles gets its closing fair/CLV recomputed from our OWN
+    odds_snapshots change-only history (finalize_closing_from_snapshots) —
+    same devig, same anchoring rules, effective odds both sides. When that
+    finds no coverage (event not scraped near kickoff, no anchorable close
+    set — the common case until snapshots accumulate), the pick KEEPS the
+    close the live/match-page re-scrape revalidation last wrote: the
+    fallback. `devig_method=None` skips the snapshot path entirely.
     """
     if len(book) == 0:
         logger.error("settlement: empty score book — refusing to settle (silent-empty guard)")
         return 0
+    # Lazy import: app.clv_trueup imports STALE_NULL_KICKOFF_AGE from this
+    # module at import time — a top-level import here would be circular.
+    from app.clv_trueup import finalize_closing_from_snapshots
 
     home, away = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
-            select(Pick, home.name, away.name, Event.starts_at)
+            select(Pick, home.name, away.name, Event.starts_at, Event.external_ref)
             .join(Event, Pick.event_id == Event.id)
             .join(home, Event.home_team_id == home.id)
             .join(away, Event.away_team_id == away.id)
@@ -142,7 +156,7 @@ async def settle_open_picks(
     ).all()
 
     settled = 0
-    for pick, home_name, away_name, starts_at in rows:
+    for pick, home_name, away_name, starts_at, external_ref in rows:
         score = book.lookup(home_name, away_name, starts_at)
         if score is None:
             continue  # close_pending — stays open, retried next cycle
@@ -150,6 +164,13 @@ async def settle_open_picks(
             session, pick, home_name, away_name, score.home_score, score.away_score, now
         ):
             settled += 1
+            # Snapshot close AFTER the status flip, same transaction: the
+            # pick is now frozen for revalidation, so what we write here is
+            # final. A False return keeps the re-scrape close untouched.
+            if devig_method is not None:
+                await finalize_closing_from_snapshots(
+                    session, pick, external_ref, starts_at, devig_method
+                )
     if settled:
         await session.flush()  # status flips visible to the caller's transaction
         logger.info("settlement cycle: %d picks settled", settled)
@@ -242,13 +263,29 @@ async def run_settlement_cycle(
     slugs: Sequence[str],
     seasons: Sequence[str],
     now: datetime | None = None,
+    devig_method: DevigMethod | None = None,
 ) -> int:
     """One scheduler cycle: fetch scores for the configured leagues, settle.
 
     Refuses to settle when the providers return nothing (a feed outage must
     look like an outage, not like a quiet day).
+
+    `devig_method` prices the snapshot-sourced closing line for the picks
+    this cycle settles (see settle_open_picks). None — the scheduler's call —
+    resolves to the SAME method the pick pipeline runs with, mirroring how
+    app/scheduler.py builds deps.devig_method: live CLV, backtest CLV, and
+    the settlement-time snapshot close must all speak one devig.
     """
     now = now or datetime.now(tz=UTC)
+    if devig_method is None:
+        from app.config import get_settings  # composition-root parity, lazy
+
+        settings = get_settings()
+        devig_method = (
+            DevigMethod(settings.value_devig)
+            if settings.pick_strategy == "value"
+            else DevigMethod.POWER
+        )
     # Stale-TBD voiding runs FIRST and independently of the score feed: a
     # feed outage must not keep dead picks burning revalidation slots.
     async with session_factory() as session:
@@ -259,7 +296,9 @@ async def run_settlement_cycle(
         logger.error("settle_results: results providers returned no scores — nothing settled")
         return 0
     async with session_factory() as session:
-        settled = await settle_open_picks(session, ScoreBook(scores), now)
+        settled = await settle_open_picks(
+            session, ScoreBook(scores), now, devig_method=devig_method
+        )
         await session.commit()
     return settled
 

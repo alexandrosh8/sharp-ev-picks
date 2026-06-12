@@ -256,7 +256,7 @@ async def test_offwindow_open_picks_revalidated_via_match_links(factory) -> None
             super().__init__(snapshots)
             self.links_requested: list[str] = []
 
-        async def fetch_match_odds(self, sport_key, match_links):  # type: ignore[no-untyped-def]
+        async def fetch_match_odds(self, sport_key, match_links, markets=None):  # type: ignore[no-untyped-def]
             self.links_requested = list(match_links)
             return self._snapshots
 
@@ -294,7 +294,7 @@ async def test_offwindow_skips_picks_already_covered_by_cycle(factory) -> None: 
         await session.commit()
 
     class NoScrapeLoader(FakeLoader):
-        async def fetch_match_odds(self, sport_key, match_links):  # type: ignore[no-untyped-def]
+        async def fetch_match_odds(self, sport_key, match_links, markets=None):  # type: ignore[no-untyped-def]
             raise AssertionError("covered events must not be re-scraped")
 
     updated = await revalidate_offwindow_picks(
@@ -310,14 +310,17 @@ async def test_offwindow_skips_picks_already_covered_by_cycle(factory) -> None: 
 
 
 class RecordingLoader(FakeLoader):
-    """fetch_match_odds records the links it was asked to scrape."""
+    """fetch_match_odds records the links (and trimmed markets) it was asked
+    to scrape."""
 
     def __init__(self, snapshots: list[OddsSnapshotIn]) -> None:
         super().__init__(snapshots)
         self.links_requested: list[str] = []
+        self.markets_requested: tuple[str, ...] | None = None
 
-    async def fetch_match_odds(self, sport_key, match_links):  # type: ignore[no-untyped-def]
+    async def fetch_match_odds(self, sport_key, match_links, markets=None):  # type: ignore[no-untyped-def]
         self.links_requested = list(match_links)
+        self.markets_requested = tuple(markets) if markets is not None else None
         return self._snapshots
 
 
@@ -382,11 +385,11 @@ async def test_offwindow_excludes_stale_null_kickoff_picks(factory) -> None:  # 
 
 
 async def _seed_offwindow_pick(
-    session: AsyncSession, ref: str, attempted_at: datetime | None
+    session: AsyncSession, ref: str, attempted_at: datetime | None, tier: str = "premium"
 ) -> None:
     await persist_pick(
         session,
-        make_pick(ref),
+        make_pick(ref, tier=tier),
         EventTeams(home="Home FC", away="Away FC", starts_at=NOW + timedelta(days=12)),
         "value-sharp-vs-soft",
         "v2-test",
@@ -515,6 +518,133 @@ async def test_attempted_unpriced_pick_advances_attempt_clock_only(factory, gap)
         assert pick is not None
         assert pick.revalidation_attempted_at is not None  # attempt recorded
         assert pick.revalidated_at is None  # never re-priced -> not "verified"
+
+
+def test_offwindow_order_premium_events_first_then_attempt_round_robin() -> None:
+    """Tier priority inside the link cap: events holding a PREMIUM pick are
+    scraped before volume-only events (the shadow tier runs ~6x premium and
+    must not stretch premium CLV true-up cadence to days); inside each band
+    the attempts round-robin is unchanged (never-attempted first, then
+    stalest attempt)."""
+    from app.clv_trueup import order_offwindow_refs
+
+    t_old = NOW - timedelta(days=2)
+    t_new = NOW - timedelta(hours=1)
+    rows = [
+        ("ref-vol-never", "h2h", "A", "volume", None),
+        ("ref-vol-old", "h2h", "A", "volume", t_old),
+        ("ref-prem-new", "h2h", "A", "premium", t_new),
+        ("ref-prem-old", "h2h", "A", "premium", t_old),
+        # one premium pick makes the whole EVENT premium-bearing
+        ("ref-mixed", "h2h", "A", "volume", t_new),
+        ("ref-mixed", "totals", "Over 2.5", "premium", t_new),
+    ]
+    order = order_offwindow_refs(rows)
+    premium_band = {"ref-prem-old", "ref-prem-new", "ref-mixed"}
+    assert set(order[:3]) == premium_band  # every premium event leads
+    assert order.index("ref-prem-old") < order.index("ref-prem-new")  # stalest first
+    assert order[3:] == ["ref-vol-never", "ref-vol-old"]  # never-attempted leads
+
+
+def test_offwindow_market_keys_map_picks_to_provider_tabs() -> None:
+    """Trimmed off-window scrape: each open pick maps back to the provider
+    market key(s) it needs (sport-aware; spreads return BOTH signs because
+    selections are team-relative while keys are home-relative; DC needs the
+    1X2 anchor too). Any unmappable pick -> None = full configured list."""
+    from app.clv_trueup import offwindow_market_keys
+
+    assert offwindow_market_keys("soccer", [("h2h", "Home FC")]) == ("1x2",)
+    assert offwindow_market_keys("basketball", [("h2h", "Lakers")]) == ("home_away",)
+    assert offwindow_market_keys("soccer", [("btts", "BTTS Yes")]) == ("btts",)
+    assert offwindow_market_keys("soccer", [("dnb", "Home FC")]) == ("dnb",)
+    assert offwindow_market_keys("soccer", [("totals", "Over 2.5")]) == ("over_under_2_5",)
+    assert offwindow_market_keys("basketball", [("totals", "Under 225.5")]) == (
+        "over_under_games_225_5",
+    )
+    assert offwindow_market_keys("soccer", [("spreads", "Alpha FC -1.5")]) == (
+        "asian_handicap_+1_5",
+        "asian_handicap_-1_5",
+    )
+    assert offwindow_market_keys("soccer", [("spreads", "Draw (+1)")]) == (
+        "european_handicap_+1",
+        "european_handicap_-1",
+    )
+    assert offwindow_market_keys("basketball", [("spreads", "Lakers +7.5")]) == (
+        "asian_handicap_games_+7_5_games",
+        "asian_handicap_games_-7_5_games",
+    )
+    assert offwindow_market_keys("soccer", [("double_chance", "Home FC or Draw")]) == (
+        "1x2",
+        "double_chance",
+    )
+    # union across picks, sorted and deduped
+    assert offwindow_market_keys(
+        "soccer", [("h2h", "Home FC"), ("totals", "Over 2.5"), ("h2h", "Away FC")]
+    ) == ("1x2", "over_under_2_5")
+    # unmappable pick or empty input -> None (loader scrapes its full list)
+    assert offwindow_market_keys("soccer", [("h2h", "x"), ("mystery", "sel")]) is None
+    assert offwindow_market_keys("soccer", []) is None
+
+
+async def test_offwindow_premium_event_scrapes_before_volume_backlog(factory) -> None:  # type: ignore[no-untyped-def]
+    # Under the OLD pure round-robin the never-attempted volume event led;
+    # the premium event must now be scraped first.
+    vol_ref = "https://www.oddsportal.com/football/world/vol-flood-vs-x/TV1/"
+    prem_ref = "https://www.oddsportal.com/football/world/prem-starved-vs-y/TP1/"
+    async with factory() as session:
+        await session.execute(
+            sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+        )
+        await _seed_offwindow_pick(session, vol_ref, None, tier="volume")
+        await _seed_offwindow_pick(session, prem_ref, NOW - timedelta(hours=1), tier="premium")
+        await session.commit()
+
+    loader = RecordingLoader([])
+    await revalidate_offwindow_picks(loader, factory, "soccer", covered_event_ids=set())
+    assert loader.links_requested == [prem_ref, vol_ref]
+
+
+async def test_offwindow_scrape_requests_only_picked_markets(factory) -> None:  # type: ignore[no-untyped-def]
+    # The capped links' open picks are all h2h -> the scrape must request
+    # the 1x2 tab only, not the full 18-21 tab configured list.
+    event_id = "https://www.oddsportal.com/football/world/trim-vs-markets/TM1/"
+    async with factory() as session:
+        await session.execute(
+            sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+        )
+        await _seed_offwindow_pick(session, event_id, None)
+        await session.commit()
+
+    loader = RecordingLoader(closing_snapshots(event_id))
+    assert await revalidate_offwindow_picks(loader, factory, "soccer", covered_event_ids=set()) == 1
+    assert loader.links_requested == [event_id]
+    assert loader.markets_requested == ("1x2",)  # make_pick is Market.H2H
+
+
+async def test_revalidation_excludes_started_events(factory) -> None:  # type: ignore[no-untyped-def]
+    """Once a game kicks off the scraper follows OddsPortal's in-play pages;
+    in-play prices must not overwrite the last pre-kickoff observation (the
+    de-facto close) or pose as a live verdict — started events are skipped
+    (live incident 2026-06-12: in-play odds written into open picks' CLV)."""
+    event_id = "evt-clv-started"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=1)),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    updated = await true_up_clv(FakeLoader(closing_snapshots(event_id)), factory, ["soccer"])
+    assert updated == 0
+
+    async with factory() as session:
+        pick = await session.scalar(select(Pick).where(Pick.reason_summary == "clv true-up test"))
+        assert pick is not None
+        assert pick.clv_log is None  # in-play prices never became its "close"
+        assert pick.revalidated_at is None
 
 
 async def test_fallback_book_selected_by_effective_odds(factory) -> None:  # type: ignore[no-untyped-def]

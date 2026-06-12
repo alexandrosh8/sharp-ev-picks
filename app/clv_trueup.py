@@ -17,12 +17,12 @@ only trusted while it stays positive (docs/backtesting/value-findings.md).
 
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, or_, select, update
 
 from app.backtesting.clv import clv_log
 from app.edge.value import effective_odds
@@ -32,9 +32,10 @@ from app.probabilities.devig import DevigMethod
 from app.schemas.odds import OddsSnapshotIn
 from app.settlement.engine import STALE_NULL_KICKOFF_AGE
 from app.storage.models import Event, Pick
+from app.storage.repositories import closing_odds_from_snapshots
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,17 @@ async def revalidate_open_picks(
             await session.execute(
                 select(Pick, Event.external_ref)
                 .join(Event, Pick.event_id == Event.id)
-                .where(Pick.status == "alerted")
+                # STARTED events are excluded: once a game kicks off the
+                # scraper follows OddsPortal's in-play pages, and in-play
+                # prices must neither overwrite the last pre-kickoff
+                # observation (the de-facto close this loop maintains) nor
+                # pose as a live "still worth betting?" verdict. NULL
+                # kickoff = cannot prove the game started -> keep re-pricing
+                # (same rule as the off-window selector below).
+                .where(
+                    Pick.status == "alerted",
+                    or_(Event.starts_at.is_(None), Event.starts_at > now),
+                )
             )
         ).all()
         for pick, external_ref in rows:
@@ -179,6 +190,103 @@ def select_offwindow_links(
     return links[:cap]
 
 
+def order_offwindow_refs(
+    rows: Sequence[tuple[str, str, str, str, datetime | None]],
+) -> list[str]:
+    """Scrape order over (external_ref, market, selection, tier,
+    revalidation_attempted_at) open-pick rows: PREMIUM-bearing events first
+    — the alerted tier's CLV true-up cadence must not be diluted by the ~6x
+    larger volume shadow tier competing for the same link cap — then the
+    attempts round-robin inside each band (never-attempted events lead,
+    then stalest attempt: whoever waited longest goes next cycle)."""
+    has_premium: dict[str, bool] = {}
+    attempts: dict[str, list[datetime]] = {}
+    for ref, _market, _selection, tier, attempted in rows:
+        has_premium[ref] = has_premium.get(ref, False) or tier == "premium"
+        stamps = attempts.setdefault(ref, [])
+        if attempted is not None:
+            stamps.append(attempted)
+
+    def sort_key(ref: str) -> tuple[bool, bool, datetime]:
+        # min over non-NULL stamps (SQL MIN semantics, matching the previous
+        # query): an event is "never attempted" only when NO pick has one.
+        stamps = attempts[ref]
+        return (
+            not has_premium[ref],
+            bool(stamps),
+            min(stamps) if stamps else datetime.min.replace(tzinfo=UTC),
+        )
+
+    return sorted(has_premium, key=sort_key)
+
+
+def _selection_line(selection: str) -> float | None:
+    """The line embedded in a stored selection string — 'Over 2.5' -> 2.5,
+    'Alpha FC -1.5' -> -1.5, 'Draw (+1)' -> 1.0. None = no parseable line."""
+    parts = selection.rsplit(maxsplit=1)
+    if not parts:
+        return None
+    token = parts[-1].strip("()")
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _key_line(line: float, signed: bool = True) -> str:
+    text = f"{line:+g}" if signed else f"{line:g}"
+    return text.replace(".", "_")
+
+
+def _pick_market_keys(sport_key: str, market: str, selection: str) -> tuple[str, ...] | None:
+    """OddsHarvester market key(s) a stored pick needs for re-pricing; None
+    = unmappable (the caller falls back to the loader's full configured
+    list). Spread selections carry the line from THEIR team's perspective
+    while provider keys are home-relative — both signs are returned and the
+    loader's config intersection drops whichever does not exist."""
+    basketball = sport_key == "basketball"
+    if market == "h2h":
+        return ("home_away",) if basketball else ("1x2",)
+    if market in ("btts", "dnb"):
+        return (market,)
+    if market == "double_chance":
+        return ("double_chance", "1x2")  # DC fair is DERIVED from the 1X2 anchor
+    if market == "totals":
+        line = _selection_line(selection)
+        if line is None or line <= 0:
+            return None
+        frag = _key_line(line, signed=False)
+        return (f"over_under_games_{frag}",) if basketball else (f"over_under_{frag}",)
+    if market == "spreads":
+        line = _selection_line(selection)
+        if line is None or line == 0:
+            return None
+        lines = sorted({line, -line})
+        if basketball:
+            return tuple(f"asian_handicap_games_{_key_line(ln)}_games" for ln in lines)
+        if line == int(line):  # integer line = 3-way European handicap
+            return tuple(f"european_handicap_{_key_line(ln)}" for ln in lines)
+        return tuple(f"asian_handicap_{_key_line(ln)}" for ln in lines)
+    return None
+
+
+def offwindow_market_keys(
+    sport_key: str, picks: Sequence[tuple[str, str]]
+) -> tuple[str, ...] | None:
+    """Provider market keys the off-window re-scrape needs: ONLY the
+    submarkets the capped links' open picks actually reference — every key
+    costs one browser tab per match page, and the full configured list is
+    18-21 tabs. None = no picks or at least one is unmappable: the loader
+    then scrapes its full configured list (never worse coverage)."""
+    keys: set[str] = set()
+    for market, selection in picks:
+        mapped = _pick_market_keys(sport_key, market, selection)
+        if mapped is None:
+            return None
+        keys.update(mapped)
+    return tuple(sorted(keys)) if keys else None
+
+
 async def revalidate_offwindow_picks(
     loader: OddsLoader,
     session_factory: "async_sessionmaker",
@@ -197,45 +305,54 @@ async def revalidate_offwindow_picks(
         return 0
     now = datetime.now(tz=UTC)
     async with session_factory() as session:
-        refs = (
-            (
-                await session.execute(
-                    select(Event.external_ref)
-                    .join(Pick, Pick.event_id == Event.id)
-                    # NULL starts_at = kickoff unknown ("TBD"): we cannot
-                    # prove the game started, so keep re-pricing — without
-                    # the IS NULL arm, SQL's "NULL > now" (unknown) silently
-                    # drops TBD picks from revalidation forever. But only
-                    # for STALE_NULL_KICKOFF_AGE from pick creation: a
-                    # kickoff that never materialises must not burn scrape
-                    # slots indefinitely — the settlement cycle voids those
-                    # picks (void_stale_null_kickoff_picks).
-                    .where(
-                        Pick.status == "alerted",
-                        or_(
-                            and_(
-                                Event.starts_at.is_(None),
-                                Pick.created_at > now - STALE_NULL_KICKOFF_AGE,
-                            ),
-                            Event.starts_at > now,
+        pick_rows = (
+            await session.execute(
+                select(
+                    Event.external_ref,
+                    Pick.market,
+                    Pick.selection,
+                    Pick.tier,
+                    Pick.revalidation_attempted_at,
+                )
+                .join(Event, Pick.event_id == Event.id)
+                # NULL starts_at = kickoff unknown ("TBD"): we cannot
+                # prove the game started, so keep re-pricing — without
+                # the IS NULL arm, SQL's "NULL > now" (unknown) silently
+                # drops TBD picks from revalidation forever. But only
+                # for STALE_NULL_KICKOFF_AGE from pick creation: a
+                # kickoff that never materialises must not burn scrape
+                # slots indefinitely — the settlement cycle voids those
+                # picks (void_stale_null_kickoff_picks).
+                .where(
+                    Pick.status == "alerted",
+                    or_(
+                        and_(
+                            Event.starts_at.is_(None),
+                            Pick.created_at > now - STALE_NULL_KICKOFF_AGE,
                         ),
-                    )
-                    .group_by(Event.external_ref)
-                    # Round-robin on ATTEMPTS, not successes: a dead link that
-                    # never re-prices would keep revalidated_at NULL forever,
-                    # sort first every cycle, and starve the queue.
-                    .order_by(func.min(Pick.revalidation_attempted_at).asc().nulls_first())
+                        Event.starts_at > now,
+                    ),
                 )
             )
-            .scalars()
-            .all()
-        )
+        ).all()
+    # Premium-bearing events first, then the attempts round-robin (a dead
+    # link that never re-prices would keep revalidated_at NULL forever,
+    # sort first every cycle, and starve the queue — hence attempts).
+    refs = order_offwindow_refs([tuple(row) for row in pick_rows])
+    pairs_by_ref: dict[str, list[tuple[str, str]]] = {}
+    for ref, market, selection, _tier, _attempted in pick_rows:
+        pairs_by_ref.setdefault(ref, []).append((market, selection))
     segment_for = getattr(loader, "sport_segment", None)
     segment = segment_for(sport_key) if callable(segment_for) else None
     links = select_offwindow_links(refs, segment, covered_event_ids)
     if not links:
         return 0
-    snapshots = await fetch(sport_key, links)
+    # Trimmed market set: scrape only the tabs the capped links' open picks
+    # reference (None = full configured list when any pick is unmappable).
+    needed = offwindow_market_keys(
+        sport_key, [pair for link in links for pair in pairs_by_ref.get(link, [])]
+    )
+    snapshots = await fetch(sport_key, links, markets=needed)
     # Every fetched match page counts as an ATTEMPT for its open picks —
     # priced or not (wholesale-empty fetch, postponed page, per-market gap) —
     # so dead links rotate to the back of the round-robin above instead of
@@ -256,6 +373,106 @@ async def revalidate_offwindow_picks(
     # Same devig as the live pipeline (passed from the composition root) so
     # off-window re-pricing stays comparable to in-window CLV numbers.
     return await revalidate_open_picks(session_factory, snapshots, devig_method)
+
+
+# --- closing-line capture from our OWN odds_snapshots ------------------------
+# Scrape-coverage gate for the snapshot close: the EVENT's last pre-kickoff
+# snapshot must be at most this old at kickoff. This guards events that FELL
+# OUT of the scrape (dropped from listings days before kickoff) — it does NOT
+# judge slow-moving prices: change-only persistence means an individual book's
+# last row may be days old and still be that book's true close (the price
+# simply never moved while the event kept being scraped), so the gate reads
+# the event-wide last-capture clock, never per-row age.
+SNAPSHOT_CLOSE_MAX_GAP = timedelta(hours=4)
+
+
+async def finalize_closing_from_snapshots(
+    session: "AsyncSession",
+    pick: Pick,
+    external_ref: str,
+    kickoff: datetime | None,
+    devig_method: DevigMethod,
+    max_gap: timedelta = SNAPSHOT_CLOSE_MAX_GAP,
+) -> bool:
+    """Recompute the pick's closing fair/CLV from our own odds_snapshots
+    history instead of trusting the last pre-kickoff re-scrape write.
+
+    Returns True when the snapshot close was applied. False = NO coverage
+    (kickoff unknown, event not scraped near kickoff, no anchorable close
+    book set, selection unpriced at close): the pick keeps whatever the
+    live/match-page re-scrape revalidation path last wrote — that overwrite
+    IS the fallback close, so this function must never blank existing fields.
+
+    Consistency rules — identical to the live pick path BY CONSTRUCTION:
+    - SAME devig method the pick used (the pipeline's deps.devig_method);
+    - SAME anchoring/min-book rules: the close set runs through
+      event_fair_probs/anchor_fair_probs — a named sharp book pricing the
+      full market, else a >= MIN_CONSENSUS_BOOKS median consensus; anything
+      thinner yields no fair and falls back rather than anchoring on garbage;
+    - EFFECTIVE odds on BOTH sides (netting convention, see
+      revalidate_open_picks): anchor prices are commission-netted before
+      devig (close side) and the fill is netted here (fill side).
+
+    Provenance: `closing_odds` — never populated by the re-scrape path — is
+    written ONLY here (close-row price at the pick's own book; best remaining
+    book by effective odds when it dropped the market). `closing_odds IS NOT
+    NULL` therefore marks a snapshot-sourced close; an INFO log line says the
+    same at write time.
+    """
+    if kickoff is None:
+        return False  # kickoff unknown -> "close" is undefined
+    snaps, last_capture = await closing_odds_from_snapshots(
+        session, pick.event_id, external_ref, kickoff
+    )
+    if last_capture is None or kickoff - last_capture > max_gap:
+        logger.info(
+            "pick %d: no snapshot-close coverage (event not scraped within %s "
+            "of kickoff) — keeping revalidation close",
+            pick.id,
+            max_gap,
+        )
+        return False
+    grouped = group_market_prices(snaps)
+    fair_by_key: dict[tuple[str, str], float] = {}
+    for (_event, market, _detail), (_anchor, fair_by_sel) in event_fair_probs(
+        grouped, devig_method
+    ).items():
+        for sel, p in fair_by_sel.items():
+            fair_by_key[(str(market), sel)] = p
+    fair = fair_by_key.get((pick.market, pick.selection))
+    if fair is None or not 0.0 < fair < 1.0:
+        logger.info(
+            "pick %d: snapshot close has no anchored fair for its market/selection "
+            "— keeping revalidation close",
+            pick.id,
+        )
+        return False
+    # EFFECTIVE fill vs net-anchored close — same symmetry as the live path.
+    fill_eff = effective_odds(pick.bookmaker, float(pick.decimal_odds))
+    clv = clv_log(fill_eff, fair)
+    books: dict[str, float] = {}
+    for (_event, market, _detail), (prices, _captured) in grouped.items():
+        if str(market) == pick.market and pick.selection in prices:
+            books = prices[pick.selection]
+            break
+    if pick.bookmaker in books:
+        close_odds = books[pick.bookmaker]
+    elif books:
+        _, close_odds = max(books.items(), key=lambda kv: effective_odds(kv[0], kv[1]))
+    else:  # unreachable when fair exists (the anchor priced the selection)
+        close_odds = None
+    pick.closing_fair_probability = Decimal(f"{fair:.6f}")
+    pick.clv_log = Decimal(f"{clv:.6f}")
+    pick.beat_close = clv > 0
+    if close_odds is not None and close_odds > 1.0:
+        pick.closing_odds = Decimal(f"{close_odds:.4f}")
+    logger.info(
+        "pick %d: closing line from odds_snapshots (clv_log=%.4f, %d close books)",
+        pick.id,
+        clv,
+        len(books),
+    )
+    return True
 
 
 async def true_up_clv(

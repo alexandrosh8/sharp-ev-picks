@@ -6,6 +6,7 @@ then insert the pick. Picks are deduped by their natural key
 re-poll of the same market state never duplicates rows.
 """
 
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.ingestion.base import EventTeams
+from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
 from app.storage.models import (
@@ -33,6 +35,8 @@ from app.storage.models import (
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
+
+logger = logging.getLogger(__name__)
 
 
 async def _get_or_create_sport(session: AsyncSession, key: str, name: str) -> int:
@@ -118,21 +122,29 @@ async def _get_or_create_model_version(
     return mv.id
 
 
-async def latest_picks_with_events(session: AsyncSession, limit: int = 50) -> list[dict[str, Any]]:
+async def latest_picks_with_events(
+    session: AsyncSession, limit: int = 50, tier: str | None = None
+) -> list[dict[str, Any]]:
     """Latest picks joined with their event (match label, league, kickoff) —
     the payload served by GET /picks and rendered by the dashboard.
-    All datetimes are UTC ISO-8601; the frontend converts for display only."""
+    All datetimes are UTC ISO-8601; the frontend converts for display only.
+
+    `tier` scopes the window SERVER-side ("premium"/"volume"; None = both):
+    the volume shadow tier runs ~6x premium volume, so an unscoped
+    latest-N window fills with volume rows and pushes open premium picks
+    out of the feed entirely."""
     home = aliased(Team)
     away = aliased(Team)
-    rows = await session.execute(
+    stmt = (
         select(Pick, home.name, away.name, League.name, Event.starts_at)
         .join(Event, Pick.event_id == Event.id)
         .join(home, Event.home_team_id == home.id)
         .join(away, Event.away_team_id == away.id)
         .join(League, Event.league_id == League.id)
-        .order_by(Pick.created_at.desc())
-        .limit(limit)
     )
+    if tier is not None:
+        stmt = stmt.where(Pick.tier == tier)
+    rows = await session.execute(stmt.order_by(Pick.created_at.desc()).limit(limit))
     return [
         {
             "id": p.id,
@@ -289,6 +301,28 @@ def snapshot_market_key(snapshot: OddsSnapshotIn) -> str:
     return (snapshot.market_detail or str(snapshot.market))[:32]
 
 
+def market_from_snapshot_key(key: str) -> tuple[Market, str | None] | None:
+    """Reverse of `snapshot_market_key`: a stored odds_snapshots.market string
+    back to (Market enum, market_detail). Plain enum values ("h2h", "totals")
+    were stored detail-less; provider submarket keys ("1x2", "home_away",
+    "over_under_2_5", "asian_handicap_-1_5") map through the oddsportal
+    loader's own key table — single source of truth — so a rebuilt snapshot
+    groups EXACTLY like the live scrape did (distinct lines stay distinct
+    devig groups via market_detail). Unknown keys return None: skip the row,
+    never guess a market."""
+    try:
+        return Market(key), None
+    except ValueError:
+        pass
+    # Lazy: keep app.storage import-time free of the scraper module.
+    from app.ingestion.oddsportal import _market_for_key
+
+    market = _market_for_key(key)
+    if market is None:
+        return None
+    return market, key
+
+
 async def persist_odds_snapshots(
     session_factory: "async_sessionmaker",
     snapshots: Sequence[OddsSnapshotIn],
@@ -307,6 +341,17 @@ async def persist_odds_snapshots(
     (event, bookmaker, market, selection, captured_at) via ON CONFLICT DO
     NOTHING. Odds cross the boundary Decimal-via-string; captured_at is the
     provider-reported observation time, never now().
+
+    Failure isolation: each event resolves and inserts inside its OWN
+    SAVEPOINT — one poisoned event (e.g. an external_ref longer than its
+    column) must not abort the whole cycle's history, every cycle, for as
+    long as the bad match stays in the scrape window. A failed event is
+    logged (team names + exception type only, never URLs) and skipped; its
+    rows count as seen by the caller's change-only cache, which is correct:
+    a deterministic overflow would fail identically on every retry.
+    Free-text row fields (bookmaker, selection) are clamped to their column
+    lengths up front — display strings, where truncation beats losing the
+    event's whole history.
     """
     by_event: dict[str, list[OddsSnapshotIn]] = {}
     for snapshot in snapshots:
@@ -316,53 +361,143 @@ async def persist_odds_snapshots(
         return 0
 
     written = 0
+    failed_events = 0
     async with session_factory() as session:
         sport_id = await _get_or_create_sport(session, sport, sport.title())
-        rows: list[dict[str, Any]] = []
         for external_ref, event_snapshots in by_event.items():
             teams = teams_by_event[external_ref]
-            league_id = await _get_or_create_league(
-                session, sport_id, teams.league or default_league
-            )
-            home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
-            away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)
-            event_id = await _get_or_create_event(
-                session,
-                sport_id,
-                league_id,
-                home_id,
-                away_id,
-                external_ref,
-                starts_at=teams.starts_at,
-            )
-            for snapshot in event_snapshots:
-                rows.append(
-                    {
-                        "event_id": event_id,
-                        "bookmaker": snapshot.bookmaker,
-                        "market": snapshot_market_key(snapshot),
-                        "selection": snapshot.selection,
-                        "decimal_odds": Decimal(str(snapshot.decimal_odds)),
-                        "liquidity": (
-                            Decimal(str(snapshot.liquidity))
-                            if snapshot.liquidity is not None
-                            else None
-                        ),
-                        "captured_at": snapshot.captured_at,
-                        "ingested_at": snapshot.ingested_at,
-                    }
+            try:
+                event_written = 0
+                async with session.begin_nested():
+                    league_id = await _get_or_create_league(
+                        session, sport_id, teams.league or default_league
+                    )
+                    home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
+                    away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)
+                    event_id = await _get_or_create_event(
+                        session,
+                        sport_id,
+                        league_id,
+                        home_id,
+                        away_id,
+                        external_ref,
+                        starts_at=teams.starts_at,
+                    )
+                    rows: list[dict[str, Any]] = [
+                        {
+                            "event_id": event_id,
+                            "bookmaker": snapshot.bookmaker[:64],
+                            "market": snapshot_market_key(snapshot),
+                            "selection": snapshot.selection[:64],
+                            "decimal_odds": Decimal(str(snapshot.decimal_odds)),
+                            "liquidity": (
+                                Decimal(str(snapshot.liquidity))
+                                if snapshot.liquidity is not None
+                                else None
+                            ),
+                            "captured_at": snapshot.captured_at,
+                            "ingested_at": snapshot.ingested_at,
+                        }
+                        for snapshot in event_snapshots
+                    ]
+                    for start in range(0, len(rows), _SNAPSHOT_INSERT_CHUNK):
+                        chunk = rows[start : start + _SNAPSHOT_INSERT_CHUNK]
+                        stmt = (
+                            pg_insert(OddsSnapshot)
+                            .values(chunk)
+                            .on_conflict_do_nothing(constraint="uq_odds_snapshot_observation")
+                            .returning(OddsSnapshot.id)
+                        )
+                        event_written += len((await session.execute(stmt)).scalars().all())
+                written += event_written
+            except Exception as exc:  # poisoned event: skip it, keep the cycle
+                failed_events += 1
+                logger.warning(
+                    "odds snapshot persistence skipped event '%s vs %s' (%d rows): %s",
+                    teams.home,
+                    teams.away,
+                    len(event_snapshots),
+                    type(exc).__name__,
                 )
-        for start in range(0, len(rows), _SNAPSHOT_INSERT_CHUNK):
-            chunk = rows[start : start + _SNAPSHOT_INSERT_CHUNK]
-            stmt = (
-                pg_insert(OddsSnapshot)
-                .values(chunk)
-                .on_conflict_do_nothing(constraint="uq_odds_snapshot_observation")
-                .returning(OddsSnapshot.id)
-            )
-            written += len((await session.execute(stmt)).scalars().all())
         await session.commit()
+    if failed_events:
+        logger.warning(
+            "odds snapshot persistence: %d/%d events skipped this cycle",
+            failed_events,
+            len(by_event),
+        )
     return written
+
+
+async def closing_odds_from_snapshots(
+    session: AsyncSession,
+    event_id: int,
+    external_ref: str,
+    kickoff: datetime,
+) -> tuple[list[OddsSnapshotIn], datetime | None]:
+    """Per-bookmaker odds AT CLOSE from our own odds_snapshots history.
+
+    For every (market, bookmaker, selection) of the event: the LAST row
+    captured at-or-before kickoff, rebuilt as OddsSnapshotIn (keyed by the
+    event's external_ref) so the caller can run the exact live grouping +
+    devig pipeline over it. Also returns the EVENT's overall last pre-kickoff
+    capture time — the scrape-coverage clock.
+
+    Change-only subtlety (this is the load-bearing design point): the
+    pipeline persists a row only when a price MOVES, so a per-book close row
+    may be days old and still be that book's true close — the price simply
+    never changed while the event kept being scraped. Per-row age must
+    therefore NEVER gate validity. What CAN invalidate the close is the event
+    falling out of the scrape (dropped from listings days before kickoff):
+    that is visible only on the event-wide last-capture time, which the
+    caller compares against its staleness window.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(OddsSnapshot)
+                .where(
+                    OddsSnapshot.event_id == event_id,
+                    OddsSnapshot.captured_at <= kickoff,
+                )
+                # Postgres DISTINCT ON: first row per (market, bookmaker,
+                # selection) under captured_at-DESC ordering == the close row.
+                .distinct(OddsSnapshot.market, OddsSnapshot.bookmaker, OddsSnapshot.selection)
+                .order_by(
+                    OddsSnapshot.market,
+                    OddsSnapshot.bookmaker,
+                    OddsSnapshot.selection,
+                    OddsSnapshot.captured_at.desc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # The event-wide last pre-kickoff row is the last row of its own group,
+    # so the max over group winners IS the event's last-capture time. Taken
+    # over ALL rows (even unmappable legacy keys): any row proves coverage.
+    last_capture = max((row.captured_at for row in rows), default=None)
+    snaps: list[OddsSnapshotIn] = []
+    for row in rows:
+        mapped = market_from_snapshot_key(row.market)
+        if mapped is None or row.decimal_odds <= 1:
+            continue  # unknown legacy key / degenerate price: skip, never guess
+        market, detail = mapped
+        snaps.append(
+            OddsSnapshotIn(
+                event_id=external_ref,
+                bookmaker=row.bookmaker,
+                market=market,
+                selection=row.selection,
+                decimal_odds=float(row.decimal_odds),
+                liquidity=float(row.liquidity) if row.liquidity is not None else None,
+                captured_at=row.captured_at,
+                ingested_at=row.ingested_at,
+                market_detail=detail,
+            )
+        )
+    return snaps, last_capture
 
 
 PickPersistOutcome = Literal["inserted", "upgraded", "duplicate"]
