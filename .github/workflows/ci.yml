@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# gitleaks-action v3 lists PR commits via the API on pull_request events —
+# the default restricted GITHUB_TOKEN (contents: read only) 403s without
+# pull-requests: read.
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
