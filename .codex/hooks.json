@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/pre_bash_guard.sh'",
+            "statusMessage": "Safety-checking command..."
+          },
+          {
+            "type": "command",
+            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/pre_commit_secret_scan.sh'",
+            "statusMessage": "Scanning staged changes for secrets..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/post_edit_format.sh'",
+            "statusMessage": "Formatting Python..."
+          },
+          {
+            "type": "command",
+            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/post_edit_pytest.sh'",
+            "statusMessage": "Running tests..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/stop_memory_reminder.sh'"
+          }
+        ]
+      }
+    ]
+  }
+}
