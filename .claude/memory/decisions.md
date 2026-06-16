@@ -1,5 +1,27 @@
 # Decisions Log
 
+- 2026-06-16 (Pinnacle arcadia capture — BUILT, ADR-0013) — the recommended
+  clean-room job below is now SHIPPED: `app/ingestion/pinnacle_arcadia.py`
+  (GET-only client + pure `parse_matchups`/`extract_moneyline_quotes` +
+  `PinnacleArcadiaCapture`), wired as an INDEPENDENT scheduler job
+  (`ARCADIA_ENABLED`, OFF by default) that runs ALONGSIDE the active
+  `ODDS_SOURCE` and mints no picks. Took only the unlicensed repo's API FACTS
+  (endpoints, sport ids 29/33/4/15, `s;0;m` period-0 moneyline key,
+  American→decimal), ZERO code. Persists `bookmaker="Pinnacle"` period-0
+  moneyline closes under an ISOLATED `pinnacle_<sport>` warehouse namespace
+  (chosen because `ODDS_SOURCE` is single-select — a real source would replace
+  OddsPortal — and AVAILABLE GAMES filters to soccer/basketball/tennis, so the
+  archive can't pollute the dashboard/pick path). Change-gated on Pinnacle's
+  per-market `version` int; the latest pre-kickoff row IS the close via the
+  existing `closing_odds_from_snapshots` (no `is_closing` write — it's dead
+  code). Guest `x-api-key` is OPTIONAL/empty (the 2 endpoints used need none) →
+  no secret committed, gitleaks-clean. Verified LIVE (tennis/soccer/basketball
+  245/101/28 quotes; soccer 303=101×3 confirms draw); 16 tests, ruff/mypy/
+  safety green. NOT YET validation: turning the archive into NBA/tennis CLV
+  needs (a) STRICT cross-source event resolution to attach closes to OddsPortal
+  picks (fuzzy joins FORBIDDEN — wrong close = corrupted CLV) and (b) pick
+  generation for those sports — both deferred. v1 = moneyline only.
+
 - 2026-06-16 (GitHub discovery — devig/Pinnacle repos) — **POTENTIAL
   GAP-CLOSER found: a FREE, accountless, PRE-MATCH Pinnacle feed exists** via
   the unofficial JSON API `guest.api.arcadia.pinnacle.com/0.1` (bulk
