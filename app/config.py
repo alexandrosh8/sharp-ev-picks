@@ -142,6 +142,18 @@ class Settings(BaseSettings):
     # decimal_odds) and alerts immediately regardless of this TTL.
     alert_dedupe_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=60)
 
+    # --- Dashboard auth (optional) --------------------------------------------
+    # OFF by default so dev/CI and fresh installs are never locked out. Enable
+    # in .env (gitignored, 0600) by setting enabled + a PBKDF2 hash + a random
+    # session secret. The plaintext password NEVER lives in tracked code or
+    # .env — only the salted hash (app.api.auth.hash_password). /health stays
+    # public for the compose healthcheck and external watchdog.
+    dashboard_auth_enabled: bool = False
+    dashboard_auth_username: str = "admin"
+    dashboard_auth_password_hash: str = ""  # "pbkdf2_sha256$iters$salt$hash"
+    dashboard_session_secret: str = ""  # HMAC key for the session cookie
+    dashboard_session_ttl_seconds: int = Field(default=12 * 60 * 60, ge=60)
+
     # --- Pick strategy --------------------------------------------------------
     # "value" = sharp-vs-soft line shopping (BACKTESTED, positive holdout CLV —
     #           docs/backtesting/value-findings.md). The validated default.
@@ -344,6 +356,21 @@ class Settings(BaseSettings):
                 "SAFETY VIOLATION: PICKS_ONLY, MANUAL_BETTING_ONLY and "
                 "READ_ONLY_MARKET_DATA must stay true (ADR-0002)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_dashboard_auth_config(self) -> "Settings":
+        if self.dashboard_auth_enabled:
+            missing = [
+                name
+                for name, value in (
+                    ("DASHBOARD_AUTH_PASSWORD_HASH", self.dashboard_auth_password_hash),
+                    ("DASHBOARD_SESSION_SECRET", self.dashboard_session_secret),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError("DASHBOARD_AUTH_ENABLED=true requires: " + ", ".join(missing))
         return self
 
     @model_validator(mode="after")

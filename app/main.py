@@ -9,6 +9,7 @@ import httpx
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
+from app.api.auth import install_auth
 from app.api.routes import router
 from app.config import get_settings
 from app.database import create_engine, create_session_factory
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(router)
+    install_auth(app)
     return app
 
 

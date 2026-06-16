@@ -21,6 +21,9 @@ def make_app() -> FastAPI:
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_session] = _no_session
+    from app.api.auth import require_dashboard_auth
+
+    app.dependency_overrides[require_dashboard_auth] = lambda: None
     return app
 
 
@@ -279,7 +282,7 @@ def test_dashboard_fetches_and_renders_available_games() -> None:
     assert 'id="f-game-sport"' in text
     assert 'fetchWithTimeout("/games?limit=1000")' in text
     assert "function setGamesOpen" in text
-    assert 'setGamesOpen(false)' in text
+    assert "setGamesOpen(false)" in text
     assert '$("toggle-games").addEventListener("click"' in text
     assert "renderGames" in text
     assert "NO GAMES LOADED" in text
@@ -348,9 +351,9 @@ def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
     assert "if (!Number(ev.n_settled))" in text
     assert "function setEvidenceGroupOpen" in text
     assert 'button.className = "evtoggle"' in text
-    assert "button.addEventListener(\"click\"" in text
+    assert 'button.addEventListener("click"' in text
     assert 'button.setAttribute("aria-expanded", String(open))' in text
-    assert 'tr.dataset.evGroup = groupKey' in text
+    assert "tr.dataset.evGroup = groupKey" in text
     assert "insufficient data (n<" in text  # explicit per-stratum state
     assert "Live evidence" in text
     # execution helper line in the odds column

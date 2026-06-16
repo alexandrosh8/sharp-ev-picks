@@ -775,6 +775,7 @@
       <span class="live" id="eng-badge"
         ><i aria-hidden="true"></i><span id="eng-label">POLLING</span></span
       >
+      <button id="logout" class="section-toggle" type="button">Log out</button>
     </header>
     <div class="sub">
       sharp-vs-soft value · fair price = devig(sharpest book) · CLV-tracked ·
@@ -2119,6 +2120,14 @@
         // an HTTP error throws with .httpStatus so callers can distinguish
         // "server reachable but failing" from "unreachable".
         if (settled.status !== "fulfilled") throw settled.reason;
+        // An expired/absent session (optional dashboard auth) answers 401 on
+        // the gated data endpoints — bounce straight to the login page before
+        // any other handling so the user re-authenticates instead of seeing a
+        // frozen/offline state.
+        if (settled.value.status === 401) {
+          window.location.assign("/login");
+          return;
+        }
         if (!settled.value.ok) {
           const e = new Error("HTTP " + settled.value.status);
           e.httpStatus = settled.value.status;
@@ -2280,6 +2289,17 @@
       $("f-game-sport").addEventListener("change", renderGames);
       $("f-game-search").addEventListener("input", renderGames);
       $("refresh").addEventListener("click", load);
+      // Optional dashboard auth: clear the session cookie server-side, then
+      // land on the login page. Harmless when auth is OFF — /logout always
+      // redirects to /login, which immediately bounces back to / .
+      $("logout").addEventListener("click", () => {
+        // Route through fetchWithTimeout so the raw network primitive stays
+        // wrapped (and used exactly once, inside the helper) — the
+        // in-flight/timeout contract the dashboard QA test guards.
+        fetchWithTimeout("/logout", { method: "POST" }).finally(() =>
+          window.location.assign("/login"),
+        );
+      });
       setGamesOpen(false);
       load();
       setInterval(load, 60000);

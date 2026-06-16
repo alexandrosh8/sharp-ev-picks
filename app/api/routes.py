@@ -13,10 +13,18 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel
 from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import (
+    SESSION_COOKIE,
+    authenticate,
+    is_authenticated,
+    require_dashboard_auth,
+    sign_session,
+)
 from app.api.deps import get_session
 from app.backtesting.live_evidence import live_evidence_report
 from app.schemas.events import EventResultIn, ResultIn
@@ -37,10 +45,199 @@ router = APIRouter()
 # identically on the Ubuntu VPS). Data is fetched from /picks client-side.
 _DASHBOARD_HTML = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
 
+# Self-contained dark login page (no CDN/JS libs). Posts JSON to /login; on
+# success redirects to /. No credential is ever embedded here, and the error
+# message is set via textContent (never innerHTML) so a server string can't
+# inject markup.
+_LOGIN_HTML = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>betting-ai — sign in</title>
+    <style>
+      :root {
+        --bg: #060906;
+        --panel: #0d130d;
+        --line: #1a241a;
+        --text: #cfe3cf;
+        --dim: #5e7a5e;
+        --pos: #00ff9d;
+        --neg: #ff5c57;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      html { background: var(--bg); }
+      body {
+        color: var(--text);
+        font: 13px/1.5 var(--mono);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background:
+          radial-gradient(1000px 420px at 50% -10%,
+            rgba(0, 255, 157, 0.05), transparent 60%), var(--bg);
+      }
+      .card {
+        width: 100%;
+        max-width: 340px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 22px 20px 20px;
+      }
+      .brand {
+        font-size: 16px;
+        font-weight: 800;
+        letter-spacing: 0.22em;
+        color: var(--pos);
+        text-shadow: 0 0 14px rgba(0, 255, 157, 0.3);
+      }
+      .sub {
+        color: var(--dim);
+        font-size: 11px;
+        letter-spacing: 0.05em;
+        margin: 6px 0 18px;
+      }
+      label {
+        display: block;
+        color: var(--dim);
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        margin: 12px 0 5px;
+      }
+      input {
+        width: 100%;
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 9px 11px;
+        font: 13px var(--mono);
+      }
+      input:focus { outline: 1px solid var(--pos); outline-offset: 0; }
+      button {
+        width: 100%;
+        margin-top: 18px;
+        cursor: pointer;
+        background: rgba(0, 255, 157, 0.08);
+        color: var(--pos);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 10px 12px;
+        font: 700 11px var(--mono);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      button:hover { border-color: var(--pos); }
+      .err {
+        color: var(--neg);
+        font-size: 11px;
+        min-height: 16px;
+        margin-top: 12px;
+        letter-spacing: 0.03em;
+      }
+    </style>
+  </head>
+  <body>
+    <form class="card" id="login-form" autocomplete="off">
+      <div class="brand">PICKS&nbsp;TERMINAL</div>
+      <div class="sub">decision-support · sign in to continue</div>
+      <label for="u">Username</label>
+      <input id="u" name="username" type="text" autocomplete="username" autofocus />
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" />
+      <button type="submit">Sign in</button>
+      <div class="err" id="err" role="alert"></div>
+    </form>
+    <script>
+      "use strict";
+      const form = document.getElementById("login-form");
+      const errEl = document.getElementById("err");
+      form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        errEl.textContent = "";
+        const username = document.getElementById("u").value;
+        const password = document.getElementById("p").value;
+        try {
+          const res = await fetch("/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+          if (res.ok) {
+            window.location = "/";
+            return;
+          }
+          errEl.textContent =
+            res.status === 401
+              ? "Invalid username or password"
+              : "Sign-in failed (HTTP " + res.status + ")";
+        } catch (e) {
+          errEl.textContent = "Sign-in failed — could not reach the server";
+        }
+      });
+    </script>
+  </body>
+</html>
+"""
 
-@router.get("/", response_class=HTMLResponse, include_in_schema=False)
+
+@router.get(
+    "/",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+    dependencies=[Depends(require_dashboard_auth)],
+)
 async def dashboard() -> str:
     return _DASHBOARD_HTML
+
+
+class _LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+@router.get("/login", response_class=HTMLResponse, include_in_schema=False)
+async def login_form(request: Request) -> Response:
+    if is_authenticated(request):
+        return RedirectResponse("/", status_code=303)
+    return HTMLResponse(_LOGIN_HTML)
+
+
+@router.post("/login", include_in_schema=False)
+async def login_submit(payload: _LoginIn) -> Response:
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not authenticate(payload.username, payload.password):
+        return JSONResponse({"detail": "invalid credentials"}, status_code=401)
+    token = sign_session(
+        settings.dashboard_auth_username,
+        settings.dashboard_session_secret,
+        settings.dashboard_session_ttl_seconds,
+    )
+    resp = JSONResponse({"status": "ok"})
+    resp.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=settings.dashboard_session_ttl_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=(settings.app_env != "local"),
+        path="/",
+    )
+    return resp
+
+
+@router.post("/logout", include_in_schema=False)
+async def logout() -> Response:
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return resp
 
 
 @router.get("/health")
@@ -60,7 +257,7 @@ async def health() -> dict[str, Any]:
     }
 
 
-@router.get("/picks")
+@router.get("/picks", dependencies=[Depends(require_dashboard_auth)])
 async def latest_picks(
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -98,7 +295,7 @@ async def _warehouse_available_games(
         return []
 
 
-@router.get("/games")
+@router.get("/games", dependencies=[Depends(require_dashboard_auth)])
 async def available_games(
     request: Request,
     limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
@@ -140,7 +337,7 @@ def _ml_operating_point() -> float | None:
     )
 
 
-@router.get("/performance")
+@router.get("/performance", dependencies=[Depends(require_dashboard_auth)])
 async def performance(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
@@ -162,7 +359,7 @@ async def performance(
     return report
 
 
-@router.post("/events/{event_id}/result")
+@router.post("/events/{event_id}/result", dependencies=[Depends(require_dashboard_auth)])
 async def settle_event(
     event_id: int,
     payload: EventResultIn,
@@ -183,7 +380,11 @@ async def settle_event(
     return {"settled": settled, "skipped": skipped}
 
 
-@router.post("/picks/{pick_id}/result", status_code=201)
+@router.post(
+    "/picks/{pick_id}/result",
+    status_code=201,
+    dependencies=[Depends(require_dashboard_auth)],
+)
 async def record_result(
     pick_id: int,
     payload: ResultIn,
