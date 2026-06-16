@@ -1,5 +1,23 @@
 # Decisions Log
 
+- 2026-06-16 (repo-bind + NBA-backtestability re-check, 2nd ask) — **DO NOT
+  re-evaluate these 4 repos again; verdicts unchanged from 2026-06-11.**
+  kyleskom/NBA-ML = REJECT (still NO LICENSE; only a single SOFT book via
+  sbrscrape, no Pinnacle/close). georgedouzas/sports-betting = idea-only
+  (market-avg only, no Pinnacle/close). kochlisGit/ProphitBet = REJECT
+  (leakage 3 ways). NBA-Betting/NBA_Betting = idea-only/pattern (archived;
+  only nba_api point-in-time snapshot + merge_asof(+1d) patterns liftable).
+  None supplies a free historical SHARP-anchor+CLOSE feed; 3 are winner/ATS
+  ML (wrong shape for line-shopping/CLV). **NBA is NOT historically
+  backtestable for our CLV doctrine on any FREE data (verified by fetching):
+  the flancast90 SBR archive (13,903 games 2011-2021, MIT) has only a single
+  CONSENSUS close — no Pinnacle, no opening ML, no per-book; sbrscrape has
+  Pinnacle but is LIVE-only (no archive); Kaggle dumps are SBR-consensus/ESPN
+  soft, login-gated; The Odds API historical is paid/credit-spending.** So
+  NBA = forward-only/visibility-only like tennis; the only doctrine path is
+  prospectively SELF-CAPTURING near-tipoff Pinnacle (regions=eu) snapshots.
+  Full evidence: docs/research/nba-repo-evaluations.md + free-odds-sources.md.
+
 - 2026-06-12 (optimization round 3 FINALIZED — validated verdicts + hardening;
   full digest: `docs/research/optimization-round-3.md`) — validation upheld:
   **Track A consensus anchor STAGE** (train evidence reproduced exactly;
