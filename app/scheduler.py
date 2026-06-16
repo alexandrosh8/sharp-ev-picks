@@ -410,6 +410,48 @@ def build_scheduler(
         misfire_grace_time=None,  # run on Mac wake, don't skip
     )
     scheduler.add_job(upstream_watch, DateTrigger(), id="upstream_watch_initial")
+
+    # Independent read-only Pinnacle sharp-line ARCHIVE capture (ADR-0013).
+    # Runs ALONGSIDE the active odds_source (never replaces it, mints no picks):
+    # persists period-0 moneyline closes under the isolated `pinnacle_<sport>`
+    # namespace so closing_odds_from_snapshots can reconstruct a true sharp
+    # close. OFF unless ARCADIA_ENABLED=true and a DB session factory exists.
+    if settings.arcadia_enabled and session_factory is not None:
+        from app.ingestion.pinnacle_arcadia import (
+            PinnacleArcadiaCapture,
+            PinnacleArcadiaClient,
+        )
+
+        arcadia_capture = PinnacleArcadiaCapture(
+            client=PinnacleArcadiaClient(
+                http_client,
+                base_url=settings.arcadia_base_url,
+                guest_key=settings.arcadia_guest_key,
+            ),
+            session_factory=session_factory,
+            sports=tuple(_csv(settings.arcadia_sports)),
+            horizon=timedelta(hours=settings.arcadia_horizon_hours),
+        )
+
+        async def capture_pinnacle_arcadia() -> None:
+            try:
+                await arcadia_capture.capture_once()
+            except Exception as exc:
+                logger.error("pinnacle arcadia capture failed: %s", type(exc).__name__)
+
+        scheduler.add_job(
+            capture_pinnacle_arcadia,
+            IntervalTrigger(seconds=settings.arcadia_poll_interval_seconds),
+            id="capture_pinnacle_arcadia",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=None,  # run on Mac wake, don't skip
+        )
+        logger.info(
+            "pinnacle arcadia sharp-line archive ENABLED (read-only) for sports=%s",
+            settings.arcadia_sports,
+        )
+
     return scheduler
 
 
