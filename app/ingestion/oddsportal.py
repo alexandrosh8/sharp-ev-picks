@@ -52,10 +52,20 @@ def normalize_match_link(link: str) -> str:
 _EXACT_MARKETS: dict[str, Market] = {
     "1x2": Market.H2H,  # football/basketball 3-way
     "home_away": Market.H2H,  # basketball moneyline (OddsHarvester has no "moneyline" key)
+    "match_winner": Market.H2H,  # tennis 2-way ML (upstream labels player_1/player_2)
     "btts": Market.BTTS,
     "dnb": Market.DNB,
     "double_chance": Market.DOUBLE_CHANCE,
 }
+
+# Tennis carries two totals/handicap AXES — sets and games — which collide in
+# the bare over_under_/asian_handicap_ namespaces (over_under_sets_2_5 vs the
+# football goals over_under_2_5). OddsHarvester encodes the axis as an infix
+# (over_under_sets_/over_under_games_) or a trailing suffix
+# (asian_handicap_-1_5_sets). We strip the axis to read the numeric line, but
+# the FULL key is still carried into OddsSnapshotIn.market_detail, so distinct
+# axes never share a devig group — group_market_prices keys on market_detail.
+_TENNIS_AXIS_SUFFIXES = ("_sets", "_games")
 
 
 def _market_for_key(key: str) -> Market | None:
@@ -70,9 +80,15 @@ def _market_for_key(key: str) -> Market | None:
 
 def _line_from_key(market_key: str) -> float | None:
     """'over_under_2_5' -> 2.5; 'asian_handicap_-1_5' -> -1.5;
-    'asian_handicap_games_-7_5_games' -> -7.5; 'european_handicap_+1' -> 1.0."""
+    'asian_handicap_games_-7_5_games' -> -7.5; 'european_handicap_+1' -> 1.0.
+    Tennis: 'over_under_sets_2_5' -> 2.5; 'over_under_games_22_5' -> 22.5;
+    'asian_handicap_-1_5_sets' -> -1.5 (the _sets/_games axis is stripped here
+    but preserved in market_detail so the sets vs games lines never collide)."""
     raw = market_key
     for prefix in (
+        # tennis axis-prefixed totals first (over_under_sets_/over_under_games_),
+        # then the basketball-AH and football/basketball bare prefixes.
+        "over_under_sets_",
         "over_under_games_",
         "over_under_",
         "asian_handicap_games_",
@@ -80,7 +96,11 @@ def _line_from_key(market_key: str) -> float | None:
         "european_handicap_",
     ):
         if raw.startswith(prefix):
-            raw = raw.removeprefix(prefix).removesuffix("_games")
+            raw = raw.removeprefix(prefix)
+            # Strip a trailing tennis axis suffix (asian_handicap_-1_5_sets,
+            # ..._games) and the basketball AH _games suffix.
+            for suffix in (*_TENNIS_AXIS_SUFFIXES, "_games"):
+                raw = raw.removesuffix(suffix)
             try:
                 return float(raw.replace("_", "."))
             except ValueError:
@@ -715,6 +735,8 @@ def _selections(market_key: str, home: str, away: str) -> list[tuple[str, str]]:
         return [("1", home), ("X", "Draw"), ("2", away)]
     if market_key == "home_away":  # basketball moneyline
         return [("1", home), ("2", away)]
+    if market_key == "match_winner":  # tennis 2-way ML — upstream player_1/player_2
+        return [("player_1", home), ("player_2", away)]
     if market_key == "btts":
         return [("btts_yes", "BTTS Yes"), ("btts_no", "BTTS No")]
     if market_key == "dnb":
@@ -729,7 +751,33 @@ def _selections(market_key: str, home: str, away: str) -> list[tuple[str, str]]:
     if line is None:
         return []
     if market_key.startswith("over_under_"):
+        # Football goals, basketball points (over_under_games_*) and tennis
+        # sets/games totals all share the upstream odds_over/odds_under labels.
+        # The readable text stays axis-free (basketball already labels its
+        # points totals "Over 220.5" via the over_under_games_ key); the FULL
+        # market_key rides in market_detail, so the sets vs games vs goals
+        # axes never collapse into one devig group regardless of the text.
         return [("odds_over", f"Over {line:g}"), ("odds_under", f"Under {line:g}")]
+    # Tennis AH carries a _sets / _games SUFFIX (asian_handicap_-1_5_sets,
+    # asian_handicap_+2_5_games) and DIFFERENT upstream labels than football
+    # (sets_handicap_player_1 / games_handicap_player_1). Match the suffix
+    # BEFORE the generic asian_handicap_ branch — otherwise the football
+    # team1_handicap labels silently drop every tennis-AH snapshot. The
+    # basketball asian_handicap_games_ PREFIX is matched separately below.
+    if market_key.startswith("asian_handicap_") and market_key.endswith("_sets"):
+        return [
+            ("sets_handicap_player_1", f"{home} {_fmt_line(line)}"),
+            ("sets_handicap_player_2", f"{away} {_fmt_line(-line)}"),
+        ]
+    if (
+        market_key.startswith("asian_handicap_")
+        and not market_key.startswith("asian_handicap_games_")
+        and market_key.endswith("_games")
+    ):
+        return [
+            ("games_handicap_player_1", f"{home} {_fmt_line(line)}"),
+            ("games_handicap_player_2", f"{away} {_fmt_line(-line)}"),
+        ]
     if market_key.startswith("asian_handicap_games_"):  # basketball AH labels differ
         return [
             ("handicap_team_1", f"{home} {_fmt_line(line)}"),

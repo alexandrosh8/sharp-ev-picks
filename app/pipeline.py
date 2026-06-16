@@ -138,6 +138,17 @@ def _loader_event_ids(loader: OddsLoader, sport_key: str) -> tuple[str, ...] | N
     return None
 
 
+def _sport_label(sport_key: str) -> str:
+    """Human label for the AVAILABLE GAMES view (mirrors storage._sport_label)."""
+    if sport_key.startswith("soccer"):
+        return "Football"
+    if sport_key.startswith("basketball"):
+        return "NBA"
+    if sport_key.startswith("tennis"):
+        return "Tennis"
+    return sport_key
+
+
 def _record_available_games(
     sport_key: str,
     snapshots: Sequence[OddsSnapshotIn],
@@ -145,8 +156,15 @@ def _record_available_games(
     directory: EventDirectory | None,
     default_league: str,
     now: datetime,
+    unvalidated: bool = False,
 ) -> None:
-    """Publish every listed game from the latest poll, independent of picks."""
+    """Publish every listed game from the latest poll, independent of picks.
+
+    `unvalidated=True` tags every row of a VISIBILITY-ONLY sport (e.g. tennis):
+    the sport is scraped for this view but has NOT cleared the doctrine CLV
+    gate, so it mints no picks/alerts. The dashboard badges these rows; the
+    flag is the single source of truth that a row is informational only.
+    """
     snapshots_by_event: dict[str, list[OddsSnapshotIn]] = defaultdict(list)
     for snap in snapshots:
         snapshots_by_event[snap.event_id].append(snap)
@@ -179,13 +197,7 @@ def _record_available_games(
         rows.append(
             {
                 "sport": sport_key,
-                "sport_label": (
-                    "Football"
-                    if sport_key.startswith("soccer")
-                    else "NBA"
-                    if sport_key.startswith("basketball")
-                    else sport_key
-                ),
+                "sport_label": _sport_label(sport_key),
                 "event_id": event_id,
                 "event": event_label,
                 "home": home,
@@ -200,6 +212,10 @@ def _record_available_games(
                 "first_captured_at": min(captured).isoformat() if captured else None,
                 "last_captured_at": max(captured).isoformat() if captured else None,
                 "updated_at": now.isoformat(),
+                # VISIBILITY-ONLY sports (e.g. tennis) carry no validated edge;
+                # the dashboard badges these rows UNVALIDATED. Always present so
+                # consumers can rely on the key (False for football/basketball).
+                "unvalidated": unvalidated,
             }
         )
 
@@ -264,6 +280,12 @@ class PipelineDeps:
     # only and is refused for demotion both here and at the root.
     value_filter: ValueFilterModel | None = None
     value_ml_filter_enabled: bool = False
+    # VISIBILITY-ONLY sport keys (e.g. {"tennis"}): scraped for the AVAILABLE
+    # GAMES view ONLY. A cycle for one of these keys publishes its slate tagged
+    # unvalidated=true and records the poll, but mints NO picks, sends NO
+    # alerts, and touches NO exposure ledger — they have not cleared the
+    # doctrine CLV gate. Default empty: football/basketball are validated.
+    visibility_only_sports: frozenset[str] = frozenset()
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
@@ -336,6 +358,23 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     # `now` AFTER the fetch: live scrapes take minutes and stamp captured_at
     # during the run — taking now first yields negative odds ages.
     now = datetime.now(tz=UTC)
+    if sport_key in deps.visibility_only_sports:
+        # Defense in depth: a visibility-only sport must mint no pick under
+        # ANY strategy. Tennis only runs the value pipeline, but keep the
+        # invariant strategy-agnostic — publish the slate (unvalidated), record
+        # the poll, no picks/alerts. (No persist here: the model strategy is
+        # football-only and has no visibility-only sports in practice.)
+        _record_available_games(
+            sport_key,
+            snapshots,
+            deps.loader,
+            deps.directory,
+            deps.league or sport_key,
+            now,
+            unvalidated=True,
+        )
+        _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
+        return []
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
         _record_available_games(
@@ -591,6 +630,41 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     snapshots = await deps.loader.fetch_odds(sport_key)
     # `now` AFTER the fetch — see run_pick_pipeline comment (negative ages).
     now = datetime.now(tz=UTC)
+
+    if sport_key in deps.visibility_only_sports:
+        # VISIBILITY-ONLY sport (e.g. tennis): publish the slate for the
+        # AVAILABLE GAMES view tagged unvalidated=true and record the poll,
+        # but mint NO picks, send NO alerts, and reserve NO exposure — it has
+        # not cleared the doctrine CLV gate. Snapshots are still persisted so
+        # the warehouse can accumulate the data a future backtest would need.
+        persisted = (
+            await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
+            if snapshots
+            else None
+        )
+        _record_available_games(
+            sport_key,
+            snapshots,
+            deps.loader,
+            deps.directory,
+            deps.league or sport_key,
+            now,
+            unvalidated=True,
+        )
+        _record_poll(
+            sport_key,
+            snapshots,
+            0,
+            _loader_matches_found(deps.loader, sport_key),
+            snapshots_persisted=persisted,
+        )
+        logger.info(
+            "value pipeline %s: visibility-only (unvalidated) — %d snapshots, no picks",
+            sport_key,
+            len(snapshots),
+        )
+        return []
+
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
         _record_available_games(

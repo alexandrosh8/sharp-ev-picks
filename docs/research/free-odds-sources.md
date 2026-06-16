@@ -50,6 +50,22 @@ cadence is needed.
   (regions=eu) pre-tipoff snapshots; caveats: minutes-level snapshot-vs-close
   drift, no retroactive CLV, snapshot job must be redundant.
 
+## Update 2026-06-16 — free unofficial LIVE Pinnacle (the biggest-gap candidate)
+
+GitHub discovery surfaced a FREE, accountless, pre-match **Pinnacle** feed:
+the unofficial guest JSON API `guest.api.arcadia.pinnacle.com/0.1` (bulk
+`/sports/{id}/markets/straight?primaryOnly=false`; per-match
+`/matchups/{id}/markets`). Verified live in two repos' code
+(ACHBIDHAN/Pinnacle_Football_Odds_Scraper, NateDeMoro/prediction-market-ev-engine
+— both UNLICENSED, NO code copyable). This is the first concrete path to the
+LIVE Pinnacle sharp anchor this doc lists as the biggest gap: it would let us
+self-capture near-kickoff Pinnacle snapshots, set picks.anchor_type='pinnacle'
+(today mostly 'consensus'), and measure FORWARD CLV against a true sharp line.
+Caveat: direct Pinnacle scraping is **high ToS risk + endpoint-fragile** (same
+class as OddsPortal), and the guest `x-api-key` rotates. Doctrine-compliant
+route = clean-room a GET-only, rate-gated forward-capture job (read-only, no
+account, no order code), NOT a backfill (historical Pinnacle stays paid-only).
+
 ## Fetch-honesty log
 
 football-data.co.uk notes.txt 429'd via WebFetch (succeeded via curl);

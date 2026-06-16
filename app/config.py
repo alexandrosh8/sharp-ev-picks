@@ -310,6 +310,44 @@ class Settings(BaseSettings):
         "asian_handicap_games_+7_5_games,asian_handicap_games_+10_5_games"
     )
     oddsportal_basketball_leagues: str = "nba,euroleague"
+    # --- Tennis (VISIBILITY-ONLY / UNVALIDATED) ------------------------------
+    # OddsHarvester 0.3.0 scrapes tennis (151 ATP/WTA league URLs) and the
+    # loader now ingests the devig-sound tennis markets below. BUT tennis is
+    # NOT an alerting sport: the held-out value backtest (ATP n=1085, WTA
+    # n=1220 — scripts/sports/tennis_backtest.py) could not clear the doctrine
+    # gate. tennis-data.co.uk carries no Pinnacle/Max closing columns, so
+    # incremental CLV vs the close is UNDEFINED for tennis and the >2 SE bar
+    # cannot even be evaluated. Tennis therefore enters as VISIBILITY-ONLY:
+    # scraped rows appear in the AVAILABLE GAMES view tagged unvalidated=true,
+    # and the pipeline mints NO picks and sends NO alerts for it (enforced in
+    # app/scheduler.py + app/pipeline.py, not just by config).
+    #
+    # Empty leagues = tennis polling OFF (the default). It is OFF because a
+    # third sport across 151 leagues materially grows cycle time; enable in
+    # .env only when the operator wants the unvalidated visibility feed.
+    # Markets are the devig-sound tennis set: match_winner (2-way ML), totals
+    # half-lines on BOTH axes (sets _5 and games _5), and AH HALF-lines on
+    # both axes (integer/zero AH lines push and are rejected by the loader;
+    # correct_score is many-outcome and has no pairwise devig path).
+    oddsportal_tennis_leagues: str = ""  # csv of atp-/wta- slugs; empty = OFF
+    oddsportal_tennis_markets: str = (
+        "match_winner,"
+        "over_under_sets_2_5,over_under_sets_3_5,"
+        "over_under_games_21_5,over_under_games_22_5,over_under_games_23_5,"
+        "asian_handicap_-1_5_sets,asian_handicap_+1_5_sets,"
+        "asian_handicap_-3_5_games,asian_handicap_-2_5_games,"
+        "asian_handicap_+2_5_games,asian_handicap_+3_5_games"
+    )
+    # --- American football / NFL (REJECTED — no live code) -------------------
+    # The loader supports NFL markets config-only (same home_away/over_under_/
+    # asian_handicap_ keys as football/basketball), BUT the NFL value backtest
+    # verdict is REJECT: there is no free source carrying both a sharp price
+    # and a true closing line, so the sharp-vs-close CLV protocol is
+    # impossible to run — NFL cannot be validated even as visibility-only with
+    # honest provenance. Per doctrine a rejected sport gets NO live alerts;
+    # we deliberately add NO NFL config flags and NO scheduler wiring so it
+    # cannot be toggled on by accident. Revisit only if a free sharp+close
+    # NFL odds source appears (docs/research/free-odds-sources.md).
     # Dated scraping: each cycle covers today..today+N (UTC) instead of a
     # league's whole upcoming list — far-future fixtures are skipped and
     # cycle time tracks the actionable slate. Unset = legacy upcoming page.
@@ -383,6 +421,7 @@ class Settings(BaseSettings):
         for sport, leagues, markets in (
             ("FOOTBALL", self.oddsportal_football_leagues, self.oddsportal_football_markets),
             ("BASKETBALL", self.oddsportal_basketball_leagues, self.oddsportal_basketball_markets),
+            ("TENNIS", self.oddsportal_tennis_leagues, self.oddsportal_tennis_markets),
         ):
             slugs = [s.strip() for s in leagues.split(",") if s.strip()]
             keys = [m.strip() for m in markets.split(",") if m.strip()]

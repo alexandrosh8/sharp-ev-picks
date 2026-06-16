@@ -110,15 +110,15 @@ def test_dashboard_fetches_are_timeout_guarded() -> None:
 
 def test_dashboard_has_tier_filter_and_premium_scoped_cards() -> None:
     """Two-tier UI contract: a tier filter (default PREMIUM) consistent with
-    the existing view toggles; volume rows marked by a muted VOL badge that
+    the existing view toggles; volume rows marked by a muted SHADOW badge that
     reuses the status badge slot (no new column — the 1280px no-scroll
     layout must hold); every summary card explicitly labelled premium."""
     text = TestClient(make_app()).get("/").text
     assert 'id="f-tier"' in text
     assert '<option value="premium" selected>' in text  # premium is default
     assert "ALL TIERS" in text
-    # the muted VOL badge + its honest tooltip
-    assert 'isVolume ? "vol" : "open"' in text
+    # the muted SHADOW badge (relabel of "vol") + its honest tooltip
+    assert '"SHADOW"' in text
     assert "volume (shadow) tier" in text
     # summary cards say they are premium-scoped
     assert "Open picks (premium, verified)" in text
@@ -189,7 +189,13 @@ def test_games_endpoint_serves_unrestricted_latest_fixture_view() -> None:
         assert len(nba_rows) == 1
         assert nba_rows[0]["event"] == "Home Hoops vs Away Hoops"
         assert nba_rows[0]["snapshot_count"] == 0
-        assert client.get("/games?sport=tennis").status_code == 422
+        # Tennis is a visibility-only sport (OFF by default) but DOES surface in
+        # /games when enabled, so the sport filter must accept it (200, empty
+        # here) rather than 422 - otherwise the view shows tennis unfiltered
+        # but rejects filtering to it.
+        tennis_resp = client.get("/games?sport=tennis")
+        assert tennis_resp.status_code == 200
+        assert tennis_resp.json() == []
     finally:
         AVAILABLE_GAMES.pop("soccer", None)
         AVAILABLE_GAMES.pop("basketball", None)
@@ -294,8 +300,16 @@ def test_dashboard_has_mobile_table_card_layout() -> None:
     assert "@media (max-width: 720px)" in text
     assert "#picks-table td:nth-child(11)::before" in text
     assert 'content: "Status"' in text
-    assert "#games-table td:nth-child(8)::before" in text
-    assert 'content: "Updated"' in text
+    # confidence replaced the Stake label at picks column 9
+    assert "#picks-table td:nth-child(9)::before" in text
+    assert 'content: "Confidence"' in text
+    # games table is now 5 columns: last label is Coverage at child 5
+    assert "#games-table td:nth-child(5)::before" in text
+    assert 'content: "Coverage"' in text
+    # SETTLED view drives mobile labels off data-label so they follow the
+    # (shorter) active column set
+    assert "#picks-table.settled td::before" in text
+    assert "content: attr(data-label)" in text
     assert "overflow-wrap: anywhere" in text
     assert "td[colspan]::before" in text
     assert "innerHTML" not in text
@@ -398,3 +412,121 @@ def test_event_result_rejects_negative_and_missing_scores() -> None:
         client.post("/events/1/result", json={"home_score": 2, "away_score": "x"}).status_code
         == 422
     )
+
+
+def _pick_row(**over: object) -> dict[str, object]:
+    """A minimal /picks repo row (every numeric serialized as a string)."""
+    base: dict[str, object] = {
+        "id": 1,
+        "event_id": 10,
+        "event": "Home vs Away",
+        "league": "EPL",
+        "starts_at": "2026-06-16T18:00:00+00:00",
+        "market": "h2h",
+        "selection": "Home",
+        "bookmaker": "BookA",
+        "decimal_odds": "2.00",
+        "model_probability": "0.55",
+        "fair_probability": "0.52",
+        "edge": "0.03",
+        "ev": "0.05",
+        "confidence": "0.9",
+        "recommended_stake_fraction": "0.012",
+        "recommended_stake_amount": "1.20",
+        "reason_summary": "value vs sharp",
+        "status": "alerted",
+        "tier": "premium",
+        "value_filter_score": None,
+        "anchor_type": "consensus",
+        "created_at": "2026-06-16T10:00:00+00:00",
+        "clv_log": None,
+        "beat_close": None,
+        "current_odds": None,
+        "current_edge": None,
+        "revalidated_at": None,
+        "min_acceptable_odds": "1.74",
+    }
+    base.update(over)
+    return base
+
+
+def test_picks_serializer_attaches_confidence_rating(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The /picks route enriches each row with a 1..5 star confidence block
+    computed from existing fields — the dashboard headline that replaces the
+    recommended stake. The repository layer is stubbed; the pure rating runs
+    for real, so the band formula is asserted end-to-end."""
+    from app.api import routes
+
+    rows = [
+        # bare-minimum premium: edge==floor, consensus, no ML -> 2 stars
+        _pick_row(edge="0.03", anchor_type="consensus", value_filter_score=None),
+        # strong edge + pinnacle + ML>=q* -> 5 stars; live edge preferred
+        _pick_row(
+            current_edge="0.07",
+            edge="0.03",
+            anchor_type="pinnacle",
+            value_filter_score="0.80",
+        ),
+    ]
+
+    async def fake_rows(session, limit, tier=None, min_edge=0.0):  # type: ignore[no-untyped-def]
+        return [dict(r) for r in rows]
+
+    monkeypatch.setattr(routes, "latest_picks_with_events", fake_rows)
+    body = TestClient(make_app()).get("/picks").json()
+
+    assert body[0]["confidence_rating"]["level"] == 2
+    assert body[0]["confidence_rating"]["label"] == "low"
+    assert body[1]["confidence_rating"]["level"] == 5
+    assert body[1]["confidence_rating"]["label"] == "very high"
+    # "why this rating" reasons ride along for the tooltip
+    assert any("pinnacle" in r for r in body[1]["confidence_rating"]["reasons"])
+    # the stake figures stay on the row (moved to a tooltip, never dropped)
+    assert body[0]["recommended_stake_fraction"] == "0.012"
+    assert body[0]["recommended_stake_amount"] == "1.20"
+
+
+def test_dashboard_renders_confidence_stars_not_visible_stake() -> None:
+    """USER DECISION 1: the Confidence stars are the headline; the stake %
+    moves to the star cell's hover tooltip and never appears as visible text.
+    The doctrine framing must be present and must not claim a win rate."""
+    text = TestClient(make_app()).get("/").text
+    assert "<th>Confidence</th>" in text
+    assert "confidence_rating" in text
+    # framing copy — confidence in the EDGE, not a win probability. The source
+    # string is line-wrapped by the formatter, so assert the surviving
+    # fragments rather than the runtime-joined sentence.
+    assert "Model confidence in the EDGE" in text
+    assert "NOT a " in text
+    assert "probability you will win" in text
+    assert "Evidence currency is held-out CLV" in text
+    # stake stays tooltip-only: the recommended-stake amount is referenced
+    # exactly once now — inside the tooltip string, never as a visible cell.
+    assert text.count("recommended_stake_amount") == 1
+    assert "Recommended fractional-Kelly stake (informational" in text
+    # the star glyphs are present and the rating reads off confidence_rating
+    assert "★" in text  # filled star
+    assert "☆" in text  # empty star
+    # stars built with textContent, never innerHTML
+    assert "innerHTML" not in text
+
+
+def test_dashboard_settled_view_swaps_table_header() -> None:
+    """SETTLED-header regression: the desktop <thead> must be swapped to the
+    8-col results set when the body renders the SETTLED column set, so each
+    value sits under the right label. Before the fix the body rendered 8 cells
+    under the fixed 11-col LIVE header and every Result/P&L/CLV value appeared
+    under a mislabeling column (e.g. P&L under FAIR/EV). We assert the swap
+    machinery (renderHead + a distinct SETTLED header set, called from
+    render()) is present in the served page."""
+    text = TestClient(make_app()).get("/").text
+    # the header row is addressable and the swap function exists + is invoked
+    assert 'id="picks-head"' in text
+    assert "function renderHead(" in text
+    assert "renderHead(settledView)" in text
+    # the SETTLED header set is results-oriented (Result/P&L), distinct from the
+    # LIVE set (Market/Fair/EV/Edge/Confidence/Status do NOT appear in it)
+    assert '"Result"' in text
+    assert '"P&L"' in text
+    # header cells built with textContent, never innerHTML (no markup injection)
+    assert "th.textContent = label" in text

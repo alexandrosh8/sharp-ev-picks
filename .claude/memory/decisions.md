@@ -1,5 +1,67 @@
 # Decisions Log
 
+- 2026-06-16 (GitHub discovery — devig/Pinnacle repos) — **POTENTIAL
+  GAP-CLOSER found: a FREE, accountless, PRE-MATCH Pinnacle feed exists** via
+  the unofficial JSON API `guest.api.arcadia.pinnacle.com/0.1` (bulk
+  `/sports/{id}/markets/straight?primaryOnly=false`). Verified in two repos'
+  code. This is the first concrete artifact touching our documented biggest
+  gap (a free live Pinnacle sharp anchor) — it could populate
+  picks.anchor_type='pinnacle' (today mostly 'consensus') and enable FORWARD
+  CLV against a true sharp line. CAVEAT: direct Pinnacle scraping = high ToS
+  risk + DOM/endpoint fragility (same class as OddsPortal), guest x-api-key
+  rotates. RECOMMENDATION (not yet built): clean-room a GET-only, rate-gated
+  app/ingestion/pinnacle_arcadia.py forward-capture job (read-only,
+  ToS-risk-accepted). **All 3 repos are UNLICENSED → idea-only, NO code may
+  be copied:** ACHBIDHAN/Pinnacle_Football_Odds_Scraper (idea-only, top pick,
+  safety-clean GET-only — the Pinnacle mechanism); NateDeMoro/
+  prediction-market-ev-engine (**HARD REJECT bind — auto-places real bets,
+  RSA-signed orders, credential storage**; read-only refs only: its Shin/
+  bisection devig, the bulk arcadia endpoint shape, a calibration-haircut +
+  live-refetch-before-decision pattern); jjc256/devigger (reject — crude
+  devig, not an oracle). The free-Pinnacle endpoint logged in
+  free-odds-sources.md.
+
+- 2026-06-16 (NFL data gate + GitHub discovery) — **NFL = REJECT, now PROVEN
+  by fetching the nflverse data (not just asserted).** nflverse games.csv
+  (7.5k rows 1999-2026) has spread/total/ML odds but only ONE snapshot per
+  market (no open/close columns), the source is unlabeled CONSENSUS (no
+  Pinnacle/sharp), closing_lines.csv ends 2018 with no book id, the only
+  opening file (initial_lines.csv) is 2021-only / single Australian book /
+  price-less, and ESPN's API is all soft books, current-only. So NFL clears
+  NEITHER gate condition (sharp anchor + close) — no backtest possible; only
+  forward self-capture of Pinnacle (regions=eu) would work, same as
+  NBA/tennis. nflfastR pbp is a rich FEATURE source but only for an
+  outcome-prediction model (out of our line-shopping/CLV doctrine). Other
+  named repos: Public-ESPN-API idea-only (soft, current-only), yfpy reject
+  (fantasy, no odds), unravelsports reject (tracking GNN, no odds), nflow
+  reject (unrelated workflow engine). GITHUB DISCOVERY (read-only sweep):
+  nothing bindable — golden-mane-labs/Sports-Betting-Demo (partial: an
+  odds-history open->close modal-extraction technique, mirrors OddsHarvester
+  scrape_odds_history), ianalloway/awesome-sports-betting (idea-only: a
+  free-data vetting checklist), iliyasone/ps3838api (reject-bind: Pinnacle V4
+  JSON-shape reference for a future forward-capture client); all others
+  reject. RECURRING CONCLUSION: the free historical sharp-anchor+CLOSE gap
+  cannot be closed by any repo; the only doctrine path for new sports is
+  prospective self-captured Pinnacle snapshots.
+
+- 2026-06-16 (repo-bind + NBA-backtestability re-check, 2nd ask) — **DO NOT
+  re-evaluate these 4 repos again; verdicts unchanged from 2026-06-11.**
+  kyleskom/NBA-ML = REJECT (still NO LICENSE; only a single SOFT book via
+  sbrscrape, no Pinnacle/close). georgedouzas/sports-betting = idea-only
+  (market-avg only, no Pinnacle/close). kochlisGit/ProphitBet = REJECT
+  (leakage 3 ways). NBA-Betting/NBA_Betting = idea-only/pattern (archived;
+  only nba_api point-in-time snapshot + merge_asof(+1d) patterns liftable).
+  None supplies a free historical SHARP-anchor+CLOSE feed; 3 are winner/ATS
+  ML (wrong shape for line-shopping/CLV). **NBA is NOT historically
+  backtestable for our CLV doctrine on any FREE data (verified by fetching):
+  the flancast90 SBR archive (13,903 games 2011-2021, MIT) has only a single
+  CONSENSUS close — no Pinnacle, no opening ML, no per-book; sbrscrape has
+  Pinnacle but is LIVE-only (no archive); Kaggle dumps are SBR-consensus/ESPN
+  soft, login-gated; The Odds API historical is paid/credit-spending.** So
+  NBA = forward-only/visibility-only like tennis; the only doctrine path is
+  prospectively SELF-CAPTURING near-tipoff Pinnacle (regions=eu) snapshots.
+  Full evidence: docs/research/nba-repo-evaluations.md + free-odds-sources.md.
+
 - 2026-06-12 (optimization round 3 FINALIZED — validated verdicts + hardening;
   full digest: `docs/research/optimization-round-3.md`) — validation upheld:
   **Track A consensus anchor STAGE** (train evidence reproduced exactly;

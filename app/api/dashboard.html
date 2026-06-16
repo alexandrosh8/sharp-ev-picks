@@ -309,11 +309,6 @@
       .gameswrap .matchwrap {
         max-width: 260px;
       }
-      .gameswrap .marketscell {
-        max-width: 240px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
 
       /* --- picks table -------------------------------------------------- */
       .tablewrap {
@@ -460,6 +455,89 @@
         inset: 0 auto 0 0;
         background: var(--pos);
         box-shadow: 0 0 6px rgba(0, 255, 157, 0.5);
+      }
+
+      /* confidence stars — replaces the old Stake column. Filled stars carry
+         the value colour; the stake % lives in the cell title only. */
+      .confcell {
+        letter-spacing: 0.04em;
+        font-size: 13px;
+        cursor: help;
+        white-space: nowrap;
+      }
+      .confcell .stars {
+        color: var(--pos);
+        text-shadow: 0 0 6px rgba(0, 255, 157, 0.35);
+      }
+      .confcell .dim {
+        color: var(--faint);
+      }
+
+      /* external-link affordance on the Available games Match cell — the URL
+         lives in href/title only, never as visible text. */
+      .extlink {
+        color: var(--info);
+        text-decoration: none;
+        margin-left: 6px;
+        font-size: 11px;
+      }
+      .extlink:hover {
+        text-shadow: 0 0 6px var(--info);
+      }
+
+      /* inline legend strip (status + CLV semantics) — reuses the status-bar
+         chip aesthetic, wraps on mobile. */
+      .legend {
+        display: flex;
+        align-items: stretch;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin: 0 0 12px;
+      }
+      .legend .chip {
+        white-space: normal;
+        text-transform: none;
+        letter-spacing: 0.02em;
+        font-weight: 400;
+        line-height: 1.5;
+        text-align: left;
+        max-width: 560px;
+      }
+      .legend .chip b {
+        color: var(--faint);
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-right: 6px;
+      }
+
+      /* segmented status control (LIVE / UNVERIFIED / SETTLED) */
+      .segmented {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .segmented button {
+        border: 0;
+        border-radius: 0;
+        border-right: 1px solid var(--line);
+        background: var(--bg2);
+        color: var(--dim);
+        padding: 7px 13px;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+      }
+      .segmented button:last-child {
+        border-right: 0;
+      }
+      .segmented button[aria-selected="true"] {
+        background: rgba(0, 255, 157, 0.08);
+        color: var(--pos-soft);
+        border-color: var(--line);
+      }
+      .segmented button:hover {
+        background: rgba(0, 255, 157, 0.06);
       }
 
       /* badges: ONE shape/size system, semantic variants only */
@@ -702,25 +780,16 @@
           content: "Kickoff";
         }
         #games-table td:nth-child(2)::before {
-          content: "Sport";
+          content: "Match";
         }
         #games-table td:nth-child(3)::before {
           content: "League";
         }
         #games-table td:nth-child(4)::before {
-          content: "Match";
+          content: "Sport";
         }
         #games-table td:nth-child(5)::before {
-          content: "Markets";
-        }
-        #games-table td:nth-child(6)::before {
-          content: "Books";
-        }
-        #games-table td:nth-child(7)::before {
-          content: "Odds rows";
-        }
-        #games-table td:nth-child(8)::before {
-          content: "Updated";
+          content: "Coverage";
         }
         #picks-table td:nth-child(1)::before {
           content: "Kickoff";
@@ -747,13 +816,19 @@
           content: "Edge";
         }
         #picks-table td:nth-child(9)::before {
-          content: "Stake";
+          content: "Confidence";
         }
         #picks-table td:nth-child(10)::before {
           content: "CLV";
         }
         #picks-table td:nth-child(11)::before {
           content: "Status";
+        }
+        /* SETTLED view has a different (shorter) column set — drive the
+           mobile labels off each cell's data-label so they follow the active
+           columns instead of fixed nth-child indices. */
+        #picks-table.settled td::before {
+          content: attr(data-label);
         }
         .matchwrap,
         .gameswrap .matchwrap,
@@ -777,15 +852,12 @@
       >
       <button id="logout" class="section-toggle" type="button">Log out</button>
     </header>
-    <div class="sub">
-      sharp-vs-soft value · fair price = devig(sharpest book) · CLV-tracked ·
-      odds ≥ 1.60 · times: Cyprus (Asia/Nicosia)
-    </div>
 
     <!-- compact status bar: poll age · verified window · ingestion · deps -->
     <div class="statusbar" role="status">
       <span class="chip" id="chip-poll">poll: —</span>
       <span class="chip" id="chip-window">verified ≤ 45m</span>
+      <span class="chip" id="chip-sports">football — · nba — · tennis —</span>
       <span class="chipset" id="ing-chips"></span>
       <span class="chip" id="chip-deps" style="display: none"></span>
     </div>
@@ -861,12 +933,14 @@
         Show
       </button>
     </div>
+    <!-- purpose line set via textContent in JS (no untrusted markup) -->
     <div id="games-panel" hidden>
       <div class="controls">
         <select id="f-game-sport" aria-label="Filter games by sport">
           <option value="">ALL SPORTS</option>
           <option value="soccer">FOOTBALL</option>
           <option value="basketball">NBA</option>
+          <option value="tennis">TENNIS</option>
         </select>
         <input
           type="search"
@@ -880,21 +954,18 @@
           <thead>
             <tr>
               <th>Kickoff</th>
-              <th>Sport</th>
-              <th>League</th>
               <th>Match</th>
-              <th>Markets</th>
-              <th>Books</th>
-              <th>Odds rows</th>
-              <th>Updated</th>
+              <th>League</th>
+              <th>Sport</th>
+              <th>Coverage</th>
             </tr>
           </thead>
           <tbody id="game-rows">
             <tr>
-              <td colspan="8"><div class="skelbar"></div></td>
+              <td colspan="5"><div class="skelbar"></div></td>
             </tr>
             <tr>
-              <td colspan="8"><div class="skelbar"></div></td>
+              <td colspan="5"><div class="skelbar"></div></td>
             </tr>
           </tbody>
         </table>
@@ -902,12 +973,40 @@
     </div>
 
     <div class="controls">
-      <select id="f-status" aria-label="Filter picks by status">
-        <option value="">ALL STATUSES</option>
-        <option value="alerted" selected>OPEN (VERIFIED)</option>
-        <option value="alerted-all">OPEN (INCL. UNVERIFIED)</option>
-        <option value="settled">SETTLED</option>
-      </select>
+      <!-- segmented status control (replaces the old status <select>):
+           LIVE = verified open · UNVERIFIED = open awaiting re-price ·
+           SETTLED = results recorded. Default tab = LIVE. -->
+      <div
+        class="segmented"
+        id="status-tabs"
+        role="tablist"
+        aria-label="Pick status"
+      >
+        <button
+          type="button"
+          role="tab"
+          data-status="live"
+          aria-selected="true"
+        >
+          LIVE
+        </button>
+        <button
+          type="button"
+          role="tab"
+          data-status="unverified"
+          aria-selected="false"
+        >
+          UNVERIFIED
+        </button>
+        <button
+          type="button"
+          role="tab"
+          data-status="settled"
+          aria-selected="false"
+        >
+          SETTLED
+        </button>
+      </div>
       <!-- tier filter: PREMIUM is the alerted, exposure-capped tier and the
            default view; VOLUME is the muted CLV-evidence shadow tier -->
       <select id="f-tier" aria-label="Filter picks by tier">
@@ -928,7 +1027,10 @@
     <div class="tablewrap">
       <table id="picks-table">
         <thead>
-          <tr>
+          <!-- LIVE/UNVERIFIED header (11 cols). render() swaps this row's cells
+               for the 8-col SETTLED set so desktop header labels track the body
+               column set (mobile uses per-cell data-label and is unaffected). -->
+          <tr id="picks-head">
             <th>Kickoff</th>
             <th>Match</th>
             <th>Market</th>
@@ -937,7 +1039,7 @@
             <th>Odds</th>
             <th>Fair&nbsp;/&nbsp;EV</th>
             <th>Edge</th>
-            <th>Stake</th>
+            <th>Confidence</th>
             <th>CLV</th>
             <th>Status</th>
           </tr>
@@ -957,6 +1059,13 @@
       </table>
     </div>
 
+    <!-- legend moved here (page bottom): status + CLV semantics, JS-populated -->
+    <!-- plain footer-style legend (not boxed chips) -->
+    <div class="sub" id="picks-legend">
+      <b>Status</b><span id="legend-status"></span> &nbsp;·&nbsp; <b>CLV</b
+      ><span id="legend-clv"></span>
+    </div>
+
     <footer>
       auto-refresh 60s · data <code>GET /games</code> +
       <code>GET /picks</code> · CLV = closing line value — consistently positive
@@ -970,6 +1079,9 @@
       let GAMES = [];
       let GAMES_ERR = null;
       let GAMES_OPEN = false;
+      // Active status tab: "live" | "unverified" | "settled" (replaces the
+      // old #f-status select). Default = LIVE (verified open premium picks).
+      let STATUS_TAB = "live";
       const EVIDENCE_GROUP_OPEN = { score: true, tier: true, anchor: true };
       const $ = (id) => document.getElementById(id);
       const MARKETS = {
@@ -1096,12 +1208,22 @@
         title.className = "empty-title";
         const hint = document.createElement("div");
         hint.className = "empty-hint";
-        if ($("f-status").value === "alerted") {
-          title.textContent = "NO VERIFIED OPEN PICKS";
+        if (STATUS_TAB === "live") {
+          title.textContent = "NO VERIFIED LIVE PICKS";
           hint.textContent =
             "Picks appear here once the current poll cycle re-checks their " +
-            "odds (one full cycle, up to ~40 min); older unverified ones are " +
-            "under OPEN (INCL. UNVERIFIED).";
+            "odds (one full cycle, up to ~40 min); older ones awaiting a " +
+            "re-price are under the UNVERIFIED tab.";
+        } else if (STATUS_TAB === "unverified") {
+          title.textContent = "NO UNVERIFIED PICKS";
+          hint.textContent =
+            "Open picks land here when their last re-price is older than the " +
+            "verified window; they return to LIVE on the next poll cycle.";
+        } else if (STATUS_TAB === "settled") {
+          title.textContent = "NO SETTLED PICKS";
+          hint.textContent =
+            "Settled picks show their recorded result, P&L and final CLV " +
+            "here once you settle a match or auto-settlement records one.";
         } else {
           title.textContent = "NO PICKS MATCH";
           hint.textContent =
@@ -1120,8 +1242,32 @@
         $("toggle-games").textContent = GAMES_OPEN ? "Hide" : "Show";
       }
 
+      // Resolve a real http(s) URL for the Match external-link icon. Prefers
+      // a future clean match_url, falls back to event_id (which IS the
+      // OddsPortal match URL today under ODDS_SOURCE=oddsportal). Anything
+      // that isn't an absolute http(s) URL (e.g. an odds-api provider key)
+      // yields null so no broken link renders.
+      function matchUrl(g) {
+        const u = g.match_url || g.event_id;
+        return typeof u === "string" && /^https?:\/\//i.test(u) ? u : null;
+      }
+
       function renderGames() {
         const tbody = $("game-rows");
+        // Per-sport fetched-match counts in the status bar (total loaded, not
+        // the filtered view): how many football / NBA / tennis we are pricing.
+        const sc = { soccer: 0, basketball: 0, tennis: 0 };
+        for (const g of GAMES) {
+          const k = String(g.sport).split("_")[0];
+          if (k in sc) sc[k] += 1;
+        }
+        $("chip-sports").textContent =
+          "football " +
+          sc.soccer +
+          " · nba " +
+          sc.basketball +
+          " · tennis " +
+          sc.tennis;
         const sport = $("f-game-sport").value;
         const q = $("f-game-search").value.trim().toLowerCase();
         const rows = GAMES.filter(
@@ -1148,7 +1294,7 @@
         if (GAMES_ERR) {
           const tr = document.createElement("tr");
           const cell = td(tr, "games unavailable: " + GAMES_ERR, "empty");
-          cell.colSpan = 8;
+          cell.colSpan = 5;
           tbody.appendChild(tr);
           $("games-count").textContent = "games feed unavailable";
           $("games-count").classList.add("err");
@@ -1159,8 +1305,20 @@
           rows.length + " shown / " + GAMES.length + " loaded";
         if (!rows.length) {
           const tr = document.createElement("tr");
-          const cell = td(tr, "NO GAMES LOADED", "empty");
-          cell.colSpan = 8;
+          const sportSel = $("f-game-sport").value;
+          let msg =
+            "NO GAMES LOADED — engine is still completing its first poll cycle, or no fixtures are listed yet.";
+          if (GAMES.length && sportSel === "tennis") {
+            msg =
+              "Tennis is off (visibility-only) — set ODDSPORTAL_TENNIS_LEAGUES in .env to enable.";
+          } else if (GAMES.length && sportSel === "basketball") {
+            msg =
+              "No NBA games right now — the NBA is off-season (Jun–Oct); only club competitions appear when listed.";
+          } else if (GAMES.length && sportSel) {
+            msg = "No games for this sport in the current slate.";
+          }
+          const cell = td(tr, msg, "empty");
+          cell.colSpan = 5;
           tbody.appendChild(tr);
           return;
         }
@@ -1169,6 +1327,7 @@
           const tr = document.createElement("tr");
           tr.style.animationDelay = Math.min(idx * 14, 280) + "ms";
 
+          // 1 — Kickoff
           const ko = document.createElement("div");
           ko.className = "ko";
           const when = document.createElement("span");
@@ -1184,28 +1343,59 @@
           ko.append(when, rel);
           td(tr, ko);
 
-          td(tr, SPORT_LABELS[g.sport] || g.sport_label || g.sport);
-          td(tr, g.league || "—");
-
+          // 2 — Match (team line + external-link icon; URL in href/title only)
           const match = document.createElement("div");
           match.className = "matchwrap";
-          match.title = g.event + "\n" + (g.league || "");
+          match.title = g.event;
           const name = document.createElement("span");
           name.className = "match";
           name.textContent = g.event;
-          const id = document.createElement("span");
-          id.className = "league";
-          id.textContent = g.event_id;
-          match.append(name, id);
+          match.appendChild(name);
+          const url = matchUrl(g);
+          if (url) {
+            const link = document.createElement("a");
+            link.className = "extlink";
+            link.textContent = "↗"; // affordance only — never the raw URL text
+            link.href = url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.title = "Open " + g.event + " on OddsPortal";
+            name.appendChild(link);
+          }
           td(tr, match);
 
-          const markets = g.markets || [];
-          const marketText = markets.length ? markets.join(", ") : "—";
-          const marketCell = td(tr, marketText, "marketscell");
-          marketCell.title = marketText;
-          td(tr, String(g.bookmaker_count || 0));
-          td(tr, String(g.snapshot_count || 0));
-          td(tr, g.updated_at ? fmtLocal(g.updated_at) : "—");
+          // 3 — League
+          td(tr, g.league || "—");
+
+          // 4 — Sport (+ optional UNVALIDATED badge, per-row boolean only)
+          const sportCell = td(
+            tr,
+            SPORT_LABELS[g.sport] || g.sport_label || g.sport,
+          );
+          // Driver is strictly the per-row flag; an ABSENT field (undefined)
+          // renders no badge, so nothing is mislabeled until the backend
+          // ships the validated/unvalidated signal. Accept either spelling:
+          // validated===false OR unvalidated===true.
+          const isUnvalidated = g.validated === false || g.unvalidated === true;
+          if (isUnvalidated) {
+            const b = badge("UNVALIDATED", "b-neutral");
+            b.style.marginLeft = "6px";
+            b.title =
+              "This sport has not cleared a held-out CLV backtest — shown " +
+              "for visibility only, not alerted as picks.";
+            sportCell.appendChild(b);
+          }
+
+          // 5 — Coverage (one signal; raw market keys + book count on hover)
+          const mc = Number(g.market_count || 0);
+          const covCell = td(
+            tr,
+            mc + (mc === 1 ? " market priced" : " markets priced"),
+          );
+          covCell.title =
+            (g.bookmaker_count || 0) +
+            " books · " +
+            (g.markets || []).join(", ");
           tbody.appendChild(tr);
         });
       }
@@ -1215,32 +1405,463 @@
       // DB backfills the same way).
       const tierOf = (p) => p.tier || "premium";
 
+      // --- per-cell builders (shared by the LIVE/UNVERIFIED and SETTLED
+      // column sets) -------------------------------------------------------
+      // Each appends ONE <td> via td()/badge() (textContent only) and tags it
+      // with a data-label so the SETTLED view's mobile labels follow the
+      // active columns (see #picks-table.settled td::before).
+      function cellKickoff(tr, p) {
+        const ko = document.createElement("div");
+        ko.className = "ko";
+        const when = document.createElement("span");
+        // starts_at === null = the source never reported a kickoff; TBD rows
+        // get no countdown and no settle button.
+        const kickoffKnown = p.starts_at != null;
+        if (kickoffKnown) {
+          when.textContent = fmtLocal(p.starts_at);
+        } else {
+          when.textContent = "TBD";
+          when.className = "tbd";
+          when.title =
+            "the odds source has not reported a kickoff time for this match yet";
+        }
+        const cd = kickoffKnown
+          ? countdown(p.starts_at)
+          : { text: "kickoff unknown", soon: false };
+        const rel = document.createElement("small");
+        rel.textContent = cd.text;
+        if (cd.soon) rel.className = "soon";
+        ko.append(when, rel);
+        td(tr, ko).dataset.label = "Kickoff";
+      }
+
+      function cellMatch(tr, p) {
+        const m = document.createElement("div");
+        m.className = "matchwrap";
+        m.title = p.event + "\n" + p.league; // ellipsis-capped; full text on hover
+        const name = document.createElement("span");
+        name.className = "match";
+        name.textContent = p.event;
+        const lg = document.createElement("span");
+        lg.className = "league";
+        lg.textContent = p.league;
+        m.append(name, lg);
+        td(tr, m).dataset.label = "Match";
+      }
+
+      function cellPick(tr, p) {
+        const selCell = document.createElement("div");
+        selCell.className = "selwrap";
+        // Surface the pick's WHY on hover: reason summary + anchor confidence
+        // (0.9 backtested sharp vs 0.7 consensus) + ML score.
+        const why = [];
+        if (p.reason_summary) why.push(p.reason_summary);
+        if (p.confidence !== null && p.confidence !== undefined)
+          why.push(
+            "anchor: " +
+              (Number(p.confidence) >= 0.9 ? "sharp" : "consensus") +
+              " (" +
+              Number(p.confidence).toFixed(1) +
+              ")",
+          );
+        if (p.value_filter_score != null)
+          why.push(
+            "ml score " +
+              Number(p.value_filter_score).toFixed(3) +
+              " (P(beats close), q* 0.725)",
+          );
+        if (why.length) selCell.title = why.join("\n");
+        const selName = document.createElement("span");
+        selName.className = "sel";
+        selName.textContent = p.selection;
+        const pickedAgo = document.createElement("small");
+        pickedAgo.style.color = "var(--faint)";
+        const ageH = (Date.now() - new Date(p.created_at)) / 3.6e6;
+        pickedAgo.textContent =
+          "found " +
+          (ageH < 1 ? Math.round(ageH * 60) + "m" : Math.round(ageH) + "h") +
+          " ago";
+        pickedAgo.title =
+          "when this pick was first alerted — always confirm the live price " +
+          "at the bookmaker before betting";
+        if (ageH > 6) pickedAgo.style.color = "var(--warn)";
+        selCell.append(selName, pickedAgo);
+        if (p.value_filter_score != null) {
+          const ml = document.createElement("small");
+          ml.style.color = "var(--faint)";
+          ml.textContent = "ML " + Number(p.value_filter_score).toFixed(2);
+          ml.title =
+            "value-filter meta-model score: calibrated P(this pick beats " +
+            "the vig-free best-of-books closing line). Informational — " +
+            "the operating point from the held-out evaluation is 0.725.";
+          selCell.append(ml);
+        }
+        // Anchor chip: PIN = Pinnacle, SHARP = other named sharp book,
+        // CONS = >=3-book median fallback (live CLV tracked per anchor).
+        if (p.anchor_type) {
+          const an = document.createElement("small");
+          an.style.color = "var(--faint)";
+          an.textContent =
+            { pinnacle: "PIN", sharp: "SHARP", consensus: "CONS" }[
+              p.anchor_type
+            ] || p.anchor_type.toUpperCase();
+          an.title =
+            "fair-value anchor for this pick: " +
+            p.anchor_type +
+            ". Live CLV is tracked per anchor (PIN = Pinnacle, " +
+            "CONS = cross-book median fallback, SHARP = other named " +
+            "sharp book).";
+          selCell.append(an);
+        }
+        td(tr, selCell).dataset.label = "Pick";
+      }
+
+      function cellBook(tr, p) {
+        // ellipsis-capped (110px) so a long book name can't push columns off
+        // a 1280px screen; tooltip = full name.
+        const cell = td(tr, p.bookmaker, "bookcell");
+        cell.title = p.bookmaker;
+        cell.dataset.label = "Book";
+      }
+
+      function cellOdds(tr, p, withHelpers) {
+        const oddsCell = document.createElement("div");
+        const orig = document.createElement("span");
+        orig.className = "odds";
+        orig.textContent = Number(p.decimal_odds).toFixed(2);
+        oddsCell.appendChild(orig);
+        // Live revalidation + execution helper only matter for open picks;
+        // the SETTLED view omits them (withHelpers === false).
+        if (withHelpers && p.status === "alerted" && p.current_odds !== null) {
+          const nowLine = document.createElement("small");
+          nowLine.style.display = "block";
+          const curEdge =
+            p.current_edge === null ? null : Number(p.current_edge);
+          let verdict = "";
+          let color = "var(--faint)";
+          if (curEdge !== null) {
+            verdict =
+              " · " +
+              (curEdge >= 0 ? "+" : "") +
+              (curEdge * 100).toFixed(1) +
+              "%";
+            if (curEdge >= 0.03) color = "var(--pos)";
+            else if (curEdge > 0) color = "var(--warn)";
+            else color = "var(--neg)";
+          }
+          nowLine.style.color = color;
+          nowLine.title =
+            curEdge === null
+              ? "current price at the pick's book"
+              : curEdge >= 0.03
+                ? "still value at current price"
+                : curEdge > 0
+                  ? "thin edge at current price"
+                  : "edge gone at current price";
+          nowLine.textContent =
+            "now " + Number(p.current_odds).toFixed(2) + verdict;
+          oddsCell.appendChild(nowLine);
+        }
+        if (
+          withHelpers &&
+          p.status === "alerted" &&
+          p.min_acceptable_odds != null
+        ) {
+          const minLine = document.createElement("small");
+          minLine.style.display = "block";
+          minLine.style.color = "var(--faint)";
+          minLine.textContent = "ok ≥ " + p.min_acceptable_odds;
+          minLine.title =
+            "still +EV down to " +
+            p.min_acceptable_odds +
+            " — the lowest odds at which this pick keeps the premium " +
+            "edge floor against its sharp fair probability; if the book " +
+            "now quotes less, skip. Informational only — never a profit " +
+            "guarantee.";
+          oddsCell.appendChild(minLine);
+        }
+        td(tr, oddsCell).dataset.label = "Odds";
+      }
+
+      function cellFairEv(tr, p) {
+        // model_probability IS the devigged sharp fair prob in the value
+        // pipeline (the validated default).
+        const fairCell = document.createElement("div");
+        const fairPct = document.createElement("span");
+        fairPct.textContent = pct(p.model_probability);
+        const evLine = document.createElement("small");
+        evLine.style.display = "block";
+        evLine.style.color = "var(--faint)";
+        evLine.textContent = "EV +" + pct(p.ev);
+        fairCell.append(fairPct, evLine);
+        td(tr, fairCell).dataset.label = "Fair / EV";
+      }
+
+      function cellEdge(tr, p) {
+        const e = Number(p.edge);
+        const ed = document.createElement("div");
+        const ev_ = document.createElement("span");
+        ev_.className = "edge";
+        ev_.textContent = "+" + pct(p.edge);
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        const fill = document.createElement("i");
+        fill.style.width = Math.min(e / 0.1, 1) * 100 + "%"; // 10% edge = full bar
+        bar.appendChild(fill);
+        ed.append(ev_, bar);
+        td(tr, ed, "edgecell").dataset.label = "Edge";
+      }
+
+      // CONFIDENCE stars — the headline that REPLACES the recommended-stake
+      // column (USER DECISION 1). The stake % lives ONLY in this cell's title
+      // tooltip, never as visible text. Stars set via textContent.
+      const CONF_FRAMING =
+        "Model confidence in the EDGE (sharp-vs-soft line value) — NOT a " +
+        "probability you will win. Evidence currency is held-out CLV.";
+      function cellConfidence(tr, p) {
+        const conf = p.confidence_rating || {};
+        // Defensive: an older API without confidence_rating still renders a
+        // floor of 1 star rather than a blank cell.
+        const n = Math.max(1, Math.min(5, Number(conf.level) || 1));
+        const cell = document.createElement("td");
+        cell.className = "confcell";
+        cell.dataset.label = "Confidence";
+        const stars = document.createElement("span");
+        stars.className = "stars";
+        stars.textContent = "★".repeat(n); // filled
+        const empty = document.createElement("span");
+        empty.className = "dim";
+        empty.textContent = "☆".repeat(5 - n); // unfilled
+        cell.append(stars, empty);
+        // tooltip = framing + stake (informational) + why-this-rating bands.
+        const frac = Number(p.recommended_stake_fraction);
+        const amt = Number(p.recommended_stake_amount);
+        let tip = CONF_FRAMING;
+        if (isFinite(frac) && isFinite(amt))
+          tip +=
+            "\nRecommended fractional-Kelly stake (informational, not " +
+            "advice): " +
+            (frac * 100).toFixed(2) +
+            "% of bankroll = " +
+            amt.toFixed(2) +
+            " units.";
+        if (conf.reasons && conf.reasons.length)
+          tip += "\nwhy this rating: " + conf.reasons.join("; ");
+        if (tierOf(p) === "volume") tip += " · volume shadow tier (no alert)";
+        cell.title = tip;
+        tr.appendChild(cell);
+      }
+
+      function cellClv(tr, p) {
+        let cell;
+        if (p.clv_log === null) {
+          // Open picks await their first true-up; anything else with no CLV
+          // row never got one — "pending" would lie.
+          cell = td(
+            tr,
+            badge(p.status === "alerted" ? "pending" : "n/a", "b-neutral"),
+          );
+        } else {
+          const clvPct = (Math.exp(Number(p.clv_log)) - 1) * 100;
+          cell = td(
+            tr,
+            badge(
+              (p.status === "alerted" ? "live " : "") +
+                (clvPct >= 0 ? "+" : "") +
+                clvPct.toFixed(1) +
+                "%",
+              p.beat_close ? "b-pos" : "b-neg",
+            ),
+          );
+          cell.title =
+            p.status === "alerted"
+              ? "provisional — re-priced every cycle until kickoff; final CLV is the last price before the market closes"
+              : p.status === "superseded"
+                ? "provisional CLV frozen when this pick was superseded by a newer strategy version — never finalized against the close"
+                : "closing-line value: pick price vs the de-vigged closing fair price";
+        }
+        cell.dataset.label = "CLV";
+      }
+
+      // Per-row status badge: alerted -> LIVE (premium) / SHADOW (volume);
+      // settled/superseded keep their own word. Adds the settle button for
+      // past-kickoff open picks (LIVE/UNVERIFIED views only).
+      function cellStatus(tr, p) {
+        const kickoffKnown = p.starts_at != null;
+        const isVolume = tierOf(p) === "volume";
+        const statusBadge = badge(
+          p.status === "alerted"
+            ? isVolume
+              ? "SHADOW"
+              : "LIVE"
+            : p.status === "settled"
+              ? "SETTLED"
+              : p.status === "superseded"
+                ? "SUPERSEDED"
+                : p.status,
+          p.status === "alerted" && !isVolume ? "b-info" : "b-neutral",
+        );
+        if (isVolume)
+          statusBadge.title =
+            "volume (shadow) tier — persisted for CLV evidence only: " +
+            "no alert was sent, no daily exposure reserved, stake figures " +
+            "are what WOULD have been recommended";
+        const statusCell = td(tr, statusBadge);
+        statusCell.dataset.label = "Status";
+        // Manual settle: past-kickoff open picks only. TBD kickoffs
+        // (starts_at null) must not invite settling an unstarted match.
+        if (
+          p.status === "alerted" &&
+          kickoffKnown &&
+          new Date(p.starts_at) < Date.now()
+        ) {
+          const btn = document.createElement("button");
+          btn.textContent = "settle";
+          btn.style.marginLeft = "6px";
+          btn.addEventListener("click", () => settleEvent(p));
+          statusCell.appendChild(btn);
+        }
+      }
+
+      // SETTLED-only cells: recorded result + realized P&L. outcome/pnl are
+      // additive backend fields (LEFT JOIN ResultTracking); absent today ->
+      // graceful fallback (SETTLED badge + "—").
+      const _OUTCOME_CLS = {
+        won: "b-pos",
+        half_won: "b-pos",
+        lost: "b-neg",
+        half_lost: "b-neg",
+        push: "b-neutral",
+        void: "b-neutral",
+      };
+      function cellResult(tr, p) {
+        let cell;
+        if (p.outcome) {
+          cell = td(
+            tr,
+            badge(p.outcome, _OUTCOME_CLS[p.outcome] || "b-neutral"),
+          );
+        } else {
+          cell = td(tr, badge("SETTLED", "b-neutral"));
+          cell.title = "result not recorded for this pick";
+        }
+        cell.dataset.label = "Result";
+      }
+      function cellPnl(tr, p) {
+        let cell;
+        if (p.pnl === null || p.pnl === undefined) {
+          cell = td(tr, "—");
+        } else {
+          const v = Number(p.pnl);
+          cell = td(tr, (v >= 0 ? "+" : "") + v.toFixed(2));
+          if (v < 0) cell.style.color = "var(--neg)";
+        }
+        cell.dataset.label = "P&L";
+      }
+
+      // Desktop column headers per view. SETTLED is the 8-col results set
+      // (matches the body's cellKickoff|Match|Pick|Book|Odds|Result|P&L|CLV);
+      // LIVE/UNVERIFIED is the 11-col execution set. Built as text nodes so the
+      // header can never inject markup.
+      const HEAD_LIVE = [
+        "Kickoff",
+        "Match",
+        "Market",
+        "Pick",
+        "Book",
+        "Odds",
+        "Fair / EV",
+        "Edge",
+        "Confidence",
+        "CLV",
+        "Status",
+      ];
+      const HEAD_SETTLED = [
+        "Kickoff",
+        "Match",
+        "Pick",
+        "Book",
+        "Odds",
+        "Result",
+        "P&L",
+        "CLV",
+      ];
+      function renderHead(settledView) {
+        const head = $("picks-head");
+        if (!head) return;
+        const labels = settledView ? HEAD_SETTLED : HEAD_LIVE;
+        head.replaceChildren();
+        for (const label of labels) {
+          const th = document.createElement("th");
+          th.textContent = label;
+          head.appendChild(th);
+        }
+      }
+
       function render() {
-        const status = $("f-status").value;
         const tier = $("f-tier").value;
         const q = $("f-search").value.trim().toLowerCase();
-        const rows = PICKS.filter(
-          (p) =>
-            (!status ||
-              (status === "alerted-all"
-                ? p.status === "alerted"
-                : p.status === status)) &&
-            (status !== "alerted" || isVerified(p)) &&
-            (!tier || tierOf(p) === tier) &&
-            (!q ||
-              [
-                p.event,
-                p.selection,
-                p.bookmaker,
-                p.league,
-                p.market,
-                MARKETS[p.market] || "", // searchable by the DISPLAYED label too
-                tierOf(p), // "premium" / "volume" are searchable words
-              ]
-                .join(" ")
-                .toLowerCase()
-                .includes(q)),
-        );
+        const settledView = STATUS_TAB === "settled";
+        // LIVE = verified open · UNVERIFIED = open past its re-price window ·
+        // SETTLED = results recorded. isVerified() window logic unchanged.
+        const matchesTab = (p) => {
+          if (STATUS_TAB === "live")
+            return p.status === "alerted" && isVerified(p);
+          if (STATUS_TAB === "unverified")
+            return p.status === "alerted" && !isVerified(p);
+          if (STATUS_TAB === "settled") return p.status === "settled";
+          return true;
+        };
+        // tier+search scope (NOT tab-filtered) — used both for the tab counts
+        // and the visible rows, so the two never diverge.
+        const inScope = (p) =>
+          (!tier || tierOf(p) === tier) &&
+          (!q ||
+            [
+              p.event,
+              p.selection,
+              p.bookmaker,
+              p.league,
+              p.market,
+              MARKETS[p.market] || "", // searchable by the DISPLAYED label too
+              tierOf(p), // "premium" / "volume" are searchable words
+            ]
+              .join(" ")
+              .toLowerCase()
+              .includes(q));
+        const scoped = PICKS.filter(inScope);
+        // Tab counts so finished games awaiting a settle stay discoverable:
+        // a past-kickoff open pick keeps its settle button, but once it ages
+        // out of the verified window it moves LIVE -> UNVERIFIED. The count
+        // shows where those settle-able picks actually are.
+        const tabCounts = {
+          live: scoped.filter((p) => p.status === "alerted" && isVerified(p))
+            .length,
+          unverified: scoped.filter(
+            (p) => p.status === "alerted" && !isVerified(p),
+          ).length,
+          settled: scoped.filter((p) => p.status === "settled").length,
+        };
+        const TAB_LABELS = {
+          live: "LIVE",
+          unverified: "UNVERIFIED",
+          settled: "SETTLED",
+        };
+        for (const b of document.querySelectorAll(
+          "#status-tabs button[data-status]",
+        )) {
+          const k = b.dataset.status;
+          b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
+        }
+        const rows = scoped.filter(matchesTab);
+
+        // Toggle the SETTLED column set: the class drives the mobile labels
+        // (data-label) and lets CSS follow the active columns.
+        $("picks-table").classList.toggle("settled", settledView);
+        // Swap the desktop <thead> labels to match the active body columns, so
+        // each value sits under the right header. The body toggles between an
+        // 11-col LIVE set and an 8-col SETTLED set (below); the header must too.
+        renderHead(settledView);
 
         const tbody = $("rows");
         tbody.replaceChildren();
@@ -1252,274 +1873,31 @@
         rows.forEach((p, idx) => {
           const tr = document.createElement("tr");
           tr.style.animationDelay = Math.min(idx * 20, 360) + "ms";
-
-          const ko = document.createElement("div");
-          ko.className = "ko";
-          const when = document.createElement("span");
-          // starts_at === null is the REAL server-side signal that the
-          // source never reported a kickoff (events.starts_at is nullable;
-          // repositories.persist_pick stores NULL — no more pick-time
-          // placeholders). TBD rows get no countdown and no settle button.
-          const kickoffKnown = p.starts_at != null;
-          if (kickoffKnown) {
-            when.textContent = fmtLocal(p.starts_at);
+          if (settledView) {
+            // RESULTS-oriented set: Kickoff | Match | Pick | Book | Odds |
+            // Result | P&L | CLV. No execution columns, no stars, no settle.
+            cellKickoff(tr, p);
+            cellMatch(tr, p);
+            cellPick(tr, p);
+            cellBook(tr, p);
+            cellOdds(tr, p, false);
+            cellResult(tr, p);
+            cellPnl(tr, p);
+            cellClv(tr, p);
           } else {
-            when.textContent = "TBD";
-            when.className = "tbd";
-            when.title =
-              "the odds source has not reported a kickoff time for this match yet";
-          }
-          const cd = kickoffKnown
-            ? countdown(p.starts_at)
-            : { text: "kickoff unknown", soon: false };
-          const rel = document.createElement("small");
-          rel.textContent = cd.text;
-          if (cd.soon) rel.className = "soon";
-          ko.append(when, rel);
-          td(tr, ko);
-
-          const m = document.createElement("div");
-          m.className = "matchwrap";
-          // ellipsis-capped column — tooltip carries the full text
-          m.title = p.event + "\n" + p.league;
-          const name = document.createElement("span");
-          name.className = "match";
-          name.textContent = p.event;
-          const lg = document.createElement("span");
-          lg.className = "league";
-          lg.textContent = p.league;
-          m.append(name, lg);
-          td(tr, m);
-
-          td(tr, MARKETS[p.market] || p.market);
-          const selCell = document.createElement("div");
-          selCell.className = "selwrap";
-          // Surface the pick's WHY on hover: the pipeline's reason summary
-          // (anchor book, fair price, effective price) + anchor confidence
-          // (0.9 backtested named sharp vs 0.7 consensus).
-          const why = [];
-          if (p.reason_summary) why.push(p.reason_summary);
-          if (p.confidence !== null && p.confidence !== undefined)
-            why.push(
-              "anchor: " +
-                (Number(p.confidence) >= 0.9 ? "sharp" : "consensus") +
-                " (" +
-                Number(p.confidence).toFixed(1) +
-                ")",
-            );
-          if (p.value_filter_score != null)
-            why.push(
-              "ml score " +
-                Number(p.value_filter_score).toFixed(3) +
-                " (P(beats close), q* 0.725)",
-            );
-          if (why.length) selCell.title = why.join("\n");
-          const selName = document.createElement("span");
-          selName.className = "sel";
-          selName.textContent = p.selection;
-          const pickedAgo = document.createElement("small");
-          pickedAgo.style.color = "var(--faint)";
-          const ageH = (Date.now() - new Date(p.created_at)) / 3.6e6;
-          // Age of the PICK (when it was first found) — not a verification
-          // timestamp; the live re-check is the "now …" line in the Odds
-          // column, and freshness gates the default VERIFIED view.
-          pickedAgo.textContent =
-            "found " +
-            (ageH < 1 ? Math.round(ageH * 60) + "m" : Math.round(ageH) + "h") +
-            " ago";
-          pickedAgo.title =
-            "when this pick was first alerted — always confirm the live price " +
-            "at the bookmaker before betting";
-          if (ageH > 6) pickedAgo.style.color = "var(--warn)";
-          selCell.append(selName, pickedAgo);
-          // Value-filter meta-model score, when the pick was scored (null =
-          // artifact absent or candidate outside the model's trained scope
-          // — 1x2/ou25, mapped league, sharp anchor, odds >= 1.6 only).
-          if (p.value_filter_score != null) {
-            const ml = document.createElement("small");
-            ml.style.color = "var(--faint)";
-            ml.textContent = "ML " + Number(p.value_filter_score).toFixed(2);
-            ml.title =
-              "value-filter meta-model score: calibrated P(this pick beats " +
-              "the vig-free best-of-books closing line). Informational — " +
-              "the operating point from the held-out evaluation is 0.725.";
-            selCell.append(ml);
-          }
-          // Anchor chip: which fair-value anchor produced this pick.
-          // PIN = Pinnacle (backtested primary), SHARP = other named sharp
-          // book, CONS = >=3-book median fallback (train-validated as
-          // weaker than PIN — its live CLV verdict is exactly what this
-          // stratification chip exists to accumulate).
-          if (p.anchor_type) {
-            const an = document.createElement("small");
-            an.style.color = "var(--faint)";
-            an.textContent =
-              { pinnacle: "PIN", sharp: "SHARP", consensus: "CONS" }[
-                p.anchor_type
-              ] || p.anchor_type.toUpperCase();
-            an.title =
-              "fair-value anchor for this pick: " +
-              p.anchor_type +
-              ". Live CLV is tracked per anchor (PIN = Pinnacle, " +
-              "CONS = cross-book median fallback, SHARP = other named " +
-              "sharp book).";
-            selCell.append(an);
-          }
-          td(tr, selCell);
-          // ellipsis-capped (110px) so a long book name can never push the
-          // Status/Settle column off a 1280px screen; tooltip = full name.
-          td(tr, p.bookmaker, "bookcell").title = p.bookmaker;
-          const oddsCell = document.createElement("div");
-          const orig = document.createElement("span");
-          orig.className = "odds";
-          orig.textContent = Number(p.decimal_odds).toFixed(2);
-          oddsCell.appendChild(orig);
-          // Live revalidation: current price + "still worth it?" verdict,
-          // refreshed every poll while the pick is open.
-          if (p.status === "alerted" && p.current_odds !== null) {
-            const nowLine = document.createElement("small");
-            nowLine.style.display = "block";
-            const curEdge =
-              p.current_edge === null ? null : Number(p.current_edge);
-            // Colour carries the verdict (pos = still value, warn = thin,
-            // neg = edge gone) — keeps the column narrow enough that
-            // Status/Settle stay on-screen.
-            let verdict = "";
-            let color = "var(--faint)";
-            if (curEdge !== null) {
-              verdict =
-                " · " +
-                (curEdge >= 0 ? "+" : "") +
-                (curEdge * 100).toFixed(1) +
-                "%";
-              if (curEdge >= 0.03) color = "var(--pos)";
-              else if (curEdge > 0) color = "var(--warn)";
-              else color = "var(--neg)";
-            }
-            nowLine.style.color = color;
-            nowLine.title =
-              curEdge === null
-                ? "current price at the pick's book"
-                : curEdge >= 0.03
-                  ? "still value at current price"
-                  : curEdge > 0
-                    ? "thin edge at current price"
-                    : "edge gone at current price";
-            nowLine.textContent =
-              "now " + Number(p.current_odds).toFixed(2) + verdict;
-            oddsCell.appendChild(nowLine);
-          }
-          // Execution helper: the minimum displayed odds at which this pick
-          // still clears the premium edge floor vs its sharp fair prob —
-          // "still +EV down to X.XX" (server-computed; null = not derivable).
-          if (p.status === "alerted" && p.min_acceptable_odds != null) {
-            const minLine = document.createElement("small");
-            minLine.style.display = "block";
-            minLine.style.color = "var(--faint)";
-            minLine.textContent = "ok ≥ " + p.min_acceptable_odds;
-            minLine.title =
-              "still +EV down to " +
-              p.min_acceptable_odds +
-              " — the lowest odds at which this pick keeps the premium " +
-              "edge floor against its sharp fair probability; if the book " +
-              "now quotes less, skip. Informational only — never a profit " +
-              "guarantee.";
-            oddsCell.appendChild(minLine);
-          }
-          td(tr, oddsCell);
-          // Fair % with EV folded in as a sub-line (one column fewer keeps
-          // Status/Settle on-screen without horizontal scrolling).
-          // NB: model_probability IS the devigged sharp fair prob in the
-          // value pipeline (the validated default); under PICK_STRATEGY=
-          // model it would hold the model's own probability instead — keep
-          // in mind if the model pipeline ever goes live (it is screens-only).
-          const fairCell = document.createElement("div");
-          const fairPct = document.createElement("span");
-          fairPct.textContent = pct(p.model_probability);
-          const evLine = document.createElement("small");
-          evLine.style.display = "block";
-          evLine.style.color = "var(--faint)";
-          evLine.textContent = "EV +" + pct(p.ev);
-          fairCell.append(fairPct, evLine);
-          td(tr, fairCell);
-
-          const e = Number(p.edge);
-          const ed = document.createElement("div");
-          const ev_ = document.createElement("span");
-          ev_.className = "edge";
-          ev_.textContent = "+" + pct(p.edge);
-          const bar = document.createElement("div");
-          bar.className = "bar";
-          const fill = document.createElement("i");
-          fill.style.width = Math.min(e / 0.1, 1) * 100 + "%"; // 10% edge = full bar
-          bar.appendChild(fill);
-          ed.append(ev_, bar);
-          td(tr, ed, "edgecell");
-
-          td(
-            tr,
-            Number(p.recommended_stake_amount).toFixed(2) +
-              " (" +
-              pct(p.recommended_stake_fraction) +
-              ")",
-          );
-
-          if (p.clv_log === null) {
-            // Open picks await their first true-up; anything else with no
-            // CLV row never got one and never will — "pending" would lie.
-            td(
-              tr,
-              badge(p.status === "alerted" ? "pending" : "n/a", "b-neutral"),
-            );
-          } else {
-            const clvPct = (Math.exp(Number(p.clv_log)) - 1) * 100;
-            const cell = td(
-              tr,
-              badge(
-                (p.status === "alerted" ? "live " : "") +
-                  (clvPct >= 0 ? "+" : "") +
-                  clvPct.toFixed(1) +
-                  "%",
-                p.beat_close ? "b-pos" : "b-neg",
-              ),
-            );
-            cell.title =
-              p.status === "alerted"
-                ? "provisional — re-priced every cycle until kickoff; final CLV is the last price before the market closes"
-                : p.status === "superseded"
-                  ? "provisional CLV frozen when this pick was superseded by a newer strategy version — never finalized against the close"
-                  : "closing-line value: pick price vs the de-vigged closing fair price";
-          }
-          // Tier marking reuses the SAME status badge slot — no extra
-          // column, no extra width ("vol" is narrower than "open", so the
-          // 1280px no-scroll layout is untouched): an open volume row shows
-          // a muted VOL badge instead of "open"; non-open volume rows keep
-          // their status badge and carry the tier in the tooltip.
-          const isVolume = tierOf(p) === "volume";
-          const statusBadge = badge(
-            p.status === "alerted" ? (isVolume ? "vol" : "open") : p.status,
-            p.status === "alerted" && !isVolume ? "b-info" : "b-neutral",
-          );
-          if (isVolume)
-            statusBadge.title =
-              "volume (shadow) tier — persisted for CLV evidence only: " +
-              "no alert was sent, no daily exposure reserved, stake figures " +
-              "are what WOULD have been recommended";
-          const statusCell = td(tr, statusBadge);
-          // Manual settle: past-kickoff open picks (auto-settlement covers
-          // football; NBA/euroleague have no free results feed). TBD
-          // kickoffs (starts_at null) must not invite settling an
-          // unstarted match.
-          if (
-            p.status === "alerted" &&
-            kickoffKnown &&
-            new Date(p.starts_at) < Date.now()
-          ) {
-            const btn = document.createElement("button");
-            btn.textContent = "settle";
-            btn.style.marginLeft = "6px";
-            btn.addEventListener("click", () => settleEvent(p));
-            statusCell.appendChild(btn);
+            // LIVE/UNVERIFIED set: Kickoff | Match | Market | Pick | Book |
+            // Odds | Fair/EV | Edge | Confidence | CLV | Status.
+            cellKickoff(tr, p);
+            cellMatch(tr, p);
+            td(tr, MARKETS[p.market] || p.market).dataset.label = "Market";
+            cellPick(tr, p);
+            cellBook(tr, p);
+            cellOdds(tr, p, true);
+            cellFairEv(tr, p);
+            cellEdge(tr, p);
+            cellConfidence(tr, p);
+            cellClv(tr, p);
+            cellStatus(tr, p);
           }
           tbody.appendChild(tr);
         });
@@ -2280,7 +2658,23 @@
           "load failed (" + errLabel(picksErr) + ") — retrying in 60s";
       }
 
-      $("f-status").addEventListener("change", render);
+      // Segmented status control: LIVE / UNVERIFIED / SETTLED. aria-selected
+      // tracks the active tab; switching re-renders with the matching column
+      // set. Default tab (LIVE) is set in the markup.
+      function setStatusTab(tab) {
+        STATUS_TAB = tab;
+        document
+          .querySelectorAll("#status-tabs button[data-status]")
+          .forEach((b) => {
+            b.setAttribute("aria-selected", String(b.dataset.status === tab));
+          });
+        render();
+      }
+      document
+        .querySelectorAll("#status-tabs button[data-status]")
+        .forEach((b) => {
+          b.addEventListener("click", () => setStatusTab(b.dataset.status));
+        });
       $("f-tier").addEventListener("change", render);
       $("f-search").addEventListener("input", render);
       $("toggle-games").addEventListener("click", () =>
@@ -2300,6 +2694,21 @@
           window.location.assign("/login"),
         );
       });
+      // Inline legend + games purpose line — static honest copy set via
+      // textContent only (never via raw-markup assignment). Status semantics
+      // + the CLV definition sit above the picks table; the games purpose
+      // line sits under the "Available games" title.
+      function fillStaticCopy() {
+        $("legend-status").textContent =
+          " LIVE = price re-checked each cycle · SETTLED = result recorded · " +
+          "SUPERSEDED = replaced by a newer strategy version · SHADOW = " +
+          "volume tier, tracked but never alerted.";
+        $("legend-clv").textContent =
+          " CLV +x% = your price beat the de-vigged closing sharp line by " +
+          "x%. Consistently positive CLV is the only proof of real edge — " +
+          "not a profit guarantee.";
+      }
+      fillStaticCopy();
       setGamesOpen(false);
       load();
       setInterval(load, 60000);

@@ -178,6 +178,9 @@ def build_scheduler(
     sport_keys: tuple[str, ...] = ()
     league_label = ""
     directory: EventDirectory | None = None
+    # Sport keys that scrape for the AVAILABLE GAMES view only (no picks/
+    # alerts) — populated by the oddsportal branch when tennis is enabled.
+    visibility_only_sports: frozenset[str] = frozenset()
 
     if settings.odds_source == "oddsportal":
         directory = EventDirectory()
@@ -192,6 +195,16 @@ def build_scheduler(
             config["basketball"] = ("basketball", bb_leagues)
             markets_by["basketball"] = tuple(_csv(settings.oddsportal_basketball_markets))
             sport_keys = ("soccer", "basketball")
+        # Tennis is VISIBILITY-ONLY / UNVALIDATED (held-out CLV undefined — no
+        # closing source; app/config.py). Enabled only when leagues are set
+        # (OFF by default); it scrapes for the AVAILABLE GAMES view but mints
+        # NO picks/alerts — enforced by visibility_only_sports below.
+        tennis_leagues = _csv(settings.oddsportal_tennis_leagues)
+        if tennis_leagues:
+            config["tennis"] = ("tennis", tennis_leagues)
+            markets_by["tennis"] = tuple(_csv(settings.oddsportal_tennis_markets))
+            sport_keys = (*sport_keys, "tennis")
+            visibility_only_sports = frozenset({"tennis"})
         loader = OddsPortalLoader(
             directory=directory,
             leagues_by_sport_key=config,
@@ -310,6 +323,8 @@ def build_scheduler(
             value_policy=value_policy(settings),
             value_filter=value_filter,
             value_ml_filter_enabled=ml_filter_enforced,
+            # tennis (if enabled) is scraped for visibility only — no picks
+            visibility_only_sports=visibility_only_sports,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 

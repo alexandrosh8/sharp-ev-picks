@@ -31,11 +31,12 @@ def make_pick(
     tier: str = "premium",
     decimal_odds: float = 2.10,
     edge: float = 0.05,
+    league: str = "test-league-persist",
 ) -> PickOut:
     return PickOut(
         pick_id="p-1",
         sport="soccer",
-        league="test-league-persist",
+        league=league,
         event="Alpha FC vs Beta United",
         event_id=event_id,
         market=Market.H2H,
@@ -420,7 +421,7 @@ async def test_available_games_fallback_reads_current_warehouse_events(session) 
     )
     await persist_pick(
         session,
-        make_pick("evt-games-fallback"),
+        make_pick("evt-games-fallback", league="test-league-games"),
         teams,
         "value-sharp-vs-soft",
         "t-games",
@@ -619,3 +620,130 @@ async def test_anchor_type_follows_volume_to_premium_upgrade(session) -> None:  
     assert row is not None
     assert row.tier == "premium"
     assert row.anchor_type == "pinnacle"
+
+
+async def test_settled_pick_carries_outcome_and_pnl_from_result_tracking(session) -> None:  # type: ignore[no-untyped-def]
+    # SETTLED view regression: the /picks payload must LEFT JOIN ResultTracking
+    # so the dashboard's Result/P&L columns render the recorded outcome and the
+    # realized P&L. Before the join these keys were absent and every settled
+    # pick fell into the cellResult/cellPnl else-branch ("SETTLED" / "—").
+    from sqlalchemy import insert as sa_insert
+
+    from app.storage.models import ResultTracking
+
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(session, make_pick("evt-settled-pnl"), teams, "value-sharp-vs-soft", "t-set")
+    pick_row = await session.scalar(
+        select(Pick).where(Pick.bookmaker == "testbook").order_by(Pick.id.desc())
+    )
+    assert pick_row is not None
+    await session.execute(sa_update(Pick).where(Pick.id == pick_row.id).values(status="settled"))
+    await session.execute(
+        sa_insert(ResultTracking).values(
+            pick_id=pick_row.id,
+            outcome="won",
+            pnl=Decimal("1.00"),
+            roi=Decimal("0.05"),
+            settled_at=datetime(2026, 6, 11, 22, 0, tzinfo=UTC),
+        )
+    )
+    await session.flush()
+
+    payload = await latest_picks_with_events(session, limit=200)
+    ours = [p for p in payload if p["event_id"] == pick_row.event_id]
+    assert ours, "settled pick missing from /picks payload"
+    p = ours[0]
+    assert p["outcome"] == "won"  # the Result column's badge value
+    assert p["pnl"] == "1.00"  # realized P&L, Decimal-stringified at the boundary
+
+
+async def test_open_pick_has_null_outcome_and_pnl(session) -> None:  # type: ignore[no-untyped-def]
+    # Open/unverified picks have no ResultTracking row; the LEFT JOIN must keep
+    # outcome/pnl NULL (not raise, not invent a result).
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(
+        session, make_pick("evt-open-noresult"), teams, "value-sharp-vs-soft", "t-op"
+    )
+    payload = await latest_picks_with_events(session, limit=200)
+    ours = [p for p in payload if p["event"] == "Alpha FC vs Beta United"]
+    assert ours
+    assert ours[0]["outcome"] is None
+    assert ours[0]["pnl"] is None
+
+
+async def test_available_games_fallback_includes_tennis_with_unvalidated_flag(session) -> None:  # type: ignore[no-untyped-def]
+    # Doctrine-safety regression: the restart-durability fallback must include
+    # VISIBILITY-ONLY tennis AND tag it unvalidated=True, so the dashboard's
+    # UNVALIDATED badge survives a restart. The default unscoped query used to
+    # filter to soccer/basketball only and emit no unvalidated key, so a
+    # tennis row served from the warehouse rendered as a validated sport.
+    now = datetime.now(tz=UTC)
+    kickoff = now + timedelta(hours=3)
+    tennis_teams = EventTeams(
+        home="Tennis Player A",
+        away="Tennis Player B",
+        league="atp-test-tour",
+        starts_at=kickoff,
+    )
+    tennis_pick = make_pick("evt-games-tennis", league="atp-test-tour").model_copy(
+        update={"sport": "tennis"}
+    )
+    await persist_pick(session, tennis_pick, tennis_teams, "value-sharp-vs-soft", "t-games-tennis")
+    event = await session.scalar(select(Event).where(Event.external_ref == "evt-games-tennis"))
+    assert event is not None
+    captured = now - timedelta(minutes=5)
+    session.add(
+        OddsSnapshot(
+            event_id=event.id,
+            bookmaker="Pinnacle",
+            market="h2h",
+            selection="Tennis Player A",
+            decimal_odds=Decimal("1.9000"),
+            liquidity=None,
+            captured_at=captured,
+            ingested_at=captured + timedelta(seconds=10),
+        )
+    )
+    await session.flush()
+
+    # Unscoped (sport=None) is the path the /games route uses for the fallback.
+    rows = await latest_available_games_with_events(session, limit=200, now=now)
+    ours = [row for row in rows if row["event_id"] == "evt-games-tennis"]
+    assert ours, "warehouse fallback excluded the tennis fixture"
+    row = ours[0]
+    assert row["sport"] == "tennis"
+    assert row["sport_label"] == "Tennis"
+    assert row["unvalidated"] is True  # the doctrine-safety badge driver
+
+    # And a validated sport from the same path must carry unvalidated=False so
+    # the flag is a reliable discriminator the dashboard can badge on.
+    soccer_teams = EventTeams(
+        home="Soccer Home", away="Soccer Away", league="test-league-games", starts_at=kickoff
+    )
+    await persist_pick(
+        session,
+        make_pick("evt-games-soccer", league="test-league-games"),
+        soccer_teams,
+        "value-sharp-vs-soft",
+        "t-games-soccer",
+    )
+    soccer_event = await session.scalar(
+        select(Event).where(Event.external_ref == "evt-games-soccer")
+    )
+    assert soccer_event is not None
+    session.add(
+        OddsSnapshot(
+            event_id=soccer_event.id,
+            bookmaker="Pinnacle",
+            market="h2h",
+            selection="Soccer Home",
+            decimal_odds=Decimal("2.0000"),
+            liquidity=None,
+            captured_at=captured,
+            ingested_at=captured + timedelta(seconds=10),
+        )
+    )
+    await session.flush()
+    rows2 = await latest_available_games_with_events(session, limit=200, now=now)
+    soccer_rows = [row for row in rows2 if row["event_id"] == "evt-games-soccer"]
+    assert soccer_rows and soccer_rows[0]["unvalidated"] is False

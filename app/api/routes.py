@@ -27,6 +27,7 @@ from app.api.auth import (
 )
 from app.api.deps import get_session
 from app.backtesting.live_evidence import live_evidence_report
+from app.edge.confidence import confidence_rating
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
@@ -257,6 +258,52 @@ async def health() -> dict[str, Any]:
     }
 
 
+def _coerce_float(value: Any) -> float | None:
+    """Best-effort str/Decimal -> float for repo rows (every numeric is a
+    serialized string). None/blank/unparseable -> None so the caller can fall
+    back to a stated neutral input."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _attach_confidence(rows: list[dict[str, Any]], threshold: float) -> list[dict[str, Any]]:
+    """Add a `confidence_rating` block to each /picks row from existing fields.
+
+    The star rating is the dashboard headline that replaces the recommended
+    stake (the stake moves to a hover tooltip). It rates confidence in the
+    EDGE (sharp-vs-soft line value), NOT a win probability — see
+    app/edge/confidence. Computed here at the route (composition root) so the
+    repository layer and the pure rating module both stay clean: the repo only
+    serializes DB rows, the rating module only does arithmetic.
+
+    `threshold` is Settings.value_min_edge (the premium edge floor); the live
+    edge is preferred over alert-time edge when present, mirroring the
+    dashboard's own `current_edge ?? edge` choice. There is no per-pick
+    book-count field today, so book_count is None.
+    """
+    for row in rows:
+        edge = _coerce_float(row.get("current_edge"))
+        if edge is None:
+            edge = _coerce_float(row.get("edge")) or 0.0
+        rating = confidence_rating(
+            edge=edge,
+            threshold=threshold,
+            value_filter_score=_coerce_float(row.get("value_filter_score")),
+            anchor_type=row.get("anchor_type"),
+            book_count=None,
+        )
+        row["confidence_rating"] = {
+            "level": rating.level,
+            "label": rating.label,
+            "reasons": list(rating.reasons),
+        }
+    return rows
+
+
 @router.get("/picks", dependencies=[Depends(require_dashboard_auth)])
 async def latest_picks(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -269,14 +316,18 @@ async def latest_picks(
     picks entirely (the dashboard fetches each tier separately).
     None = both tiers (legacy feed).
 
+    Each row carries a `confidence_rating` (1..5 star edge-quality headline);
+    the recommended stake stays on the row but is surfaced only in a hover
+    tooltip on the dashboard (informational, never advice).
+
     `min_acceptable_odds` per row is the execution helper: the minimum
     displayed odds at which the pick still retains the premium edge floor
     ("still +EV down to X.XX" on the dashboard)."""
     from app.config import get_settings
 
-    return await latest_picks_with_events(
-        session, limit, tier=tier, min_edge=get_settings().value_min_edge
-    )
+    threshold = get_settings().value_min_edge
+    rows = await latest_picks_with_events(session, limit, tier=tier, min_edge=threshold)
+    return _attach_confidence(rows, threshold)
 
 
 async def _warehouse_available_games(
@@ -299,7 +350,7 @@ async def _warehouse_available_games(
 async def available_games(
     request: Request,
     limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
-    sport: Annotated[str | None, Query(pattern="^(soccer|basketball)$")] = None,
+    sport: Annotated[str | None, Query(pattern="^(soccer|basketball|tennis)$")] = None,
 ) -> list[dict[str, Any]]:
     """Latest unrestricted football/NBA fixture list from odds ingestion.
 

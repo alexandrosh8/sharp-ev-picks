@@ -159,12 +159,24 @@ async def latest_picks_with_events(
 
     home = aliased(Team)
     away = aliased(Team)
+    # LEFT JOIN ResultTracking so settled rows carry their recorded outcome and
+    # realized P&L (the dashboard SETTLED tab's Result/P&L columns). The join is
+    # outer: open/unverified picks have no result row and keep outcome/pnl NULL.
     stmt = (
-        select(Pick, home.name, away.name, League.name, Event.starts_at)
+        select(
+            Pick,
+            home.name,
+            away.name,
+            League.name,
+            Event.starts_at,
+            ResultTracking.outcome,
+            ResultTracking.pnl,
+        )
         .join(Event, Pick.event_id == Event.id)
         .join(home, Event.home_team_id == home.id)
         .join(away, Event.away_team_id == away.id)
         .join(League, Event.league_id == League.id)
+        .outerjoin(ResultTracking, ResultTracking.pick_id == Pick.id)
     )
     if tier is not None:
         stmt = stmt.where(Pick.tier == tier)
@@ -210,8 +222,13 @@ async def latest_picks_with_events(
             # execution helper: "still +EV down to X.XX" (null = not
             # computable — min_edge unset or fair prob >= floor impossible)
             "min_acceptable_odds": _min_acceptable(p),
+            # settlement result + realized P&L from ResultTracking (LEFT JOIN):
+            # the dashboard SETTLED tab's Result/P&L columns. null = no result
+            # row yet (open/unverified picks, or settled-but-unrecorded).
+            "outcome": outcome,
+            "pnl": str(pnl) if pnl is not None else None,
         }
-        for p, home_name, away_name, league_name, starts_at in rows.all()
+        for p, home_name, away_name, league_name, starts_at, outcome, pnl in rows.all()
     ]
 
 
@@ -220,7 +237,21 @@ def _sport_label(sport_key: str, sport_name: str) -> str:
         return "Football"
     if sport_key.startswith("basketball"):
         return "NBA"
+    if sport_key.startswith("tennis"):
+        return "Tennis"
     return sport_name
+
+
+# Sports that have cleared the held-out CLV doctrine gate and are alerted as
+# picks. Everything else (e.g. tennis) is VISIBILITY-ONLY / UNVALIDATED and the
+# dashboard badges it. Mirrors app/pipeline.visibility_only_sports (the runtime
+# set), but is the warehouse-path source of truth: the restart-durability query
+# has no access to the in-memory pipeline registry.
+_VALIDATED_SPORT_PREFIXES = ("soccer", "basketball")
+
+
+def _is_unvalidated_sport(sport_key: str) -> bool:
+    return not sport_key.startswith(_VALIDATED_SPORT_PREFIXES)
 
 
 async def latest_available_games_with_events(
@@ -276,9 +307,7 @@ async def latest_available_games_with_events(
         .join(home, Event.home_team_id == home.id)
         .join(away, Event.away_team_id == away.id)
         .outerjoin(OddsSnapshot, OddsSnapshot.event_id == Event.id)
-        .where(
-            (Event.starts_at >= event_cutoff) | (OddsSnapshot.ingested_at >= recent_odds_cutoff)
-        )
+        .where((Event.starts_at >= event_cutoff) | (OddsSnapshot.ingested_at >= recent_odds_cutoff))
         .group_by(
             Sport.key,
             Sport.name,
@@ -292,11 +321,17 @@ async def latest_available_games_with_events(
         .limit(limit)
     )
     if sport is None:
+        # Include the validated alerting sports AND visibility-only sports
+        # (tennis): the in-memory pipeline publishes tennis to AVAILABLE GAMES,
+        # so the restart-durability fallback must too — otherwise tennis vanishes
+        # from the view (with its UNVALIDATED badge) until the first poll.
         stmt = stmt.where(
             (Sport.key == "soccer")
             | Sport.key.startswith("soccer_")
             | (Sport.key == "basketball")
             | Sport.key.startswith("basketball_")
+            | (Sport.key == "tennis")
+            | Sport.key.startswith("tennis_")
         )
     else:
         stmt = stmt.where((Sport.key == sport) | Sport.key.startswith(f"{sport}_"))
@@ -346,6 +381,11 @@ async def latest_available_games_with_events(
                     if (updated_at or last_captured_at or starts_at) is not None
                     else None
                 ),
+                # Mirrors the in-memory pipeline contract: VISIBILITY-ONLY sports
+                # (tennis) carry unvalidated=True so the dashboard badges them;
+                # validated football/NBA rows carry False. Always present so the
+                # restart-durability path never strips the doctrine-safety flag.
+                "unvalidated": _is_unvalidated_sport(sport_key),
             }
         )
     return payload
