@@ -61,6 +61,28 @@ def test_odds_api_key_rotation_drops_empties() -> None:
     assert s.odds_api_keys() == ("test-key-one", "test-key-three")
 
 
+def test_arcadia_proxy_urls_parse_without_secret_leak() -> None:
+    s = make_settings(
+        arcadia_proxy_urls=(
+            "http://user-one:pass-one@proxy-one.example:8000,"
+            "https://user-two:pass-two@proxy-two.example:8443"
+        )
+    )
+    assert s.arcadia_proxies() == (
+        "http://user-one:pass-one@proxy-one.example:8000",
+        "https://user-two:pass-two@proxy-two.example:8443",
+    )
+
+
+def test_bad_arcadia_proxy_url_error_does_not_echo_secret() -> None:
+    secret = "leaky-password"
+    with pytest.raises(ValidationError) as excinfo:
+        make_settings(arcadia_proxy_urls=f"http://user:{secret}@proxy.example")
+    msg = str(excinfo.value)
+    assert secret not in msg
+    assert "proxy.example" not in msg
+
+
 def test_public_app_bind_requires_dashboard_auth() -> None:
     with pytest.raises(ValidationError, match="APP_HOST_BIND exposes the dashboard"):
         make_settings(app_host_bind="0.0.0.0")

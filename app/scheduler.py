@@ -170,6 +170,7 @@ def build_scheduler(
     redis: Redis,
     session_factory: "async_sessionmaker | None" = None,
     ledger: DailyExposureLedger | None = None,
+    arcadia_http_client: httpx.AsyncClient | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -425,7 +426,7 @@ def build_scheduler(
 
         arcadia_capture = PinnacleArcadiaCapture(
             client=PinnacleArcadiaClient(
-                http_client,
+                arcadia_http_client or http_client,
                 base_url=settings.arcadia_base_url,
                 guest_key=settings.arcadia_guest_key,
             ),

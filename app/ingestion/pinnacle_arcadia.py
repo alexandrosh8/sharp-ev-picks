@@ -235,6 +235,37 @@ class _MarketSource(Protocol):
     async def fetch_straight_markets(self, sport_id: int) -> list[dict[str, Any]]: ...
 
 
+class _RoundRobinTransport(httpx.AsyncBaseTransport):
+    """Route each request through the next configured proxy transport."""
+
+    def __init__(self, transports: Sequence[httpx.AsyncBaseTransport]) -> None:
+        if not transports:
+            raise ValueError("at least one transport is required")
+        self._transports = tuple(transports)
+        self._next_index = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        transport = self._transports[self._next_index % len(self._transports)]
+        self._next_index += 1
+        return await transport.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        for transport in self._transports:
+            await transport.aclose()
+
+
+def build_arcadia_proxy_http_client(proxy_urls: Sequence[str]) -> httpx.AsyncClient:
+    """Build an Arcadia-only client with rotating outbound proxies.
+
+    The proxy URLs may contain credentials. They must never be logged or stored
+    in tracked files; callers pass them from Settings/.env only.
+    """
+    transports = tuple(
+        httpx.AsyncHTTPTransport(proxy=proxy_url, trust_env=False) for proxy_url in proxy_urls
+    )
+    return httpx.AsyncClient(transport=_RoundRobinTransport(transports), trust_env=False)
+
+
 class PinnacleArcadiaClient:
     """Read-only client for the public Pinnacle guest JSON API. GET-only.
 

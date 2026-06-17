@@ -55,14 +55,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "today's earlier picks are not counted against it",
             type(exc).__name__,
         )
+    arcadia_http_client: httpx.AsyncClient | None = None
+    arcadia_proxy_urls = settings.arcadia_proxies()
+    if arcadia_proxy_urls:
+        from app.ingestion.pinnacle_arcadia import build_arcadia_proxy_http_client
+
+        arcadia_http_client = build_arcadia_proxy_http_client(arcadia_proxy_urls)
+        logger.info("arcadia outbound proxy rotation enabled: %d proxies", len(arcadia_proxy_urls))
     scheduler = build_scheduler(
-        settings, http_client, redis, session_factory=session_factory, ledger=ledger
+        settings,
+        http_client,
+        redis,
+        session_factory=session_factory,
+        ledger=ledger,
+        arcadia_http_client=arcadia_http_client,
     )
     scheduler.start()
     try:
         yield
     finally:
         scheduler.shutdown(wait=False)
+        if arcadia_http_client is not None:
+            await arcadia_http_client.aclose()
         await http_client.aclose()
         await redis.aclose()
         await engine.dispose()

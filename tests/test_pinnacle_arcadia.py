@@ -24,6 +24,7 @@ from app.ingestion.pinnacle_arcadia import (
     PinnacleArcadiaCapture,
     PinnacleArcadiaClient,
     PinnacleArcadiaError,
+    _RoundRobinTransport,
     american_to_decimal,
     extract_moneyline_quotes,
     parse_matchups,
@@ -254,6 +255,36 @@ async def test_client_sends_key_only_when_set() -> None:
     await _make_client(handler).fetch_matchups(33)
     await _make_client(handler, guest_key="PUBLIC-CONST").fetch_matchups(33)
     assert seen == [None, "PUBLIC-CONST"]
+
+
+class _NamedTransport(httpx.AsyncBaseTransport):
+    def __init__(self, name: str, seen: list[str]) -> None:
+        self._name = name
+        self._seen = seen
+        self.closed = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self._seen.append(self._name)
+        return httpx.Response(200, json=[{"proxy": self._name}], request=request)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_round_robin_transport_rotates_and_closes_children() -> None:
+    seen: list[str] = []
+    first = _NamedTransport("first", seen)
+    second = _NamedTransport("second", seen)
+    transport = _RoundRobinTransport((first, second))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        for _ in range(3):
+            response = await client.get("https://example.test/path")
+            assert response.status_code == 200
+
+    assert seen == ["first", "second", "first"]
+    assert first.closed is True
+    assert second.closed is True
 
 
 async def test_client_non_200_raises_without_url_or_key() -> None:

@@ -6,8 +6,9 @@ error. There is no code anywhere that reads these flags to enable anything.
 """
 
 from functools import lru_cache
+from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.edge.gates import GatePolicy
@@ -97,11 +98,32 @@ def parse_odds_bands(raw: str) -> tuple[tuple[float, float], ...]:
     return tuple(bands)
 
 
+def parse_proxy_urls(raw: str, env_name: str = "ARCADIA_PROXY_URLS") -> tuple[str, ...]:
+    """Parse comma/newline separated proxy URLs without ever echoing secrets."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for idx, entry in enumerate(raw.replace("\n", ",").split(","), start=1):
+        url = entry.strip()
+        if not url:
+            continue
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.port is None:
+            raise ValueError(
+                f"{env_name}: proxy entry #{idx} must be http(s)://user:pass@host:port"
+            )
+        if url in seen:
+            raise ValueError(f"{env_name}: duplicate proxy entry #{idx}")
+        seen.add(url)
+        urls.append(url)
+    return tuple(urls)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_env: str = "local"
@@ -418,6 +440,12 @@ class Settings(BaseSettings):
     # short interval just tracks repricings; near kickoff is what matters. The
     # >=30s floor blocks hammering-by-typo on a free source.
     arcadia_poll_interval_seconds: int = Field(default=120, ge=30)
+    # Optional outbound proxies for Arcadia/Pinnacle archive capture only.
+    # Store real values in .env as comma-separated http(s) proxy URLs:
+    # http://user:pass@host:port,http://user:pass@host:port
+    # The parser deliberately never echoes the configured URLs in validation
+    # errors because proxy usernames/passwords are secrets.
+    arcadia_proxy_urls: SecretStr = SecretStr("")
     # When true, the settlement-time snapshot close ALSO injects the STRICT
     # cross-source match's Pinnacle ARCHIVE close (app/resolution, ADR-0013), so
     # incremental CLV anchors on a real sharp close. OFF by default: it changes
@@ -534,12 +562,17 @@ class Settings(BaseSettings):
                 "STAKE_MAX_DRAWDOWN and STAKE_MAX_DRAWDOWN_PROBABILITY define one "
                 "constraint — set both or neither."
             )
+        parse_proxy_urls(self.arcadia_proxy_urls.get_secret_value())
         return self
 
     def odds_api_keys(self) -> tuple[str, ...]:
         """Configured Odds API keys for rotation, in order, empties dropped."""
         keys = (self.odds_api_key, self.odds_api_key_1, self.odds_api_key_2, self.odds_api_key_3)
         return tuple(k for k in keys if k)
+
+    def arcadia_proxies(self) -> tuple[str, ...]:
+        """Configured Arcadia/Pinnacle outbound proxies, in rotation order."""
+        return parse_proxy_urls(self.arcadia_proxy_urls.get_secret_value())
 
 
 def gate_policy(settings: Settings) -> GatePolicy:
