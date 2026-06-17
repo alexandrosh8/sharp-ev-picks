@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from app.backtesting.live_evidence import SettledPickRow
+    from app.resolution.shadow import ShadowOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -827,6 +828,106 @@ async def resolve_pinnacle_close_snaps(
             snap.model_copy(update={"event_id": pick_external_ref, "selection": mapped_selection})
         )
     return out
+
+
+async def shadow_match_rate_outcomes(
+    session: AsyncSession,
+    *,
+    since: datetime | None = None,
+    max_day_drift: int = 1,
+) -> "list[ShadowOutcome]":
+    """SHADOW Pinnacle-archive resolution over picks with a known kickoff — the
+    read behind GET /resolution/match-rate.
+
+    For each pick it runs the SAME strict matcher app.clv_trueup uses at
+    settlement, but writes NOTHING and attaches no close: it records only
+    whether a UNIQUE ``pinnacle_<sport>`` archive event exists for the fixture
+    and, diagnostically, how many archive events fell in the kickoff window
+    (0 = a coverage gap; >0 with no match = an alias/ambiguity gap). This is the
+    instrument ADR-0014 asks be checked before CLV_USE_PINNACLE_ARCHIVE is
+    enabled.
+
+    Population: picks whose event has a known kickoff (``Event.starts_at`` NOT
+    NULL), optionally limited to kickoffs at/after ``since``. Matching is
+    settlement-independent (a future fixture already captured in the archive
+    counts), so pass ``since`` to scope to recent fixtures when you only care
+    about closes that are realizable now.
+    """
+    from app.resolution import EventCandidate, default_aliases, match_event
+    from app.resolution.shadow import ShadowOutcome, arcadia_base_sport
+
+    home_t, away_t = aliased(Team), aliased(Team)
+    conds: list[Any] = [Event.starts_at.is_not(None)]
+    if since is not None:
+        conds.append(Event.starts_at >= since)
+    pick_rows = (
+        await session.execute(
+            select(Pick.id, Sport.key, League.key, home_t.name, away_t.name, Event.starts_at)
+            .select_from(Pick)
+            .join(Event, Pick.event_id == Event.id)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(League, Event.league_id == League.id)
+            .join(home_t, Event.home_team_id == home_t.id)
+            .join(away_t, Event.away_team_id == away_t.id)
+            .where(*conds)
+        )
+    ).all()
+    if not pick_rows:
+        return []
+
+    # Group picks by their pinnacle_<base> archive namespace; load each
+    # namespace's candidate events ONCE over the full kickoff span (+/- window)
+    # rather than one query per pick.
+    aliases = default_aliases()
+    window = timedelta(days=max_day_drift + 1)
+    by_namespace: dict[str, list[Any]] = {}
+    for row in pick_rows:
+        by_namespace.setdefault(f"pinnacle_{arcadia_base_sport(row[1])}", []).append(row)
+
+    outcomes: list[ShadowOutcome] = []
+    for pinnacle_key, picks in by_namespace.items():
+        kickoffs = [p[5] for p in picks]
+        arc_home, arc_away = aliased(Team), aliased(Team)
+        arc_rows = (
+            await session.execute(
+                select(arc_home.name, arc_away.name, Event.starts_at)
+                .join(Sport, Event.sport_id == Sport.id)
+                .join(arc_home, Event.home_team_id == arc_home.id)
+                .join(arc_away, Event.away_team_id == arc_away.id)
+                .where(
+                    Sport.key == pinnacle_key,
+                    Event.starts_at.is_not(None),
+                    Event.starts_at >= min(kickoffs) - window,
+                    Event.starts_at <= max(kickoffs) + window,
+                )
+            )
+        ).all()
+        archive = [
+            EventCandidate(ref=str(i), home=h, away=a, kickoff=ko)
+            for i, (h, a, ko) in enumerate(arc_rows)
+        ]
+        for pick_id, sport_key, league_key, home, away, kickoff in picks:
+            # Same day window the matcher uses internally — count first so a
+            # no-coverage pick is distinguishable from a strict-rejection.
+            in_window = [
+                c for c in archive if abs((c.kickoff.date() - kickoff.date()).days) <= max_day_drift
+            ]
+            matched = (
+                match_event(
+                    home, away, kickoff, in_window, aliases=aliases, max_day_drift=max_day_drift
+                )
+                is not None
+            )
+            outcomes.append(
+                ShadowOutcome(
+                    pick_id=pick_id,
+                    sport=sport_key,
+                    league=league_key,
+                    candidates_in_window=len(in_window),
+                    matched=matched,
+                )
+            )
+    return outcomes
 
 
 PickPersistOutcome = Literal["inserted", "upgraded", "duplicate"]

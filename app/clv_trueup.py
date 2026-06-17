@@ -30,6 +30,7 @@ from app.edge.value import effective_odds
 from app.ingestion.base import OddsLoader
 from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
+from app.resolution.shadow import arcadia_base_sport
 from app.schemas.odds import OddsSnapshotIn
 from app.settlement.engine import STALE_NULL_KICKOFF_AGE
 from app.storage.models import Event, Pick, Sport, Team
@@ -490,9 +491,6 @@ async def finalize_closing_from_snapshots(
     return True
 
 
-_ARCADIA_SPORTS = frozenset({"soccer", "tennis", "basketball", "american_football"})
-
-
 async def _pinnacle_archive_close(
     session: "AsyncSession",
     pick: Pick,
@@ -519,7 +517,7 @@ async def _pinnacle_archive_close(
     if info is None:
         return []
     sport_key, home, away = info
-    base = sport_key if sport_key in _ARCADIA_SPORTS else sport_key.split("_", 1)[0]
+    base = arcadia_base_sport(sport_key)
     return await resolve_pinnacle_close_snaps(
         session,
         pinnacle_sport_key=f"pinnacle_{base}",

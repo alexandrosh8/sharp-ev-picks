@@ -179,3 +179,24 @@ def test_seed_alias_canonicals_do_not_collide() -> None:
     data = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
     canonicals = [normalize_name(name) for name in data["teams"]]
     assert len(canonicals) == len(set(canonicals))
+
+
+def test_seed_aliases_resolve_cross_source_name_variants() -> None:
+    """Real OddsPortal-vs-Pinnacle fixture name variants surfaced by the shadow
+    match-rate harness (scripts/reports/resolution_match_rate.py) must
+    canonicalize equal — else a true fixture goes unmatched and its sharp close
+    is lost. Each pair is a VERIFIED same fixture (same opponent + kickoff)."""
+    table = AliasTable.from_seed()
+    pairs = [
+        ("Bosnia & Herzegovina", "Bosnia and Herzegovina"),  # & vs and
+        ("Maghreb Fez", "Maghreb Fes"),  # transliteration
+        ("Difaa El Jadidi", "Difaa El Jadida"),  # transliteration
+        ("Landvetter", "Landvetter IS"),  # club suffix
+        ("FC Gareji Sagarejo", "Gareji"),  # long vs short name
+        ("AS Monaco", "Monaco"),  # AS prefix (basketball LNB)
+    ]
+    for oddsportal_name, pinnacle_name in pairs:
+        assert table.canonical(oddsportal_name) == table.canonical(pinnacle_name), (
+            oddsportal_name,
+            pinnacle_name,
+        )

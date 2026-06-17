@@ -533,3 +533,24 @@
     tennis remains prospective self-captured Pinnacle arcadia snapshots (already
     shipped). DO NOT re-evaluate: pinnapi, rozzac90/pinnacle, odds-arb-scanner,
     Danymcflyy/OddsTracker, sportsdataverse/hoopR.
+
+2026-06-17 — SHADOW match-rate harness (ADR-0014 validation precondition) BUILT
+on branch feat/resolution-match-rate-shadow. Pure aggregator
+app/resolution/shadow.py (ShadowOutcome / GroupRate / MatchRateReport +
+summarize*match_rate; numpy/stdlib only, inside the pure-math boundary) +
+impure DB reader repositories.shadow_match_rate_outcomes, which runs the SAME
+strict matcher app.clv_trueup uses at settlement over picks with a known
+kickoff (Event.starts_at NOT NULL, optional `since`), writes NOTHING and
+attaches no close — it only records matched + candidates_in_window. Bound to
+the app two ways: GET /resolution/match-rate (auth, read-only, ?days=N) and
+scripts/reports/resolution_match_rate.py (--days / --json). DRY: the
+pinnacle*<base> namespace logic now lives once in shadow.arcadia*base_sport
+(clv_trueup imports it; its private \_ARCADIA_SPORTS removed). Diagnostic split
+is the point — no_archive_candidates = COVERAGE gap, unmatched_with_candidates
+= ALIAS gap (extend aliases_seed.json). LIVE RESULT 2026-06-17: 56 picks, 0
+matched, ALL 56 = no_archive_candidates — the pinnacle*<sport> archive is
+EMPTY (ARCADIA_ENABLED=false, never captured). So the blocker before flipping
+CLV_USE_PINNACLE_ARCHIVE is COVERAGE, not aliasing: enable ARCADIA_ENABLED,
+let it capture a slate, then re-run to read the real match rate. 9 pure + 2 DB
+tests; ruff/mypy/full-pytest/safety all green. NOT committed (left on the
+branch for review).

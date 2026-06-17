@@ -355,6 +355,48 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
     assert ev["by_anchor"] is None
 
 
+def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """GET /resolution/match-rate serializes the strict shadow match-rate report
+    (overall rate + coverage/alias diagnostic buckets). The DB read is stubbed
+    at the route's own import; the pure summarizer runs for real."""
+    from app.api import routes
+    from app.resolution.shadow import ShadowOutcome
+
+    async def fake_outcomes(session, *, since=None):  # type: ignore[no-untyped-def]
+        return [
+            ShadowOutcome(
+                pick_id=1, sport="soccer", league="soccer_epl", candidates_in_window=1, matched=True
+            ),
+            ShadowOutcome(
+                pick_id=2,
+                sport="soccer",
+                league="soccer_epl",
+                candidates_in_window=1,
+                matched=False,
+            ),  # alias/ambiguity gap
+            ShadowOutcome(
+                pick_id=3,
+                sport="soccer",
+                league="soccer_epl",
+                candidates_in_window=0,
+                matched=False,
+            ),  # coverage gap
+        ]
+
+    monkeypatch.setattr(routes, "shadow_match_rate_outcomes", fake_outcomes)
+    body = TestClient(make_app()).get("/resolution/match-rate").json()
+    assert body["total"] == 3
+    assert body["matched"] == 1
+    assert body["match_rate"] == pytest.approx(1 / 3)
+    assert body["no_archive_candidates"] == 1
+    assert body["unmatched_with_candidates"] == 1
+    sport = body["by_sport"][0]
+    assert sport["key"] == "soccer"
+    assert sport["total"] == 3
+    assert sport["matched"] == 1
+    assert sport["match_rate"] == pytest.approx(1 / 3)
+
+
 def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
     """Live-evidence panel + execution helper on the dashboard: honest-n
     insufficient states, hidden-until-served panel, the 'ok >=' odds-floor
