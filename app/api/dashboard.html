@@ -900,27 +900,6 @@
       <span class="chip" id="chip-deps" style="display: none"></span>
     </div>
 
-    <!-- onboarding explainer: frames CLV + stars BEFORE the data (the footer
-         is too late/passive). Dismissible and remembered via localStorage so a
-         returning operator is never re-nagged. Static author copy. -->
-    <div class="intro" id="intro" role="note">
-      <span class="intro-txt">
-        <b>How to read this:</b> CLV = your pick's price vs the sharp closing
-        line — consistently positive CLV is the proof of edge, <b>not</b> a
-        profit guarantee. ★ stars = confidence in the EDGE, not your chance to
-        win. Always confirm the live price at the book and review manually —
-        this system never places bets.
-      </span>
-      <button
-        id="intro-dismiss"
-        class="intro-x"
-        type="button"
-        aria-label="Dismiss this note"
-      >
-        ×
-      </button>
-    </div>
-
     <!-- unmissable full-width banner — ONLY when /picks itself fails -->
     <div class="banner" id="offline-banner" style="display: none"></div>
 
@@ -1163,6 +1142,26 @@
       ><span id="legend-clv"></span>
     </div>
 
+    <!-- onboarding explainer (page-bottom): how to read CLV + stars.
+         Dismissible and remembered via localStorage. Static author copy. -->
+    <div class="intro" id="intro" role="note">
+      <span class="intro-txt">
+        <b>How to read this:</b> CLV = your pick's price vs the sharp closing
+        line — consistently positive CLV is the proof of edge, <b>not</b> a
+        profit guarantee. ★ stars = confidence in the EDGE, not your chance to
+        win. Always confirm the live price at the book and review manually —
+        this system never places bets.
+      </span>
+      <button
+        id="intro-dismiss"
+        class="intro-x"
+        type="button"
+        aria-label="Dismiss this note"
+      >
+        ×
+      </button>
+    </div>
+
     <footer>
       auto-refresh 60s · data <code>GET /games</code> +
       <code>GET /picks</code> · CLV = closing line value — consistently positive
@@ -1311,6 +1310,25 @@
         if (!p.revalidated_at) return false;
         return Date.now() - new Date(p.revalidated_at) < verifiedWindowMs();
       }
+      // A pick whose match has KICKED OFF is no longer a pre-match LIVE
+      // opportunity: you can't take the pre-kickoff price, and the backend stops
+      // re-pricing once a game starts (the last pre-kickoff price is the de-facto
+      // close). Such picks leave LIVE and sit under UNVERIFIED, where Settle
+      // lives, until a result is recorded. TBD (starts_at null) = not started.
+      function hasStarted(p) {
+        return (
+          p.starts_at != null && new Date(p.starts_at).getTime() <= Date.now()
+        );
+      }
+      // LIVE = alerted, freshly re-priced, AND not yet kicked off. UNVERIFIED is
+      // the complement among open picks (stale re-price OR kicked off / awaiting
+      // settle), so the two partition every open pick with no gaps/overlap.
+      function inLiveTab(p) {
+        return p.status === "alerted" && isVerified(p) && !hasStarted(p);
+      }
+      function inUnverifiedTab(p) {
+        return p.status === "alerted" && !inLiveTab(p);
+      }
 
       function emptyRow(tbody) {
         const tr = document.createElement("tr");
@@ -1325,13 +1343,14 @@
           title.textContent = "NO VERIFIED LIVE PICKS";
           hint.textContent =
             "Picks appear here once the current poll cycle re-checks their " +
-            "odds (one full cycle, up to ~40 min); older ones awaiting a " +
-            "re-price are under the UNVERIFIED tab.";
+            "odds (one full cycle, up to ~40 min) AND the match has not kicked " +
+            "off yet; stale or kicked-off picks are under the UNVERIFIED tab.";
         } else if (STATUS_TAB === "unverified") {
           title.textContent = "NO UNVERIFIED PICKS";
           hint.textContent =
             "Open picks land here when their last re-price is older than the " +
-            "verified window; they return to LIVE on the next poll cycle.";
+            "verified window, OR the match has kicked off (awaiting a result — " +
+            "use Settle). Pre-kickoff ones return to LIVE on the next cycle.";
         } else if (STATUS_TAB === "settled") {
           title.textContent = "NO SETTLED PICKS";
           hint.textContent =
@@ -2021,13 +2040,12 @@
         const tier = $("f-tier").value;
         const q = $("f-search").value.trim().toLowerCase();
         const settledView = STATUS_TAB === "settled";
-        // LIVE = verified open · UNVERIFIED = open past its re-price window ·
-        // SETTLED = results recorded. isVerified() window logic unchanged.
+        // LIVE = freshly-repriced open picks that have NOT kicked off ·
+        // UNVERIFIED = open picks that are stale OR have kicked off (awaiting
+        // settle) · SETTLED = results recorded.
         const matchesTab = (p) => {
-          if (STATUS_TAB === "live")
-            return p.status === "alerted" && isVerified(p);
-          if (STATUS_TAB === "unverified")
-            return p.status === "alerted" && !isVerified(p);
+          if (STATUS_TAB === "live") return inLiveTab(p);
+          if (STATUS_TAB === "unverified") return inUnverifiedTab(p);
           if (STATUS_TAB === "settled") return p.status === "settled";
           return true;
         };
@@ -2054,11 +2072,8 @@
         // out of the verified window it moves LIVE -> UNVERIFIED. The count
         // shows where those settle-able picks actually are.
         const tabCounts = {
-          live: scoped.filter((p) => p.status === "alerted" && isVerified(p))
-            .length,
-          unverified: scoped.filter(
-            (p) => p.status === "alerted" && !isVerified(p),
-          ).length,
+          live: scoped.filter(inLiveTab).length,
+          unverified: scoped.filter(inUnverifiedTab).length,
           settled: scoped.filter((p) => p.status === "settled").length,
         };
         const TAB_LABELS = {
@@ -2412,7 +2427,9 @@
         // exist purely as CLV evidence) — each caption says "premium".
         const premium = PICKS.filter((p) => tierOf(p) === "premium");
         const open = premium.filter((p) => p.status === "alerted");
-        const verified = open.filter(isVerified);
+        // Match the LIVE tab exactly: verified AND not yet kicked off, so the
+        // card count never disagrees with the LIVE (n) tab.
+        const verified = open.filter((p) => isVerified(p) && !hasStarted(p));
         // Match the default OPEN (VERIFIED) + PREMIUM view; surface the
         // rest in the caption instead of silently disagreeing with the
         // table below.
