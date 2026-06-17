@@ -197,7 +197,12 @@ _LOGIN_HTML = """<!doctype html>
     include_in_schema=False,
     dependencies=[Depends(require_dashboard_auth)],
 )
-async def dashboard() -> str:
+async def dashboard(response: Response) -> str:
+    # Never browser-cache the HTML shell: a deploy ships new structure (panels,
+    # badges, banner) but the page only reloads on a full refresh — the 60s
+    # auto-refresh re-fetches DATA, not the page. A cached shell would mask the
+    # update behind a stale tab (and caching auth-gated HTML is undesirable).
+    response.headers["Cache-Control"] = "no-store"
     return _DASHBOARD_HTML
 
 

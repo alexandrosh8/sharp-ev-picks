@@ -397,6 +397,17 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     assert sport["match_rate"] == pytest.approx(1 / 3)
 
 
+def test_dashboard_html_is_not_browser_cached() -> None:
+    """The dashboard HTML shell must not be browser-cached: a deploy ships new
+    structure (panels, badges, banner) but the page only reloads on a full
+    refresh — the 60s auto-refresh re-fetches DATA, not the page. A cached shell
+    masks the update behind a stale tab. Cache-Control: no-store forces a fresh
+    shell each load."""
+    res = TestClient(make_app()).get("/")
+    assert res.status_code == 200
+    assert "no-store" in res.headers.get("cache-control", "").lower()
+
+
 def test_dashboard_has_onboarding_clv_explainer() -> None:
     """A dismissible, plain-language explainer frames CLV + confidence stars
     BEFORE the data (not just the footer): CLV is proof of edge — not a profit
