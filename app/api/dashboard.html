@@ -23,8 +23,8 @@
         --panel: #0d130d;
         --line: #1a241a;
         --text: #cfe3cf;
-        --dim: #5e7a5e;
-        --faint: #6b8a6b;
+        --dim: #708070;
+        --faint: #7f977f;
         --pos: #00ff9d;
         --pos-soft: #2bd576;
         --neg: #ff5c57;
@@ -178,6 +178,44 @@
         border-radius: 4px;
         background: rgba(255, 92, 87, 0.07);
         letter-spacing: 0.03em;
+      }
+
+      /* onboarding explainer — frames CLV/stars before the data; dismissible
+         and remembered (localStorage) so it never re-nags. */
+      .intro {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        margin: 0 0 14px;
+        padding: 9px 12px;
+        border: 1px solid rgba(106, 215, 255, 0.28);
+        border-radius: 4px;
+        background: rgba(106, 215, 255, 0.05);
+        font-size: 11px;
+        line-height: 1.55;
+        color: var(--text);
+      }
+      .intro b {
+        color: var(--info);
+        font-weight: 700;
+      }
+      .intro-txt {
+        flex: 1;
+      }
+      .intro-x {
+        width: auto;
+        border: 0;
+        background: transparent;
+        color: var(--dim);
+        font-size: 16px;
+        line-height: 1;
+        padding: 0 4px;
+        cursor: pointer;
+      }
+      .intro-x:hover {
+        color: var(--info);
+        background: transparent;
+        border-color: transparent;
       }
 
       /* --- summary cards -------------------------------------------- */
@@ -862,6 +900,27 @@
       <span class="chip" id="chip-deps" style="display: none"></span>
     </div>
 
+    <!-- onboarding explainer: frames CLV + stars BEFORE the data (the footer
+         is too late/passive). Dismissible and remembered via localStorage so a
+         returning operator is never re-nagged. Static author copy. -->
+    <div class="intro" id="intro" role="note">
+      <span class="intro-txt">
+        <b>How to read this:</b> CLV = your pick's price vs the sharp closing
+        line — consistently positive CLV is the proof of edge, <b>not</b> a
+        profit guarantee. ★ stars = confidence in the EDGE, not your chance to
+        win. Always confirm the live price at the book and review manually —
+        this system never places bets.
+      </span>
+      <button
+        id="intro-dismiss"
+        class="intro-x"
+        type="button"
+        aria-label="Dismiss this note"
+      >
+        ×
+      </button>
+    </div>
+
     <!-- unmissable full-width banner — ONLY when /picks itself fails -->
     <div class="banner" id="offline-banner" style="display: none"></div>
 
@@ -966,6 +1025,44 @@
             </tr>
             <tr>
               <td colspan="5"><div class="skelbar"></div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Pinnacle archive coverage: strict cross-source match rate of picks to
+         the captured Pinnacle sharp-close archive (ADR-0014). The readiness
+         dial for CLV_USE_PINNACLE_ARCHIVE — shadow-only, changes NO pick.
+         Lazy-loaded on expand (the query scans picks + archive) so it never
+         taxes the 60s refresh loop. -->
+    <div class="games-head">
+      <div class="evtitle">Pinnacle archive coverage</div>
+      <span class="stamp" id="archive-count">—</span>
+      <button
+        id="toggle-archive"
+        class="section-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="archive-panel"
+      >
+        Show
+      </button>
+    </div>
+    <div id="archive-panel" hidden>
+      <div class="sub" id="archive-purpose"></div>
+      <div class="tablewrap gameswrap">
+        <table id="archive-table">
+          <thead>
+            <tr>
+              <th>Sport</th>
+              <th>Matched</th>
+              <th>Rate</th>
+            </tr>
+          </thead>
+          <tbody id="archive-rows">
+            <tr>
+              <td colspan="3"><div class="skelbar"></div></td>
             </tr>
           </tbody>
         </table>
@@ -1079,6 +1176,12 @@
       let GAMES = [];
       let GAMES_ERR = null;
       let GAMES_OPEN = false;
+      // Pinnacle archive coverage panel (lazy: fetched on first expand, not in
+      // the 60s loop). ARCHIVE = last GET /resolution/match-rate payload.
+      let ARCHIVE = null;
+      let ARCHIVE_OPEN = false;
+      let ARCHIVE_LOADED = false;
+      let ARCHIVE_LOADING = false;
       // Active status tab: "live" | "unverified" | "settled" (replaces the
       // old #f-status select). Default = LIVE (verified open premium picks).
       let STATUS_TAB = "live";
@@ -1130,7 +1233,17 @@
       function badge(text, cls) {
         const s = document.createElement("span");
         s.className = "badge " + cls;
-        s.textContent = text; // untrusted strings only ever via textContent
+        // Colorblind-safe: a polarity glyph so won/lost & beat-close/not are
+        // never hue-only. Only pass/fail classes get one (neutral/info are not
+        // outcomes); glyph is decorative (aria-hidden), label stays the text.
+        const glyph = { "b-pos": "✓ ", "b-neg": "✗ " }[cls];
+        if (glyph) {
+          const g = document.createElement("span");
+          g.textContent = glyph;
+          g.setAttribute("aria-hidden", "true");
+          s.appendChild(g);
+        }
+        s.appendChild(document.createTextNode(text)); // untrusted via text node
         return s;
       }
 
@@ -1240,6 +1353,112 @@
         $("games-panel").hidden = !GAMES_OPEN;
         $("toggle-games").setAttribute("aria-expanded", String(GAMES_OPEN));
         $("toggle-games").textContent = GAMES_OPEN ? "Hide" : "Show";
+      }
+
+      // --- Pinnacle archive coverage (lazy) --------------------------------
+      const ratePct = (r) =>
+        r === null || r === undefined
+          ? "n/a"
+          : (Number(r) * 100).toFixed(1) + "%";
+
+      function setArchiveOpen(open) {
+        ARCHIVE_OPEN = !!open;
+        $("archive-panel").hidden = !ARCHIVE_OPEN;
+        $("toggle-archive").setAttribute("aria-expanded", String(ARCHIVE_OPEN));
+        $("toggle-archive").textContent = ARCHIVE_OPEN ? "Hide" : "Show";
+        // Fetch only on first expand — the query scans picks + archive, so it
+        // stays off the 60s refresh loop.
+        if (ARCHIVE_OPEN && !ARCHIVE_LOADED && !ARCHIVE_LOADING) loadArchive();
+      }
+
+      async function loadArchive() {
+        ARCHIVE_LOADING = true;
+        $("archive-count").classList.remove("err");
+        $("archive-count").textContent = "loading…";
+        try {
+          const res = await fetchWithTimeout("/resolution/match-rate?days=180");
+          if (res.status === 401) {
+            window.location.assign("/login");
+            return;
+          }
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          ARCHIVE = await res.json();
+          ARCHIVE_LOADED = true;
+          renderArchive();
+        } catch (err) {
+          $("archive-count").classList.add("err");
+          $("archive-count").textContent = "coverage unavailable";
+          const tbody = $("archive-rows");
+          tbody.replaceChildren();
+          const tr = document.createElement("tr");
+          const cell = td(
+            tr,
+            "GET /resolution/match-rate failed — " + errLabel(err),
+            "empty",
+          );
+          cell.colSpan = 3;
+          tbody.appendChild(tr);
+        } finally {
+          ARCHIVE_LOADING = false;
+        }
+      }
+
+      function renderArchive() {
+        const a = ARCHIVE;
+        if (!a) return;
+        const total = Number(a.total) || 0;
+        $("archive-count").classList.remove("err");
+        $("archive-count").textContent =
+          a.matched + " / " + total + " matched · " + ratePct(a.match_rate);
+        $("archive-purpose").textContent =
+          "Strict cross-source match of picks (known kickoff, last 180d) to the " +
+          "captured Pinnacle sharp-close archive — the readiness dial for the " +
+          "CLV_USE_PINNACLE_ARCHIVE flip. Shadow-only: it changes no pick. Of " +
+          total +
+          " picks, " +
+          (a.no_archive_candidates || 0) +
+          " have no Pinnacle event in window (coverage gap — accrues as capture " +
+          "runs) and " +
+          (a.unmatched_with_candidates || 0) +
+          " have one but no name match (alias gap). Enable the archive in CLV " +
+          "only after a healthy rate AND a held-out CLV backtest.";
+        const tbody = $("archive-rows");
+        tbody.replaceChildren();
+        if (!total) {
+          const tr = document.createElement("tr");
+          const cell = td(
+            tr,
+            "No picks with a known kickoff to evaluate yet.",
+            "empty",
+          );
+          cell.colSpan = 3;
+          tbody.appendChild(tr);
+          return;
+        }
+        const bySport = a.by_sport || [];
+        if (!bySport.length) {
+          const tr = document.createElement("tr");
+          const cell = td(
+            tr,
+            "Archive empty — enable ARCADIA_ENABLED to start capturing Pinnacle closes.",
+            "empty",
+          );
+          cell.colSpan = 3;
+          tbody.appendChild(tr);
+          return;
+        }
+        bySport.forEach((g) => {
+          const tr = document.createElement("tr");
+          td(tr, SPORT_LABELS[g.key] || g.key);
+          td(tr, g.matched + " / " + g.total);
+          const rateCell = td(tr, ratePct(g.match_rate));
+          if (g.match_rate !== null && g.match_rate !== undefined) {
+            const r = Number(g.match_rate);
+            rateCell.style.color =
+              r >= 0.5 ? "var(--pos)" : r > 0 ? "var(--warn)" : "var(--neg)";
+          }
+          tbody.appendChild(tr);
+        });
       }
 
       // Resolve a real http(s) URL for the Match external-link icon. Prefers
@@ -2680,6 +2899,9 @@
       $("toggle-games").addEventListener("click", () =>
         setGamesOpen(!GAMES_OPEN),
       );
+      $("toggle-archive").addEventListener("click", () =>
+        setArchiveOpen(!ARCHIVE_OPEN),
+      );
       $("f-game-sport").addEventListener("change", renderGames);
       $("f-game-search").addEventListener("input", renderGames);
       $("refresh").addEventListener("click", load);
@@ -2709,7 +2931,29 @@
           "not a profit guarantee.";
       }
       fillStaticCopy();
+      // Onboarding explainer: visible by default, hidden once dismissed
+      // (remembered via localStorage so a returning operator isn't re-nagged).
+      (function initIntro() {
+        const el = $("intro");
+        if (!el) return;
+        let dismissed = false;
+        try {
+          dismissed = localStorage.getItem("pt_intro_dismissed") === "1";
+        } catch (e) {
+          dismissed = false;
+        }
+        el.hidden = dismissed;
+        $("intro-dismiss").addEventListener("click", () => {
+          el.hidden = true;
+          try {
+            localStorage.setItem("pt_intro_dismissed", "1");
+          } catch (e) {
+            /* private mode: dismiss for this session only */
+          }
+        });
+      })();
       setGamesOpen(false);
+      setArchiveOpen(false);
       load();
       setInterval(load, 60000);
     </script>

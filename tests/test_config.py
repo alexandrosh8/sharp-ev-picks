@@ -61,6 +61,34 @@ def test_odds_api_key_rotation_drops_empties() -> None:
     assert s.odds_api_keys() == ("test-key-one", "test-key-three")
 
 
+def test_public_app_bind_requires_dashboard_auth() -> None:
+    with pytest.raises(ValidationError, match="APP_HOST_BIND exposes the dashboard"):
+        make_settings(app_host_bind="0.0.0.0")
+
+
+def test_public_app_bind_passes_with_dashboard_auth() -> None:
+    s = make_settings(
+        app_host_bind="0.0.0.0",
+        dashboard_auth_enabled=True,
+        dashboard_auth_password_hash="pbkdf2_sha256$1$abcd$1234",
+        dashboard_session_secret="test-session-secret",
+    )
+    assert s.app_host_bind == "0.0.0.0"
+
+
+def test_dashboard_auth_password_hash_format_is_validated() -> None:
+    with pytest.raises(ValidationError, match="DASHBOARD_AUTH_PASSWORD_HASH must look like"):
+        make_settings(
+            dashboard_auth_enabled=True,
+            dashboard_auth_password_hash="pbkdf2_sha256",
+            dashboard_session_secret="test-session-secret",
+        )
+
+
+def test_loopback_app_bind_does_not_require_dashboard_auth() -> None:
+    assert make_settings(app_host_bind="127.0.0.1").dashboard_auth_enabled is False
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

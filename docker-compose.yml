@@ -99,7 +99,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://betting_ai:${POSTGRES_PASSWORD:-betting_ai}@postgres:5432/betting_ai
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "127.0.0.1:8000:8000"
+      # Default loopback is for SSH-tunnel/reverse-proxy deployments. Set
+      # APP_HOST_BIND=0.0.0.0 only after enabling DASHBOARD_AUTH_* in .env;
+      # app/config.py refuses public binds without dashboard auth.
+      - "${APP_HOST_BIND:-127.0.0.1}:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy

@@ -8,14 +8,22 @@ ambiguous -> [], out-of-window -> []). No live network.
 """
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams
+from app.resolution.shadow import summarize_match_rate
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
-from app.storage.repositories import persist_odds_snapshots, resolve_pinnacle_close_snaps
+from app.schemas.picks import PickOut, StakeBreakdownOut
+from app.storage.repositories import (
+    persist_odds_snapshots,
+    persist_pick,
+    resolve_pinnacle_close_snaps,
+    shadow_match_rate_outcomes,
+)
 
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
 KO = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
@@ -168,3 +176,105 @@ async def test_resolver_caps_cutoff_at_arcadia_kickoff(factory) -> None:  # type
     by_sel = {s.selection: s for s in out}
     # the Alpha close must be the PRE-kickoff 2.10, NOT the in-play 1.50
     assert by_sel["Alpha"].decimal_odds == pytest.approx(2.10)
+
+
+# A league key unique to this test so the shadow runner's outcomes can be
+# isolated from any committed warehouse picks (the DB is real; only THIS
+# transaction's writes roll back).
+_SHADOW_LEAGUE = "shadow-test-epl"
+
+
+def _shadow_pick(event_id: str, selection: str = "Home") -> PickOut:
+    """Minimal soccer PickOut for shadow-match-rate seeding. Matching is
+    event-level, so market/selection are irrelevant to the matcher."""
+    return PickOut(
+        pick_id="p-shadow",
+        sport="soccer",
+        league=_SHADOW_LEAGUE,
+        event=f"{event_id} fixture",
+        event_id=event_id,
+        market=Market.H2H,
+        selection=selection,
+        bookmaker="testbook",
+        decimal_odds=2.10,
+        model_probability=0.55,
+        fair_probability=0.50,
+        edge=0.05,
+        ev=0.155,
+        confidence=0.70,
+        recommended_stake_fraction=0.02,
+        recommended_stake_amount=Decimal("20.00"),
+        stake_breakdown=StakeBreakdownOut(raw_kelly=0.1, fractional=0.025, capped=True, final=0.02),
+        odds_age_seconds=30.0,
+        liquidity=None,
+        reason_summary="shadow match-rate test",
+        tier="premium",
+        created_at=KO - timedelta(days=180),
+    )
+
+
+async def test_shadow_match_rate_classifies_match_alias_gap_and_coverage_gap(factory) -> None:  # type: ignore[no-untyped-def]
+    """Shadow runner over three picks against one archived fixture:
+    A strict-matches (alias), B has the archive in-window but different teams
+    (alias/ambiguity gap), C kicks off far from any archive event (coverage
+    gap). Nothing is written; only match outcomes are reported."""
+    await _seed_pinnacle_event(factory, "pin-mu-che", "Manchester United", "Chelsea")
+    async with factory() as session:
+        # A: "Man Utd" aliases to "Manchester United", same kickoff -> matched
+        await persist_pick(
+            session,
+            _shadow_pick("evt-shadow-A"),
+            EventTeams(home="Man Utd", away="Chelsea", league=_SHADOW_LEAGUE, starts_at=KO),
+            "value-sharp-vs-soft",
+            "v3",
+        )
+        # B: archive event is in-window but teams differ -> unmatched_with_candidates
+        await persist_pick(
+            session,
+            _shadow_pick("evt-shadow-B"),
+            EventTeams(home="Gamma", away="Delta", league=_SHADOW_LEAGUE, starts_at=KO),
+            "value-sharp-vs-soft",
+            "v3",
+        )
+        # C: kickoff 30 days from any archive event -> no_archive_candidates
+        await persist_pick(
+            session,
+            _shadow_pick("evt-shadow-C"),
+            EventTeams(
+                home="Alpha",
+                away="Beta",
+                league=_SHADOW_LEAGUE,
+                starts_at=KO + timedelta(days=30),
+            ),
+            "value-sharp-vs-soft",
+            "v3",
+        )
+        await session.commit()
+        outcomes = await shadow_match_rate_outcomes(session)
+
+    mine = [o for o in outcomes if o.league == _SHADOW_LEAGUE]
+    report = summarize_match_rate(mine)
+    assert report.total == 3
+    assert report.matched == 1  # A
+    assert report.unmatched_with_candidates == 1  # B: archive present, no name match
+    assert report.no_archive_candidates == 1  # C: no archive event in window
+    by_sport = {g.key: g for g in report.by_sport}
+    assert by_sport["soccer"].total == 3
+    assert by_sport["soccer"].matched == 1
+
+
+async def test_shadow_match_rate_since_filters_old_kickoffs(factory) -> None:  # type: ignore[no-untyped-def]
+    """`since` scopes the population by kickoff: a pick before the cutoff is
+    excluded entirely from the outcomes."""
+    async with factory() as session:
+        await persist_pick(
+            session,
+            _shadow_pick("evt-shadow-old"),
+            EventTeams(home="Old", away="Timer", league=_SHADOW_LEAGUE, starts_at=KO),
+            "value-sharp-vs-soft",
+            "v3",
+        )
+        await session.commit()
+        outcomes = await shadow_match_rate_outcomes(session, since=KO + timedelta(days=1))
+
+    assert all(o.league != _SHADOW_LEAGUE for o in outcomes)

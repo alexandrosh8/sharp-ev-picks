@@ -533,3 +533,54 @@
     tennis remains prospective self-captured Pinnacle arcadia snapshots (already
     shipped). DO NOT re-evaluate: pinnapi, rozzac90/pinnacle, odds-arb-scanner,
     Danymcflyy/OddsTracker, sportsdataverse/hoopR.
+
+2026-06-17 — SHADOW match-rate harness (ADR-0014 validation precondition) BUILT
+on branch feat/resolution-match-rate-shadow. Pure aggregator
+app/resolution/shadow.py (ShadowOutcome / GroupRate / MatchRateReport +
+summarize*match_rate; numpy/stdlib only, inside the pure-math boundary) +
+impure DB reader repositories.shadow_match_rate_outcomes, which runs the SAME
+strict matcher app.clv_trueup uses at settlement over picks with a known
+kickoff (Event.starts_at NOT NULL, optional `since`), writes NOTHING and
+attaches no close — it only records matched + candidates_in_window. Bound to
+the app two ways: GET /resolution/match-rate (auth, read-only, ?days=N) and
+scripts/reports/resolution_match_rate.py (--days / --json). DRY: the
+pinnacle*<base> namespace logic now lives once in shadow.arcadia*base_sport
+(clv_trueup imports it; its private \_ARCADIA_SPORTS removed). Diagnostic split
+is the point — no_archive_candidates = COVERAGE gap, unmatched_with_candidates
+= ALIAS gap (extend aliases_seed.json). LIVE RESULT 2026-06-17: 56 picks, 0
+matched, ALL 56 = no_archive_candidates — the pinnacle*<sport> archive is
+EMPTY (ARCADIA_ENABLED=false, never captured). So the blocker before flipping
+CLV_USE_PINNACLE_ARCHIVE is COVERAGE, not aliasing: enable ARCADIA_ENABLED,
+let it capture a slate, then re-run to read the real match rate. 9 pure + 2 DB
+tests; ruff/mypy/full-pytest/safety all green. NOT committed (left on the
+branch for review).
+
+2026-06-17 — OPTIMIZATION PASS (branch feat/resolution-match-rate-shadow,
+committed). Goal: "train/backtest/optimize to best results + friendlier
+dashboard." A 4-agent audit (dashboard/code/modeling/safety) returned the
+decisive verdict, NOW THE STANDING RULE: **the value strategy is at its
+validated statistical CEILING — there is NO honest modeling slack left.** The
+production config (differential-margin devig, edge>=0.03, odds>=1.60) is
+conclusively +CLV (holdout n=61, incCLV +0.106 >2SE, beats Max close, monotone
+across 7 devig methods); the asymptotic CLV (~0.11 premium / ~0.02 volume per
+bet) is set by immovable factors (best-of-N premium already stripped vs Max
+close, the exogenous Pinnacle-to-best gap, the win rate at that edge — not
+improvable without outcome prediction, which is forbidden + backtested
+negative). Seasons 2425+2526 are SPENT (consulted 4x); 2627 lands ~Jun 2027.
+=> The ONLY doctrine-safe frontier is COVERAGE, OBSERVABILITY, EXECUTION
+fidelity, and dashboard COMPREHENSION — none statistical. Reproduced this
+session: value backtest n=62 ROI +22.4% incCLV +0.1066; ML value-filter retrain
+VERDICT ADOPT (4 criteria, ECE 0.014); tennis ATP+WTA visibility-only (no
+closing line -> CLV gate unevaluable). SHIPPED (all gated/tested): dashboard
+archive-coverage panel (lazy GET /resolution/match-rate), onboarding CLV
+explainer banner (dismissible/localStorage), colorblind-safe badge glyphs +
+--dim/--faint contrast lift, and tests/test_value_no_closing_leak.py (locks the
+no-closing-into-decision invariant on bets_for). DO-NOT-DO (reaffirmed): no
+re-tuning VALUE_MIN_EDGE/DEVIG/ODDS/features on the spent holdout (p-hacking);
+no ML-v2 CANDIDATE->ADOPT promotion (shadow only); no outcome/goal model; no
+index migration on Event.external_ref (already unique); no ROI-delta-justified
+changes on small n; no pure-math-boundary churn. DEFERRED (available, lower
+value): pipeline \_fair_probabilities fusion (~5-10% cycle time, touches the
+validated hot path), ETag/304 on /picks+/performance, live-CLV drift ALERT
+gates (need live data, alert-only never auto-tune), more aliases as Arcadia
+coverage accrues.

@@ -7,7 +7,7 @@ place a bet.
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -30,6 +30,7 @@ from app.api.auth import (
 from app.api.deps import get_session
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
+from app.resolution.shadow import summarize_match_rate
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
@@ -38,6 +39,7 @@ from app.storage.repositories import (
     latest_picks_with_events,
     live_evidence_rows,
     performance_report,
+    shadow_match_rate_outcomes,
 )
 
 logger = logging.getLogger(__name__)
@@ -413,6 +415,25 @@ async def performance(
     rows = await live_evidence_rows(session)
     report["live_evidence"] = live_evidence_report(rows, ml_threshold=_ml_operating_point())
     return report
+
+
+@router.get("/resolution/match-rate", dependencies=[Depends(require_dashboard_auth)])
+async def resolution_match_rate(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    days: Annotated[int | None, Query(ge=1, le=365)] = None,
+) -> dict[str, Any]:
+    """Strict SHADOW Pinnacle-archive match rate over picks with a known kickoff
+    — the instrument ADR-0014 asks be checked BEFORE CLV_USE_PINNACLE_ARCHIVE is
+    enabled. Read-only: no close is attached and nothing is written. ``days``
+    scopes the population to kickoffs within the last N days.
+
+    A low rate is diagnosable, never guessed: ``no_archive_candidates`` is a
+    COVERAGE gap (capture more / enable ARCADIA_ENABLED), ``unmatched_with_
+    candidates`` an ALIAS gap (extend the alias table).
+    """
+    since = datetime.now(tz=UTC) - timedelta(days=days) if days is not None else None
+    outcomes = await shadow_match_rate_outcomes(session, since=since)
+    return summarize_match_rate(outcomes).as_dict()
 
 
 @router.post("/events/{event_id}/result", dependencies=[Depends(require_dashboard_auth)])

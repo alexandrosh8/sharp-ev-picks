@@ -109,6 +109,10 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
     redis_url: str = "redis://localhost:6380/0"
+    # Mirrors docker-compose.yml's host-side app bind. It does not configure
+    # uvicorn inside the container; it exists so public Docker binds fail fast
+    # unless dashboard auth is enabled.
+    app_host_bind: str = "127.0.0.1"
 
     # --- Safety flags (locked defaults; flipping any is a fatal error) ------
     picks_only: bool = True
@@ -449,6 +453,22 @@ class Settings(BaseSettings):
             ]
             if missing:
                 raise ValueError("DASHBOARD_AUTH_ENABLED=true requires: " + ", ".join(missing))
+            hash_parts = self.dashboard_auth_password_hash.split("$")
+            if len(hash_parts) != 4 or hash_parts[0] != "pbkdf2_sha256":
+                raise ValueError(
+                    "DASHBOARD_AUTH_PASSWORD_HASH must look like "
+                    "pbkdf2_sha256$iterations$salt$hash. In compose .env files, "
+                    "wrap it in single quotes so Docker Compose does not "
+                    "interpolate the $ separators."
+                )
+        bind = self.app_host_bind.strip().lower().strip("[]")
+        loopback = bind == "localhost" or bind == "::1" or bind.startswith("127.")
+        if not loopback and not self.dashboard_auth_enabled:
+            raise ValueError(
+                "APP_HOST_BIND exposes the dashboard outside loopback; set "
+                "DASHBOARD_AUTH_ENABLED=true with DASHBOARD_AUTH_PASSWORD_HASH and "
+                "DASHBOARD_SESSION_SECRET before binding the app publicly."
+            )
         return self
 
     @model_validator(mode="after")

@@ -47,13 +47,17 @@ chmod 600 .env
 Edit `.env` (it stays on the host, mode 0600, never enters the image —
 `.dockerignore` excludes it; compose injects it at runtime):
 
-| Key                                      | Required?               | Notes                                                                                                                   |
-| ---------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | **REQUIRED**            | pick alerts                                                                                                             |
-| `COMPOSE_PROFILES=prod`                  | **REQUIRED on the VPS** | uncomment it — see below                                                                                                |
-| `POSTGRES_PASSWORD`                      | strongly recommended    | set BEFORE first boot: pgdata is initialized with the first password; changing later needs `ALTER USER` inside postgres |
-| `ODDS_API_KEY_1..3`                      | optional                | only for `ODDS_SOURCE=odds_api`; default `oddsportal` is free, no key                                                   |
-| `WEBHOOK_URL`                            | optional                | secondary alert channel                                                                                                 |
+| Key                                      | Required?               | Notes                                                                                                                                       |
+| ---------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | **REQUIRED**            | pick alerts                                                                                                                                 |
+| `COMPOSE_PROFILES=prod`                  | **REQUIRED on the VPS** | uncomment it — see below                                                                                                                    |
+| `POSTGRES_PASSWORD`                      | strongly recommended    | set BEFORE first boot: pgdata is initialized with the first password; changing later needs `ALTER USER` inside postgres                     |
+| `DASHBOARD_AUTH_ENABLED=true`            | required for public IP  | required before `APP_HOST_BIND=0.0.0.0` or a public reverse proxy                                                                           |
+| `DASHBOARD_AUTH_PASSWORD_HASH`           | required for public IP  | generate with `uv run python -c "from app.api.auth import hash_password; print(hash_password('YOUR_PASSWORD'))"`; store it in single quotes |
+| `DASHBOARD_SESSION_SECRET`               | required for public IP  | generate with `uv run python -c "import secrets; print(secrets.token_urlsafe(48))"`                                                         |
+| `APP_HOST_BIND`                          | optional                | default `127.0.0.1`; set `0.0.0.0` only after dashboard auth is enabled                                                                     |
+| `ODDS_API_KEY_1..3`                      | optional                | only for `ODDS_SOURCE=odds_api`; default `oddsportal` is free, no key                                                                       |
+| `WEBHOOK_URL`                            | optional                | secondary alert channel                                                                                                                     |
 
 Keys that must **NEVER** be set or changed from the `.env.example` defaults —
 the safety flags. There is deliberately no flag that enables betting; these
@@ -101,18 +105,42 @@ docker compose ps                          # all three services "healthy"
 curl -s http://127.0.0.1:8000/health       # {"status":"ok","mode":"picks-only",...}
 ```
 
-Dashboard: everything binds to 127.0.0.1 only. Access it via SSH tunnel from
-your machine:
+Dashboard default: the app binds to `127.0.0.1` only. Access it via SSH tunnel
+from your machine:
 
 ```bash
 ssh -L 8000:127.0.0.1:8000 <vps>
 # then open http://localhost:8000/ locally
 ```
 
-**HARD RULE — never rebind to 0.0.0.0 and never reverse-proxy the app without
-adding auth first.** The loopback bind is the ONLY auth: `POST
-/events/{id}/result` and `POST /picks/{id}/result` are unauthenticated, so an
-exposed port lets anyone settle/forge results.
+External-IP access: enable dashboard auth first, then expose only the app port.
+In `.env`:
+
+```dotenv
+DASHBOARD_AUTH_ENABLED=true
+DASHBOARD_AUTH_PASSWORD_HASH='<generated_pbkdf2_hash>'
+DASHBOARD_SESSION_SECRET=<generated_random_secret>
+APP_HOST_BIND=0.0.0.0
+```
+
+The single quotes around `DASHBOARD_AUTH_PASSWORD_HASH` matter: Docker Compose
+interpolates unquoted `$` characters, and PBKDF2 hashes use `$` separators.
+
+Restart:
+
+```bash
+docker compose up -d --build
+```
+
+Then open `http://<vps-ip>:8000/`. `app/config.py` refuses to start with
+`APP_HOST_BIND=0.0.0.0` unless dashboard auth is enabled. Keep Postgres and
+Redis loopback-only; never expose ports `5433` or `6380`. If the VPS firewall
+supports it, allow `8000/tcp` only from your trusted IPs.
+
+Reverse proxy option: keep `APP_HOST_BIND=127.0.0.1`, put the proxy on the
+public interface, and still enable dashboard auth before exposing the route.
+Use TLS at the proxy for any non-local access. `/health` stays public and
+read-only for compose healthchecks and watchdogs.
 
 What "healthy" means: the compose healthcheck hits `GET /health` (interval
 30s, start period 60s). `/health` also exposes per-job poll liveness
@@ -256,10 +284,11 @@ over-recommends at worst).
 
 ## 7. OpenClaw coexistence
 
-- Host port bindings (all 127.0.0.1): app 8000, postgres 5433, redis 6380
-  (5432/6379 left free for other stacks). If OpenClaw claims any, change the
-  HOST side of the mapping in `docker-compose.yml`; container ports stay
-  standard.
+- Host port bindings: app 8000 defaults to `127.0.0.1` and can be changed with
+  `APP_HOST_BIND` after dashboard auth is enabled. Postgres 5433 and Redis
+  6380 stay `127.0.0.1` only (5432/6379 left free for other stacks). If
+  OpenClaw claims any host port, change the HOST side of the mapping in
+  `docker-compose.yml`; container ports stay standard.
 - Resources are capped in compose (app: 2 GB RAM, 2 CPUs, `init: true` to
   reap zombie Chromium helpers) — committed defaults, tune in place.
 
