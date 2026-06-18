@@ -200,9 +200,14 @@ class Settings(BaseSettings):
     # Must stay <= value_min_edge; setting it EQUAL disables the volume
     # tier cleanly (no edge can be >= volume and < premium at once).
     value_volume_min_edge: float = Field(default=0.015, ge=0.0)
-    # User policy: never pick odds below 1.60. The backtest validated at
-    # >= 1.30; a higher floor only narrows to a subset of validated picks.
-    value_min_odds: float = 1.60
+    # Floor on candidate odds, set to the VALIDATED floor (1.30 = the engine
+    # default). A 2026-06-18 held-out floor sweep showed 1.60->1.30 adds ~1
+    # pick over two seasons with ROI/CLV unchanged (high-edge sub-1.60 value
+    # bets barely exist), while dropping below 1.30 only admits the noisy
+    # short-odds region (net-negative at the no-threshold baseline). So 1.30
+    # captures all premium upside and guards the noise; raise in .env to be
+    # more conservative. (2026-06-18 floor sweep; see .claude/memory/decisions.md.)
+    value_min_odds: float = 1.30
     value_devig: str = "differential_margin_weighting"  # any DevigMethod value
     # --- ML value filter (meta-labeling SECONDARY model — OFF by default) ----
     # Scores value CANDIDATES (never match outcomes — ML winner-prediction

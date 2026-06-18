@@ -1,5 +1,21 @@
 # Decisions Log
 
+- 2026-06-18 (odds floor 1.60 → 1.30, evidence-backed) — held-out floor sweep
+  via `scripts/value_backtest.py --min-odds {1.60,1.30,1.01}` (train-sweep →
+  single-shot test, the existing methodology). At the production edge threshold
+  (thr=0.03) the floor is NEARLY NON-BINDING: 1.60→1.30→1.01 gives test n =
+  61→62→62, ROI +21.1%→+22.4%→+22.4%, incCLV +0.106 throughout — high-edge
+  sub-1.60 value bets barely exist (favorites priced efficiently). At the
+  no-threshold baseline the floor DOES matter: dropping it pulls in ~440 extra
+  sub-1.60 picks at NEGATIVE ROI (−1.37%→−1.59%). So 1.30 (the engine default)
+  captures 100% of premium upside while guarding the noisy short-odds region;
+  1.01 adds zero upside and only volume-tier downside → STOPPED at 1.30, not
+  removed entirely. value_min_odds default 1.60→1.30 (config.py), tests +
+  .env.example updated. NOTE: 2425+2526 is the spent holdout, so this is
+  descriptive confirmation of a STRUCTURAL fact (the floor barely binds), not a
+  fresh validation — a true protocol change would need live CLV / season 2627.
+  Conclusion stands because the finding is structural, not a tuned parameter.
+
 - 2026-06-18 (config defaults → VPS/local parity — DONE) — the committed
   `Settings` defaults now match the reference `.env` so a fresh deploy is wide
   out of the box (the local-vs-VPS divergence was pure per-`.env` config, not a

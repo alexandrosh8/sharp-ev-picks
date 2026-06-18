@@ -159,7 +159,7 @@ def test_value_strategy_defaults_are_the_train_chosen_optimum() -> None:
     s = make_settings()
     assert s.pick_strategy == "value"
     assert s.value_min_edge == 0.03
-    assert s.value_min_odds == 1.60  # user policy: no picks below 1.60
+    assert s.value_min_odds == 1.30  # validated floor (2026-06-18 held-out sweep)
     assert DevigMethod(s.value_devig) is DevigMethod.DIFFERENTIAL_MARGIN
 
 
@@ -297,10 +297,10 @@ def test_per_market_floor_below_volume_floor_is_fatal() -> None:
 
 
 def test_odds_band_entirely_below_min_odds_is_fatal() -> None:
-    # value_min_odds=1.60 already rejects everything such a band could match;
+    # value_min_odds=1.30 already rejects everything such a band could match;
     # a dead band silently rejecting ALL picks must refuse to start instead.
     with pytest.raises(ValidationError, match="can never match"):
-        make_settings(value_odds_bands="1.2-1.5")
+        make_settings(value_odds_bands="1.1-1.25")
 
 
 def test_stake_drawdown_knobs_must_be_set_together() -> None:
