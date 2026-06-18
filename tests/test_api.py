@@ -601,7 +601,7 @@ def test_dashboard_renders_confidence_stars_not_visible_stake() -> None:
 
 def test_dashboard_fades_value_gone_picks() -> None:
     """A pick whose LIVE re-price no longer beats fair value (current_edge <= 0)
-    is FADED + tagged 'value gone' so it isn't mistaken for a fresh opportunity —
+    is FADED + tagged 'no value now' so it isn't mistaken for a fresh opportunity —
     but it is NEVER removed from the board or from CLV tracking (dropping losers
     would be survivorship bias). We assert the affordance (predicate + row class
     + chip) is present, and the chip is built via the badge() helper (textContent,
@@ -613,8 +613,9 @@ def test_dashboard_fades_value_gone_picks() -> None:
     # the faded row class is applied AND styled
     assert 'tr.classList.add("valuegone")' in text
     assert "tr.valuegone {" in text
-    # the muted chip label
-    assert "value gone" in text
+    # the muted chip label — time-scoped so it doesn't read as a contradiction
+    # against a positive (green) CLV badge on the same row
+    assert "no value now" in text
     # purely presentational — still no markup injection anywhere
     assert "innerHTML" not in text
 

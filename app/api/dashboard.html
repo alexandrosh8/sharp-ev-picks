@@ -1755,19 +1755,30 @@
             (switched ? " @ " + nowBook : "") +
             verdict;
           oddsCell.appendChild(nowLine);
-          // The live re-price no longer beats fair value -> a muted "value gone"
-          // chip (the row is also faded). Don't bet it now; it stays on the
-          // board only for CLV tracking.
+          // The CURRENT price no longer beats fair value -> a muted
+          // "no value now" chip (the row is also faded). This is about the
+          // price you could take NOW, NOT the pick's quality: a pick can be
+          // "no value now" yet still have POSITIVE CLV (its original price beat
+          // the close — the line just shortened past fair afterwards). The
+          // tooltip reconciles the two so the green CLV badge never looks like a
+          // contradiction. Time-scoped wording ("now") on purpose.
           if (curEdge !== null && curEdge <= 0) {
-            const gone = badge("value gone", "b-neg");
+            const gone = badge("no value now", "b-neg");
             gone.style.display = "inline-block";
             gone.style.marginTop = "3px";
             gone.style.fontSize = "9px";
-            gone.title =
-              "the live re-price at " +
-              nowBook +
-              " no longer beats fair value — skip it now. Kept on the board " +
-              "only for CLV tracking (removing losers would fake the edge record).";
+            gone.title = p.beat_close
+              ? "the current price at " +
+                nowBook +
+                " no longer beats fair value — the line has shortened past fair " +
+                "since you flagged it. Your ORIGINAL price still beat the close " +
+                "(that's the positive CLV — the pick was sharp); you'd just have " +
+                "needed to bet it earlier. Skip it at this price."
+              : "the current price at " +
+                nowBook +
+                " no longer beats fair value, and it didn't beat the close " +
+                "either — skip it. Kept on the board only for CLV tracking " +
+                "(removing losers would fake the edge record).";
             oddsCell.appendChild(gone);
           }
         }
