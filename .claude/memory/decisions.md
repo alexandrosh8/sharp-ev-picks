@@ -1,5 +1,26 @@
 # Decisions Log
 
+- 2026-06-18 (Pinnacle arcadia: capture totals + spreads, not just moneyline)
+  — the arcadia straight feed is fetched with `primaryOnly=false` (full market
+  set already on the wire) but previously extracted ONLY period-0 moneyline
+  (`s;0;m`). Now `extract_market_quotes` ALSO captures the MAIN-line total
+  (`s;0;ou;<line>` → Market.TOTALS, "Over 2.5"/market*detail "over_under_2_5")
+  and spread/AH (`s;0;s;<line>` → Market.SPREADS, "{home} -1.5"/market_detail
+  "asian_handicap*-1*5", keyed on the home handicap). `isAlternate` lines and
+  period≥1 variants are excluded (main line = the sharp anchor). MoneylineQuote
+  → MarketQuote (+market_key); the version change-gate is now keyed by
+  (sport, event, market_key) so each line gates independently. Zero new
+  requests (data was already fetched-and-discarded). Read-only, mints nothing,
+  isolated `pinnacle*<sport>`namespace. **This is GROUNDWORK** — it accrues the
+sharp OU/AH closing archive. Using it for CLV still needs (a) extending`resolve_pinnacle_close_snaps` to re-key OU/AH selections (today it re-keys
+  only home/away/Draw → OU/AH closes are dropped at the re-key) + line-matching
+  to the pick, and (b) flipping CLV_USE_PINNACLE_ARCHIVE (still false). Decided
+  after a feature audit (OddsHarvester HISTORIC unused = future CLV-backtest
+  gap; georgedouzas/sports-betting + kochlisGit/ProphitBet both rejected as
+  off-doctrine outcome predictors). Markets config UNCHANGED (operator kept
+  leagues=all + 4 core markets — all-leagues + all-markets would starve the
+  slate via the odds-age gate, ~73s/match×18 tabs = multi-hour cycles).
+
 - 2026-06-18 (odds floor 1.60 → 1.30, evidence-backed) — held-out floor sweep
   via `scripts/value_backtest.py --min-odds {1.60,1.30,1.01}` (train-sweep →
   single-shot test, the existing methodology). At the production edge threshold

@@ -28,7 +28,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard
 
 import httpx
 from tenacity import (
@@ -59,9 +59,14 @@ SPORT_IDS: dict[str, int] = {
     "american_football": 15,
 }
 
-# The match/game-winner market: straight (s), period 0 (full event), moneyline
-# (m). period>=1 is halves/quarters/sets — never the match winner.
+# Straight (s), period 0 (full event) market keys. period>=1 is
+# halves/quarters/sets — never the full-event line, so always filtered out.
+#   moneyline:  "s;0;m"            (m)   -> Market.H2H
+#   total:      "s;0;ou;<line>"    (ou)  -> Market.TOTALS  (over/under)
+#   spread/AH:  "s;0;s;<line>"     (s)   -> Market.SPREADS (home/away handicap)
 _MONEYLINE_KEY = "s;0;m"
+_TOTAL_PREFIX = "s;0;ou;"
+_SPREAD_PREFIX = "s;0;s;"
 
 
 class PinnacleArcadiaError(Exception):
@@ -107,11 +112,14 @@ class _Matchup:
 
 
 @dataclass(frozen=True)
-class MoneylineQuote:
-    """One period-0 moneyline observation for an event: the per-selection
-    snapshots plus Pinnacle's monotonic market ``version`` (the change-gate)."""
+class MarketQuote:
+    """One period-0 market observation for an event (moneyline / total /
+    spread): the per-selection snapshots, the arcadia ``market_key`` (which
+    identifies the market+line so each line change-gates independently), and
+    Pinnacle's monotonic market ``version``."""
 
     event_id: str
+    market_key: str
     version: int
     snapshots: tuple[OddsSnapshotIn, ...]
 
@@ -164,19 +172,64 @@ def _selection_for(designation: str, matchup: _Matchup) -> str | None:
     return None  # participantId-keyed / unexpected designation: skip
 
 
+def _line_token(line: float) -> str:
+    """Unsigned decimal line -> market-key token matching the OddsPortal loader:
+    2.5->'2_5', 3.0->'3_0', 220.5->'220_5', 0.25->'0_25'. Distinct lines MUST
+    yield distinct tokens so they group separately for devig."""
+    mag = abs(line)
+    return f"{mag:g}".replace(".", "_") if mag != int(mag) else f"{int(mag)}_0"
+
+
+def _signed_token(line: float) -> str:
+    """Signed AH line token for market_detail: -1.5->'-1_5', 0.5->'+0_5'."""
+    return f"{'-' if line < 0 else '+'}{_line_token(line)}"
+
+
+def _fmt_signed(line: float) -> str:
+    """Human selection suffix for a handicap: -1.5->'-1.5', 1.5->'+1.5', 0->'0'."""
+    return "0" if line == 0 else f"{line:+g}"
+
+
+def _is_int_price(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _finalize_quote(
+    market: Mapping[str, Any],
+    event_id: str,
+    market_key: str,
+    snapshots: list[OddsSnapshotIn],
+) -> MarketQuote | None:
+    """Wrap snapshots into a versioned MarketQuote, or None if unusable. A
+    versionless market cannot be change-gated (a synthesized 0 would freeze it),
+    so it is skipped and retried next cycle — arcadia's version is ~always set."""
+    if not snapshots:
+        return None
+    version = market.get("version")
+    if not _is_int_price(version):
+        return None
+    return MarketQuote(
+        event_id=event_id, market_key=market_key, version=version, snapshots=tuple(snapshots)
+    )
+
+
 def extract_moneyline_quotes(
     matchups: Mapping[str, _Matchup],
     markets: Sequence[Mapping[str, Any]],
     *,
     now: datetime,
-) -> list[MoneylineQuote]:
+) -> list[MarketQuote]:
     """Period-0 moneyline (match/game winner) quotes joined to their matchups.
 
     Skips non-``s;0;m`` keys, non-open markets, markets for events outside the
     matchup window, and participantId-keyed multiway prices (no designation).
     Prices are American integers -> European decimal; soccer carries a draw.
     """
-    quotes: list[MoneylineQuote] = []
+    quotes: list[MarketQuote] = []
     for market in markets:
         if market.get("key") != _MONEYLINE_KEY:
             continue
@@ -194,7 +247,7 @@ def extract_moneyline_quotes(
             raw_price = price.get("price")
             if designation is None:
                 continue  # participantId-keyed multiway leg
-            if not isinstance(raw_price, int) or isinstance(raw_price, bool):
+            if not _is_int_price(raw_price):
                 continue
             selection = _selection_for(str(designation), matchup)
             if selection is None:
@@ -213,21 +266,147 @@ def extract_moneyline_quotes(
                     ingested_at=now,
                 )
             )
-        if snapshots:
-            version = market.get("version")
-            # A versionless market cannot be change-gated; capturing it once
-            # would freeze it (a synthesized 0 gates every later move). Skip and
-            # retry next cycle — arcadia's version is effectively always present.
-            if not isinstance(version, int) or isinstance(version, bool):
+        quote = _finalize_quote(market, event_id, _MONEYLINE_KEY, snapshots)
+        if quote is not None:
+            quotes.append(quote)
+    return quotes
+
+
+def extract_total_quotes(
+    matchups: Mapping[str, _Matchup],
+    markets: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+) -> list[MarketQuote]:
+    """Period-0 over/under (``s;0;ou;<line>``) MAIN-line quotes -> Market.TOTALS.
+
+    Alternates (``isAlternate``) are excluded — the main line is the sharp
+    anchor; alternates carry wider margin and would pollute the devig. The line
+    rides BOTH the selection text ("Over 2.5") and market_detail
+    ("over_under_2_5") so distinct lines never collapse into one devig group.
+    """
+    quotes: list[MarketQuote] = []
+    for market in markets:
+        if not str(market.get("key") or "").startswith(_TOTAL_PREFIX):
+            continue
+        if market.get("type") != "total" or market.get("period") != 0:
+            continue
+        if market.get("status") != "open" or market.get("isAlternate"):
+            continue
+        event_id = str(market.get("matchupId"))
+        if matchups.get(event_id) is None:
+            continue
+        snapshots: list[OddsSnapshotIn] = []
+        for price in market.get("prices") or []:
+            designation = price.get("designation")
+            raw_price = price.get("price")
+            points = price.get("points")
+            if designation not in ("over", "under") or not _is_int_price(raw_price):
                 continue
-            quotes.append(
-                MoneylineQuote(
+            if not _is_number(points):
+                continue
+            decimal_odds = american_to_decimal(raw_price)
+            if decimal_odds <= 1.0:
+                continue
+            line = float(points)
+            label = "Over" if designation == "over" else "Under"
+            snapshots.append(
+                OddsSnapshotIn(
                     event_id=event_id,
-                    version=version,
-                    snapshots=tuple(snapshots),
+                    bookmaker=BOOKMAKER,
+                    market=Market.TOTALS,
+                    selection=f"{label} {line:g}",
+                    decimal_odds=decimal_odds,
+                    captured_at=now,
+                    ingested_at=now,
+                    market_detail=f"over_under_{_line_token(line)}",
                 )
             )
+        quote = _finalize_quote(market, event_id, str(market.get("key")), snapshots)
+        if quote is not None:
+            quotes.append(quote)
     return quotes
+
+
+def extract_spread_quotes(
+    matchups: Mapping[str, _Matchup],
+    markets: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+) -> list[MarketQuote]:
+    """Period-0 spread / Asian-handicap (``s;0;s;<line>``) MAIN-line quotes ->
+    Market.SPREADS. Alternates excluded. market_detail is keyed on the HOME
+    handicap (the OddsPortal AH convention) so home -1.5 / away +1.5 group as
+    one line; the per-side signed handicap rides the selection text."""
+    quotes: list[MarketQuote] = []
+    for market in markets:
+        if not str(market.get("key") or "").startswith(_SPREAD_PREFIX):
+            continue
+        if market.get("type") != "spread" or market.get("period") != 0:
+            continue
+        if market.get("status") != "open" or market.get("isAlternate"):
+            continue
+        event_id = str(market.get("matchupId"))
+        matchup = matchups.get(event_id)
+        if matchup is None:
+            continue
+        prices = market.get("prices") or []
+        home_line = next(
+            (
+                float(p["points"])
+                for p in prices
+                if p.get("designation") == "home" and _is_number(p.get("points"))
+            ),
+            None,
+        )
+        if home_line is None:
+            continue  # cannot key the line without the home handicap
+        market_detail = f"asian_handicap_{_signed_token(home_line)}"
+        snapshots: list[OddsSnapshotIn] = []
+        for price in prices:
+            designation = price.get("designation")
+            raw_price = price.get("price")
+            points = price.get("points")
+            if designation not in ("home", "away") or not _is_int_price(raw_price):
+                continue
+            if not _is_number(points):
+                continue
+            decimal_odds = american_to_decimal(raw_price)
+            if decimal_odds <= 1.0:
+                continue
+            team = matchup.home if designation == "home" else matchup.away
+            snapshots.append(
+                OddsSnapshotIn(
+                    event_id=event_id,
+                    bookmaker=BOOKMAKER,
+                    market=Market.SPREADS,
+                    selection=f"{team} {_fmt_signed(float(points))}",
+                    decimal_odds=decimal_odds,
+                    captured_at=now,
+                    ingested_at=now,
+                    market_detail=market_detail,
+                )
+            )
+        quote = _finalize_quote(market, event_id, str(market.get("key")), snapshots)
+        if quote is not None:
+            quotes.append(quote)
+    return quotes
+
+
+def extract_market_quotes(
+    matchups: Mapping[str, _Matchup],
+    markets: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+) -> list[MarketQuote]:
+    """All capturable period-0 sharp markets: moneyline + MAIN-line total +
+    MAIN-line spread (Asian handicap). The sharp closing anchor across H2H /
+    TOTALS / SPREADS for the archive."""
+    return [
+        *extract_moneyline_quotes(matchups, markets, now=now),
+        *extract_total_quotes(matchups, markets, now=now),
+        *extract_spread_quotes(matchups, markets, now=now),
+    ]
 
 
 class _MarketSource(Protocol):
@@ -338,12 +517,15 @@ class PinnacleArcadiaClient:
 
 
 class PinnacleArcadiaCapture:
-    """Forward closing-line capture: persists Pinnacle period-0 moneyline
-    snapshots into the ``pinnacle_<sport>`` warehouse namespace.
+    """Forward closing-line capture: persists Pinnacle period-0 sharp snapshots
+    — moneyline (H2H) plus the MAIN-line total (O/U) and spread (Asian
+    handicap) — into the ``pinnacle_<sport>`` warehouse namespace. (Alternate
+    lines are excluded: the main line is the sharp anchor.)
 
-    Change-gated on Pinnacle's monotonic per-market ``version`` (mirrors the
-    pipeline's change-only cache): a snapshot is written only when a market
-    reprices, so the latest pre-kickoff row IS that event's sharp close.
+    Change-gated on Pinnacle's monotonic per-market ``version`` keyed by
+    (sport, event, market_key) so each line gates INDEPENDENTLY: a snapshot is
+    written only when that market reprices, so the latest pre-kickoff row IS
+    that market's sharp close.
     captured_at is our observation time (the public feed exposes no per-price
     timestamp); the version-gate makes it approximate the reprice instant.
     The in-memory gate resets on restart -> the next cycle re-emits each still-
@@ -368,11 +550,11 @@ class PinnacleArcadiaCapture:
         self._sports = tuple(sports)
         self._horizon = horizon
         self._now_fn = now_fn or _utc_now
-        self._seen_version: dict[tuple[str, str], int] = {}
+        self._seen_version: dict[tuple[str, str, str], int] = {}
 
     def _select_fresh(
         self,
-        quotes: Sequence[MoneylineQuote],
+        quotes: Sequence[MarketQuote],
         matchups: Mapping[str, _Matchup],
         sport: str,
     ) -> tuple[list[OddsSnapshotIn], dict[str, EventTeams]]:
@@ -381,7 +563,7 @@ class PinnacleArcadiaCapture:
         fresh: list[OddsSnapshotIn] = []
         teams: dict[str, EventTeams] = {}
         for quote in quotes:
-            seen_key = (sport, quote.event_id)
+            seen_key = (sport, quote.event_id, quote.market_key)
             if self._seen_version.get(seen_key, -1) >= quote.version:
                 continue
             self._seen_version[seen_key] = quote.version
@@ -422,7 +604,7 @@ class PinnacleArcadiaCapture:
                 )
                 continue
             matchups = parse_matchups(raw_matchups, now=now, horizon_end=horizon_end)
-            quotes = extract_moneyline_quotes(matchups, raw_markets, now=now)
+            quotes = extract_market_quotes(matchups, raw_markets, now=now)
             fresh, teams = self._select_fresh(quotes, matchups, sport)
             if not fresh or self._session_factory is None:
                 written[sport] = 0

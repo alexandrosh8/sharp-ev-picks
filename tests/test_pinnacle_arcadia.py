@@ -20,13 +20,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.ingestion.pinnacle_arcadia import (
     BOOKMAKER,
     SPORT_IDS,
-    MoneylineQuote,
+    MarketQuote,
     PinnacleArcadiaCapture,
     PinnacleArcadiaClient,
     PinnacleArcadiaError,
     _RoundRobinTransport,
     american_to_decimal,
+    extract_market_quotes,
     extract_moneyline_quotes,
+    extract_spread_quotes,
+    extract_total_quotes,
     parse_matchups,
 )
 from app.schemas.base import Market
@@ -221,6 +224,163 @@ def test_extract_skips_versionless_market() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Totals (s;0;ou) + Spreads/AH (s;0;s) extraction — main line only
+# --------------------------------------------------------------------------- #
+def _total_market(
+    mid: int,
+    line: float,
+    *,
+    over: int = -110,
+    under: int = -110,
+    key: str | None = None,
+    period: int = 0,
+    status: str = "open",
+    is_alt: bool = False,
+    version: int = 20,
+) -> dict:
+    return {
+        "matchupId": mid,
+        "key": key or f"s;0;ou;{line}",
+        "type": "total",
+        "period": period,
+        "isAlternate": is_alt,
+        "status": status,
+        "prices": [
+            {"designation": "over", "points": line, "price": over},
+            {"designation": "under", "points": line, "price": under},
+        ],
+        "version": version,
+    }
+
+
+def _spread_market(
+    mid: int,
+    home_line: float,
+    *,
+    home: int = -110,
+    away: int = -110,
+    period: int = 0,
+    status: str = "open",
+    is_alt: bool = False,
+    version: int = 20,
+) -> dict:
+    return {
+        "matchupId": mid,
+        "key": f"s;0;s;{home_line}",
+        "type": "spread",
+        "period": period,
+        "isAlternate": is_alt,
+        "status": status,
+        "prices": [
+            {"designation": "home", "points": home_line, "price": home},
+            {"designation": "away", "points": -home_line, "price": away},
+        ],
+        "version": version,
+    }
+
+
+def test_extract_total_quotes_over_under_with_line() -> None:
+    matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
+    quotes = extract_total_quotes(
+        matchups, [_total_market(555, 2.5, over=-105, under=-115)], now=NOW
+    )
+    assert len(quotes) == 1
+    q = quotes[0]
+    assert q.market_key == "s;0;ou;2.5"
+    by_sel = {s.selection: s for s in q.snapshots}
+    assert set(by_sel) == {"Over 2.5", "Under 2.5"}
+    over = by_sel["Over 2.5"]
+    assert over.market == Market.TOTALS
+    assert over.market_detail == "over_under_2_5"
+    assert over.bookmaker == BOOKMAKER
+    assert over.decimal_odds == pytest.approx(american_to_decimal(-105))
+
+
+def test_extract_total_integer_line_token() -> None:
+    matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
+    q = extract_total_quotes(matchups, [_total_market(555, 3.0)], now=NOW)[0]
+    assert {s.selection for s in q.snapshots} == {"Over 3", "Under 3"}
+    assert all(s.market_detail == "over_under_3_0" for s in q.snapshots)
+
+
+def test_extract_spread_quotes_signed_handicap_shared_detail() -> None:
+    matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
+    quotes = extract_spread_quotes(
+        matchups, [_spread_market(555, -1.5, home=-115, away=-105)], now=NOW
+    )
+    assert len(quotes) == 1
+    q = quotes[0]
+    assert q.market_key == "s;0;s;-1.5"
+    by_sel = {s.selection: s for s in q.snapshots}
+    assert set(by_sel) == {"Alpha FC -1.5", "Beta United +1.5"}
+    home = by_sel["Alpha FC -1.5"]
+    assert home.market == Market.SPREADS
+    # market_detail keyed on the HOME handicap; BOTH sides share it (one line).
+    assert home.market_detail == "asian_handicap_-1_5"
+    assert by_sel["Beta United +1.5"].market_detail == "asian_handicap_-1_5"
+    assert home.decimal_odds == pytest.approx(american_to_decimal(-115))
+
+
+def test_extract_skips_alternate_and_period_total_spread() -> None:
+    matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
+    markets = [
+        _total_market(555, 2.5, is_alt=True),  # alternate -> skip
+        _spread_market(555, -1.5, is_alt=True),  # alternate -> skip
+        _total_market(555, 2.5, key="s;1;ou;2.5", period=1),  # 1st-half -> skip
+    ]
+    assert extract_total_quotes(matchups, markets, now=NOW) == []
+    assert extract_spread_quotes(matchups, markets, now=NOW) == []
+
+
+def test_extract_market_quotes_combines_ml_total_spread() -> None:
+    matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
+    markets = [
+        _ml_market(
+            555,
+            [
+                {"designation": "home", "price": 150},
+                {"designation": "draw", "price": 230},
+                {"designation": "away", "price": 180},
+            ],
+        ),
+        _total_market(555, 2.5),
+        _spread_market(555, -0.5),
+    ]
+    quotes = extract_market_quotes(matchups, markets, now=NOW)
+    assert {q.market_key for q in quotes} == {"s;0;m", "s;0;ou;2.5", "s;0;s;-0.5"}
+    assert {s.market for q in quotes for s in q.snapshots} == {
+        Market.H2H,
+        Market.TOTALS,
+        Market.SPREADS,
+    }
+
+
+def test_version_gate_is_per_market_key() -> None:
+    # ML + total share an event but have distinct market_keys -> they gate
+    # INDEPENDENTLY (one repricing must not freeze the other).
+    matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
+    ml = [
+        {"designation": "home", "price": 150},
+        {"designation": "draw", "price": 230},
+        {"designation": "away", "price": 180},
+    ]
+    quotes = extract_market_quotes(
+        matchups, [_ml_market(555, ml, version=10), _total_market(555, 2.5, version=10)], now=NOW
+    )
+    cap = _capture(("soccer",))
+    fresh1, _ = cap._select_fresh(quotes, matchups, "soccer")
+    assert {s.market for s in fresh1} == {Market.H2H, Market.TOTALS}
+    # same versions re-observed -> nothing fresh
+    assert cap._select_fresh(quotes, matchups, "soccer")[0] == []
+    # only the total reprices -> only the total re-emits
+    reprice = extract_market_quotes(
+        matchups, [_ml_market(555, ml, version=10), _total_market(555, 2.5, version=11)], now=NOW
+    )
+    fresh3, _ = cap._select_fresh(reprice, matchups, "soccer")
+    assert {s.market for s in fresh3} == {Market.TOTALS}
+
+
+# --------------------------------------------------------------------------- #
 # HTTP client (MockTransport — no live network)
 # --------------------------------------------------------------------------- #
 def _make_client(
@@ -369,7 +529,7 @@ def test_version_gate_emits_once_until_reprice() -> None:
 
 
 def test_quote_is_frozen_dataclass() -> None:
-    q = MoneylineQuote(event_id="1", version=1, snapshots=())
+    q = MarketQuote(event_id="1", market_key="s;0;m", version=1, snapshots=())
     with pytest.raises(FrozenInstanceError):
         q.version = 2  # type: ignore[misc]
 
