@@ -2116,6 +2116,25 @@
           b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
         }
         const rows = scoped.filter(matchesTab);
+        // Best pick on top. LIVE/UNVERIFIED order by the headline CONFIDENCE
+        // stars (confidence_rating.level, floor 1), tie-broken by the same
+        // effective edge the cards use (current_edge ?? edge). SETTLED keeps
+        // the server's recent-first order (created_at desc) so the latest
+        // results read top-down. `rows` is a fresh array from .filter(), so
+        // this never mutates PICKS — cards/counts read `scoped` independently.
+        if (!settledView) {
+          const confLevel = (p) => {
+            const c = p.confidence_rating || {};
+            return Math.max(1, Math.min(5, Number(c.level) || 1));
+          };
+          const effEdge = (p) => {
+            const v = Number(p.current_edge ?? p.edge);
+            return isFinite(v) ? v : -Infinity;
+          };
+          rows.sort(
+            (a, b) => confLevel(b) - confLevel(a) || effEdge(b) - effEdge(a),
+          );
+        }
 
         // Toggle the SETTLED column set: the class drives the mobile labels
         // (data-label) and lets CSS follow the active columns.
