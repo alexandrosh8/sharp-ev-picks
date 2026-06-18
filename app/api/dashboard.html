@@ -1811,16 +1811,31 @@
             else color = "var(--neg)";
           }
           nowLine.style.color = color;
-          nowLine.title =
+          // The "now" price is the pick's OWN book by default; current_bookmaker
+          // differs only when that book dropped the selection (best remaining
+          // book shown instead). Name the actual book so the label is honest.
+          const nowBook = p.current_bookmaker || p.bookmaker;
+          const switched =
+            !!p.current_bookmaker && p.current_bookmaker !== p.bookmaker;
+          const verdictTip =
             curEdge === null
-              ? "current price at the pick's book"
+              ? "current price at " + nowBook
               : curEdge >= 0.03
-                ? "still value at current price"
+                ? "still value at " + nowBook
                 : curEdge > 0
-                  ? "thin edge at current price"
-                  : "edge gone at current price";
+                  ? "thin edge at " + nowBook
+                  : "edge gone at " + nowBook;
+          nowLine.title = switched
+            ? verdictTip +
+              " — your original book " +
+              p.bookmaker +
+              " no longer offers this selection; this is the best remaining price"
+            : verdictTip;
           nowLine.textContent =
-            "now " + Number(p.current_odds).toFixed(2) + verdict;
+            "now " +
+            Number(p.current_odds).toFixed(2) +
+            (switched ? " @ " + nowBook : "") +
+            verdict;
           oddsCell.appendChild(nowLine);
         }
         if (
