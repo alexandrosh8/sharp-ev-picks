@@ -396,15 +396,6 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      tbody tr {
-        animation: rowin 0.3s ease both;
-      }
-      @keyframes rowin {
-        from {
-          opacity: 0;
-          transform: translateY(3px);
-        }
-      }
       tbody tr:hover td {
         background: rgba(106, 215, 255, 0.05);
       }
@@ -1584,9 +1575,8 @@
           return;
         }
 
-        rows.forEach((g, idx) => {
+        rows.forEach((g) => {
           const tr = document.createElement("tr");
-          tr.style.animationDelay = Math.min(idx * 14, 280) + "ms";
 
           // 1 — Kickoff
           const ko = document.createElement("div");
@@ -2142,9 +2132,8 @@
           return;
         }
 
-        rows.forEach((p, idx) => {
+        rows.forEach((p) => {
           const tr = document.createElement("tr");
-          tr.style.animationDelay = Math.min(idx * 20, 360) + "ms";
           if (settledView) {
             // RESULTS-oriented set: Kickoff | Match | Pick | Book | Odds |
             // Result | P&L | CLV. No execution columns, no stars, no settle.
@@ -3040,6 +3029,23 @@
       })();
       setGamesOpen(false);
       setArchiveOpen(false);
+      // Picks are the product: surface the picks table directly under the KPI
+      // cards, above the secondary panels (live evidence, available games,
+      // Pinnacle archive). One-time move of existing DOM nodes — no markup
+      // strings are injected; the render code is getElementById-based so the
+      // source order is irrelevant. No-ops if the structure ever changes.
+      (function picksFirst() {
+        const anchor = $("evidence-panel");
+        const tabs = $("status-tabs");
+        const controls = tabs && tabs.closest(".controls");
+        const wrap = $("picks-table") && $("picks-table").closest(".tablewrap");
+        const legend = $("picks-legend");
+        if (!anchor || !controls || !wrap || !legend) return;
+        const parent = anchor.parentNode;
+        parent.insertBefore(controls, anchor);
+        parent.insertBefore(wrap, anchor);
+        parent.insertBefore(legend, anchor);
+      })();
       load();
       setInterval(load, 60000);
     </script>
