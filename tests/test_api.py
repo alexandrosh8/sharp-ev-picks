@@ -74,8 +74,12 @@ def test_dashboard_served_at_root() -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    # safety reminder must be visible on the dashboard
-    assert "not</b> place bets" in response.text
+    # safety reminder must be visible on the dashboard. The old bold footer
+    # banner was removed (operator request); the picks-only / no-profit framing
+    # now lives in the relocated Status/CLV legend copy.
+    assert "the system places none" in response.text
+    assert "not a profit guarantee" in response.text
+    assert "<footer>" not in response.text
     assert 'id="picks-table"' in response.text
     # untrusted scrape strings must never go through innerHTML
     assert "innerHTML" not in response.text
@@ -409,20 +413,26 @@ def test_dashboard_html_is_not_browser_cached() -> None:
 
 
 def test_dashboard_legend_frames_clv_and_confidence() -> None:
-    """The static legend under the picks table frames CLV (proof of edge, NOT a
-    profit guarantee) and the ★ confidence stars (edge-confidence, not win
-    probability). This replaces the old dismissible intro banner + the hover "?"
-    explainers (operator removed them); the framing now lives as static legend
-    copy, and the footer still carries the 'does not place bets' line."""
+    """The static legend (relocated to the page bottom, below the Pinnacle
+    archive panel) frames CLV (proof of edge, NOT a profit guarantee) and the ★
+    confidence stars (edge-confidence, not win probability). The old dismissible
+    intro banner, the hover "?" explainers, AND the bold footer banner were all
+    removed (operator request); the picks-only / no-profit safety framing now
+    lives entirely in this legend copy."""
     text = TestClient(make_app()).get("/").text
     assert 'id="picks-legend"' in text
     assert "proof of real edge" in text
     assert "not a profit guarantee" in text
     assert "confidence in the EDGE" in text
-    # the dismissible intro banner + its hover "?" explainers were removed
+    # the picks-only safety reminder migrated from the footer into the legend
+    assert "the system places none" in text
+    # the dismissible intro banner, hover "?" explainers, footer, and the old
+    # "Always confirm the live price" line were all removed
     assert 'id="intro"' not in text
     assert 'id="intro-dismiss"' not in text
     assert "data-tip" not in text
+    assert "<footer>" not in text
+    assert "Always confirm the live price" not in text
 
 
 def test_dashboard_has_archive_coverage_panel() -> None:

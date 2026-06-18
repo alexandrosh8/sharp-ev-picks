@@ -340,6 +340,11 @@
         cursor: pointer;
         user-select: none;
       }
+      /* Non-sortable headers that carry a meaning tooltip get a help cursor so
+         the hover explanation is discoverable. */
+      th.hashelp {
+        cursor: help;
+      }
       th.sortable:hover {
         color: var(--text);
       }
@@ -1073,19 +1078,15 @@
       </table>
     </div>
 
-    <!-- legend moved here (page bottom): status + CLV semantics, JS-populated -->
-    <!-- plain footer-style legend (not boxed chips) -->
+    <!-- Status + CLV legend. picksFirst() relocates this node to the page
+         bottom, below the Pinnacle archive coverage section. JS-populated
+         (fillStaticCopy) — plain text, never markup. Carries the static
+         picks-only / no-profit safety framing (the old footer banner is gone,
+         this is now the single home for it). -->
     <div class="sub" id="picks-legend">
       <b>Status</b><span id="legend-status"></span> &nbsp;·&nbsp; <b>CLV</b
       ><span id="legend-clv"></span>
     </div>
-
-    <!-- onboarding explainer (page-bottom): how to read CLV + stars.
-         Dismissible and remembered via localStorage. Static author copy. -->
-    <footer>
-      auto-refresh 60s · manual review only — this system does
-      <b>not</b> place bets; stakes informational, no profit guaranteed
-    </footer>
 
     <script>
       "use strict";
@@ -1942,6 +1943,50 @@
         { label: "CLV", key: "clv" },
       ];
 
+      // Per-column plain-English meaning, surfaced as the <th> hover tooltip
+      // (renderHead reads this by label). Keyed by label so the shared columns
+      // (Kickoff / Match / Pick / Book / Odds / CLV) define their text once and
+      // both the LIVE and SETTLED views pick it up. Text only — never markup.
+      const HEAD_EXPLAIN = {
+        Kickoff:
+          "Match start in your local time, with a live countdown. " +
+          "TBD = the source hasn't posted a kickoff time yet.",
+        Match: "Home vs away team and the competition.",
+        Market:
+          "What you're betting: 1X2 (match result), Over/Under goals, " +
+          "BTTS, Double Chance, or moneyline.",
+        Pick:
+          "The exact selection to back, when it was first found, and the " +
+          "value anchor — PIN = Pinnacle, SHARP = a sharp book, " +
+          "CONS = consensus median of ≥3 books (weaker).",
+        Book: "The bookmaker offering this price — back it there, not elsewhere.",
+        Odds:
+          "Decimal odds when the pick was found. “now @ book” is the " +
+          "live re-priced odds at the same book; “ok ≥ X” is the " +
+          "lowest price that still keeps a positive edge.",
+        "Fair / EV":
+          "Model fair win probability (the de-vigged sharp anchor) and the " +
+          "expected value of a unit bet at this price.",
+        Edge:
+          "How far your price beats fair value (sharp fair prob − implied " +
+          "prob). The bar fills toward a 10% edge.",
+        Confidence:
+          "1–5★ rating of how strong the EDGE is — not your " +
+          "chance of winning the bet.",
+        CLV:
+          "Closing Line Value: how much your price beat the de-vigged closing " +
+          "sharp line. Green ✓ = beat it, red ✗ = worse, " +
+          "LIVE = still provisional until kickoff. The only real proof of edge.",
+        Status:
+          "LIVE = fresh and pre-kickoff · SHADOW = volume tier (tracked, " +
+          "never alerted) · SETTLED / SUPERSEDED. After kickoff a Settle " +
+          "button appears here (under the UNVERIFIED tab).",
+        Result:
+          "How the bet resolved: won / lost / push / void " +
+          "(half-won / half-lost on Asian lines).",
+        "P&L": "Profit or loss in units at the recorded stake and odds.",
+      };
+
       // --- picks-table sorting -------------------------------------------------
       // Interactive column sort. DISPLAY-ONLY: render() sorts the `rows` array
       // (a fresh .filter() result) by the active column; PICKS and the server
@@ -2039,6 +2084,7 @@
         head.replaceChildren();
         for (const col of cols) {
           const th = document.createElement("th");
+          const explain = HEAD_EXPLAIN[col.label] || "";
           if (col.key) {
             // Sortable header: label text node + caret affordance. DOM nodes /
             // textContent only — the header can never inject markup.
@@ -2063,14 +2109,15 @@
                 : " ▼"
               : " ↕";
             th.appendChild(caret);
-            th.title =
-              "Sort by " +
-              col.label +
+            const sortHint =
+              "Click to sort" +
               (active
                 ? SORT_DIR === "asc"
                   ? " (ascending)"
                   : " (descending)"
                 : "");
+            // Hover tooltip = column meaning first, sort affordance second.
+            th.title = explain ? explain + " · " + sortHint : sortHint;
             th.addEventListener("click", () => toggleSort(col.key));
             th.addEventListener("keydown", (e) => {
               if (e.key === "Enter" || e.key === " ") {
@@ -2080,6 +2127,11 @@
             });
           } else {
             th.textContent = col.label;
+            // Non-sortable header: meaning-only tooltip + help cursor.
+            if (explain) {
+              th.title = explain;
+              th.classList.add("hashelp");
+            }
           }
           head.appendChild(th);
         }
@@ -3056,14 +3108,19 @@
       // line sits under the "Available games" title.
       function fillStaticCopy() {
         $("legend-status").textContent =
-          " LIVE = price re-checked each cycle · SETTLED = result recorded · " +
+          " LIVE = price re-checked each cycle (fresh, pre-kickoff) · " +
+          "UNVERIFIED = open but stale or already kicked off — settle it here " +
+          "once the game finishes · SETTLED = result recorded · " +
           "SUPERSEDED = replaced by a newer strategy version · SHADOW = " +
           "volume tier, tracked but never alerted.";
         $("legend-clv").textContent =
-          " CLV +x% = your price beat the de-vigged closing sharp line by " +
-          "x%. Consistently positive CLV is the only proof of real edge — " +
-          "not a profit guarantee. ★ = model confidence in the EDGE, not your " +
-          "chance to win. Always confirm the live price at the book before betting.";
+          " CLV +x% (green ✓) = your price beat the de-vigged closing sharp " +
+          "line by x%; −x% (red ✗) = it's worse; LIVE = still provisional " +
+          "until kickoff. Consistently positive CLV is the only " +
+          "proof of real edge — not a profit guarantee. " +
+          "★ = model confidence in the EDGE, not your chance to win. " +
+          "Decision support only: you review and place every bet yourself — " +
+          "the system places none.";
       }
       fillStaticCopy();
       setGamesOpen(false);
@@ -3079,11 +3136,18 @@
         const controls = tabs && tabs.closest(".controls");
         const wrap = $("picks-table") && $("picks-table").closest(".tablewrap");
         const legend = $("picks-legend");
+        const archive = $("archive-panel");
         if (!anchor || !controls || !wrap || !legend) return;
         const parent = anchor.parentNode;
         parent.insertBefore(controls, anchor);
         parent.insertBefore(wrap, anchor);
-        parent.insertBefore(legend, anchor);
+        // Legend (status/CLV/safety copy) sits at the very bottom, just below
+        // the Pinnacle archive coverage panel — not under the picks table.
+        if (archive && archive.parentNode === parent) {
+          parent.insertBefore(legend, archive.nextSibling);
+        } else {
+          parent.appendChild(legend);
+        }
       })();
       load();
       setInterval(load, 60000);
