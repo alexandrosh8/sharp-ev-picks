@@ -243,6 +243,8 @@ def _sport_label(sport_key: str, sport_name: str) -> str:
         return "NBA"
     if sport_key.startswith("tennis"):
         return "Tennis"
+    if sport_key.startswith("american_football"):
+        return "NFL"
     return sport_name
 
 
@@ -269,9 +271,10 @@ async def latest_available_games_with_events(
     The live pipeline publishes the freshest poll slate in memory. After a
     deploy/restart that registry is empty until the first poll, while the
     dashboard can still show picks from Postgres. This query makes the games
-    table survive restarts by reading current football/NBA events and their
-    latest odds-snapshot coverage from the warehouse. It does not apply pick
-    status, edge, tier, exposure, or odds-age gates.
+    table survive restarts by reading current events and their latest
+    odds-snapshot coverage from the warehouse — the validated alerting sports
+    (football, NBA) AND the visibility-only ones (tennis, NFL). It does not
+    apply pick status, edge, tier, exposure, or odds-age gates.
     """
     as_of = now or datetime.now(tz=UTC)
     event_cutoff = as_of - timedelta(hours=12)
@@ -326,9 +329,11 @@ async def latest_available_games_with_events(
     )
     if sport is None:
         # Include the validated alerting sports AND visibility-only sports
-        # (tennis): the in-memory pipeline publishes tennis to AVAILABLE GAMES,
-        # so the restart-durability fallback must too — otherwise tennis vanishes
-        # from the view (with its UNVALIDATED badge) until the first poll.
+        # (tennis, american_football): the in-memory pipeline publishes these to
+        # AVAILABLE GAMES, so the restart-durability fallback must too — otherwise
+        # they vanish from the view (with their UNVALIDATED badge) until the first
+        # poll. Visibility-only membership is enforced elsewhere
+        # (_VALIDATED_SPORT_PREFIXES); this query only decides what to DISPLAY.
         stmt = stmt.where(
             (Sport.key == "soccer")
             | Sport.key.startswith("soccer_")
@@ -336,6 +341,8 @@ async def latest_available_games_with_events(
             | Sport.key.startswith("basketball_")
             | (Sport.key == "tennis")
             | Sport.key.startswith("tennis_")
+            | (Sport.key == "american_football")
+            | Sport.key.startswith("american_football_")
         )
     else:
         stmt = stmt.where((Sport.key == sport) | Sport.key.startswith(f"{sport}_"))

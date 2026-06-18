@@ -205,7 +205,20 @@ def build_scheduler(
             config["tennis"] = ("tennis", tennis_leagues)
             markets_by["tennis"] = tuple(_csv(settings.oddsportal_tennis_markets))
             sport_keys = (*sport_keys, "tennis")
-            visibility_only_sports = frozenset({"tennis"})
+            visibility_only_sports = visibility_only_sports | frozenset({"tennis"})
+        # American football / NFL is ALSO VISIBILITY-ONLY / UNVALIDATED (its
+        # forward Pinnacle-close archive is only now being captured via arcadia
+        # sport-id 15; held-out CLV cannot be evaluated until it accrues —
+        # app/config.py). Enabled when leagues are set (default "nfl"); scrapes
+        # for AVAILABLE GAMES but mints NO picks/alerts (visibility_only_sports
+        # below + the warehouse _VALIDATED_SPORT_PREFIXES). Upstream sport string
+        # is "american-football"; slugs nfl/ncaa.
+        nfl_leagues = _csv(settings.oddsportal_nfl_leagues)
+        if nfl_leagues:
+            config["american_football"] = ("american-football", nfl_leagues)
+            markets_by["american_football"] = tuple(_csv(settings.oddsportal_nfl_markets))
+            sport_keys = (*sport_keys, "american_football")
+            visibility_only_sports = visibility_only_sports | frozenset({"american_football"})
         loader = OddsPortalLoader(
             directory=directory,
             leagues_by_sport_key=config,

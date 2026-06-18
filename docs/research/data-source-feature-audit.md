@@ -9,6 +9,19 @@ line shopping + CLV**; outcome/goal prediction backtested NEGATIVE and is
 screens-only. A feature is "worth adding" only if it improves
 **devig / pricing / CLV / market coverage**, not standalone prediction.
 
+> **Update (2026-06-18, post-audit):** two items below are now stale.
+> (1) **Arcadia is no longer moneyline-only** — `app/ingestion/pinnacle_arcadia.py`
+> already captures period-0 **moneyline + main-line totals + main-line
+> spreads** (the "A1 — extract Pinnacle totals/spreads" recommendation is
+> effectively shipped for the _capture_ side; the remaining work is consuming
+> them in live CLV, still gated on match rate).
+> (2) **NFL is now VISIBILITY-ONLY, not rejected.** `american_football`
+> (arcadia sport-id 15) was added to `ARCADIA_SPORTS`, so a free Pinnacle
+> ML/totals/spread **close is forward-captured** for NFL — which is exactly the
+> "free sharp price + true close" the old NFL REJECT said did not exist (it now
+> exists going forward). NFL + tennis are scraped and shown but mint **no
+> picks** until accrued closes clear the held-out >2 SE incremental-CLV bar.
+
 ## TL;DR
 
 1. **penaltyblog 1.11.0 is the LATEST release** (PyPI, 2026-06-02). Our `>=1.11`

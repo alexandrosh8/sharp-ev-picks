@@ -146,6 +146,8 @@ def _sport_label(sport_key: str) -> str:
         return "NBA"
     if sport_key.startswith("tennis"):
         return "Tennis"
+    if sport_key.startswith("american_football"):
+        return "NFL"
     return sport_key
 
 

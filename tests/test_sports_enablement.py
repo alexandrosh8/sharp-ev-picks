@@ -3,8 +3,10 @@
 Doctrine: a new sport earns LIVE ALERTS only after a held-out backtest clears
 incremental CLV vs the closing line > 2 SE; otherwise it is VISIBILITY-ONLY,
 marked UNVALIDATED, and mints NO picks/alerts. Tennis is visibility-only (its
-held-out CLV is undefined — no closing source); NFL is rejected (no free
-sharp+close source) and gets no live code at all.
+held-out CLV is undefined — no closing source); NFL is ALSO visibility-only
+now (its forward Pinnacle-close archive is only just being captured via
+arcadia sport-id 15, so its CLV cannot be evaluated yet) — it is scraped and
+shown but mints NO picks/alerts.
 
 These tests cover, per the task brief:
 1. config validation for the new tennis sport keys (devig-sound, budget guard,
@@ -98,11 +100,48 @@ def test_tennis_all_leagues_within_budget_loads() -> None:
     assert s.oddsportal_tennis_leagues == "all"
 
 
-def test_no_nfl_config_flags_exist() -> None:
-    # NFL is REJECTED (no free sharp+close source) — it must have no config
-    # slots so it cannot be toggled on by accident.
-    assert not any("nfl" in name.lower() for name in Settings.model_fields)
-    assert not any("american_football" in name.lower() for name in Settings.model_fields)
+def test_nfl_polling_on_by_default_with_nfl_slug() -> None:
+    # NFL ships ON by default (leagues="nfl"); off-season the dated scrape
+    # simply yields no events. It stays VISIBILITY-ONLY (no picks).
+    s = make_settings()
+    assert s.oddsportal_nfl_leagues == "nfl"
+    assert s.oddsportal_nfl_markets == "home_away"
+
+
+def test_nfl_all_leagues_market_budget_is_enforced() -> None:
+    # Same worldwide-scrape guard as the other sports: leagues=all + too many
+    # market keys is a fatal config error (the error names NFL).
+    with pytest.raises(ValueError, match="NFL"):
+        make_settings(
+            oddsportal_nfl_leagues="all",
+            oddsportal_nfl_markets="home_away,over_under_40_5,over_under_44_5,"
+            "over_under_48_5,asian_handicap_-3_5",
+        )
+
+
+def test_arcadia_sports_default_includes_american_football() -> None:
+    # NFL's free Pinnacle close is forward-captured via arcadia (sport-id 15) —
+    # the prerequisite for ever CLV-grading NFL picks.
+    sports = [s.strip() for s in make_settings().arcadia_sports.split(",") if s.strip()]
+    assert "american_football" in sports
+
+
+def test_nfl_config_flags_exist_and_are_visibility_only() -> None:
+    # NFL is VISIBILITY-ONLY now: it HAS config slots (leagues/markets) so it
+    # can be scraped + shown, but it is never in the validated/alerting set —
+    # the warehouse gate omits american_football, so it mints no picks. (The
+    # pipeline-level no-picks contract is asserted in the visibility tests.)
+    from app.storage.repositories import _is_unvalidated_sport
+
+    fields = Settings.model_fields
+    assert "oddsportal_nfl_leagues" in fields
+    assert "oddsportal_nfl_markets" in fields
+    # default markets are loader-sound (home_away = the 2-way moneyline -> H2H)
+    nfl_markets = tuple(m.strip() for m in make_settings().oddsportal_nfl_markets.split(","))
+    _validate_markets(nfl_markets)  # raises on any unsound key
+    assert _market_for_key("home_away") is Market.H2H
+    # NFL is NOT a validated/alerting sport -> visibility-only by construction
+    assert _is_unvalidated_sport("american_football") is True
 
 
 # ---------------------------------------------------------------------------
@@ -268,8 +307,9 @@ def make_tennis_deps(sink: RecordingSink, loader: FakeLoader) -> PipelineDeps:
 @pytest.fixture(autouse=True)
 def _clear_registries() -> Iterator[None]:
     yield
-    AVAILABLE_GAMES.pop("tennis", None)
-    LAST_POLL.pop("tennis", None)
+    for key in ("tennis", "american_football"):
+        AVAILABLE_GAMES.pop(key, None)
+        LAST_POLL.pop(key, None)
 
 
 async def test_visibility_only_sport_mints_no_picks_or_alerts() -> None:
@@ -355,6 +395,72 @@ async def test_visibility_only_blocks_picks_under_model_strategy_too() -> None:
     assert all(row["unvalidated"] is True for row in AVAILABLE_GAMES["tennis"])
 
 
+def nfl_snapshots() -> list[OddsSnapshotIn]:
+    # A 2-way (home_away) NFL market with an obvious soft outlier — under the
+    # value strategy this WOULD mint a pick for a validated sport.
+    captured = NOW - timedelta(seconds=30)
+
+    def s(book: str, sel: str, odds: float) -> OddsSnapshotIn:
+        return OddsSnapshotIn(
+            event_id="nfl-evt-1",
+            bookmaker=book,
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=odds,
+            captured_at=captured,
+            ingested_at=NOW,
+            market_detail="home_away",
+        )
+
+    return [
+        s("Pinnacle", "Chiefs", 1.50),
+        s("Pinnacle", "Bills", 2.60),
+        s("SoftBook", "Chiefs", 1.55),
+        s("SoftBook", "Bills", 3.40),  # soft outlier on Bills
+    ]
+
+
+def make_nfl_deps(sink: RecordingSink, loader: FakeLoader) -> PipelineDeps:
+    directory = EventDirectory()
+    directory.register(
+        "nfl-evt-1",
+        EventTeams(home="Chiefs", away="Bills", league="NFL"),
+    )
+    return PipelineDeps(
+        loader=loader,
+        model=NullModel(),
+        dispatcher=AlertDispatcher([sink], InMemoryIdempotencyStore()),
+        gate_policy=GatePolicy(
+            min_edge=0.0,
+            min_ev=0.0,
+            min_confidence=0.0,
+            max_odds_age_seconds=300,
+            min_liquidity=0.0,
+        ),
+        stake_policy=StakePolicy(),
+        ledger=DailyExposureLedger(max_daily_fraction=0.05),
+        bankroll=Decimal("1000"),
+        directory=directory,
+        value_min_edge=0.0,  # would alert any edge for a validated sport
+        value_min_odds=1.30,
+        visibility_only_sports=frozenset({"american_football"}),
+    )
+
+
+async def test_nfl_visibility_only_mints_no_picks_or_alerts() -> None:
+    sink = RecordingSink()
+    deps = make_nfl_deps(sink, FakeLoader(nfl_snapshots()))
+    picks = await run_value_pipeline(deps, "american_football")
+    assert picks == []
+    assert sink.sent == []  # no alerts dispatched
+    assert deps.ledger.used(NOW.date()) == 0.0  # exposure untouched
+    games = AVAILABLE_GAMES["american_football"]
+    assert games, "NFL slate should still publish to AVAILABLE GAMES"
+    assert all(row["unvalidated"] is True for row in games)
+    assert all(row["sport_label"] == "NFL" for row in games)
+    assert LAST_POLL["american_football"]["picks"] == 0
+
+
 # ---------------------------------------------------------------------------
 # 4. Scheduler wiring
 # ---------------------------------------------------------------------------
@@ -381,6 +487,30 @@ async def test_scheduler_wires_tennis_when_leagues_set() -> None:
 
     redis = fakeredis.FakeRedis()
     settings = make_settings(oddsportal_tennis_leagues="atp-us-open,wta-wimbledon")
+    async with httpx.AsyncClient() as client:
+        scheduler = build_scheduler(settings, client, redis)
+    assert any(job.id == "poll_odds" for job in scheduler.get_jobs())
+
+
+async def test_scheduler_wires_nfl_when_leagues_set() -> None:
+    import fakeredis.aioredis as fakeredis
+
+    from app.scheduler import build_scheduler
+
+    redis = fakeredis.FakeRedis()
+    settings = make_settings(oddsportal_nfl_leagues="nfl")
+    async with httpx.AsyncClient() as client:
+        scheduler = build_scheduler(settings, client, redis)
+    assert any(job.id == "poll_odds" for job in scheduler.get_jobs())
+
+
+async def test_scheduler_omits_nfl_when_leagues_unset() -> None:
+    import fakeredis.aioredis as fakeredis
+
+    from app.scheduler import build_scheduler
+
+    redis = fakeredis.FakeRedis()
+    settings = make_settings(oddsportal_nfl_leagues="")
     async with httpx.AsyncClient() as client:
         scheduler = build_scheduler(settings, client, redis)
     assert any(job.id == "poll_odds" for job in scheduler.get_jobs())

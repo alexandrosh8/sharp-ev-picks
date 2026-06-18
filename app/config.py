@@ -359,17 +359,28 @@ class Settings(BaseSettings):
         "atp-halle,atp-london,atp-eastbourne,atp-mallorca,atp-wimbledon,"
         "wta-berlin,wta-birmingham,wta-eastbourne,wta-bad-homburg,wta-wimbledon"
     )  # csv of atp-/wta- slugs (seasonal); empty = OFF
-    oddsportal_tennis_markets: str = "match_winner"
-    # --- American football / NFL (REJECTED — no live code) -------------------
-    # The loader supports NFL markets config-only (same home_away/over_under_/
-    # asian_handicap_ keys as football/basketball), BUT the NFL value backtest
-    # verdict is REJECT: there is no free source carrying both a sharp price
-    # and a true closing line, so the sharp-vs-close CLV protocol is
-    # impossible to run — NFL cannot be validated even as visibility-only with
-    # honest provenance. Per doctrine a rejected sport gets NO live alerts;
-    # we deliberately add NO NFL config flags and NO scheduler wiring so it
-    # cannot be toggled on by accident. Revisit only if a free sharp+close
-    # NFL odds source appears (docs/research/free-odds-sources.md).
+    oddsportal_tennis_markets: str = "match_winner,over_under_sets_2_5"
+    # --- American football / NFL (VISIBILITY-ONLY / UNVALIDATED) -------------
+    # Mirrors tennis: NFL is scraped and shown in AVAILABLE GAMES tagged
+    # unvalidated, and the pipeline mints NO picks/alerts for it — enforced in
+    # app/scheduler.py (visibility_only_sports) AND the warehouse path
+    # (_VALIDATED_SPORT_PREFIXES omits it). It earns alerts ONLY after a
+    # held-out incremental-CLV-vs-close backtest clears the >2 SE bar.
+    # The earlier REJECT ("no free source carries a sharp price + true close")
+    # is now only PARTLY true: the read-only Pinnacle Arcadia archive
+    # (american_football = sport-id 15, added to arcadia_sports below)
+    # FORWARD-captures a free Pinnacle moneyline/totals/spread close for NFL —
+    # so a CLV grade becomes possible once enough fixtures accrue AND the strict
+    # cross-source matcher attaches them. Until then NFL stays visibility-only.
+    # Leagues default "nfl" (the whole league); off-season the dated scrape
+    # simply yields no events (same as basketball=all in summer). Set empty to
+    # turn NFL polling OFF. Markets kept to home_away (moneyline) to keep the
+    # visibility scrape light; widen in .env (loader supports over_under_/
+    # asian_handicap_ keys). The market-budget guard engages ONLY when
+    # leagues=all; with the scoped default slug it is uncapped but bounded by
+    # that league's match volume (~1 browser tab per match per market key).
+    oddsportal_nfl_leagues: str = "nfl"  # csv of american-football slugs (nfl,ncaa); empty = OFF
+    oddsportal_nfl_markets: str = "home_away"
     # Dated scraping: each cycle covers today..today+N (UTC) instead of a
     # league's whole upcoming list — far-future fixtures are skipped and
     # cycle time tracks the actionable slate. Unset = legacy upcoming page.
@@ -427,7 +438,10 @@ class Settings(BaseSettings):
     # exceptions like every other key.
     arcadia_guest_key: str = ""
     # csv of sport keys to archive (soccer,tennis,basketball,american_football).
-    arcadia_sports: str = "soccer,tennis,basketball"
+    # american_football (sport-id 15) included so NFL's free Pinnacle ML/totals/
+    # spread CLOSE is forward-captured — the prerequisite for ever CLV-grading
+    # NFL picks (off-season the upstream simply returns no events).
+    arcadia_sports: str = "soccer,tennis,basketball,american_football"
     # Only archive events kicking off within this horizon (bounds volume; the
     # close is the last pre-kickoff observation regardless of horizon).
     arcadia_horizon_hours: int = Field(default=72, ge=1)
@@ -505,6 +519,7 @@ class Settings(BaseSettings):
             ("FOOTBALL", self.oddsportal_football_leagues, self.oddsportal_football_markets),
             ("BASKETBALL", self.oddsportal_basketball_leagues, self.oddsportal_basketball_markets),
             ("TENNIS", self.oddsportal_tennis_leagues, self.oddsportal_tennis_markets),
+            ("NFL", self.oddsportal_nfl_leagues, self.oddsportal_nfl_markets),
         ):
             slugs = [s.strip() for s in leagues.split(",") if s.strip()]
             keys = [m.strip() for m in markets.split(",") if m.strip()]
