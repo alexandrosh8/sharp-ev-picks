@@ -336,14 +336,11 @@
       /* Clickable column headers (picks table). The caret doubles as the
          affordance: a faint ↕ on sortable-but-inactive headers, an accent
          ▲/▼ on the active one. Non-sortable headers get neither. */
+      /* Sortable headers stay clickable (caret + role=button signal it), but
+         keep the default arrow cursor — operator dislikes the hand/help cursor
+         on header words. Hover tooltips still appear on the plain arrow. */
       th.sortable {
-        cursor: pointer;
         user-select: none;
-      }
-      /* Non-sortable headers that carry a meaning tooltip get a help cursor so
-         the hover explanation is discoverable. */
-      th.hashelp {
-        cursor: help;
       }
       th.sortable:hover {
         color: var(--text);
@@ -1780,12 +1777,19 @@
         fill.style.width = Math.min(e / 0.1, 1) * 100 + "%"; // 10% edge = full bar
         bar.appendChild(fill);
         ed.append(ev_, bar);
-        td(tr, ed, "edgecell").dataset.label = "Edge";
+        const edgeCell = td(tr, ed, "edgecell");
+        edgeCell.dataset.label = "Edge";
+        // Hover explanation on the value itself (header tooltip mirrors this).
+        edgeCell.title =
+          "Edge = de-vigged sharp fair probability − this book's implied " +
+          "probability. How much the price beats fair value; the bar fills " +
+          "toward a 10% edge. Premium tier needs ≥3%, volume (shadow) ≥1.5%.";
       }
 
       // CONFIDENCE stars — the headline that REPLACES the recommended-stake
-      // column. Stars set via textContent; NO hover tooltip (operator
-      // preference) — the ★ meaning lives in the static legend under the table.
+      // column. Stars set via textContent. Hover tooltip explains the MEANING
+      // (confidence in the EDGE, not win chance) plus this pick's own rating
+      // reasons — NOT the recommended stake the operator removed earlier.
       function cellConfidence(tr, p) {
         const conf = p.confidence_rating || {};
         // Defensive: an older API without confidence_rating still renders a
@@ -1794,6 +1798,16 @@
         const cell = document.createElement("td");
         cell.className = "confcell";
         cell.dataset.label = "Confidence";
+        const reasons = Array.isArray(conf.reasons) ? conf.reasons : [];
+        cell.title =
+          "Confidence " +
+          n +
+          "/5" +
+          (conf.label ? " (" + conf.label + ")" : "") +
+          " — model confidence in the EDGE, not your chance to win. Driven by " +
+          "edge size, anchor quality (Pinnacle/sharp beat consensus) and book " +
+          "count." +
+          (reasons.length ? " This pick: " + reasons.join("; ") + "." : "");
         const stars = document.createElement("span");
         stars.className = "stars";
         stars.textContent = "★".repeat(n); // filled
@@ -1825,12 +1839,24 @@
               p.beat_close ? "b-pos" : "b-neg",
             ),
           );
+          const sign = p.beat_close
+            ? "✓ your price currently beats the de-vigged closing sharp line by this much"
+            : "✗ the market has moved against your pick — your price is now worse than the de-vigged closing line by this much";
           cell.title =
             p.status === "alerted"
-              ? "provisional — re-priced every cycle until kickoff; final CLV is the last price before the market closes"
+              ? "LIVE = provisional, re-priced every cycle until kickoff (final " +
+                "CLV locks at the close). " +
+                sign +
+                ". Consistently positive CLV is the only proof of real edge."
               : p.status === "superseded"
-                ? "provisional CLV frozen when this pick was superseded by a newer strategy version — never finalized against the close"
-                : "closing-line value: pick price vs the de-vigged closing fair price";
+                ? "Provisional CLV frozen when this pick was superseded by a " +
+                  "newer strategy version — never finalized against the close. " +
+                  sign +
+                  "."
+                : "Closing Line Value: pick price vs the de-vigged closing " +
+                  "fair price. " +
+                  sign +
+                  ".";
         }
         cell.dataset.label = "CLV";
       }
@@ -2127,11 +2153,8 @@
             });
           } else {
             th.textContent = col.label;
-            // Non-sortable header: meaning-only tooltip + help cursor.
-            if (explain) {
-              th.title = explain;
-              th.classList.add("hashelp");
-            }
+            // Non-sortable header: meaning-only tooltip (default arrow cursor).
+            if (explain) th.title = explain;
           }
           head.appendChild(th);
         }
