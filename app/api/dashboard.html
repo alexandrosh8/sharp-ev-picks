@@ -18,20 +18,29 @@
            dim/faint = secondary text (faint ≈ 4.9:1 on panel — AA at 10px+)
          --------------------------------------------------------------- */
       :root {
-        --bg: #060906;
-        --bg2: #0a0f0a;
-        --panel: #0d130d;
-        --line: #1a241a;
-        --text: #cfe3cf;
-        --dim: #708070;
-        --faint: #7f977f;
-        --pos: #00ff9d;
-        --pos-soft: #2bd576;
-        --neg: #ff5c57;
-        --warn: #ffb454;
+        /* Neutral slate surfaces — no colour tint. Refined monospace trading
+           terminal: structure is grey, the DATA carries the colour. */
+        --bg: #0b0d10;
+        --bg2: #0f1217;
+        --panel: #13161b;
+        --panel2: #171b21;
+        --line: #232a33;
+        --text: #d7dde5;
+        --dim: #8a93a0;
+        --faint: #69707c;
+        /* semantics — ONE meaning each; reserved for NUMBERS, never chrome */
+        --pos: #3ecf8e;
+        --pos-soft: #2faf78;
+        --neg: #e0625e;
+        --warn: #e0a23c;
+        /* structural accent: selection / focus / interactive identity — NOT a
+           value, so hierarchy reads even when every number is "lit" */
         --info: #6ad7ff;
+        --accent: #6ad7ff;
+        --radius: 4px;
         --mono:
-          ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+          ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
+          Consolas, monospace;
       }
       * {
         box-sizing: border-box;
@@ -48,28 +57,9 @@
         /* tabular-nums globally: every odds/percent/money figure aligns */
         font: 13px/1.5 var(--mono);
         font-variant-numeric: tabular-nums;
-        padding: 24px 16px 40px;
+        padding: 22px 18px 40px;
         min-height: 100vh;
-        background:
-          radial-gradient(
-            1200px 500px at 50% -10%,
-            rgba(0, 255, 157, 0.05),
-            transparent 60%
-          ),
-          var(--bg);
-      }
-      /* CRT scanlines — barely there */
-      body::after {
-        content: "";
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        z-index: 9;
-        background: repeating-linear-gradient(
-          0deg,
-          rgba(255, 255, 255, 0.012) 0 1px,
-          transparent 1px 3px
-        );
+        background: var(--bg);
       }
 
       /* --- header + status bar ------------------------------------- */
@@ -80,26 +70,27 @@
         flex-wrap: wrap;
       }
       .brand {
-        font-size: 18px;
-        font-weight: 800;
-        letter-spacing: 0.22em;
-        color: var(--pos);
-        text-shadow: 0 0 14px rgba(0, 255, 157, 0.3);
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: var(--text);
+        padding-left: 10px;
+        border-left: 2px solid var(--accent);
       }
       .live {
         display: inline-flex;
         align-items: center;
-        gap: 8px;
+        gap: 7px;
         color: var(--dim);
-        font-size: 11px;
-        letter-spacing: 0.15em;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
       .live i {
         width: 7px;
         height: 7px;
         border-radius: 50%;
         background: var(--pos);
-        box-shadow: 0 0 8px var(--pos);
         animation: pulse 1.6s ease-in-out infinite;
       }
       .live.down {
@@ -226,9 +217,9 @@
         margin-bottom: 16px;
       }
       .card {
-        background: linear-gradient(180deg, var(--panel), var(--bg2));
+        background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: 6px;
+        border-radius: var(--radius);
         padding: 12px 16px 10px;
         position: relative;
         overflow: hidden;
@@ -238,27 +229,26 @@
         position: absolute;
         inset: 0 auto 0 0;
         width: 2px;
-        background: var(--pos);
-        opacity: 0.5;
+        background: var(--accent);
+        opacity: 0.55;
       }
       .card .v {
-        font-size: 22px;
+        font-size: 21px;
         font-weight: 700;
-        color: var(--pos-soft);
-        text-shadow: 0 0 10px rgba(43, 213, 118, 0.2);
+        color: var(--text);
+        letter-spacing: -0.01em;
       }
       .card .k {
         color: var(--dim);
         font-size: 10px;
-        letter-spacing: 0.16em;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
-        margin-top: 2px;
+        margin-top: 3px;
       }
       /* stale/degraded card: value visibly demoted + corner flag.
          Every value on screen is either live or explicitly marked. */
       .card.stale .v {
         color: var(--dim);
-        text-shadow: none;
       }
       .card.stale::before {
         background: var(--warn);
@@ -302,19 +292,19 @@
       select:focus,
       input:focus,
       button:focus {
-        outline: 1px solid var(--pos);
+        outline: 1px solid var(--accent);
         outline-offset: 0;
       }
       button {
         cursor: pointer;
-        color: var(--pos-soft);
+        color: var(--text);
         text-transform: uppercase;
-        letter-spacing: 0.12em;
+        letter-spacing: 0.08em;
         font-size: 11px;
       }
       button:hover {
-        border-color: var(--pos-soft);
-        background: rgba(0, 255, 157, 0.06);
+        border-color: var(--accent);
+        background: rgba(106, 215, 255, 0.08);
       }
       .stamp {
         color: var(--dim);
@@ -416,10 +406,10 @@
         }
       }
       tbody tr:hover td {
-        background: rgba(0, 255, 157, 0.035);
+        background: rgba(106, 215, 255, 0.05);
       }
       tbody tr:hover td:first-child {
-        box-shadow: inset 2px 0 0 var(--pos);
+        box-shadow: inset 2px 0 0 var(--accent);
       }
 
       .ko {
@@ -492,7 +482,6 @@
         position: absolute;
         inset: 0 auto 0 0;
         background: var(--pos);
-        box-shadow: 0 0 6px rgba(0, 255, 157, 0.5);
       }
 
       /* confidence stars — replaces the old Stake column. Filled stars carry
@@ -505,7 +494,6 @@
       }
       .confcell .stars {
         color: var(--pos);
-        text-shadow: 0 0 6px rgba(0, 255, 157, 0.35);
       }
       .confcell .dim {
         color: var(--faint);
@@ -520,33 +508,68 @@
         font-size: 11px;
       }
       .extlink:hover {
-        text-shadow: 0 0 6px var(--info);
+        text-decoration: underline;
       }
 
-      /* inline legend strip (status + CLV semantics) — reuses the status-bar
-         chip aesthetic, wraps on mobile. */
-      .legend {
-        display: flex;
-        align-items: stretch;
-        gap: 8px;
-        flex-wrap: wrap;
-        margin: 0 0 12px;
-      }
-      .legend .chip {
-        white-space: normal;
-        text-transform: none;
-        letter-spacing: 0.02em;
-        font-weight: 400;
-        line-height: 1.5;
-        text-align: left;
-        max-width: 560px;
-      }
-      .legend .chip b {
+      /* compact "?" info icon — explanatory prose lives in its tooltip, not as
+         standing body text. data-tip carries the copy; shown on hover + focus
+         (keyboard accessible). Replaces the old always-on legend/intro blocks. */
+      .info {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        margin-left: 6px;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        background: transparent;
         color: var(--faint);
+        font-size: 9px;
         font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        margin-right: 6px;
+        line-height: 1;
+        cursor: help;
+        position: relative;
+        vertical-align: middle;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      .info:hover,
+      .info:focus-visible {
+        color: var(--accent);
+        border-color: var(--accent);
+        outline: none;
+      }
+      .info::after {
+        content: attr(data-tip);
+        position: absolute;
+        z-index: 30;
+        left: 0;
+        top: calc(100% + 7px);
+        width: max-content;
+        max-width: 340px;
+        white-space: normal;
+        text-align: left;
+        background: var(--panel2);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 8px 11px;
+        font-size: 11px;
+        font-weight: 400;
+        line-height: 1.55;
+        letter-spacing: 0;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.12s ease;
+        pointer-events: none;
+      }
+      .info:hover::after,
+      .info:focus-visible::after {
+        opacity: 1;
+        visibility: visible;
       }
 
       /* segmented status control (LIVE / UNVERIFIED / SETTLED) */
@@ -570,12 +593,12 @@
         border-right: 0;
       }
       .segmented button[aria-selected="true"] {
-        background: rgba(0, 255, 157, 0.08);
-        color: var(--pos-soft);
+        background: rgba(106, 215, 255, 0.1);
+        color: var(--accent);
         border-color: var(--line);
       }
       .segmented button:hover {
-        background: rgba(0, 255, 157, 0.06);
+        background: rgba(106, 215, 255, 0.06);
       }
 
       /* badges: ONE shape/size system, semantic variants only */
@@ -589,15 +612,15 @@
         text-transform: uppercase;
       }
       .b-pos {
-        background: rgba(0, 255, 157, 0.12);
+        background: rgba(62, 207, 142, 0.13);
         color: var(--pos);
       }
       .b-neg {
-        background: rgba(255, 92, 87, 0.12);
+        background: rgba(224, 98, 94, 0.13);
         color: var(--neg);
       }
       .b-neutral {
-        background: rgba(94, 122, 94, 0.12);
+        background: rgba(138, 147, 160, 0.12);
         color: var(--dim);
       }
       .b-info {
@@ -607,33 +630,31 @@
 
       /* designed empty + skeleton loading states */
       .empty {
-        padding: 32px 16px;
-        text-align: center;
+        padding: 28px 16px;
+        text-align: left;
         white-space: normal;
       }
       .empty-title {
         color: var(--dim);
         font-size: 11px;
         font-weight: 700;
-        letter-spacing: 0.18em;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
       }
       .empty-hint {
         color: var(--faint);
         font-size: 11px;
-        margin-top: 8px;
-        max-width: 560px;
-        margin-left: auto;
-        margin-right: auto;
+        margin-top: 6px;
+        max-width: 640px;
       }
       .skelbar {
         height: 10px;
         border-radius: 3px;
         background: linear-gradient(
           90deg,
-          rgba(94, 122, 94, 0.12) 25%,
-          rgba(94, 122, 94, 0.28) 50%,
-          rgba(94, 122, 94, 0.12) 75%
+          rgba(138, 147, 160, 0.1) 25%,
+          rgba(138, 147, 160, 0.22) 50%,
+          rgba(138, 147, 160, 0.1) 75%
         );
         background-size: 200% 100%;
         animation: shimmer 1.2s linear infinite;
@@ -1146,11 +1167,15 @@
          Dismissible and remembered via localStorage. Static author copy. -->
     <div class="intro" id="intro" role="note">
       <span class="intro-txt">
-        <b>How to read this:</b> CLV = your pick's price vs the sharp closing
-        line — consistently positive CLV is the proof of edge, <b>not</b> a
-        profit guarantee. ★ stars = confidence in the EDGE, not your chance to
-        win. Always confirm the live price at the book and review manually —
-        this system never places bets.
+        Decision support — manual review only; this system never places bets.
+        <button
+          class="info"
+          type="button"
+          aria-label="How to read this dashboard"
+          data-tip="CLV = your pick's price vs the sharp closing line; consistently positive CLV is the proof of edge, not a profit guarantee. ★ stars = confidence in the EDGE, not your chance to win. Always confirm the live price at the book before betting."
+        >
+          ?
+        </button>
       </span>
       <button
         id="intro-dismiss"
@@ -1163,9 +1188,7 @@
     </div>
 
     <footer>
-      auto-refresh 60s · data <code>GET /games</code> +
-      <code>GET /picks</code> · CLV = closing line value — consistently positive
-      CLV is the proof of real edge · manual review: this system does
+      auto-refresh 60s · manual review only — this system does
       <b>not</b> place bets; stakes informational, no profit guaranteed
     </footer>
 
@@ -2849,20 +2872,20 @@
         const banner = $("offline-banner");
         banner.style.display = "";
         banner.textContent = httpish
-          ? "⛔ ENGINE ERROR — the app is reachable but GET /picks failed (" +
+          ? "ENGINE ERROR — the app is reachable but GET /picks failed (" +
             picksErr.message +
             "). Data frozen at " +
             frozenAt() +
             "; prices are NOT being re-verified. Check the app logs."
           : timedOut
-            ? "⛔ ENGINE UNRESPONSIVE — the app process is up but GET /picks " +
+            ? "ENGINE UNRESPONSIVE — the app process is up but GET /picks " +
               "gave no answer within " +
               FETCH_TIMEOUT_MS / 1000 +
               "s (request aborted). Data frozen at " +
               frozenAt() +
               "; prices are NOT being re-verified. Likely a hung database " +
               "connection — check postgres, then the app logs."
-            : "⛔ ENGINE OFFLINE — cannot reach the app (" +
+            : "ENGINE OFFLINE — cannot reach the app (" +
               picksErr.message +
               "). Data frozen at " +
               frozenAt() +
