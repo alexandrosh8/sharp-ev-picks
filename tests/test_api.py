@@ -620,6 +620,34 @@ def test_dashboard_fades_value_gone_picks() -> None:
     assert "innerHTML" not in text
 
 
+def test_dashboard_shows_closing_price() -> None:
+    """Once a pick has kicked off / settled, the Odds cell shows the de-facto
+    closing price ("close X.XX") so the pick→close move is visible next to the
+    entry (value) price. The close is the finalized closing_odds when present,
+    else the frozen pre-kickoff current_odds (re-pricing stops at kickoff)."""
+    text = TestClient(make_app()).get("/").text
+    # the close line is rendered (textContent, no markup injection)
+    assert 'textContent = "close "' in text
+    assert "Book closing price" in text
+    # it sources closing_odds first, then the frozen current_odds fallback
+    assert "p.closing_odds" in text
+    assert "const closeRaw" in text
+    assert "innerHTML" not in text
+
+
+def test_picks_serializer_exposes_closing_odds() -> None:
+    """The GET /picks payload carries closing_odds so the dashboard can show the
+    closing price. It is null until a pick settles; the dashboard falls back to
+    the frozen current_odds for kicked-off-but-unsettled picks."""
+    import inspect
+
+    from app.storage import repositories
+
+    src = inspect.getsource(repositories.latest_picks_with_events)
+    assert '"closing_odds"' in src
+    assert "p.closing_odds" in src
+
+
 def test_dashboard_settled_view_swaps_table_header() -> None:
     """SETTLED-header regression: the desktop <thead> must be swapped to the
     8-col results set when the body renders the SETTLED column set, so each

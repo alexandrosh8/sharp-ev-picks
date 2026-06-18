@@ -219,6 +219,12 @@ async def latest_picks_with_events(
             "beat_close": p.beat_close,
             "current_odds": str(p.current_odds) if p.current_odds is not None else None,
             "current_edge": str(p.current_edge) if p.current_edge is not None else None,
+            # the de-vigged CLOSING price (last odds before kickoff), set at
+            # settlement by finalize_closing_from_snapshots. null until then —
+            # for a kicked-off-but-unsettled pick the frozen current_odds is the
+            # de-facto close (re-pricing stops at kickoff). The dashboard shows
+            # "close X.XX" so the pick→close price move is visible alongside CLV.
+            "closing_odds": str(p.closing_odds) if p.closing_odds is not None else None,
             # the book current_odds came from (= p.bookmaker by default; differs
             # only when the original book dropped the selection at revalidation)
             "current_bookmaker": p.current_bookmaker,

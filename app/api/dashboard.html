@@ -1266,6 +1266,7 @@
       function valueGone(p) {
         return (
           p.status === "alerted" &&
+          !hasStarted(p) && // post-kickoff rows show "close X.XX", not the fade
           p.current_edge !== null &&
           p.current_edge !== undefined &&
           Number(p.current_edge) <= 0
@@ -1709,9 +1710,58 @@
         orig.className = "odds";
         orig.textContent = Number(p.decimal_odds).toFixed(2);
         oddsCell.appendChild(orig);
-        // Live revalidation + execution helper only matter for open picks;
-        // the SETTLED view omits them (withHelpers === false).
-        if (withHelpers && p.status === "alerted" && p.current_odds !== null) {
+        // The de-facto CLOSE: the finalized closing_odds once a pick settles,
+        // else the frozen last pre-kickoff price (current_odds stops updating at
+        // kickoff). Only meaningful once the game has started/settled — it is
+        // "the odds just before the match went live", shown so the pick→close
+        // price move is visible next to the entry (value) price. Appears in BOTH
+        // the LIVE/UNVERIFIED and SETTLED views.
+        const started = hasStarted(p);
+        const closeRaw =
+          p.closing_odds != null
+            ? p.closing_odds
+            : (started ||
+                  p.status === "settled" ||
+                  p.status === "superseded") &&
+                p.current_odds != null
+              ? p.current_odds
+              : null;
+        if (closeRaw != null) {
+          const close = Number(closeRaw);
+          const entry = Number(p.decimal_odds);
+          const closeLine = document.createElement("small");
+          closeLine.style.display = "block";
+          // Neutral reference price — NOT a verdict. The colored verdict is the
+          // CLV badge (your price vs the de-vigged FAIR close, which can move
+          // even when the book price holds). Here we just show the book's last
+          // pre-kickoff price so the entry->close move is visible.
+          closeLine.style.color = "var(--faint)";
+          closeLine.textContent = "close " + close.toFixed(2);
+          const move =
+            close < entry
+              ? "shortened from your " +
+                entry.toFixed(2) +
+                " — you locked the bigger number"
+              : close > entry
+                ? "drifted out from your " +
+                  entry.toFixed(2) +
+                  " — a better price came later"
+                : "held at your " +
+                  entry.toFixed(2) +
+                  " (book price didn't move)";
+          closeLine.title =
+            "Book closing price — the last odds before kickoff" +
+            (p.closing_odds == null ? " (last pre-kickoff capture)" : "") +
+            ". The line " +
+            move +
+            ". The CLV badge grades your price against the de-vigged FAIR " +
+            "close, which can move even when the book price holds.";
+          oddsCell.appendChild(closeLine);
+        } else if (
+          withHelpers &&
+          p.status === "alerted" &&
+          p.current_odds !== null
+        ) {
           const nowLine = document.createElement("small");
           nowLine.style.display = "block";
           const curEdge =
@@ -1781,6 +1831,7 @@
         if (
           withHelpers &&
           p.status === "alerted" &&
+          !started &&
           p.min_acceptable_odds != null
         ) {
           const minLine = document.createElement("small");
