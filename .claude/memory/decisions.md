@@ -1,5 +1,35 @@
 # Decisions Log
 
+- 2026-06-18 (external-AI findings cross-checked — NO config change) — an
+  outside review flagged a football "artifact mismatch": live devig is
+  `differential_margin_weighting` (config.py:211) while `scripts/value_backtest.py`
+  at `--min-odds 1.30` selects `shin`, and recommended regenerating the
+  threshold artifact + promoting "best held-out CLV". REJECTED the action: that
+  would RE-SELECT on the SPENT holdout (2425+2526) = data-snooping, which the
+  doctrine forbids. The live config is the VALIDATED one (set by the stronger
+  threshold-control process, not value_backtest.py's train-ROI sweep with
+  n>=150 + analytic SE). value_backtest.py ITSELF notes (line 231) that below a
+  1.6 floor "the sweep may pick a different (EQUIVALENT) devig" — and the
+  penaltyblog 250M-line study + our own bake-off show the 7 devig methods sit
+  within ~0.0002 RPS for 1X2, so shin vs differential_margin is noise. The 1.30
+  floor is already held-out-validated (PR #13, barely binds at thr=0.03);
+  "audit expects 1.60" is stale. Findings #2 (tennis stays visibility-only) and
+  #3 (prefer threshold-control artifact over value_backtest.py) just CONFIRM
+  current behavior. The repo-research half (nba_api / nflverse-data / nflreadpy /
+  soccerdata-ClubElo as FUTURE feature sources for NBA/NFL; JeffSackmann tennis
+  is CC BY-NC-SA = research-only) is a roadmap for sports that stay
+  visibility/shadow-only and gated on forward CLV — not actionable now. Any
+  real future devig/threshold change needs NEW data (season 2627), never a
+  spent-holdout re-tune. The two stray `docs/research/*multisport*.md` files
+  (agent side-effect of the multisport workflow, unreviewed, overlapping
+  committed docs #21/#23) were deleted. Anchor-calibration diagnostic (PR #25)
+  ran LIVE against the warehouse: 0 settled binary picks → INSUFFICIENT (clean
+  honesty gate; SQL + model_probability column confirmed against the real
+  schema). OPERATIONAL note: the compose `app` IMAGE was 29h stale (pre-PR#15)
+  and crash-looped on `alembic upgrade head` ("Can't locate revision
+  c3d8f1a6b240") because the DB is already at that head — NOT a code bug;
+  rebuild the image before deploy (`docker compose up -d --build app`).
+
 - 2026-06-18 (Pinnacle arcadia: capture totals + spreads, not just moneyline)
   — the arcadia straight feed is fetched with `primaryOnly=false` (full market
   set already on the wire) but previously extracted ONLY period-0 moneyline
