@@ -599,6 +599,26 @@ def test_dashboard_renders_confidence_stars_not_visible_stake() -> None:
     assert "innerHTML" not in text
 
 
+def test_dashboard_fades_value_gone_picks() -> None:
+    """A pick whose LIVE re-price no longer beats fair value (current_edge <= 0)
+    is FADED + tagged 'value gone' so it isn't mistaken for a fresh opportunity —
+    but it is NEVER removed from the board or from CLV tracking (dropping losers
+    would be survivorship bias). We assert the affordance (predicate + row class
+    + chip) is present, and the chip is built via the badge() helper (textContent,
+    not innerHTML)."""
+    text = TestClient(make_app()).get("/").text
+    # predicate keyed on current_edge <= 0 for open/alerted picks
+    assert "function valueGone(" in text
+    assert "current_edge" in text
+    # the faded row class is applied AND styled
+    assert 'tr.classList.add("valuegone")' in text
+    assert "tr.valuegone {" in text
+    # the muted chip label
+    assert "value gone" in text
+    # purely presentational — still no markup injection anywhere
+    assert "innerHTML" not in text
+
+
 def test_dashboard_settled_view_swaps_table_header() -> None:
     """SETTLED-header regression: the desktop <thead> must be swapped to the
     8-col results set when the body renders the SETTLED column set, so each

@@ -547,6 +547,18 @@
         color: var(--info);
       }
 
+      /* Value-gone rows: the live re-price no longer beats fair value
+         (current edge <= 0 — the market moved against the pick). Faded so the
+         still-actionable picks stand out; NOT removed — the pick stays on the
+         board and in CLV tracking (dropping losers would be survivorship bias).
+         Hover restores opacity so a dimmed row is still readable on inspection. */
+      tr.valuegone {
+        opacity: 0.42;
+      }
+      tr.valuegone:hover {
+        opacity: 0.9;
+      }
+
       /* designed empty + skeleton loading states */
       .empty {
         padding: 28px 16px;
@@ -1245,6 +1257,20 @@
       function inUnverifiedTab(p) {
         return p.status === "alerted" && !inLiveTab(p);
       }
+      // "Value gone": an open pick whose LIVE re-price no longer beats fair
+      // value (current edge <= 0 — the market moved against it). Used only to
+      // FADE the row so it isn't mistaken for a fresh opportunity; never removes
+      // it (the pick stays on the board and in CLV tracking — dropping losers
+      // would be survivorship bias). current_edge null = no live re-price yet /
+      // book dropped the line => unknown, so NOT marked.
+      function valueGone(p) {
+        return (
+          p.status === "alerted" &&
+          p.current_edge !== null &&
+          p.current_edge !== undefined &&
+          Number(p.current_edge) <= 0
+        );
+      }
 
       function emptyRow(tbody) {
         const tr = document.createElement("tr");
@@ -1729,6 +1755,21 @@
             (switched ? " @ " + nowBook : "") +
             verdict;
           oddsCell.appendChild(nowLine);
+          // The live re-price no longer beats fair value -> a muted "value gone"
+          // chip (the row is also faded). Don't bet it now; it stays on the
+          // board only for CLV tracking.
+          if (curEdge !== null && curEdge <= 0) {
+            const gone = badge("value gone", "b-neg");
+            gone.style.display = "inline-block";
+            gone.style.marginTop = "3px";
+            gone.style.fontSize = "9px";
+            gone.title =
+              "the live re-price at " +
+              nowBook +
+              " no longer beats fair value — skip it now. Kept on the board " +
+              "only for CLV tracking (removing losers would fake the edge record).";
+            oddsCell.appendChild(gone);
+          }
         }
         if (
           withHelpers &&
@@ -2306,6 +2347,10 @@
             cellClv(tr, p);
             cellStatus(tr, p);
           }
+          // Fade picks whose live edge has evaporated so the still-actionable
+          // ones lead the eye (the default sort already sinks them via
+          // effective edge). Kept visible + tracked, just de-emphasized.
+          if (valueGone(p)) tr.classList.add("valuegone");
           tbody.appendChild(tr);
         });
       }
