@@ -1814,28 +1814,57 @@
         evLine.style.color = "var(--faint)";
         evLine.textContent = "EV +" + pct(p.ev);
         fairCell.append(fairPct, evLine);
-        td(tr, fairCell).dataset.label = "Fair / EV";
+        const cell = td(tr, fairCell);
+        cell.dataset.label = "Fair / EV";
+        // Pre-empt the same entry-vs-live confusion as Edge: this EV is the
+        // value at the ENTRY price. Once the line moves, the live read is the
+        // Edge column ("no value now" if the current price no longer beats fair).
+        cell.title =
+          "Fair % = de-vigged sharp fair win probability (the anchor — stays " +
+          "put). EV = expected value at the ENTRY price when first flagged; " +
+          "after the line moves the live read is the Edge column — “no value " +
+          "now” if the current price no longer beats fair.";
       }
 
       function cellEdge(tr, p) {
-        const e = Number(p.edge);
+        // Show the LIVE edge (current_edge) — the truth for "bet now". It
+        // already drives BOTH the sort comparator (current_edge ?? edge) and
+        // the "no value now" fade; showing the ENTRY edge (p.edge) here made
+        // the column read positive after the line moved past fair, and put the
+        // display out of step with the sort. Fall back to the entry edge only
+        // when the pick hasn't been re-priced yet (current_edge null).
+        const entry = Number(p.edge);
+        const eff = p.current_edge == null ? entry : Number(p.current_edge);
+        const moved =
+          p.current_edge != null && Number(p.current_edge) !== entry;
         const ed = document.createElement("div");
         const ev_ = document.createElement("span");
         ev_.className = "edge";
-        ev_.textContent = "+" + pct(p.edge);
+        ev_.textContent = (eff >= 0 ? "+" : "") + pct(eff);
+        // Color by the live edge: green at/above the premium floor, amber when
+        // thin, red when gone — mirrors the "now …" verdict in the Odds cell.
+        ev_.style.color =
+          eff >= 0.03 ? "var(--pos)" : eff > 0 ? "var(--warn)" : "var(--neg)";
         const bar = document.createElement("div");
         bar.className = "bar";
         const fill = document.createElement("i");
-        fill.style.width = Math.min(e / 0.1, 1) * 100 + "%"; // 10% edge = full bar
+        // Bar can't go negative; a gone edge shows an empty bar.
+        fill.style.width = Math.min(Math.max(eff, 0) / 0.1, 1) * 100 + "%";
         bar.appendChild(fill);
         ed.append(ev_, bar);
         const edgeCell = td(tr, ed, "edgecell");
         edgeCell.dataset.label = "Edge";
         // Hover explanation on the value itself (header tooltip mirrors this).
         edgeCell.title =
-          "Edge = de-vigged sharp fair probability − this book's implied " +
-          "probability. How much the price beats fair value; the bar fills " +
-          "toward a 10% edge. Premium tier needs ≥3%, volume (shadow) ≥1.5%.";
+          "Live edge at the current price = de-vigged sharp fair probability − " +
+          "the book's implied probability. " +
+          (moved
+            ? "Entry edge when first flagged was " +
+              (entry >= 0 ? "+" : "") +
+              pct(entry) +
+              " — the line has moved since. "
+            : "") +
+          "Premium needs ≥3%, volume ≥1.5%; ≤0 = no value now.";
       }
 
       // CONFIDENCE stars — the headline that REPLACES the recommended-stake
@@ -2046,8 +2075,9 @@
           "Model fair win probability (the de-vigged sharp anchor) and the " +
           "expected value of a unit bet at this price.",
         Edge:
-          "How far your price beats fair value (sharp fair prob − implied " +
-          "prob). The bar fills toward a 10% edge.",
+          "LIVE edge at the current price (sharp fair prob − implied prob) — " +
+          "the re-priced edge for open picks, matching the sort and the “no " +
+          "value now” fade. ≤0 = no value now; the bar fills toward a 10% edge.",
         Confidence:
           "1–5★ rating of how strong the EDGE is — not your " +
           "chance of winning the bet.",
