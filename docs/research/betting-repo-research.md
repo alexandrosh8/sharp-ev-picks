@@ -88,3 +88,40 @@ What survives for phase 5: NBA_AI's injury-PDF loader + ESPN lines client
 patterns, the NBA_Betting/kyleskom feature checklists and negative examples,
 and `sbrscrape` (flagged for its own future evaluation as a free NBA odds
 source).
+
+## 2026-06-19 — penaltyblog + OddsHarvester unused-feature scan (our two spine deps)
+
+Asked: do penaltyblog (`martineastwood/penaltyblog`, MIT) or OddsHarvester
+(`jordantete/OddsHarvester`, 0.3.0) have UNUSED features that would help the
+picks/dashboard? Judged against the data gate (free sharp anchor + closing
+line; outcome models are wrong-shape). Two parallel Explore agents read the
+actual module trees.
+
+**penaltyblog → nothing new helps the picks.** It has no odds source / no
+Pinnacle, so it cannot touch the only edge that matters. Unused modules are
+all **wrong-shape** (BivariatePoisson / ZeroInflated / NegativeBinomial /
+WeibullCopula / Bayesian goal models; Elo/Massey/Colley/Pi ratings; xT; FPL —
+outcome predictors that lose on CLV) or **redundant** (its `implied` devig =
+our `app/probabilities/devig.py`; its `betting.kelly` = our
+`app/risk/staking.py`; its scrapers = our ingestion). Only unused bits worth
+anything are **dashboard diagnostics**: `metrics.rps_array` (Ranked
+Probability Score, a strictly-proper rule, better than Brier for 1X2) and the
+Dixon-Coles `create_dixon_coles_grid` score heatmap. Verdict: transparency
+candy only — **no pick edge**. (Deferred; not built.)
+
+**OddsHarvester → one genuinely valuable unused feature: HISTORIC mode +
+`--odds-history`.** We only use `UPCOMING_MATCHES`
+(`app/ingestion/oddsportal.py`). The historic path scrapes, for FREE, each
+past match's **opening AND closing odds per bookmaker** from OddsPortal
+results pages — the project's biggest data gap (real closing lines vs our
+re-priced proxy; a backtestable open→close line-shopping dataset).
+**Decisive caveat:** it only closes the _sharp_ gap IF OddsPortal historic
+exposes **Pinnacle's** open+close; if only a soft consensus close, it's a real
+closing line but not a sharp anchor. Also a heavy, DOM-fragile, ToS-sensitive
+per-match scrape. Verdict: **USE — but gate a full backfill on a small
+validation probe first** (confirm Pinnacle coverage); not yet run.
+
+Acted on instead (doctrine-safe, ships now): the dashboard **CLOSED tab** (the
+proof-of-edge ledger — every kicked-off pick with its close + CLV) + a **CLV
+scorecard** (% beat the close, mean CLV). Real OddsHarvester closes would plug
+straight into it once the probe passes.
