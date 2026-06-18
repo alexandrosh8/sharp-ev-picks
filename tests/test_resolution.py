@@ -194,6 +194,16 @@ def test_seed_aliases_resolve_cross_source_name_variants() -> None:
         ("Landvetter", "Landvetter IS"),  # club suffix
         ("FC Gareji Sagarejo", "Gareji"),  # long vs short name
         ("AS Monaco", "Monaco"),  # AS prefix (basketball LNB)
+        # 2026-06-18 shadow match-rate audit: each verified same fixture
+        # (same opponent + identical kickoff) from the live archive.
+        ("D.R. Congo", "DR Congo"),  # punctuation split (D.R. vs DR)
+        ("UMF Grindavik", "Grindavik"),  # club prefix (Icelandic UMF)
+        ("Kolkheti 1913", "Kolkheti 1913 Poti"),  # city suffix
+        ("Odishi 1919", "Odishi 1919 Zugdidi"),  # city suffix
+        ("Franke", "IK Franke"),  # club prefix (Swedish IK)
+        ("Bulleen", "Bulleen Lions"),  # nickname suffix
+        ("Macae", "Macae Esporte RJ"),  # short vs full name
+        ("San German", "Atleticos de San German"),  # club prefix (BSN basketball)
     ]
     for oddsportal_name, pinnacle_name in pairs:
         assert table.canonical(oddsportal_name) == table.canonical(pinnacle_name), (
