@@ -368,6 +368,29 @@
         background: var(--panel);
         z-index: 2;
       }
+      /* Clickable column headers (picks table). The caret doubles as the
+         affordance: a faint ↕ on sortable-but-inactive headers, an accent
+         ▲/▼ on the active one. Non-sortable headers get neither. */
+      th.sortable {
+        cursor: pointer;
+        user-select: none;
+      }
+      th.sortable:hover {
+        color: var(--text);
+      }
+      th.sortable:focus-visible {
+        color: var(--text);
+        /* keep a visible keyboard focus ring (a11y) rather than removing it */
+        outline: 1px solid var(--accent);
+        outline-offset: -2px;
+      }
+      th .caret {
+        font-size: 9px;
+        color: var(--accent);
+      }
+      th[aria-sort="none"] .caret {
+        color: var(--line);
+      }
       td {
         padding: 7px 6px;
         border-bottom: 1px solid rgba(26, 36, 26, 0.6);
@@ -2029,37 +2052,173 @@
       // (matches the body's cellKickoff|Match|Pick|Book|Odds|Result|P&L|CLV);
       // LIVE/UNVERIFIED is the 11-col execution set. Built as text nodes so the
       // header can never inject markup.
+      // Each header is { label, key? }. A `key` marks the column sortable and
+      // ties it to a SORT_COLS comparator (below); keyless headers (Market /
+      // Pick / Book / Status) are not sortable. The per-view key set IS the
+      // sortable set for that view.
       const HEAD_LIVE = [
-        "Kickoff",
-        "Match",
-        "Market",
-        "Pick",
-        "Book",
-        "Odds",
-        "Fair / EV",
-        "Edge",
-        "Confidence",
-        "CLV",
-        "Status",
+        { label: "Kickoff", key: "kickoff" },
+        { label: "Match", key: "match" },
+        { label: "Market" },
+        { label: "Pick" },
+        { label: "Book" },
+        { label: "Odds", key: "odds" },
+        { label: "Fair / EV", key: "ev" },
+        { label: "Edge", key: "edge" },
+        { label: "Confidence", key: "conf" },
+        { label: "CLV", key: "clv" },
+        { label: "Status" },
       ];
       const HEAD_SETTLED = [
-        "Kickoff",
-        "Match",
-        "Pick",
-        "Book",
-        "Odds",
-        "Result",
-        "P&L",
-        "CLV",
+        { label: "Kickoff", key: "kickoff" },
+        { label: "Match", key: "match" },
+        { label: "Pick" },
+        { label: "Book" },
+        { label: "Odds", key: "odds" },
+        { label: "Result", key: "result" },
+        { label: "P&L", key: "pnl" },
+        { label: "CLV", key: "clv" },
       ];
+
+      // --- picks-table sorting -------------------------------------------------
+      // Interactive column sort. DISPLAY-ONLY: render() sorts the `rows` array
+      // (a fresh .filter() result) by the active column; PICKS and the server
+      // ORDER BY (created_at desc, load-bearing for the latest-200 card scoping)
+      // are never touched. With no active column the default best-on-top sort
+      // (confidence then effective edge) applies on LIVE/UNVERIFIED.
+      //
+      // Each column maps to the EXACT value its cell displays (verified against
+      // cellKickoff/cellMatch/cellOdds/cellFairEv/cellEdge/cellConfidence/
+      // cellClv/cellResult/cellPnl). Numeric fields are server-serialized
+      // strings → Number()-parse. Nullable fields (starts_at, clv_log, pnl,
+      // outcome) return null and SINK to the bottom in BOTH directions — a
+      // missing value is neither high nor low. dir0 = first-click direction
+      // (asc for time/name, desc for value columns so "best" leads).
+      const OUTCOME_RANK = {
+        won: 6,
+        half_won: 5,
+        push: 4,
+        void: 3,
+        half_lost: 2,
+        lost: 1,
+      };
+      const SORT_COLS = {
+        kickoff: {
+          type: "num",
+          dir0: "asc",
+          val: (p) =>
+            p.starts_at == null ? null : new Date(p.starts_at).getTime(),
+        },
+        match: { type: "str", dir0: "asc", val: (p) => p.event || "" },
+        // Sort by decimal_odds — the prominent price shown in every Odds cell
+        // (both views). The live "now" price (current_odds) is only a smaller
+        // sub-line, so keying off it would order rows by a number that isn't
+        // the dominant one on screen. decimal_odds is NOT NULL → always finite.
+        odds: { type: "num", dir0: "desc", val: (p) => Number(p.decimal_odds) },
+        ev: { type: "num", dir0: "desc", val: (p) => Number(p.ev) },
+        // Effective edge = current_edge ?? edge (the value the cards and the
+        // default sort use); edge is always present, so always finite.
+        edge: {
+          type: "num",
+          dir0: "desc",
+          val: (p) => Number(p.current_edge ?? p.edge),
+        },
+        conf: {
+          type: "num",
+          dir0: "desc",
+          val: (p) => {
+            const c = p.confidence_rating || {};
+            return Math.max(1, Math.min(5, Number(c.level) || 1));
+          },
+        },
+        clv: {
+          type: "num",
+          dir0: "desc",
+          val: (p) => (p.clv_log == null ? null : Number(p.clv_log)),
+        },
+        // Settled result ranked by realized goodness (won > half_won > push >
+        // void > half_lost > lost) so a sort clusters AND orders outcomes
+        // meaningfully; unrecorded outcome sinks.
+        result: {
+          type: "num",
+          dir0: "desc",
+          val: (p) => (p.outcome ? (OUTCOME_RANK[p.outcome] ?? null) : null),
+        },
+        pnl: {
+          type: "num",
+          dir0: "desc",
+          val: (p) => (p.pnl == null ? null : Number(p.pnl)),
+        },
+      };
+      let SORT_COL = null; // active sort key, or null = default order
+      let SORT_DIR = "desc"; // "asc" | "desc"
+      // Sort keys valid in the active view (= its keyed headers).
+      function headSortKeys(settledView) {
+        return (settledView ? HEAD_SETTLED : HEAD_LIVE)
+          .filter((h) => h.key)
+          .map((h) => h.key);
+      }
+      function toggleSort(key) {
+        if (SORT_COL === key) {
+          SORT_DIR = SORT_DIR === "asc" ? "desc" : "asc";
+        } else {
+          SORT_COL = key;
+          SORT_DIR = (SORT_COLS[key] && SORT_COLS[key].dir0) || "desc";
+        }
+        rememberView("pt_sortcol", SORT_COL || "");
+        rememberView("pt_sortdir", SORT_DIR);
+        render();
+      }
       function renderHead(settledView) {
         const head = $("picks-head");
         if (!head) return;
-        const labels = settledView ? HEAD_SETTLED : HEAD_LIVE;
+        const cols = settledView ? HEAD_SETTLED : HEAD_LIVE;
+        const activeKeys = headSortKeys(settledView);
         head.replaceChildren();
-        for (const label of labels) {
+        for (const col of cols) {
           const th = document.createElement("th");
-          th.textContent = label;
+          if (col.key) {
+            // Sortable header: label text node + caret affordance. DOM nodes /
+            // textContent only — the header can never inject markup.
+            th.append(document.createTextNode(col.label));
+            th.classList.add("sortable");
+            th.tabIndex = 0;
+            th.setAttribute("role", "button");
+            const active = col.key === SORT_COL && activeKeys.includes(col.key);
+            th.setAttribute(
+              "aria-sort",
+              active
+                ? SORT_DIR === "asc"
+                  ? "ascending"
+                  : "descending"
+                : "none",
+            );
+            const caret = document.createElement("span");
+            caret.className = "caret";
+            caret.textContent = active
+              ? SORT_DIR === "asc"
+                ? " ▲"
+                : " ▼"
+              : " ↕";
+            th.appendChild(caret);
+            th.title =
+              "Sort by " +
+              col.label +
+              (active
+                ? SORT_DIR === "asc"
+                  ? " (ascending)"
+                  : " (descending)"
+                : "");
+            th.addEventListener("click", () => toggleSort(col.key));
+            th.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                toggleSort(col.key);
+              }
+            });
+          } else {
+            th.textContent = col.label;
+          }
           head.appendChild(th);
         }
       }
@@ -2116,13 +2275,44 @@
           b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
         }
         const rows = scoped.filter(matchesTab);
-        // Best pick on top. LIVE/UNVERIFIED order by the headline CONFIDENCE
-        // stars (confidence_rating.level, floor 1), tie-broken by the same
-        // effective edge the cards use (current_edge ?? edge). SETTLED keeps
-        // the server's recent-first order (created_at desc) so the latest
-        // results read top-down. `rows` is a fresh array from .filter(), so
-        // this never mutates PICKS — cards/counts read `scoped` independently.
-        if (!settledView) {
+        // Order the visible rows. `rows` is a fresh array from .filter(), so
+        // sorting it never mutates PICKS — cards/counts read `scoped`
+        // independently, and the server ORDER BY is untouched.
+        //
+        // (a) An active, view-applicable sort column wins: sort by its mapped
+        //     value with missing values sunk to the bottom in both directions;
+        //     ties keep the incoming (server created_at desc) order via stable
+        //     sort, so equal rows stay recent-first.
+        // (b) Otherwise the default best-on-top sort for LIVE/UNVERIFIED:
+        //     headline CONFIDENCE stars (confidence_rating.level, floor 1),
+        //     tie-broken by effective edge (current_edge ?? edge).
+        // (c) Otherwise (SETTLED, no active column): server recent-first order.
+        const activeKey =
+          SORT_COL &&
+          SORT_COLS[SORT_COL] &&
+          headSortKeys(settledView).includes(SORT_COL)
+            ? SORT_COL
+            : null;
+        if (activeKey) {
+          const col = SORT_COLS[activeKey];
+          const dir = SORT_DIR === "asc" ? 1 : -1;
+          const missing = (v) =>
+            v == null || (col.type === "num" && !isFinite(v));
+          rows.sort((a, b) => {
+            const va = col.val(a, settledView);
+            const vb = col.val(b, settledView);
+            const am = missing(va);
+            const bm = missing(vb);
+            if (am && bm) return 0;
+            if (am) return 1; // missing always sinks, regardless of dir
+            if (bm) return -1;
+            const c =
+              col.type === "str"
+                ? String(va).localeCompare(String(vb))
+                : va - vb;
+            return c * dir;
+          });
+        } else if (!settledView) {
           const confLevel = (p) => {
             const c = p.confidence_rating || {};
             return Math.max(1, Math.min(5, Number(c.level) || 1));
@@ -2984,6 +3174,13 @@
           $("f-tier").value = savedTier;
         const savedSearch = localStorage.getItem("pt_search");
         if (savedSearch) $("f-search").value = savedSearch;
+        // Sort column/direction must be restored BEFORE the tab restore below
+        // (setStatusTab triggers the first render). Validate against the known
+        // comparator keys + directions so a stale value can never misorder.
+        const savedSortCol = localStorage.getItem("pt_sortcol");
+        if (savedSortCol && SORT_COLS[savedSortCol]) SORT_COL = savedSortCol;
+        const savedSortDir = localStorage.getItem("pt_sortdir");
+        if (["asc", "desc"].includes(savedSortDir)) SORT_DIR = savedSortDir;
         const savedTab = localStorage.getItem("pt_tab");
         if (["live", "unverified", "settled"].includes(savedTab))
           setStatusTab(savedTab);

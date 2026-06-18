@@ -605,5 +605,33 @@ def test_dashboard_settled_view_swaps_table_header() -> None:
     # LIVE set (Market/Fair/EV/Edge/Confidence/Status do NOT appear in it)
     assert '"Result"' in text
     assert '"P&L"' in text
-    # header cells built with textContent, never innerHTML (no markup injection)
-    assert "th.textContent = label" in text
+    # header cells built with textContent / text nodes (no markup injection):
+    # keyless headers use textContent, sortable ones append a label text node.
+    # The global no-innerHTML guard above covers the whole-page XSS contract.
+    assert "th.textContent = col.label" in text
+    assert "createTextNode(col.label)" in text
+
+
+def test_dashboard_picks_table_columns_are_sortable() -> None:
+    """Clickable column-sort machinery is served: a comparator registry keyed
+    per column, per-view sortable-key gating, a toggle that flips direction,
+    accessible sortable headers (aria-sort), and persisted column+direction
+    validated on restore. Display-only — sorts the `rows` array, never the
+    server ORDER BY (the no-innerHTML XSS contract is asserted globally)."""
+    text = TestClient(make_app()).get("/").text
+    # comparator registry + the per-view key gate
+    assert "const SORT_COLS = {" in text
+    assert "function headSortKeys(settledView)" in text
+    assert "function toggleSort(key)" in text
+    # accessible, clickable headers
+    assert 'th.classList.add("sortable")' in text
+    assert '"aria-sort"' in text
+    # settled Result ranking exists (clusters + orders outcomes)
+    assert "const OUTCOME_RANK = {" in text
+    # active column + direction persist across reloads and are validated on
+    # restore against the known comparator keys
+    assert '"pt_sortcol"' in text
+    assert '"pt_sortdir"' in text
+    assert "SORT_COLS[savedSortCol]" in text
+    # the default best-on-top sort is still the no-active-column fallback
+    assert "confLevel" in text
