@@ -1716,14 +1716,11 @@
           nowLine.style.display = "block";
           const curEdge =
             p.current_edge === null ? null : Number(p.current_edge);
-          let verdict = "";
+          // Color the live PRICE by its edge (green/amber/red); the edge NUMBER
+          // itself lives only in the Edge column now — showing the "· x%" here
+          // too just duplicated it.
           let color = "var(--faint)";
           if (curEdge !== null) {
-            verdict =
-              " · " +
-              (curEdge >= 0 ? "+" : "") +
-              (curEdge * 100).toFixed(1) +
-              "%";
             if (curEdge >= 0.03) color = "var(--pos)";
             else if (curEdge > 0) color = "var(--warn)";
             else color = "var(--neg)";
@@ -1752,8 +1749,7 @@
           nowLine.textContent =
             "now " +
             Number(p.current_odds).toFixed(2) +
-            (switched ? " @ " + nowBook : "") +
-            verdict;
+            (switched ? " @ " + nowBook : "");
           oddsCell.appendChild(nowLine);
           // The CURRENT price no longer beats fair value -> a muted
           // "no value now" chip (the row is also faded). This is about the
