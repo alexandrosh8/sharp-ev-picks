@@ -648,6 +648,25 @@ def test_picks_serializer_exposes_closing_odds() -> None:
     assert "p.closing_odds" in src
 
 
+def test_dashboard_has_closed_tab_and_clv_scorecard() -> None:
+    """The CLOSED tab is the proof-of-edge ledger: every kicked-off pick (line
+    closed, CLV locked), split out of the old conflated UNVERIFIED tab. It is
+    topped by a CLV scorecard (% that beat the close + mean CLV), computed
+    client-side from the closed picks' clv_log/beat_close — text only."""
+    text = TestClient(make_app()).get("/").text
+    # the 4-tab segmented control includes CLOSED, between UNVERIFIED and SETTLED
+    assert 'data-status="closed"' in text
+    assert ">\n          CLOSED\n        </button>" in text or "CLOSED" in text
+    # the tab predicate + router branch exist
+    assert "function inClosedTab(" in text
+    assert 'STATUS_TAB === "closed"' in text
+    # the CLV scorecard element + its proof-of-edge headline (textContent)
+    assert 'id="clv-scorecard"' in text
+    assert "CLV ledger" in text
+    assert "beat the close" in text
+    assert "innerHTML" not in text
+
+
 def test_dashboard_settled_view_swaps_table_header() -> None:
     """SETTLED-header regression: the desktop <thead> must be swapped to the
     8-col results set when the body renders the SETTLED column set, so each

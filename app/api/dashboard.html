@@ -1029,6 +1029,14 @@
         <button
           type="button"
           role="tab"
+          data-status="closed"
+          aria-selected="false"
+        >
+          CLOSED
+        </button>
+        <button
+          type="button"
+          role="tab"
           data-status="settled"
           aria-selected="false"
         >
@@ -1053,6 +1061,10 @@
     </div>
 
     <div class="tablewrap">
+      <!-- CLV scorecard: shown on the CLOSED tab only (JS-populated). The
+           proof-of-edge headline over every kicked-off pick — % that beat the
+           de-vigged close + mean CLV. Text only, never markup. -->
+      <div class="sub" id="clv-scorecard" style="display: none"></div>
       <table id="picks-table">
         <thead>
           <!-- LIVE/UNVERIFIED header (11 cols). render() swaps this row's cells
@@ -1251,11 +1263,20 @@
       // LIVE = alerted, freshly re-priced, AND not yet kicked off. UNVERIFIED is
       // the complement among open picks (stale re-price OR kicked off / awaiting
       // settle), so the two partition every open pick with no gaps/overlap.
+      // The three open-pick tabs partition every alerted pick with no overlap:
+      //   LIVE       = fresh re-price, pre-kickoff (bettable now)
+      //   UNVERIFIED = stale re-price, pre-kickoff (was bettable; awaiting the
+      //                next cycle to re-confirm value)
+      //   CLOSED     = kicked off (line has closed; CLV locked) — the
+      //                proof-of-edge ledger, awaiting a settled result.
       function inLiveTab(p) {
         return p.status === "alerted" && isVerified(p) && !hasStarted(p);
       }
+      function inClosedTab(p) {
+        return p.status === "alerted" && hasStarted(p);
+      }
       function inUnverifiedTab(p) {
-        return p.status === "alerted" && !inLiveTab(p);
+        return p.status === "alerted" && !hasStarted(p) && !inLiveTab(p);
       }
       // "Value gone": an open pick whose LIVE re-price no longer beats fair
       // value (current edge <= 0 — the market moved against it). Used only to
@@ -1287,13 +1308,19 @@
           hint.textContent =
             "Picks appear here once the current poll cycle re-checks their " +
             "odds (one full cycle, up to ~40 min) AND the match has not kicked " +
-            "off yet; stale or kicked-off picks are under the UNVERIFIED tab.";
+            "off yet; stale ones are under UNVERIFIED, kicked-off under CLOSED.";
         } else if (STATUS_TAB === "unverified") {
           title.textContent = "NO UNVERIFIED PICKS";
           hint.textContent =
-            "Open picks land here when their last re-price is older than the " +
-            "verified window, OR the match has kicked off (awaiting a result — " +
-            "use Settle). Pre-kickoff ones return to LIVE on the next cycle.";
+            "Pre-kickoff picks land here when their last re-price is older than " +
+            "the verified window; they return to LIVE on the next cycle. Once a " +
+            "match kicks off the pick moves to CLOSED.";
+        } else if (STATUS_TAB === "closed") {
+          title.textContent = "NO CLOSED PICKS";
+          hint.textContent =
+            "Picks land here once their match kicks off: the line has closed, " +
+            "CLV is locked, and the close price shows in the Odds cell. This is " +
+            "the proof-of-edge ledger — Settle a finished game to record its result.";
         } else if (STATUS_TAB === "settled") {
           title.textContent = "NO SETTLED PICKS";
           hint.textContent =
@@ -1995,17 +2022,24 @@
       function cellStatus(tr, p) {
         const kickoffKnown = p.starts_at != null;
         const isVolume = tierOf(p) === "volume";
+        const closed = hasStarted(p); // kicked off: line closed, awaiting result
         const statusBadge = badge(
           p.status === "alerted"
             ? isVolume
               ? "SHADOW"
-              : "LIVE"
+              : closed
+                ? "CLOSED"
+                : "LIVE"
             : p.status === "settled"
               ? "SETTLED"
               : p.status === "superseded"
                 ? "SUPERSEDED"
                 : p.status,
-          p.status === "alerted" && !isVolume ? "b-info" : "b-neutral",
+          // only a fresh, pre-kickoff premium pick is "active" (accent); a
+          // closed or shadow pick is neutral.
+          p.status === "alerted" && !isVolume && !closed
+            ? "b-info"
+            : "b-neutral",
         );
         if (isVolume)
           statusBadge.title =
@@ -2133,9 +2167,9 @@
           "sharp line. Green ✓ = beat it, red ✗ = worse, " +
           "LIVE = still provisional until kickoff. The only real proof of edge.",
         Status:
-          "LIVE = fresh and pre-kickoff · SHADOW = volume tier (tracked, " +
-          "never alerted) · SETTLED / SUPERSEDED. After kickoff a Settle " +
-          "button appears here (under the UNVERIFIED tab).",
+          "LIVE = fresh and pre-kickoff · CLOSED = kicked off, line closed · " +
+          "SHADOW = volume tier (tracked, never alerted) · SETTLED / " +
+          "SUPERSEDED. After kickoff a Settle button appears here (CLOSED tab).",
         Result:
           "How the bet resolved: won / lost / push / void " +
           "(half-won / half-lost on Asian lines).",
@@ -2299,6 +2333,7 @@
         const matchesTab = (p) => {
           if (STATUS_TAB === "live") return inLiveTab(p);
           if (STATUS_TAB === "unverified") return inUnverifiedTab(p);
+          if (STATUS_TAB === "closed") return inClosedTab(p);
           if (STATUS_TAB === "settled") return p.status === "settled";
           return true;
         };
@@ -2327,11 +2362,13 @@
         const tabCounts = {
           live: scoped.filter(inLiveTab).length,
           unverified: scoped.filter(inUnverifiedTab).length,
+          closed: scoped.filter(inClosedTab).length,
           settled: scoped.filter((p) => p.status === "settled").length,
         };
         const TAB_LABELS = {
           live: "LIVE",
           unverified: "UNVERIFIED",
+          closed: "CLOSED",
           settled: "SETTLED",
         };
         for (const b of document.querySelectorAll(
@@ -2339,6 +2376,42 @@
         )) {
           const k = b.dataset.status;
           b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
+        }
+        // CLV scorecard — the proof-of-edge headline, shown on the CLOSED tab
+        // only. Computed over every closed pick (in the tier/search scope) that
+        // has a CLV row: how many beat the de-vigged close + the mean CLV.
+        const scoreEl = $("clv-scorecard");
+        if (scoreEl) {
+          if (STATUS_TAB === "closed") {
+            const graded = scoped
+              .filter(inClosedTab)
+              .filter((p) => p.clv_log != null);
+            if (graded.length) {
+              const beat = graded.filter((p) => p.beat_close).length;
+              const meanClv =
+                (graded.reduce(
+                  (s, p) => s + (Math.exp(Number(p.clv_log)) - 1),
+                  0,
+                ) /
+                  graded.length) *
+                100;
+              scoreEl.textContent =
+                "CLV ledger — " +
+                graded.length +
+                " closed · " +
+                Math.round((beat / graded.length) * 100) +
+                "% beat the close · mean CLV " +
+                (meanClv >= 0 ? "+" : "") +
+                meanClv.toFixed(1) +
+                "%. Consistently positive CLV is the only proof of real edge.";
+            } else {
+              scoreEl.textContent =
+                "CLV ledger — no closed picks have a CLV row yet.";
+            }
+            scoreEl.style.display = "";
+          } else {
+            scoreEl.style.display = "none";
+          }
         }
         const rows = scoped.filter(matchesTab);
         // Order the visible rows. `rows` is a fresh array from .filter(), so
@@ -3264,11 +3337,12 @@
       // line sits under the "Available games" title.
       function fillStaticCopy() {
         $("legend-status").textContent =
-          " LIVE = price re-checked each cycle (fresh, pre-kickoff) · " +
-          "UNVERIFIED = open but stale or already kicked off — settle it here " +
-          "once the game finishes · SETTLED = result recorded · " +
-          "SUPERSEDED = replaced by a newer strategy version · SHADOW = " +
-          "volume tier, tracked but never alerted.";
+          " LIVE = fresh re-price, pre-kickoff (bettable now) · " +
+          "UNVERIFIED = stale re-price, still pre-kickoff (re-confirms next " +
+          "cycle) · CLOSED = kicked off, line closed, CLV locked — the " +
+          "proof-of-edge ledger; Settle a finished game here · " +
+          "SETTLED = result recorded · SUPERSEDED = replaced by a newer " +
+          "strategy version · SHADOW = volume tier, tracked but never alerted.";
         $("legend-clv").textContent =
           " CLV +x% (green ✓) = your price beat the de-vigged closing sharp " +
           "line by x%; −x% (red ✗) = it's worse; LIVE = still provisional " +

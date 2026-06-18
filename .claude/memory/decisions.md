@@ -1,5 +1,17 @@
 # Decisions Log
 
+- 2026-06-19 (penaltyblog + OddsHarvester unused-feature scan — see
+  docs/research/betting-repo-research.md) — penaltyblog has NOTHING new for the
+  picks (no odds/Pinnacle source; unused modules are wrong-shape goal/rating
+  models or redundant devig/Kelly; only `metrics.rps_array` + Dixon-Coles score
+  heatmap are dashboard-diagnostic candy, deferred). OddsHarvester's ONE real
+  unused feature = HISTORIC mode + `--odds-history` (free per-book OPENING +
+  CLOSING odds for past matches) — USE, but gate a backfill on a probe that
+  confirms OddsPortal historic exposes **Pinnacle** open+close (else it's a real
+  close but not a sharp anchor). Built instead: dashboard **CLOSED tab** (4th
+  tab, kicked-off picks = proof-of-edge ledger) + **CLV scorecard** (% beat
+  close, mean CLV). Do not re-scan these two repos.
+
 - 2026-06-18 (scrape-gap log fix — 'period target element not found' downgraded;
   basketball was a RED HERRING) — live monitoring flagged 8/hr
   `ERROR:SelectionManager:period target element not found for: Full Time`.
