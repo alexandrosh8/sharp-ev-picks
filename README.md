@@ -16,6 +16,21 @@ results, ROI, and Closing Line Value (CLV).
 > auto-betting flag — by design. All market-data integrations are read-only.
 > Betting involves risk; nothing here is a guarantee of profit.
 
+## Sports coverage
+
+| Sport                         | Status                      | Notes                                                                                                                              |
+| ----------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Football / Soccer             | **Pick source** (validated) | The held-out CLV edge lives here — sharp-vs-soft line shopping.                                                                    |
+| Basketball (NBA / EuroLeague) | **Pick source**             | Moneyline + main totals; runs the same devig → edge gate.                                                                          |
+| Tennis (ATP / WTA)            | **Visibility-only**         | Scraped and shown, tagged `UNVALIDATED`; mints **no** picks — its free data source has no closing line, so CLV can't be evaluated. |
+| NFL (American football)       | **Visibility-only**         | Off-season yields no games; a free Pinnacle close is now being forward-captured so it can eventually be CLV-graded.                |
+
+A sport only earns **alerting picks** after a held-out **incremental CLV vs the
+closing line > 2 SE**. Visibility-only sports are scraped, shown, and tracked
+but stay pick-free and exposure-free by design — enforced in _both_ the
+scheduler (`visibility_only_sports`) and the warehouse path
+(`_VALIDATED_SPORT_PREFIXES`).
+
 ## Install & run — pick one
 
 Two supported ways to run it. Both run the **same code** and serve the picks
@@ -183,11 +198,21 @@ backtest, generate live picks, and run the full platform.
       APScheduler pipeline, FastAPI, CI + safety audit
 - [x] Validated pick finder — sharp-vs-soft value strategy, v3 maximal-data
       backtest (46k matches, holdout incremental CLV > 2SE), wired as the
-      default live pipeline with 30-min CLV true-up (173 tests)
+      default live pipeline with 30-min CLV true-up (800+ tests)
 - [x] Settlement engine (phase 4) — auto-settles from free results sources
       (World Cup, Brazil, European leagues), manual settle button for
       NBA/euroleague, ROI + stake-weighted CLV report on the dashboard
-- [ ] Next: bankroll tracking (phase 6) + NBA model (phase 5)
+- [x] Multisport visibility — Tennis (ATP/WTA) + NFL added as **visibility-only**
+      feeds (scraped, shown `UNVALIDATED`, no picks); NFL Pinnacle-close
+      forward-capture started; held-out tennis backtest documented
+      (visibility-only verdict, CLV unevaluable without a free closing line)
+- [x] Dashboard professionalization — refined trading-terminal UI, picks-first
+      layout, 1–5★ confidence ratings, clickable column sorting, honest
+      "now @ book" re-pricing, segmented LIVE / UNVERIFIED / SETTLED tabs
+- [x] Anchor-calibration diagnostic — log-loss / Brier / ECE / reliability over
+      the devigged sharp-anchor fair probs (diagnostic only; CLV stays the
+      live validator)
+- [ ] Next: bankroll tracking (phase 6) + a validated NBA model (phase 5)
 
 ## Documentation
 
