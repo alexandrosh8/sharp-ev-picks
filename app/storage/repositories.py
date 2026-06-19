@@ -1000,6 +1000,19 @@ async def shadow_match_rate_outcomes(
     return outcomes
 
 
+# Full Betfair-Exchange H2H BACK close width per sport: soccer is 3-way
+# (home/draw/away), basketball is 2-way (home/away). Keyed by the arcadia BASE
+# sport (so "basketball_nba" -> "basketball"); any unmapped sport falls back to
+# the 3-way width (the conservative widest-market requirement).
+_BETFAIR_FULL_MARKET_ROWS: dict[str, int] = {"soccer": 3, "basketball": 2}
+
+
+def _betfair_full_market_rows(sport_key: str) -> int:
+    from app.resolution.shadow import arcadia_base_sport
+
+    return _BETFAIR_FULL_MARKET_ROWS.get(arcadia_base_sport(sport_key), 3)
+
+
 async def betfair_exchange_coverage_outcomes(
     session: AsyncSession,
     *,
@@ -1055,13 +1068,14 @@ async def betfair_exchange_coverage_outcomes(
                 session, betfair_event_id, betfair_ref, kickoff
             )
             # USABLE = event scraped near kickoff (coverage gate) AND the close
-            # set has all 3 H2H selections (home/draw/away) — the same two conditions
-            # the consumption path requires to attach a fair.
+            # set has the FULL H2H width for the sport (soccer 3-way home/draw/away,
+            # basketball 2-way home/away) — the same two conditions the consumption
+            # path requires to attach a fair.
             in_window = (
                 last_capture is not None and kickoff - last_capture <= SNAPSHOT_CLOSE_MAX_GAP
             )
             h2h_rows = sum(1 for s in snaps if s.market is Market.H2H)
-            has_close = in_window and h2h_rows >= 3  # full 3-way (home/draw/away)
+            has_close = in_window and h2h_rows >= _betfair_full_market_rows(sport_key)
         outcomes.append(
             BetfairCoverageOutcome(
                 pick_id=pick_id,

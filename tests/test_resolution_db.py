@@ -19,6 +19,7 @@ from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.repositories import (
+    _betfair_full_market_rows,
     betfair_exchange_coverage_outcomes,
     persist_odds_snapshots,
     persist_pick,
@@ -445,3 +446,100 @@ async def test_betfair_coverage_presence_absence(factory) -> None:  # type: igno
     assert report.with_event == 1
     assert report.with_close == 1
     assert report.close_rate == 0.5
+
+
+def test_betfair_full_market_rows_per_sport() -> None:
+    # The usable-close width is 3 for soccer (home/draw/away) and 2 for
+    # basketball (home/away); "basketball_nba" normalises to "basketball"; an
+    # unmapped sport falls back to the conservative 3-way width.
+    assert _betfair_full_market_rows("soccer") == 3
+    assert _betfair_full_market_rows("basketball") == 2
+    assert _betfair_full_market_rows("basketball_nba") == 2
+    assert _betfair_full_market_rows("tennis") == 3
+
+
+_BASKETBALL_COV_LEAGUE = "betfair-cov-nba"
+
+
+def _betfair_basketball_pick(event_id: str) -> PickOut:
+    pick = _betfair_pick(event_id)
+    return pick.model_copy(update={"sport": "basketball", "league": _BASKETBALL_COV_LEAGUE})
+
+
+def _betfair_basketball_back_snaps(event_ref: str) -> list[OddsSnapshotIn]:
+    """A FULL 2-way basketball Betfair Exchange BACK close (home/away, NO draw),
+    captured 2h pre-kickoff so it clears the coverage gate. Two H2H rows is the
+    full market for basketball — usable only because the threshold is 2."""
+    return [
+        OddsSnapshotIn(
+            event_id=event_ref,
+            bookmaker="Betfair Exchange",
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=o,
+            liquidity=5000.0,
+            captured_at=CAPTURED,
+            ingested_at=CAPTURED,
+        )
+        for sel, o in (("Home", 1.80), ("Away", 2.10))
+    ]
+
+
+async def test_betfair_coverage_basketball_two_way_is_usable(factory) -> None:  # type: ignore[no-untyped-def]
+    # A basketball pick whose betfair event carries a 2-row (home/away) close IS
+    # usable: the per-sport threshold is 2 for basketball. The SAME 2-row close
+    # under a SOCCER pick would NOT be usable (soccer needs 3) — proving the
+    # threshold is genuinely per-sport, not a blanket relaxation.
+    async with factory() as session:
+        await persist_pick(
+            session,
+            _betfair_basketball_pick("evt-bf-bball"),
+            EventTeams(home="Home", away="Away", league=_BASKETBALL_COV_LEAGUE, starts_at=KO),
+            "value",
+            "vbf",
+        )
+        # A soccer pick with only a 2-row betfair close: must read NOT usable.
+        await persist_pick(
+            session,
+            _betfair_pick("evt-bf-soccer2"),
+            EventTeams(home="Home", away="Away", league=_BETFAIR_LEAGUE, starts_at=KO),
+            "value",
+            "vbf",
+        )
+        await session.commit()
+    bball_teams = {
+        "betfair:evt-bf-bball": EventTeams(
+            home="Home", away="Away", league="betfair_basketball", starts_at=KO
+        )
+    }
+    await persist_odds_snapshots(
+        factory,
+        _betfair_basketball_back_snaps("betfair:evt-bf-bball"),
+        bball_teams,
+        "betfair_basketball",
+        "betfair_basketball",
+    )
+    soccer2_teams = {
+        "betfair:evt-bf-soccer2": EventTeams(
+            home="Home", away="Away", league="betfair_soccer", starts_at=KO
+        )
+    }
+    await persist_odds_snapshots(
+        factory,
+        _betfair_basketball_back_snaps("betfair:evt-bf-soccer2"),  # only 2 H2H rows
+        soccer2_teams,
+        "betfair_soccer",
+        "betfair_soccer",
+    )
+
+    async with factory() as session:
+        outcomes = await betfair_exchange_coverage_outcomes(session)
+    by_league = {
+        o.league: o for o in outcomes if o.league in (_BASKETBALL_COV_LEAGUE, _BETFAIR_LEAGUE)
+    }
+    bball = by_league[_BASKETBALL_COV_LEAGUE]
+    assert bball.has_betfair_event is True
+    assert bball.has_usable_close is True  # 2 rows >= basketball threshold (2)
+    soccer2 = by_league[_BETFAIR_LEAGUE]
+    assert soccer2.has_betfair_event is True
+    assert soccer2.has_usable_close is False  # 2 rows < soccer threshold (3)

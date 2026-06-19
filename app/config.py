@@ -524,8 +524,11 @@ class Settings(BaseSettings):
     # default mirrors the user's 2026-06-19 live probe, where a major match's
     # BACK liquidities were in the thousands of £. Floored at 0 (0 = no gate).
     betfair_exchange_min_liquidity: float = Field(default=500.0, ge=0.0)
-    # csv of sport keys to capture (v1 supports "soccer" only — the 3-way 1X2
-    # BACK row). Other sports are skipped until their exchange row is probed.
+    # csv of sport keys to capture. "soccer" (the 3-way 1X2 BACK row) and
+    # "basketball" (the 2-way moneyline BACK row) are supported; the default
+    # stays "soccer" (committed) but "soccer,basketball" works end-to-end. A
+    # basketball capture only sees fixtures when the basketball scrape is also
+    # enabled (ODDSPORTAL_BASKETBALL_LEAGUES). Unsupported sport keys are skipped.
     betfair_exchange_sports: str = "soccer"
     # Capture cadence. Change-gated on the per-selection BACK price, so a short
     # interval just tracks repricings; near kickoff is what matters. The >=30s

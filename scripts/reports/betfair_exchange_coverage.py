@@ -60,10 +60,27 @@ def _print_human(report: BetfairCoverageReport) -> None:
     print(f"picks evaluated      : {report.total}")
     print(f"with betfair event   : {report.with_event}")
     print(f"with usable close    : {report.with_close}  ({_pct(report.close_rate)})")
+    # Per-sport with_event vs with_close keeps a 0 HONEST: a sport with
+    # with_event 0 was never captured (structural — capture off/unwired for it),
+    # NOT "no Betfair-liquid match in the slate" (which shows as with_event > 0,
+    # with_close 0). The note under each bucket spells out which 0 it is.
+    event_by_sport = {g.key: g for g in report.event_by_sport}
     if report.by_sport:
-        print("\nby sport (with usable close):")
+        print("\nby sport (with_event -> usable close):")
         for g in report.by_sport:
-            print(f"  {g.key:<22} {g.matched:>5}/{g.total:<5}  {_pct(g.match_rate)}")
+            ev = event_by_sport.get(g.key)
+            ev_count = ev.matched if ev is not None else 0
+            note = ""
+            if g.matched == 0:
+                note = (
+                    "  <- no betfair page captured for this sport (structural 0)"
+                    if ev_count == 0
+                    else "  <- pages captured, none usable this window (thin slate)"
+                )
+            print(
+                f"  {g.key:<22} event {ev_count:>4}/{g.total:<5}  "
+                f"close {g.matched:>4}/{g.total:<5}  {_pct(g.match_rate)}{note}"
+            )
     if report.by_league:
         print("\nby league (with usable close):")
         for g in report.by_league:

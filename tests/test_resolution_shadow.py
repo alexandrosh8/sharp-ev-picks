@@ -175,3 +175,30 @@ def test_betfair_coverage_as_dict_shape() -> None:
     assert d["close_rate"] == 0.5
     assert d["by_sport"] == [{"key": "soccer", "total": 2, "with_close": 1, "close_rate": 0.5}]
     assert d["by_league"] == [{"key": "soccer_epl", "total": 1, "with_close": 1, "close_rate": 1.0}]
+
+
+def test_betfair_coverage_event_by_sport_distinguishes_structural_zero() -> None:
+    # FIX 3 honesty: a sport with usable-close 0 but with_event > 0 is a thin
+    # slate; a sport with with_event 0 is a STRUCTURAL 0 (never captured).
+    outcomes = [
+        # soccer: pages captured, none usable -> thin-slate 0
+        _b(1, "soccer", "soccer_epl", True, False),
+        _b(2, "soccer", "soccer_epl", True, False),
+        # basketball: NO betfair page ever captured -> structural 0
+        _b(3, "basketball", "nba", False, False),
+    ]
+    r = summarize_betfair_coverage(outcomes)
+    ev = {g.key: g for g in r.event_by_sport}
+    assert ev["soccer"].matched == 2  # captured pages for soccer
+    assert ev["basketball"].matched == 0  # structural 0: never captured
+    close = {g.key: g for g in r.by_sport}
+    assert close["soccer"].matched == 0  # thin slate (event>0, close=0)
+    assert close["basketball"].matched == 0
+    event_by_sport_dict = r.as_dict()["event_by_sport"]
+    assert isinstance(event_by_sport_dict, list)
+    assert {
+        "key": "basketball",
+        "total": 1,
+        "with_event": 0,
+        "event_rate": 0.0,
+    } in event_by_sport_dict

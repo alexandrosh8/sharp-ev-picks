@@ -14,11 +14,12 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams, ScraperProxy
 from app.ingestion.betfair_exchange import (
     _ANCESTOR_WALK_UP,
+    _BASKETBALL_BACK_OUTCOMES,
     _EXCHANGE_ALT,
     _ROW_EXTRACT_JS,
     _ROW_TESTID,
@@ -32,6 +33,7 @@ from app.ingestion.betfair_exchange import (
     MatchTarget,
     _namespace_event_ref,
     _pair_tokens,
+    back_outcomes_for_segment,
     back_quotes_to_snapshots,
     extract_back_quotes,
     fractional_to_decimal,
@@ -64,6 +66,20 @@ _LIVE_ROW_TOKENS = (
     "(41)",
     "31/10",
     "(2683)",
+)
+
+# A 2-way BASKETBALL exchange row (moneyline, NO draw): BACK home/away then LAY
+# home/away, each a fraction + parenthesised £ liquidity, overround %s dropped.
+# BACK home=4/5 -> 1.8, away=11/10 -> 2.1 ; LAY home=5/6, away=6/5 (discarded).
+_BASKETBALL_ROW_TOKENS = (
+    "4/5",
+    "(8000)",
+    "11/10",
+    "(7500)",
+    "5/6",
+    "(9000)",
+    "6/5",
+    "(6000)",
 )
 
 
@@ -231,6 +247,35 @@ async def test_reader_parses_live_row_via_injected_loader() -> None:
     quotes = await reader.read_back_quotes("https://op/match")
     assert [q.designation for q in quotes] == ["home", "draw", "away"]
     assert [round(q.decimal_odds, 2) for q in quotes] == [2.12, 3.5, 4.0]
+
+
+def test_back_outcomes_for_segment_per_sport() -> None:
+    # The reader's outcome WIDTH is driven by the URL segment: soccer 3-way,
+    # basketball 2-way; an unmapped segment falls back to the 3-way widest read.
+    assert back_outcomes_for_segment("football") == ("home", "draw", "away")
+    assert back_outcomes_for_segment("basketball") == ("home", "away")
+    assert back_outcomes_for_segment("unknown-sport") == ("home", "draw", "away")
+
+
+@pytest.mark.asyncio
+async def test_reader_basketball_two_way_keeps_two_back_discards_lay() -> None:
+    # A 2-way basketball row: the reader keeps exactly 2 BACK quotes (home/away)
+    # and DISCARDS the LAY tail — never a third (no-draw) selection.
+    reader = BetfairExchangeReader(
+        min_liquidity=0.0, page_loader=_static_loader(_BASKETBALL_ROW_TOKENS)
+    )
+    quotes = await reader.read_back_quotes("https://op/bball", outcomes=_BASKETBALL_BACK_OUTCOMES)
+    assert [q.designation for q in quotes] == ["home", "away"]
+    assert [round(q.decimal_odds, 2) for q in quotes] == [1.8, 2.1]
+    assert [q.liquidity for q in quotes] == [8000.0, 7500.0]
+    # The LAY prices (5/6 -> 1.83, 6/5 -> 2.2) must NEVER appear.
+    for lay_dec in (1.83, 2.2):
+        assert all(round(q.decimal_odds, 2) != lay_dec for q in quotes)
+    # No "Draw" designation/selection is ever produced for a 2-way sport.
+    assert "draw" not in [q.designation for q in quotes]
+    snaps = back_quotes_to_snapshots("https://op/bball", quotes, _teams(), now=NOW)
+    assert [s.selection for s in snaps] == ["Real Madrid", "Al Hilal"]
+    assert "Draw" not in [s.selection for s in snaps]
 
 
 @pytest.mark.asyncio
@@ -453,11 +498,18 @@ async def test_capture_skips_unsupported_sport() -> None:
         reader,
         session_factory=None,
         targets_fn=lambda sport: [_target()],
-        sports=("basketball",),  # not in SPORT_SEGMENTS (v1 = soccer only)
+        sports=("tennis",),  # not in SPORT_SEGMENTS (soccer + basketball only)
         now_fn=lambda: NOW,
     )
-    assert "basketball" not in SPORT_SEGMENTS
+    assert "tennis" not in SPORT_SEGMENTS
     assert await capture.capture_once() == {}  # unsupported sport skipped
+
+
+@pytest.mark.asyncio
+async def test_capture_supports_basketball_sport() -> None:
+    # Basketball IS supported now (2-way moneyline). SPORT_SEGMENTS gates it in.
+    assert SPORT_SEGMENTS["basketball"] == "basketball"
+    assert SPORT_SEGMENTS["soccer"] == "football"
 
 
 @pytest.mark.asyncio
@@ -471,25 +523,41 @@ async def test_capture_none_reader_writes_nothing() -> None:
 # --------------------------------------------------------------------------- #
 # DB integration: rows land under the ISOLATED betfair_<sport> namespace and
 # carry NO picks (capture writes odds_snapshots only). Skipped without Postgres.
+#
+# ISOLATION: these tests run inside ONE transaction on ONE connection that is
+# ROLLED BACK at teardown, so nothing they write is ever COMMITTED to the shared
+# compose Postgres (:5433). Earlier they committed fixture events + snapshots and
+# never cleaned up, accumulating "betfair:https://op/..." pollution that
+# corrupted the coverage report / audits. The capture's persist_odds_snapshots
+# commits, but join_transaction_mode="create_savepoint" turns each commit into a
+# SAVEPOINT release inside the fixture's outer transaction — exactly the
+# tests/test_resolution_db.py + tests/test_betfair_clv_consumption.py pattern.
+# Rows stay visible WITHIN the test (so the re-capture-writes-nothing assertion
+# still holds) and vanish at teardown (assert-no-leftover below proves it).
 # --------------------------------------------------------------------------- #
-async def _engine_or_skip() -> AsyncEngine:
+@pytest.fixture
+async def factory():  # type: ignore[no-untyped-def]
     engine = create_async_engine(DB_URL)
     try:
-        async with engine.connect():
-            pass
+        async with engine.connect() as probe:
+            await probe.exec_driver_sql("SELECT 1")
     except Exception:  # noqa: BLE001
         await engine.dispose()
-        pytest.skip("compose Postgres not reachable")
-    return engine
+        pytest.skip("compose Postgres not reachable on :5433")
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        maker = async_sessionmaker(
+            bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        )
+        try:
+            yield maker
+        finally:
+            await trans.rollback()
+    await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_capture_persists_under_isolated_namespace() -> None:
-    engine = await _engine_or_skip()
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    # Unique per run: the append-only unique key would dedupe a re-run's rows
-    # against a fixed external_ref, so a deterministic URL makes the test pass
-    # only on the FIRST run against a given DB. uuid keeps it idempotent.
+async def test_capture_persists_under_isolated_namespace(factory) -> None:  # type: ignore[no-untyped-def]
+    # uuid keeps the external_ref unique within the (rolled-back) transaction.
     url = f"https://op/betfair-iso-{uuid4()}"
 
     reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
@@ -500,45 +568,38 @@ async def test_capture_persists_under_isolated_namespace() -> None:
         sports=("soccer",),
         now_fn=lambda: NOW,
     )
-    try:
-        written = await capture.capture_once()
-        assert written["soccer"] == 3  # home/draw/away BACK rows
-        async with factory() as session:
-            rows = (
-                await session.execute(
-                    select(OddsSnapshot.bookmaker, OddsSnapshot.selection, OddsSnapshot.liquidity)
-                    .join(Event, Event.id == OddsSnapshot.event_id)
-                    .where(Event.external_ref == f"betfair:{url}")
-                )
-            ).all()
-            assert len(rows) == 3
-            assert {r.bookmaker for r in rows} == {BOOKMAKER}
-            assert {r.selection for r in rows} == {"Real Madrid", "Draw", "Al Hilal"}
-            # Liquidity persisted as NUMERIC (Decimal at the boundary).
-            assert all(r.liquidity is not None for r in rows)
-            # Exactly one event row exists for this isolated-namespace external_ref.
-            event_count = await session.scalar(
-                select(func.count())
-                .select_from(Event)
+    written = await capture.capture_once()
+    assert written["soccer"] == 3  # home/draw/away BACK rows
+    async with factory() as session:
+        rows = (
+            await session.execute(
+                select(OddsSnapshot.bookmaker, OddsSnapshot.selection, OddsSnapshot.liquidity)
+                .join(Event, Event.id == OddsSnapshot.event_id)
                 .where(Event.external_ref == f"betfair:{url}")
             )
-            assert event_count == 1
-        # Re-capture with the SAME prices writes nothing new (change-gate + the
-        # append-only unique key both hold).
-        assert (await capture.capture_once())["soccer"] == 0
-    finally:
-        await engine.dispose()
+        ).all()
+        assert len(rows) == 3
+        assert {r.bookmaker for r in rows} == {BOOKMAKER}
+        assert {r.selection for r in rows} == {"Real Madrid", "Draw", "Al Hilal"}
+        # Liquidity persisted as NUMERIC (Decimal at the boundary).
+        assert all(r.liquidity is not None for r in rows)
+        # Exactly one event row exists for this isolated-namespace external_ref.
+        event_count = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
+        )
+        assert event_count == 1
+    # Re-capture with the SAME prices writes nothing new (change-gate + the
+    # append-only unique key both hold) — visible within the same transaction.
+    assert (await capture.capture_once())["soccer"] == 0
 
 
-async def test_capture_does_not_graft_onto_live_event_with_same_url() -> None:
+async def test_capture_does_not_graft_onto_live_event_with_same_url(factory) -> None:  # type: ignore[no-untyped-def]
     # Regression for the isolation breach the review caught: a live soccer event
     # and the Betfair capture share the SAME OddsPortal match URL. Events are
     # keyed by external_ref ALONE (globally unique, not sport-scoped), so without
     # the "betfair:" namespace the capture would REUSE the soccer event row and
     # its "Betfair Exchange" sharp BACK price would leak into that event closing
     # CLV anchor. This pins true event-level isolation.
-    engine = await _engine_or_skip()
-    factory = async_sessionmaker(engine, expire_on_commit=False)
     url = f"https://op/betfair-collision-{uuid4()}"
     teams = EventTeams(home="Real Madrid", away="Al Hilal", league="Club WC")
 
@@ -563,45 +624,102 @@ async def test_capture_does_not_graft_onto_live_event_with_same_url() -> None:
         sports=("soccer",),
         now_fn=lambda: NOW,
     )
+    written = await capture.capture_once()
+    assert written["soccer"] == 3
+    async with factory() as session:
+        soccer_books = (
+            (
+                await session.execute(
+                    select(OddsSnapshot.bookmaker)
+                    .join(Event, Event.id == OddsSnapshot.event_id)
+                    .where(Event.external_ref == url)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert set(soccer_books) == {"bet365"}
+        assert BOOKMAKER not in soccer_books
+        bf_books = (
+            (
+                await session.execute(
+                    select(OddsSnapshot.bookmaker)
+                    .join(Event, Event.id == OddsSnapshot.event_id)
+                    .where(Event.external_ref == f"betfair:{url}")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert set(bf_books) == {BOOKMAKER}
+        assert len(bf_books) == 3
+        live_event_count = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == url)
+        )
+        betfair_event_count = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
+        )
+        assert live_event_count == 1
+        assert betfair_event_count == 1
+
+
+async def test_db_tests_leave_no_committed_pollution() -> None:
+    # The isolation fixture rolls back, so a row a test wrote inside it must NOT
+    # survive into a FRESH connection (a separate engine = a separate session,
+    # outside the fixture's rolled-back transaction). This drives the same
+    # capture against its OWN savepoint transaction, asserts the rows exist
+    # within it, rolls back, then probes from a clean engine and asserts ZERO
+    # leftover — exactly the cleanup the maintainer's one-time DELETE addresses
+    # for pre-existing pollution.
+    probe_engine = create_async_engine(DB_URL)
     try:
-        written = await capture.capture_once()
-        assert written["soccer"] == 3
-        async with factory() as session:
-            soccer_books = (
-                (
-                    await session.execute(
-                        select(OddsSnapshot.bookmaker)
-                        .join(Event, Event.id == OddsSnapshot.event_id)
-                        .where(Event.external_ref == url)
-                    )
+        async with probe_engine.connect() as probe:
+            await probe.exec_driver_sql("SELECT 1")
+    except Exception:  # noqa: BLE001
+        await probe_engine.dispose()
+        pytest.skip("compose Postgres not reachable on :5433")
+
+    url = f"https://op/betfair-leak-{uuid4()}"
+    betfair_ref = f"betfair:{url}"
+    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
+
+    inner_engine = create_async_engine(DB_URL)
+    try:
+        async with inner_engine.connect() as conn:
+            trans = await conn.begin()
+            maker = async_sessionmaker(
+                bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+            )
+            capture = BetfairExchangeCapture(
+                reader,
+                session_factory=maker,
+                targets_fn=lambda sport: [_target(url)],
+                sports=("soccer",),
+                now_fn=lambda: NOW,
+            )
+            assert (await capture.capture_once())["soccer"] == 3
+            async with maker() as session:
+                seen = await session.scalar(
+                    select(func.count()).select_from(Event).where(Event.external_ref == betfair_ref)
                 )
-                .scalars()
-                .all()
-            )
-            assert set(soccer_books) == {"bet365"}
-            assert BOOKMAKER not in soccer_books
-            bf_books = (
-                (
-                    await session.execute(
-                        select(OddsSnapshot.bookmaker)
-                        .join(Event, Event.id == OddsSnapshot.event_id)
-                        .where(Event.external_ref == f"betfair:{url}")
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            assert set(bf_books) == {BOOKMAKER}
-            assert len(bf_books) == 3
-            live_event_count = await session.scalar(
-                select(func.count()).select_from(Event).where(Event.external_ref == url)
-            )
-            betfair_event_count = await session.scalar(
-                select(func.count())
-                .select_from(Event)
-                .where(Event.external_ref == f"betfair:{url}")
-            )
-            assert live_event_count == 1
-            assert betfair_event_count == 1
+                assert seen == 1  # visible inside the transaction
+            await trans.rollback()  # teardown: discard everything
     finally:
-        await engine.dispose()
+        await inner_engine.dispose()
+
+    # Fresh engine = outside the rolled-back transaction: nothing must remain.
+    try:
+        async with async_sessionmaker(probe_engine, expire_on_commit=False)() as session:
+            leftover_events = await session.scalar(
+                select(func.count()).select_from(Event).where(Event.external_ref == betfair_ref)
+            )
+            leftover_snaps = await session.scalar(
+                select(func.count())
+                .select_from(OddsSnapshot)
+                .join(Event, Event.id == OddsSnapshot.event_id)
+                .where(Event.external_ref == betfair_ref)
+            )
+            assert leftover_events == 0
+            assert leftover_snaps == 0
+    finally:
+        await probe_engine.dispose()

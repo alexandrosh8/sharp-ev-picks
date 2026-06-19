@@ -279,3 +279,84 @@ async def test_flag_on_but_no_betfair_event_is_neutral(factory) -> None:  # type
         assert pick.closing_fair_probability is None
         assert pick.clv_log is None
         assert pick.closing_odds is None
+
+
+# --- basketball: the EXACT bridge is sport-agnostic (2-way moneyline) ----------
+
+# A 2-way basketball BACK close (home/away, NO draw). Betfair Exchange nets 5%
+# commission before devig (and the fill is netted too).
+BETFAIR_BBALL_CLOSE = (1.80, 2.10)  # home, away
+SOFT_BBALL_CLOSE = (1.85, 2.05)
+
+
+def _betfair_bball_snaps(event_ref: str, odds: tuple[float, float]) -> list[OddsSnapshotIn]:
+    """One full 2-way basketball Betfair Exchange BACK observation (home/away),
+    exactly as back_quotes_to_snapshots emits it for a 2-way sport: H2H,
+    detail-less, NO "Draw" selection, captured pre-kickoff."""
+    captured = KICKOFF - timedelta(hours=1)
+    return [
+        OddsSnapshotIn(
+            event_id=event_ref,
+            bookmaker="Betfair Exchange",
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=o,
+            liquidity=5000.0,
+            captured_at=captured,
+            ingested_at=captured,
+        )
+        for sel, o in zip((HOME, AWAY), odds, strict=True)
+    ]
+
+
+async def test_flag_on_anchors_on_betfair_basketball_two_way_close(factory) -> None:  # type: ignore[no-untyped-def]
+    # The EXACT betfair:<ref> bridge is sport-agnostic: a basketball pick whose
+    # captured Betfair close is a 2-way (home/away) market anchors the closing
+    # fair on the commission-netted Betfair devig — no "Draw" leg required. This
+    # proves _betfair_exchange_close + event_fair_probs handle a 2-way H2H close.
+    ref = "evt-betfair-bball"
+    pick_id = await seed_pick(factory, ref)  # SoftBook pick on HOME @ 2.50
+    # Seed the 2-way betfair event (home/away) under the namespaced ref.
+    betfair_ref = f"betfair:{ref}"
+    teams = {
+        betfair_ref: EventTeams(
+            home=HOME, away=AWAY, league="betfair_basketball", starts_at=KICKOFF
+        )
+    }
+    written = await persist_odds_snapshots(
+        factory,
+        _betfair_bball_snaps(betfair_ref, BETFAIR_BBALL_CLOSE),
+        teams,
+        "betfair_basketball",
+        "betfair_basketball",
+    )
+    assert written == 2  # home/away only, NO draw
+    async with factory() as session:
+        pick = await session.get(Pick, pick_id)
+        assert pick is not None
+        # A 2-way soft close on the pick's own event: passes the coverage gate.
+        captured = KICKOFF - timedelta(hours=1)
+        for sel, o in zip((HOME, AWAY), SOFT_BBALL_CLOSE, strict=True):
+            session.add(
+                OddsSnapshot(
+                    event_id=pick.event_id,
+                    bookmaker="SoftBook",
+                    market="1x2",
+                    selection=sel,
+                    decimal_odds=Decimal(str(o)),
+                    captured_at=captured,
+                    ingested_at=captured,
+                )
+            )
+        await session.flush()
+        applied = await finalize_closing_from_snapshots(
+            session, pick, ref, KICKOFF, DevigMethod.SHIN, use_betfair_exchange=True
+        )
+        assert applied is True
+        # 5% commission netted on the 2-way Betfair anchor BEFORE devig.
+        eff_close = tuple(1.0 + (o - 1.0) * 0.95 for o in BETFAIR_BBALL_CLOSE)
+        fair = devig(eff_close, method=DevigMethod.SHIN)[0]
+        assert pick.closing_fair_probability is not None
+        assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
+        # Fill is commission-free SoftBook (raw 2.50).
+        assert float(pick.clv_log) == pytest.approx(math.log(2.50 * fair), abs=1e-5)

@@ -494,6 +494,15 @@ def build_scheduler(
     # event ids = match links), so it owns no listing/scheduling policy. OFF
     # unless BETFAIR_EXCHANGE_ENABLED=true, the source is oddsportal (so the
     # directory is populated), and a DB session factory exists.
+    #
+    # Per-sport: BETFAIR_EXCHANGE_SPORTS is a csv ("soccer", or
+    # "soccer,basketball"). _betfair_targets(sport) keys into THAT sport's scrape
+    # ids (last_fetch_event_ids[sport]), so a betfair sport only sees fixtures
+    # when its OddsPortal scrape is also enabled — e.g. basketball needs
+    # ODDSPORTAL_BASKETBALL_LEAGUES set. A betfair sport with no scrape this
+    # cycle simply has no targets (an honest 0, not an error). The reader reads
+    # 3 BACK cells for soccer (1X2) and 2 for basketball (moneyline), and each
+    # sport keeps its own betfair_<sport> namespace + error isolation.
     if (
         settings.betfair_exchange_enabled
         and settings.odds_source == "oddsportal"

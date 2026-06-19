@@ -163,13 +163,21 @@ class BetfairCoverageReport:
     """Overall + per-sport/league Betfair Exchange close coverage. ``with_event``
     counts picks whose fixture has ANY captured Betfair event; ``with_close`` the
     subset whose event carries a usable BACK close (what the consumption path can
-    actually attach)."""
+    actually attach).
+
+    ``event_by_sport`` (GroupRate.matched = per-sport ``with_event`` count) keeps
+    the report HONEST about a zero: a sport bucket with ``with_close`` 0 but
+    ``with_event`` > 0 had Betfair pages captured but none usable this window (a
+    thin-slate gap), whereas ``with_event`` 0 means NO Betfair page was ever
+    captured for the sport (capture off / unwired) — a structural 0, not a thin
+    slate. Defaults to ``()`` so older positional construction stays valid."""
 
     total: int
     with_event: int
     with_close: int
     by_sport: tuple[GroupRate, ...]
     by_league: tuple[GroupRate, ...]
+    event_by_sport: tuple[GroupRate, ...] = ()
 
     @property
     def close_rate(self) -> float | None:
@@ -184,6 +192,14 @@ class BetfairCoverageReport:
                 "close_rate": g.match_rate,
             }
 
+        def egrp(g: GroupRate) -> dict[str, object]:
+            return {
+                "key": g.key,
+                "total": g.total,
+                "with_event": g.matched,
+                "event_rate": g.match_rate,
+            }
+
         return {
             "total": self.total,
             "with_event": self.with_event,
@@ -191,6 +207,10 @@ class BetfairCoverageReport:
             "close_rate": self.close_rate,
             "by_sport": [grp(g) for g in self.by_sport],
             "by_league": [grp(g) for g in self.by_league],
+            # Per-sport with_event: distinguishes a structural 0 (no Betfair page
+            # captured for the sport) from a thin-slate 0 (pages captured, none
+            # usable this window).
+            "event_by_sport": [egrp(g) for g in self.event_by_sport],
         }
 
 
@@ -204,10 +224,14 @@ def summarize_betfair_coverage(
     with_close = sum(1 for o in outcomes if o.has_usable_close)
     by_sport = _grouped([(o.sport, o.has_usable_close) for o in outcomes])
     by_league = _grouped([(o.league, o.has_usable_close) for o in outcomes if o.league is not None])
+    # Per-sport with_event (matched = captured-event count) — the structural-vs-
+    # thin-slate signal: with_event 0 for a sport = capture off/unwired for it.
+    event_by_sport = _grouped([(o.sport, o.has_betfair_event) for o in outcomes])
     return BetfairCoverageReport(
         total=len(outcomes),
         with_event=with_event,
         with_close=with_close,
         by_sport=by_sport,
         by_league=by_league,
+        event_by_sport=event_by_sport,
     )

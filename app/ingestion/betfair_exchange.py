@@ -51,10 +51,13 @@ logger = logging.getLogger(__name__)
 BOOKMAKER = "Betfair Exchange"  # normalized -> SHARP_BOOKS / EXCHANGE_COMMISSION
 DEFAULT_BASE_URL = "https://www.oddsportal.com"
 
-# OddsPortal sport URL segment per our sport key. v1 ships FOOTBALL only
-# (3-way 1X2 BACK row); tennis (2-way) and others can extend this map plus the
-# selection layout once their exchange rows are probed.
-SPORT_SEGMENTS: dict[str, str] = {"soccer": "football"}
+# OddsPortal sport URL segment per our sport key. Soccer is the 3-way 1X2 BACK
+# row; basketball is the 2-way moneyline (home/away, NO draw). The exchange-table
+# DOM is identical across sports (betting-exchanges-section / table-row / the
+# ancestor odds container) — only the outcome COUNT and selection mapping differ
+# (see _BACK_OUTCOMES_BY_SEGMENT). Tennis (also 2-way) and others can extend this
+# map plus _BACK_OUTCOMES_BY_SEGMENT once their exchange rows are probed.
+SPORT_SEGMENTS: dict[str, str] = {"soccer": "football", "basketball": "basketball"}
 
 # Confirmed live (2026-06-19, UK proxy) DOM contract — see ADR-0015:
 #   section : [data-testid="betting-exchanges-section"]
@@ -94,8 +97,25 @@ _ANCESTOR_WALK_UP = 5
 _FRACTION_RE = re.compile(r"^(\d+)\s*/\s*(\d+)$")
 _LIQUIDITY_RE = re.compile(r"^\((\d[\d,]*)\)$")
 
-# 1X2 BACK outcomes in the DOM order OddsPortal renders them.
+# BACK outcomes in the DOM order OddsPortal renders them, per sport. Soccer is
+# the 3-way 1X2 (home/draw/away); basketball is the 2-way moneyline (home/away,
+# NO draw). The reader takes the FIRST len(outcomes) (odds, liquidity) cells off
+# the BACK side and discards the LAY tail, so the outcome COUNT alone tunes the
+# parser per sport. Keyed by the OddsPortal URL SEGMENT (SPORT_SEGMENTS value),
+# so the reader needs only the segment — never the platform sport key.
 _FOOTBALL_BACK_OUTCOMES = ("home", "draw", "away")
+_BASKETBALL_BACK_OUTCOMES = ("home", "away")
+_BACK_OUTCOMES_BY_SEGMENT: dict[str, tuple[str, ...]] = {
+    "football": _FOOTBALL_BACK_OUTCOMES,
+    "basketball": _BASKETBALL_BACK_OUTCOMES,
+}
+
+
+def back_outcomes_for_segment(segment: str) -> tuple[str, ...]:
+    """BACK outcomes for an OddsPortal URL segment ("football" -> 3-way 1X2,
+    "basketball" -> 2-way moneyline). Defaults to the 3-way layout for an
+    unmapped segment (the conservative widest-market read)."""
+    return _BACK_OUTCOMES_BY_SEGMENT.get(segment, _FOOTBALL_BACK_OUTCOMES)
 
 
 class BetfairExchangeError(Exception):
@@ -386,10 +406,18 @@ class BetfairExchangeReader:
             finally:
                 await browser.close()
 
-    async def read_back_quotes(self, url: str) -> list[BackQuote]:
-        """Load the match page and return its gated Betfair BACK quotes (1X2).
-        Rotates through the proxy pool on transport failure; an empty pool loads
-        from the host IP. Errors carry the exception TYPE only, never the URL."""
+    async def read_back_quotes(
+        self,
+        url: str,
+        *,
+        outcomes: Sequence[str] = _FOOTBALL_BACK_OUTCOMES,
+    ) -> list[BackQuote]:
+        """Load the match page and return its gated Betfair BACK quotes.
+        ``outcomes`` selects how many leading BACK cells to keep and their
+        designations — the 3-way 1X2 default (home/draw/away) for soccer, the
+        2-way moneyline (home/away) for basketball. Rotates through the proxy
+        pool on transport failure; an empty pool loads from the host IP. Errors
+        carry the exception TYPE only, never the URL."""
         pool = self._proxy_pool or (None,)
         n = len(pool)
         last_exc: Exception | None = None
@@ -410,7 +438,7 @@ class BetfairExchangeReader:
             if not tokens:
                 return []  # no Betfair Exchange row (expected on thin matches)
             cells = _pair_tokens(tokens)
-            return extract_back_quotes(cells, min_liquidity=self._min_liquidity)
+            return extract_back_quotes(cells, outcomes=outcomes, min_liquidity=self._min_liquidity)
         if last_exc is not None:
             raise BetfairExchangeError(
                 f"betfair exchange read failed after {n} proxy attempts ({type(last_exc).__name__})"
@@ -505,11 +533,25 @@ class BetfairExchangeCapture:
             if sport not in SPORT_SEGMENTS:
                 logger.warning("betfair exchange: unsupported sport %r; skipping", sport)
                 continue
+            # Per-sport BACK outcomes: soccer reads 3 cells (home/draw/away),
+            # basketball reads 2 (home/away). Derived from the URL segment so the
+            # reader's parser tracks the sport's exchange-row width.
+            outcomes = back_outcomes_for_segment(SPORT_SEGMENTS[sport])
             fresh: list[OddsSnapshotIn] = []
             teams_by_event: dict[str, EventTeams] = {}
+            # Honest-zero accounting (FIX 3): a 0 result means different things —
+            # `targets` counts the fixtures we had a page to read this cycle
+            # (0 = nothing scraped for this sport; e.g. the sport's OddsPortal
+            # scrape is off or the slate was empty), and `events_with_quotes`
+            # counts those that yielded a Betfair-liquid BACK row. So
+            # "0 of 0 targets" (no match to read) is logged DISTINCTLY from
+            # "0 of N targets" (read N pages, none Betfair-liquid / all closed).
+            targets = 0
+            events_with_quotes = 0
             for target in self._targets_fn(sport):
+                targets += 1
                 try:
-                    quotes = await self._reader.read_back_quotes(target.url)
+                    quotes = await self._reader.read_back_quotes(target.url, outcomes=outcomes)
                 except Exception as exc:
                     logger.warning(
                         "betfair exchange read failed for one %s match: %s",
@@ -519,6 +561,7 @@ class BetfairExchangeCapture:
                     continue
                 if not quotes:
                     continue  # no row / all outcomes below the liquidity floor
+                events_with_quotes += 1
                 # Namespace the persisted external_ref so this Betfair row can
                 # NEVER graft onto a live event sharing the same match URL
                 # (events are keyed by external_ref ALONE). target.url stays
@@ -531,6 +574,25 @@ class BetfairExchangeCapture:
                     teams_by_event[event_ref] = target.teams
             if not fresh or self._session_factory is None:
                 written[sport] = 0
+                if self._session_factory is not None:
+                    # Distinguish the two honest zeros so logs never imply a
+                    # "structural 0": no fixtures to read vs fixtures read but
+                    # none Betfair-liquid (an expected thin-slate gap, NOT a
+                    # sign the capture is broken for this sport).
+                    if targets == 0:
+                        logger.info(
+                            "betfair exchange: %s captured 0 — no fixtures to read this "
+                            "cycle (sport scrape off or empty slate)",
+                            sport,
+                        )
+                    else:
+                        logger.info(
+                            "betfair exchange: %s captured 0 — read %d fixtures, %d had a "
+                            "Betfair-liquid BACK row (thin slate / no new price)",
+                            sport,
+                            targets,
+                            events_with_quotes,
+                        )
                 continue
             namespace = f"betfair_{sport}"
             rows = await persist_odds_snapshots(
@@ -543,9 +605,10 @@ class BetfairExchangeCapture:
             written[sport] = rows
             if rows:
                 logger.info(
-                    "betfair exchange: %s captured %d new BACK rows (%d events)",
+                    "betfair exchange: %s captured %d new BACK rows (%d events of %d read)",
                     sport,
                     rows,
                     len(teams_by_event),
+                    targets,
                 )
         return written
