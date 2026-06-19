@@ -103,8 +103,12 @@ async def test_resolver_no_match_returns_empty(factory) -> None:  # type: ignore
     assert out == []
 
 
-async def test_resolver_ambiguous_archive_returns_empty(factory) -> None:  # type: ignore[no-untyped-def]
-    # two archive events with the SAME teams + kickoff -> cannot disambiguate -> []
+async def test_resolver_duplicate_archive_matches_one(factory) -> None:  # type: ignore[no-untyped-def]
+    # Two archive events for the SAME fixture (same teams + kickoff) are
+    # DUPLICATE captures of ONE game, not two distinct fixtures (a team plays
+    # once per day). The resolver now matches one deterministically and attaches
+    # its Pinnacle close instead of rejecting — the old reject lost otherwise-
+    # matchable fixtures whenever the archive held the same game twice.
     await _seed_pinnacle_event(factory, "pin-dup-1", "Alpha", "Beta")
     await _seed_pinnacle_event(factory, "pin-dup-2", "Alpha", "Beta")
     async with factory() as session:
@@ -116,7 +120,8 @@ async def test_resolver_ambiguous_archive_returns_empty(factory) -> None:  # typ
             away="Beta",
             kickoff=KO,
         )
-    assert out == []
+    assert out  # a close IS attached now (duplicates collapse to one fixture)
+    assert all(s.bookmaker == "Pinnacle" for s in out)
 
 
 async def test_resolver_kickoff_outside_window_returns_empty(factory) -> None:  # type: ignore[no-untyped-def]

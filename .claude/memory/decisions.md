@@ -26,7 +26,22 @@
     ("Cairns W" vs "Cairns Dolphins"). Fixes (matcher is CLV-critical, needs
     careful TDD): dedup candidates by (norm_home,norm_away,date) before the
     uniqueness check; extend \_NOISE_TOKENS / aliases_seed.json; women aliases
-    without conflating M/W. NOT yet implemented — proposed to operator.
+    without conflating M/W.
+- 2026-06-19 (ROI goal — backtest + calibrate + doctrine-safe matcher fix).
+  BACKTEST re-confirmed the validated edge: held-out 2425+2526 thr=0.03 n=62
+  ROI +22.39%, incCLV +0.1066 (>2SE), beats Max-close; thr=0 baseline -1.59%
+  (edge is all in the selection gate). Calibration INSUFFICIENT (0 settled).
+  AUDIT (16 agents + data-snooping skeptic) verdict: strategy at its VALIDATED
+  CEILING — NO parameter is tunable without data-snooping (2425/2526 burned).
+  Skeptic REJECTED the "commission-netting bug" (it's the Dixon-Coles
+  goals-model path, NOT the value-pick path). Only implement-now safe levers =
+  matcher correctness fixes. IMPLEMENTED (TDD, CLV-critical, SHADOW-only so
+  zero pick-ROI risk): match_event now picks the NEAREST-kickoff capture among
+  same-canonical duplicates (was "len!=1 -> None"; recovered the exact-name
+  rejects like Perry Lakes) + added "jk" to \_NOISE_TOKENS (Besiktas JK). Live
+  matched 28->32. Women/reserve-team aliases STILL deferred (risky M/W
+  conflation). Everything else (ML v2, AH, consensus demotion) gated on FRESH
+  season 2627 — do NOT touch 2425/2526.
 
 - 2026-06-19 (penaltyblog + OddsHarvester unused-feature scan — see
   docs/research/betting-repo-research.md) — penaltyblog has NOTHING new for the

@@ -29,6 +29,12 @@ def test_normalize_strips_accents_and_club_noise() -> None:
     assert normalize_name("Manchester United") == "manchester united"
 
 
+def test_normalize_strips_jk_club_suffix() -> None:
+    # "JK" (Jimnastik/Jalgpalli Kulübü) is a club-form suffix like FC/SC — the
+    # Pinnacle-vs-OddsPortal "Besiktas JK" / "Besiktas" mismatch the probe found.
+    assert normalize_name("Besiktas JK") == normalize_name("Besiktas")
+
+
 def test_normalize_preserves_women_marker() -> None:
     assert "women" in normalize_name("Arsenal Women").split()
     assert normalize_name("Arsenal Women") != normalize_name("Arsenal")
@@ -130,10 +136,27 @@ def test_unordered_pair_matches_swap_for_tennis() -> None:
     assert m is not None and m.ref == "1"
 
 
-def test_ambiguous_candidates_yield_no_match() -> None:
-    # two candidates with the SAME teams+date -> cannot disambiguate -> None.
-    cands = [_cand("1", "Alpha", "Beta"), _cand("2", "Alpha", "Beta")]
-    assert match_event("Alpha", "Beta", KO, cands, aliases=AliasTable()) is None
+def test_duplicate_captures_match_nearest_kickoff() -> None:
+    # Two archive captures of the SAME fixture (identical canonical teams) at
+    # DIFFERENT kickoff times within the window are duplicates of one game (a
+    # team plays once per day), NOT two distinct fixtures. The matcher picks the
+    # capture nearest the pick's kickoff rather than rejecting — a wrong close
+    # cannot result because both candidates ARE the same canonical fixture.
+    pick_ko = datetime(2026, 6, 20, 12, 10, tzinfo=UTC)
+    cands = [
+        _cand("early", "Alpha", "Beta", datetime(2026, 6, 20, 10, 20, tzinfo=UTC)),
+        _cand("exact", "Alpha", "Beta", datetime(2026, 6, 20, 12, 10, tzinfo=UTC)),
+    ]
+    m = match_event("Alpha", "Beta", pick_ko, cands, aliases=AliasTable())
+    assert m is not None and m.ref == "exact"
+
+
+def test_duplicate_captures_identical_kickoff_match_deterministically() -> None:
+    # Exact duplicates (same teams + same kickoff) collapse to a single match,
+    # chosen deterministically (lowest ref) — still the same fixture's close.
+    cands = [_cand("b", "Alpha", "Beta"), _cand("a", "Alpha", "Beta")]
+    m = match_event("Alpha", "Beta", KO, cands, aliases=AliasTable())
+    assert m is not None and m.ref == "a"
 
 
 def test_women_fixture_never_matches_mens() -> None:

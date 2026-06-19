@@ -35,7 +35,7 @@ _SEED_PATH = Path(__file__).with_name("aliases_seed.json")
 # women/ladies/youth markers (they DISTINGUISH fixtures — stripping them would
 # conflate men's/women's/youth sides) and excludes ambiguous single letters.
 _NOISE_TOKENS = frozenset(
-    {"fc", "afc", "cf", "cfc", "sc", "fk", "ff", "bk", "if", "ac", "club", "calcio"}
+    {"fc", "afc", "cf", "cfc", "sc", "fk", "ff", "bk", "if", "ac", "club", "calcio", "jk"}
 )
 
 
@@ -157,4 +157,16 @@ def match_event(
                 matched.append(candidate)
         elif {cand_home, cand_away} == {target_home, target_away}:
             matched.append(candidate)
-    return matched[0] if len(matched) == 1 else None
+    if not matched:
+        return None
+    # Every entry in `matched` shares the canonical (target_home, target_away)
+    # by construction AND falls inside the day window — so >1 means DUPLICATE
+    # captures of ONE fixture (a team plays once per day in soccer/NBA; tennis
+    # is the same player pair), never two DISTINCT games. The old
+    # "len != 1 -> None" rule therefore rejected fixtures purely because the
+    # Pinnacle archive held the same game under two kickoff times. Pick the
+    # capture NEAREST the pick's kickoff (deterministic tie-break on ref): this
+    # cannot attach a wrong close — all candidates are the same canonical
+    # fixture — and recovers those matches. A genuinely different game has a
+    # different canonical name and never enters `matched`.
+    return min(matched, key=lambda c: (abs((c.kickoff - kickoff).total_seconds()), c.ref))
