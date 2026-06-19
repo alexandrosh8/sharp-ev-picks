@@ -174,6 +174,8 @@ async def latest_picks_with_events(
             Event.starts_at,
             ResultTracking.outcome,
             ResultTracking.pnl,
+            ResultTracking.home_score,
+            ResultTracking.away_score,
         )
         .join(Event, Pick.event_id == Event.id)
         .join(home, Event.home_team_id == home.id)
@@ -239,8 +241,23 @@ async def latest_picks_with_events(
             # row yet (open/unverified picks, or settled-but-unrecorded).
             "outcome": outcome,
             "pnl": str(pnl) if pnl is not None else None,
+            # final score of the settled game (HOME-AWAY, e.g. "2-1") from
+            # ResultTracking; null until settled or when no score was recorded
+            # (void settlements, pre-column rows). The dashboard SETTLED view's
+            # Score column.
+            "score": f"{hs}-{aws}" if hs is not None and aws is not None else None,
         }
-        for p, home_name, away_name, league_name, starts_at, outcome, pnl in rows.all()
+        for (
+            p,
+            home_name,
+            away_name,
+            league_name,
+            starts_at,
+            outcome,
+            pnl,
+            hs,
+            aws,
+        ) in rows.all()
     ]
 
 

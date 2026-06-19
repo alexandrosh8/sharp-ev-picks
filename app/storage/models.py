@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -296,6 +297,11 @@ class ResultTracking(Base):
     outcome: Mapped[str] = mapped_column(String(16))  # won | lost | void | push
     pnl: Mapped[Decimal | None] = mapped_column(MONEY)  # vs actual or recommended stake
     roi: Mapped[Decimal | None] = mapped_column(METRIC)
+    # Final score of the game that settled this pick (HOME, AWAY). Plain ints —
+    # not money/odds, so no NUMERIC. Nullable: void settlements (no score known)
+    # and rows persisted before this column stay NULL.
+    home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     settled_at: Mapped[datetime]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

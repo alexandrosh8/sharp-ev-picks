@@ -820,3 +820,54 @@ async def test_available_games_fallback_includes_tennis_with_unvalidated_flag(se
     rows2 = await latest_available_games_with_events(session, limit=200, now=now)
     soccer_rows = [row for row in rows2 if row["event_id"] == "evt-games-soccer"]
     assert soccer_rows and soccer_rows[0]["unvalidated"] is False
+
+
+async def test_settled_pick_persists_and_serializes_final_score(session) -> None:  # type: ignore[no-untyped-def]
+    # Final-score regression: settling an event must persist the game's final
+    # score on result_tracking (home_score/away_score) AND the /picks payload
+    # must serialize it as "HOME-AWAY" so the dashboard SETTLED view's Score
+    # column renders it. Drives the real settlement path (settle_event_picks),
+    # not a hand-written ResultTracking insert, so the engine wiring is covered.
+    from app.settlement.engine import settle_event_picks
+    from app.storage.models import ResultTracking
+
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(session, make_pick("evt-final-score"), teams, "value-sharp-vs-soft", "t-fs")
+    event = await session.scalar(select(Event).where(Event.external_ref == "evt-final-score"))
+    assert event is not None
+
+    now = datetime.now(tz=UTC)
+    settled, skipped = await settle_event_picks(
+        session, event.id, home_score=2, away_score=1, now=now
+    )
+    assert settled == 1
+    assert skipped == 0
+
+    # result_tracking row carries the plain-int scores
+    result = await session.scalar(
+        select(ResultTracking)
+        .join(Pick, ResultTracking.pick_id == Pick.id)
+        .where(Pick.event_id == event.id)
+    )
+    assert result is not None
+    assert result.home_score == 2
+    assert result.away_score == 1
+
+    # and the /picks payload serializes it HOME-first as a "2-1" string
+    payload = await latest_picks_with_events(session, limit=200)
+    ours = [p for p in payload if p["event_id"] == event.id]
+    assert ours, "settled pick missing from /picks payload"
+    assert ours[0]["score"] == "2-1"
+
+
+async def test_open_pick_has_null_score(session) -> None:  # type: ignore[no-untyped-def]
+    # An open/unsettled pick has no ResultTracking row; the LEFT JOIN must keep
+    # `score` null (CLOSED view renders "—"), never invent a score.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(
+        session, make_pick("evt-open-noscore"), teams, "value-sharp-vs-soft", "t-ons"
+    )
+    payload = await latest_picks_with_events(session, limit=200)
+    ours = [p for p in payload if p["event"] == "Alpha FC vs Beta United"]
+    assert ours
+    assert ours[0]["score"] is None

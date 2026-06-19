@@ -1866,7 +1866,12 @@
         // the filtered view): how many football / basketball / tennis we are
         // pricing. "basketball" is ALL basketball scraped (not NBA-only) — it
         // matches the basketball sport_key + the BASKETBALL ingestion chip.
-        const sc = { soccer: 0, basketball: 0, tennis: 0, american_football: 0 };
+        const sc = {
+          soccer: 0,
+          basketball: 0,
+          tennis: 0,
+          american_football: 0,
+        };
         for (const g of GAMES) {
           const s = String(g.sport);
           // "american_football" has an underscore -> split("_")[0] would mangle
@@ -2497,6 +2502,13 @@
         push: "b-neutral",
         void: "b-neutral",
       };
+      // Final score of the settled game, HOME-AWAY (e.g. "2-1"). `score` is an
+      // additive backend field (ResultTracking home_score/away_score); null on
+      // CLOSED/unsettled rows or when no score was recorded -> "—".
+      function cellScore(tr, p) {
+        const cell = td(tr, p.score ? p.score : "—");
+        cell.dataset.label = "Score";
+      }
       function cellResult(tr, p) {
         let cell;
         if (p.outcome) {
@@ -2522,8 +2534,8 @@
         cell.dataset.label = "P&L";
       }
 
-      // Desktop column headers per view. SETTLED is the 8-col results set
-      // (matches the body's cellKickoff|Match|Pick|Book|Odds|Result|P&L|CLV);
+      // Desktop column headers per view. SETTLED is the 9-col results set
+      // (matches the body's cellKickoff|Match|Pick|Book|Odds|Score|Result|P&L|CLV);
       // LIVE/UNVERIFIED is the 11-col execution set. Built as text nodes so the
       // header can never inject markup.
       // Each header is { label, key? }. A `key` marks the column sortable and
@@ -2549,6 +2561,7 @@
         { label: "Pick" },
         { label: "Book" },
         { label: "Odds", key: "odds" },
+        { label: "Score" },
         { label: "Result", key: "result" },
         { label: "P&L", key: "pnl" },
         { label: "CLV", key: "clv" },
@@ -2593,6 +2606,9 @@
           "LIVE = fresh and pre-kickoff · CLOSED = kicked off, line closed · " +
           "SHADOW = volume tier (tracked, never alerted) · SETTLED / " +
           "SUPERSEDED. After kickoff a Settle button appears here (CLOSED tab).",
+        Score:
+          "Final score of the game, home-away (e.g. 2-1). " +
+          "— = not recorded.",
         Result:
           "How the bet resolved: won / lost / push / void " +
           "(half-won / half-lost on Asian lines).",
@@ -2893,7 +2909,7 @@
         $("picks-table").classList.toggle("settled", settledView);
         // Swap the desktop <thead> labels to match the active body columns, so
         // each value sits under the right header. The body toggles between an
-        // 11-col LIVE set and an 8-col SETTLED set (below); the header must too.
+        // 11-col LIVE set and a 9-col SETTLED set (below); the header must too.
         renderHead(settledView);
 
         const tbody = $("rows");
@@ -2907,12 +2923,13 @@
           const tr = document.createElement("tr");
           if (settledView) {
             // RESULTS-oriented set: Kickoff | Match | Pick | Book | Odds |
-            // Result | P&L | CLV. No execution columns, no stars, no settle.
+            // Score | Result | P&L | CLV. No execution columns, no stars, no settle.
             cellKickoff(tr, p);
             cellMatch(tr, p);
             cellPick(tr, p);
             cellBook(tr, p);
             cellOdds(tr, p, false);
+            cellScore(tr, p);
             cellResult(tr, p);
             cellPnl(tr, p);
             cellClv(tr, p);
