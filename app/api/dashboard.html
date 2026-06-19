@@ -1292,10 +1292,6 @@
     </div>
 
     <div class="tablewrap">
-      <!-- CLV scorecard: shown on the CLOSED tab only (JS-populated). The
-           proof-of-edge headline over every kicked-off pick — % that beat the
-           de-vigged close + mean CLV. Text only, never markup. -->
-      <div class="sub" id="clv-scorecard" style="display: none"></div>
       <table id="picks-table">
         <thead>
           <!-- LIVE/UNVERIFIED header (11 cols). render() swaps this row's cells
@@ -1328,6 +1324,10 @@
           </tr>
         </tbody>
       </table>
+      <!-- CLV scorecard relocated BELOW the picks list (operator request) — the
+           proof-of-edge summary on the CLOSED tab: % beat close + mean CLV.
+           JS-populated, text only, never markup. -->
+      <div class="sub" id="clv-scorecard" style="display: none"></div>
     </div>
 
     <!-- Status + CLV legend. picksFirst() relocates this node to the page
