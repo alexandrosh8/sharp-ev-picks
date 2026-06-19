@@ -402,6 +402,7 @@ async def finalize_closing_from_snapshots(
     max_gap: timedelta = SNAPSHOT_CLOSE_MAX_GAP,
     *,
     use_pinnacle_archive: bool = False,
+    use_betfair_exchange: bool = False,
 ) -> bool:
     """Recompute the pick's closing fair/CLV from our own odds_snapshots
     history instead of trusting the last pre-kickoff re-scrape write.
@@ -450,6 +451,22 @@ async def finalize_closing_from_snapshots(
             snaps = [*snaps, *extra]
             logger.info(
                 "pick %d: injected %d Pinnacle archive close rows (strict match)",
+                pick.id,
+                len(extra),
+            )
+    if use_betfair_exchange:
+        # Inject the captured Betfair Exchange BACK close (EXACT-match resolution:
+        # the betfair event's external_ref is deterministically "betfair:"+ref) so
+        # a sharp exchange close can anchor the fair (value.SHARP_BOOKS lists
+        # "betfair exchange" with EXCHANGE_COMMISSION). No betfair event / no close
+        # -> [] -> behaviour unchanged. Both flags may be on: event_fair_probs
+        # already prefers Pinnacle (SHARP_BOOKS[0]) over Betfair (index 2), so
+        # Pinnacle wins when both price the market and Betfair fills the gap.
+        extra = await _betfair_exchange_close(session, pick, external_ref, kickoff)
+        if extra:
+            snaps = [*snaps, *extra]
+            logger.info(
+                "pick %d: injected %d Betfair Exchange close rows (exact match)",
                 pick.id,
                 len(extra),
             )
@@ -531,6 +548,43 @@ async def _pinnacle_archive_close(
         away=away,
         kickoff=kickoff,
     )
+
+
+async def _betfair_exchange_close(
+    session: "AsyncSession",
+    pick: Pick,
+    external_ref: str,
+    kickoff: datetime,
+) -> list[OddsSnapshotIn]:
+    """The captured Betfair Exchange BACK close for this pick, re-keyed to the
+    pick's own event_id, or [].
+
+    EXACT resolution (no fuzzy, no alias table, no kickoff window): the Betfair
+    capture persists its event under external_ref ``"betfair:" + <pick ref>``
+    (app/ingestion/betfair_exchange._namespace_event_ref), and external_ref is
+    globally unique (uq_events_external_ref), so the betfair event is found by a
+    single deterministic lookup. None present -> [] -> caller's behaviour
+    unchanged. The returned snaps are the betfair event's close rows
+    (bookmaker="Betfair Exchange") re-keyed to the PICK's external_ref so they
+    group with the pick's market in event_fair_probs — the namespacing prefix
+    that keeps the live event separate at capture time must be stripped here so
+    the close anchors the pick.
+    """
+    from app.ingestion.betfair_exchange import _namespace_event_ref
+
+    betfair_ref = _namespace_event_ref(external_ref)
+    betfair_event_id = await session.scalar(
+        select(Event.id).where(Event.external_ref == betfair_ref)
+    )
+    if betfair_event_id is None:
+        return []
+    # closing_odds_from_snapshots re-keys every row to the external_ref it is
+    # passed (betfair_ref here); re-key once more to the PICK's ref so the close
+    # groups with the pick's own market rather than a "betfair:"-namespaced one.
+    snaps, _last = await closing_odds_from_snapshots(
+        session, betfair_event_id, betfair_ref, kickoff
+    )
+    return [snap.model_copy(update={"event_id": external_ref}) for snap in snaps]
 
 
 async def true_up_clv(

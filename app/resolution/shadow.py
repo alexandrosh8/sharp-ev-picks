@@ -129,3 +129,85 @@ def summarize_match_rate(outcomes: Sequence[ShadowOutcome]) -> MatchRateReport:
         by_sport=by_sport,
         by_league=by_league,
     )
+
+
+# --- Betfair Exchange coverage (EXACT match -> pure presence/absence) ---------
+# The Betfair consumption path (CLV_USE_BETFAIR_EXCHANGE) attaches a captured
+# Betfair BACK close via an EXACT external_ref lookup ("betfair:"+pick_ref) — no
+# alias table, no kickoff-window fuzz — so its readiness is a single yes/no per
+# pick, NOT a match rate with diagnostic gaps. The two buckets that DO matter:
+#   - has a "betfair:"-namespaced event at all (was the page ever captured?), and
+#   - of those, does that event carry a USABLE BACK close inside the kickoff
+#     window (the same SNAPSHOT_CLOSE_MAX_GAP gate the consumption path uses).
+
+
+@dataclass(frozen=True)
+class BetfairCoverageOutcome:
+    """One pick's EXACT-match Betfair Exchange close coverage.
+
+    ``has_betfair_event``: a ``"betfair:"+ref`` event exists for the fixture.
+    ``has_usable_close``: that event carries an anchorable BACK close inside the
+    kickoff window (implies ``has_betfair_event``). Both False = no Betfair page
+    was ever captured for this fixture.
+    """
+
+    pick_id: int
+    sport: str
+    league: str | None
+    has_betfair_event: bool
+    has_usable_close: bool
+
+
+@dataclass(frozen=True)
+class BetfairCoverageReport:
+    """Overall + per-sport/league Betfair Exchange close coverage. ``with_event``
+    counts picks whose fixture has ANY captured Betfair event; ``with_close`` the
+    subset whose event carries a usable BACK close (what the consumption path can
+    actually attach)."""
+
+    total: int
+    with_event: int
+    with_close: int
+    by_sport: tuple[GroupRate, ...]
+    by_league: tuple[GroupRate, ...]
+
+    @property
+    def close_rate(self) -> float | None:
+        return self.with_close / self.total if self.total else None
+
+    def as_dict(self) -> dict[str, object]:
+        def grp(g: GroupRate) -> dict[str, object]:
+            return {
+                "key": g.key,
+                "total": g.total,
+                "with_close": g.matched,
+                "close_rate": g.match_rate,
+            }
+
+        return {
+            "total": self.total,
+            "with_event": self.with_event,
+            "with_close": self.with_close,
+            "close_rate": self.close_rate,
+            "by_sport": [grp(g) for g in self.by_sport],
+            "by_league": [grp(g) for g in self.by_league],
+        }
+
+
+def summarize_betfair_coverage(
+    outcomes: Sequence[BetfairCoverageOutcome],
+) -> BetfairCoverageReport:
+    """Aggregate Betfair coverage outcomes into overall + per-sport/league close
+    rates. ``GroupRate.matched`` carries the ``with_close`` count per bucket.
+    Empty input -> a zero report (rates ``None``, never a division by zero)."""
+    with_event = sum(1 for o in outcomes if o.has_betfair_event)
+    with_close = sum(1 for o in outcomes if o.has_usable_close)
+    by_sport = _grouped([(o.sport, o.has_usable_close) for o in outcomes])
+    by_league = _grouped([(o.league, o.has_usable_close) for o in outcomes if o.league is not None])
+    return BetfairCoverageReport(
+        total=len(outcomes),
+        with_event=with_event,
+        with_close=with_close,
+        by_sport=by_sport,
+        by_league=by_league,
+    )

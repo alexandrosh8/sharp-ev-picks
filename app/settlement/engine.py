@@ -121,6 +121,7 @@ async def settle_open_picks(
     delay: timedelta = SETTLE_DELAY,
     devig_method: DevigMethod | None = None,
     use_pinnacle_archive: bool = False,
+    use_betfair_exchange: bool = False,
 ) -> int:
     """Settle every alerted pick whose event finished and has a known score.
 
@@ -176,6 +177,7 @@ async def settle_open_picks(
                     starts_at,
                     devig_method,
                     use_pinnacle_archive=use_pinnacle_archive,
+                    use_betfair_exchange=use_betfair_exchange,
                 )
     if settled:
         await session.flush()  # status flips visible to the caller's transaction
@@ -273,6 +275,7 @@ async def run_settlement_cycle(
     now: datetime | None = None,
     devig_method: DevigMethod | None = None,
     use_pinnacle_archive: bool = False,
+    use_betfair_exchange: bool = False,
 ) -> int:
     """One scheduler cycle: fetch scores for the configured leagues, settle.
 
@@ -311,6 +314,7 @@ async def run_settlement_cycle(
             now,
             devig_method=devig_method,
             use_pinnacle_archive=use_pinnacle_archive,
+            use_betfair_exchange=use_betfair_exchange,
         )
         await session.commit()
     return settled

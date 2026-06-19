@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from app.backtesting.live_evidence import SettledPickRow
-    from app.resolution.shadow import ShadowOutcome
+    from app.resolution.shadow import BetfairCoverageOutcome, ShadowOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -997,6 +997,80 @@ async def shadow_match_rate_outcomes(
                     matched=matched,
                 )
             )
+    return outcomes
+
+
+async def betfair_exchange_coverage_outcomes(
+    session: AsyncSession,
+    *,
+    since: datetime | None = None,
+) -> "list[BetfairCoverageOutcome]":
+    """SHADOW Betfair-Exchange close coverage over picks with a known kickoff —
+    the read-only instrument ADR-0015 asks be checked before
+    CLV_USE_BETFAIR_EXCHANGE is enabled.
+
+    For each pick it reproduces EXACTLY what the consumption path
+    (app.clv_trueup._betfair_exchange_close) would resolve — an EXACT lookup of
+    the ``"betfair:"+ref`` event (external_ref is globally unique, no fuzz/alias)
+    — and whether that event carries a USABLE BACK close: an anchorable H2H close
+    set whose event-wide last pre-kickoff capture is within SNAPSHOT_CLOSE_MAX_GAP
+    of kickoff (the same gate finalize_closing_from_snapshots applies). Writes
+    NOTHING and attaches no close.
+
+    Population: picks whose event has a known kickoff (``Event.starts_at`` NOT
+    NULL), optionally limited to kickoffs at/after ``since``.
+    """
+    from app.clv_trueup import SNAPSHOT_CLOSE_MAX_GAP
+    from app.resolution.shadow import BetfairCoverageOutcome
+
+    home_t, away_t = aliased(Team), aliased(Team)
+    conds: list[Any] = [Event.starts_at.is_not(None)]
+    if since is not None:
+        conds.append(Event.starts_at >= since)
+    pick_rows = (
+        await session.execute(
+            select(Pick.id, Sport.key, League.key, Event.external_ref, Event.starts_at)
+            .select_from(Pick)
+            .join(Event, Pick.event_id == Event.id)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(League, Event.league_id == League.id)
+            .join(home_t, Event.home_team_id == home_t.id)
+            .join(away_t, Event.away_team_id == away_t.id)
+            .where(*conds)
+        )
+    ).all()
+    if not pick_rows:
+        return []
+
+    outcomes: list[BetfairCoverageOutcome] = []
+    for pick_id, sport_key, league_key, external_ref, kickoff in pick_rows:
+        betfair_ref = f"betfair:{external_ref}"
+        betfair_event_id = await session.scalar(
+            select(Event.id).where(Event.external_ref == betfair_ref)
+        )
+        has_event = betfair_event_id is not None
+        has_close = False
+        if betfair_event_id is not None and kickoff is not None:
+            snaps, last_capture = await closing_odds_from_snapshots(
+                session, betfair_event_id, betfair_ref, kickoff
+            )
+            # USABLE = event scraped near kickoff (coverage gate) AND the close
+            # set has all 3 H2H selections (home/draw/away) — the same two conditions
+            # the consumption path requires to attach a fair.
+            in_window = (
+                last_capture is not None and kickoff - last_capture <= SNAPSHOT_CLOSE_MAX_GAP
+            )
+            h2h_rows = sum(1 for s in snaps if s.market is Market.H2H)
+            has_close = in_window and h2h_rows >= 3  # full 3-way (home/draw/away)
+        outcomes.append(
+            BetfairCoverageOutcome(
+                pick_id=pick_id,
+                sport=sport_key,
+                league=league_key,
+                has_betfair_event=has_event,
+                has_usable_close=has_close,
+            )
+        )
     return outcomes
 
 
