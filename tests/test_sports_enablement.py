@@ -101,10 +101,10 @@ def test_tennis_all_leagues_within_budget_loads() -> None:
 
 
 def test_nfl_polling_on_by_default_with_nfl_slug() -> None:
-    # American football ships ON by default (leagues="nfl,ncaa" — pro + college);
+    # American football ships ON by default (leagues="nfl,ncaa" — NFL + NCAA + CFL + UFL);
     # off-season the dated scrape simply yields no events. Stays VISIBILITY-ONLY.
     s = make_settings()
-    assert s.oddsportal_nfl_leagues == "nfl,ncaa"
+    assert s.oddsportal_nfl_leagues == "nfl,ncaa,cfl,ufl"
     assert s.oddsportal_nfl_markets == "home_away"
 
 

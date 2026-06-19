@@ -379,7 +379,7 @@ class Settings(BaseSettings):
     # asian_handicap_ keys). The market-budget guard engages ONLY when
     # leagues=all; with the scoped default slug it is uncapped but bounded by
     # that league's match volume (~1 browser tab per match per market key).
-    oddsportal_nfl_leagues: str = "nfl,ncaa"  # csv american-football slugs; empty = OFF
+    oddsportal_nfl_leagues: str = "nfl,ncaa,cfl,ufl"  # csv american-football slugs; empty = OFF
     oddsportal_nfl_markets: str = "home_away"
     # Dated scraping: each cycle covers today..today+N (UTC) instead of a
     # league's whole upcoming list — far-future fixtures are skipped and

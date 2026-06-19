@@ -140,7 +140,14 @@ _EXTRA_LEAGUES: dict[str, dict[str, str]] = {
         "belgium-jupiler-pro-league": (
             "https://www.oddsportal.com/football/belgium/jupiler-pro-league"
         ),
-    }
+    },
+    # OddsHarvester 0.3.0 ships only nfl/ncaa for american football; CFL
+    # (active Jun-Nov) and UFL (spring) are the other live AF leagues
+    # OddsPortal lists. Visibility-only — they mint no picks, like nfl/ncaa.
+    "american-football": {
+        "cfl": "https://www.oddsportal.com/american-football/canada/cfl/",
+        "ufl": "https://www.oddsportal.com/american-football/usa/ufl/",
+    },
 }
 
 
