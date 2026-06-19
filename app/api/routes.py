@@ -59,98 +59,116 @@ _LOGIN_HTML = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>betting-ai — sign in</title>
+    <title>PICKS TERMINAL — sign in</title>
     <style>
       :root {
-        --bg: #060906;
-        --panel: #0d130d;
-        --line: #1a241a;
-        --text: #cfe3cf;
-        --dim: #5e7a5e;
-        --pos: #00ff9d;
-        --neg: #ff5c57;
-        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        --bg: #0a0c10;
+        --surface-1: #0f1216;
+        --surface-2: #151921;
+        --line: #232a35;
+        --text: #e8edf4;
+        --dim: #aeb8c6;
+        --faint: #8793a3;
+        --pos: #34d399;
+        --neg: #f4525f;
+        --info: #38bdf8;
+        --radius: 10px;
+        --radius-sm: 6px;
+        --font-display:
+          "SF Pro Display", "Söhne", "Geist", "Helvetica Neue", system-ui,
+          -apple-system, sans-serif;
+        --mono:
+          ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
+          Consolas, monospace;
       }
       * { box-sizing: border-box; margin: 0; }
       html { background: var(--bg); }
       body {
         color: var(--text);
         font: 13px/1.5 var(--mono);
+        font-variant-numeric: tabular-nums;
         min-height: 100vh;
         display: flex;
         align-items: center;
         justify-content: center;
         padding: 24px;
         background:
-          radial-gradient(1000px 420px at 50% -10%,
-            rgba(0, 255, 157, 0.05), transparent 60%), var(--bg);
+          radial-gradient(900px 380px at 50% -8%,
+            rgba(52, 211, 153, 0.06), transparent 60%), var(--bg);
       }
       .card {
         width: 100%;
-        max-width: 340px;
+        max-width: 360px;
         border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--panel);
-        padding: 22px 20px 20px;
+        border-radius: var(--radius);
+        background: var(--surface-2);
+        padding: 26px 24px 22px;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
       }
       .brand {
-        font-size: 16px;
-        font-weight: 800;
-        letter-spacing: 0.22em;
-        color: var(--pos);
-        text-shadow: 0 0 14px rgba(0, 255, 157, 0.3);
+        font-family: var(--font-display);
+        font-size: 19px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        color: var(--text);
       }
       .sub {
-        color: var(--dim);
-        font-size: 11px;
-        letter-spacing: 0.05em;
-        margin: 6px 0 18px;
+        color: var(--faint);
+        font-size: 10px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        margin: 7px 0 20px;
       }
       label {
         display: block;
         color: var(--dim);
+        font-family: var(--font-display);
         font-size: 10px;
-        letter-spacing: 0.14em;
+        font-weight: 600;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
-        margin: 12px 0 5px;
+        margin: 14px 0 6px;
       }
       input {
         width: 100%;
-        background: var(--bg);
+        background: var(--surface-1);
         color: var(--text);
         border: 1px solid var(--line);
-        border-radius: 4px;
-        padding: 9px 11px;
+        border-radius: var(--radius-sm);
+        padding: 10px 12px;
         font: 13px var(--mono);
+        letter-spacing: 0.02em;
       }
-      input:focus { outline: 1px solid var(--pos); outline-offset: 0; }
+      input:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
       button {
         width: 100%;
-        margin-top: 18px;
+        margin-top: 22px;
         cursor: pointer;
-        background: rgba(0, 255, 157, 0.08);
+        background: rgba(52, 211, 153, 0.10);
         color: var(--pos);
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        padding: 10px 12px;
-        font: 700 11px var(--mono);
-        letter-spacing: 0.14em;
+        border: 1px solid var(--pos);
+        border-radius: var(--radius-sm);
+        padding: 11px 12px;
+        font: 600 11px var(--mono);
+        letter-spacing: 0.16em;
         text-transform: uppercase;
+        transition: background-color 120ms, box-shadow 120ms;
       }
-      button:hover { border-color: var(--pos); }
+      button:hover { background: rgba(52, 211, 153, 0.18); box-shadow: 0 0 0 1px var(--pos); }
+      button:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
       .err {
         color: var(--neg);
         font-size: 11px;
         min-height: 16px;
-        margin-top: 12px;
-        letter-spacing: 0.03em;
+        margin-top: 13px;
+        letter-spacing: 0.02em;
       }
     </style>
   </head>
   <body>
     <form class="card" id="login-form" autocomplete="off">
       <div class="brand">PICKS&nbsp;TERMINAL</div>
-      <div class="sub">decision-support · sign in to continue</div>
+      <div class="sub">sign in to continue</div>
       <label for="u">Username</label>
       <input id="u" name="username" type="text" autocomplete="username" autofocus />
       <label for="p">Password</label>
