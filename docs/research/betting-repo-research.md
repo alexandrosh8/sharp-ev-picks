@@ -152,3 +152,47 @@ used the default results-list book set; a per-match-detail scrape or an
 explicit `target_bookmaker="Pinnacle"` / `bookies_filter` pass _might_ surface
 Pinnacle. First-pass strongly suggests it isn't in the easy/default path. Probe
 kept (`scripts/research/probe_historic_odds.py`) so the follow-up is one command.
+
+## 2026-06-19 — 5-stream ultracode sweep: live odds, NBA/tennis/NFL data, scrapers, skills
+
+16-agent workflow (5 parallel research streams + adversarial verify on every
+"free sharp source" claim). Net: **no new repo/scraper/source helps; the free
+Pinnacle source is already fully ours; the only lever is the Arcadia↔picks
+match rate, which is an off-season + alias artifact.**
+
+- **Free live Pinnacle — REAL and already fully implemented.** The
+  `guest.api.arcadia.pinnacle.com` GET-only/no-auth endpoint was re-verified
+  live (200s on `/sports/{id}/matchups` and `/markets/straight`) and is exactly
+  what `app/ingestion/pinnacle_arcadia.py` runs. Correction to the research
+  agent's over-claim (caught on grounding): we do **not** discard totals/spreads
+  — `extract_total_quotes` (l.275) and `extract_spread_quotes` (l.331) already
+  capture moneyline **+ totals + spreads** for soccer/basketball/tennis. There
+  is **no market-expansion win left to build.**
+- **The real limiter — match rate, measured live: 28/98 = 28.6%.** Breakdown
+  from `GET /resolution/match-rate`: 34 `no_archive_candidates` (Pinnacle
+  doesn't list these obscure off-season leagues — UNFIXABLE coverage) + 36
+  `unmatched_with_candidates` (Pinnacle has the event, team-name join failed —
+  FIXABLE via aliases, but for summer-league teams we won't pick in-season).
+  `CLV_USE_PINNACLE_ARCHIVE` correctly stays OFF until this is healthy on
+  MAJOR leagues; nothing to do now but let coverage accrue.
+- **Alternative scrapers — REFUTED.** `whodeanie/live-odds-aggregator` and
+  `aqsmith02/paper-betting-tracker` were USE-claimed but the verifier refuted
+  both: they default to The Odds API `regions=us` (no Pinnacle) and average all
+  books (no sharp isolation). No free scraper beats OddsHarvester+Arcadia.
+- **NBA/tennis/NFL data gate — unchanged.** Pinnacle (via Arcadia, forward) is
+  available for NBA/tennis, so the sharp anchor exists going forward; the gate
+  to MINTING picks is still (a) being in-season so Pinnacle covers the league,
+  and (b) a held-out forward CLV validation > 2SE before flipping the flag.
+  `trading_alpha_tennis` rejected (outcome-prediction model). No new free
+  source clears it; the path is the existing evidence-gated plan, not a model.
+- **roundproxies blog — nothing safe & new.** ~8 techniques; the doctrine-safe
+  ones (GET hidden JSON APIs, networkidle waits, polite pacing, UA rotation,
+  WebSocket monitor) we already use; the rest (2Captcha, `playwright_stealth`,
+  login automation, residential-proxy block-evasion) are OFF-LIMITS. The
+  verifier confirmed it names no free Pinnacle/closing source.
+- **Web/mobile skills.** Top picks: `ce-frontend-design` (compound-engineering),
+  `bencium-impact-designer`, `ui-design-system` (mega-skills) — all already in
+  the operator's local skill repos (`~/.claude/skills/`), no install needed.
+  `sleek-design-mobile-apps` (skills.sh) installs via `npx skillsadd` (unvetted
+  executor — not blind-run). React-only skills (shadcn) are reference-only for
+  this vanilla-HTML dashboard. Used the installed `frontend-design` skill.

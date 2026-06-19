@@ -1,5 +1,21 @@
 # Decisions Log
 
+- 2026-06-19 (5-stream ultracode research sweep — see
+  docs/research/betting-repo-research.md) — VERDICT: nothing new to build.
+  Free live Pinnacle (`guest.api.arcadia.pinnacle.com`) is REAL, GET-only, and
+  ALREADY fully ours (`pinnacle_arcadia.py` extracts moneyline+totals+spreads —
+  the "discards totals/spreads" research claim was FALSE, caught on grounding).
+  Live `/resolution/match-rate` = 28/98 (28.6%): ~35% `no_archive_candidates`
+  (Pinnacle doesn't cover obscure off-season leagues — unfixable) + ~37%
+  `unmatched_with_candidates` (alias gap, fixable but for teams we won't pick
+  in-season). NBA/tennis stay visibility-only until in-season Pinnacle coverage
+  - a held-out forward-CLV >2SE flips `CLV_USE_PINNACLE_ARCHIVE`. Alt scrapers
+    (whodeanie/live-odds-aggregator, aqsmith02/paper-betting-tracker) REFUTED by
+    the verifier (regions=us, no Pinnacle, averages all books). roundproxies blog
+    = no new safe source (off-limits: 2Captcha/stealth/login/proxy-evasion). Top
+    mobile skills (ce-frontend-design, bencium-impact-designer, ui-design-system)
+    already in ~/.claude/skills/. Do not re-run these searches.
+
 - 2026-06-19 (penaltyblog + OddsHarvester unused-feature scan — see
   docs/research/betting-repo-research.md) — penaltyblog has NOTHING new for the
   picks (no odds/Pinnacle source; unused modules are wrong-shape goal/rating
