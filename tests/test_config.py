@@ -349,3 +349,24 @@ def test_valid_stake_drawdown_pair_flows_into_stake_policy() -> None:
     # the validated defaults stay untouched alongside the optional knob
     assert stakes.fractional_kelly == 0.25
     assert stakes.max_stake_fraction == 0.02
+
+
+def test_parse_scraper_proxy_pool_parses_and_hides_creds() -> None:
+    from app.config import parse_scraper_proxy_pool
+
+    pool = parse_scraper_proxy_pool("1.2.3.4|8080|user|pass,5.6.7.8|9090|u2|p2")
+    assert len(pool) == 2
+    assert pool[0].url == "http://1.2.3.4:8080"
+    assert pool[0].username == "user"
+    assert pool[0].password == "pass"
+    assert "user" not in pool[0].url  # creds are NOT in the url field
+
+    # malformed (3 fields) rejected; the secret value never appears in the error
+    with pytest.raises(ValueError) as ei:
+        parse_scraper_proxy_pool("1.2.3.4|8080|onlyuser")
+    assert "onlyuser" not in str(ei.value)
+    # non-numeric port rejected
+    with pytest.raises(ValueError):
+        parse_scraper_proxy_pool("1.2.3.4|notaport|u|p")
+    # empty -> empty tuple (default OFF)
+    assert parse_scraper_proxy_pool("") == ()

@@ -340,4 +340,6 @@ async def test_archive_capture_close_match_coverage_per_sport(factory) -> None: 
     assert rows["american_football"]["scraped"] == 0
     # invariant: a close can't be found for more games than we scraped
     for row in rows.values():
-        assert int(row["matched"]) <= int(row["scraped"])
+        matched, scraped = row["matched"], row["scraped"]
+        assert isinstance(matched, int) and isinstance(scraped, int)
+        assert matched <= scraped

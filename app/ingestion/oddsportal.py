@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app.ingestion.base import EventDirectory, EventTeams
+from app.ingestion.base import EventDirectory, EventTeams, ScraperProxy
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 
@@ -470,6 +470,7 @@ class OddsPortalLoader:
         concurrency_tasks: int = 3,
         request_delay: float = 1.0,
         locale: str = "en-GB",
+        proxy_pool: Sequence[ScraperProxy] = (),
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -517,6 +518,10 @@ class OddsPortalLoader:
         # jitters delays, and runs a webdriver-hiding init script — we add the
         # missing locale, never anything that DEFEATS bot detection.
         self._locale = locale
+        # Rotating outbound proxy pool for the scrape (empty = host IP). Creds
+        # travel via separate proxy_user/proxy_pass kwargs, never in the URL.
+        self._proxy_pool = tuple(proxy_pool)
+        self._proxy_cursor = 0
         # Liveness contract read by app/pipeline._record_poll: listing count
         # of the last fetch_odds per sport key. "Matches listed but zero odds
         # parsed" is the selector-break/anti-bot signature — the pipeline
@@ -526,6 +531,42 @@ class OddsPortalLoader:
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
+
+    async def _scrape_with_failover(self, **kwargs: Any) -> Any:
+        """Scrape via the proxy pool, rotating with failover: on an exception OR
+        a zero-match result (the throttle signature), retry with the NEXT proxy.
+        Empty pool -> a single direct call (host IP, default). Credentials go via
+        separate proxy_user/proxy_pass kwargs (never in the URL); logging is
+        index-only so nothing leaks."""
+        pool = self._proxy_pool
+        if not pool:
+            return await self._scrape(**kwargs)
+        n = len(pool)
+        result: Any = None
+        for attempt in range(n):
+            idx = (self._proxy_cursor + attempt) % n
+            proxy = pool[idx]
+            try:
+                result = await self._scrape(
+                    **kwargs,
+                    proxy_url=proxy.url,
+                    proxy_user=proxy.username,
+                    proxy_pass=proxy.password,
+                )
+            except Exception as exc:  # network / anti-bot / timeout
+                logger.warning(
+                    "oddsportal scrape via proxy #%d failed (%s); trying next",
+                    idx,
+                    type(exc).__name__,
+                )
+                result = None
+                continue
+            if getattr(result, "success", None):
+                self._proxy_cursor = (idx + 1) % n  # advance past the winner
+                return result
+            logger.info("oddsportal scrape via proxy #%d returned 0 matches; trying next", idx)
+        self._proxy_cursor = (self._proxy_cursor + 1) % n  # spread load next cycle
+        return result
 
     async def fetch_odds(self, sport_key: str) -> list[OddsSnapshotIn]:
         if sport_key not in self._config:
@@ -549,7 +590,7 @@ class OddsPortalLoader:
         matches: list[dict[str, Any]] = []
         seen_links: set[str] = set()
         for scrape_date in dates:
-            result = await self._scrape(
+            result = await self._scrape_with_failover(
                 sport=sport,
                 date=scrape_date,
                 leagues=scrape_leagues,
@@ -660,7 +701,7 @@ class OddsPortalLoader:
             if trimmed:
                 requested = trimmed
         now = datetime.now(tz=UTC)
-        result = await self._scrape(
+        result = await self._scrape_with_failover(
             sport=sport,
             match_links=links,
             markets=list(requested),

@@ -602,3 +602,56 @@ async def test_basketball_totals_and_handicap_games_markets_parse() -> None:
         (Market.SPREADS, "Test Hawks -7.5", "asian_handicap_games_-7_5_games"),
         (Market.SPREADS, "Test Bulls +7.5", "asian_handicap_games_-7_5_games"),
     }
+
+
+async def test_proxy_pool_rotates_and_fails_over() -> None:
+    # Proxy #0 returns 0 matches (the throttle signature) -> failover to #1,
+    # which returns the slate. Credentials must travel via the separate
+    # proxy_user/proxy_pass kwargs, NEVER embedded in proxy_url.
+    from app.ingestion.base import ScraperProxy
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        success = [] if len(calls) == 1 else [MATCH]
+        return SimpleNamespace(success=success, failed=[], partial=[])
+
+    pool = (
+        ScraperProxy(url="http://h0:1", username="u0", password="p0"),
+        ScraperProxy(url="http://h1:2", username="u1", password="p1"),
+    )
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=fake_scrape,
+        proxy_pool=pool,
+    )
+    snapshots = await loader.fetch_odds("soccer")
+    assert len(calls) == 2
+    assert calls[0]["proxy_url"] == "http://h0:1"
+    assert calls[0]["proxy_user"] == "u0"
+    assert calls[0]["proxy_pass"] == "p0"
+    assert "u0" not in calls[0]["proxy_url"]  # creds never live in the URL
+    assert calls[1]["proxy_url"] == "http://h1:2"
+    assert snapshots  # the 2nd proxy's slate was parsed
+
+
+async def test_empty_pool_scrapes_without_proxy_kwargs() -> None:
+    # Default (no pool) -> exactly one scrape, no proxy_* kwargs (host IP).
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=fake_scrape,
+    )
+    await loader.fetch_odds("soccer")
+    (call,) = calls
+    assert "proxy_url" not in call
+    assert "proxy_user" not in call
+    assert "proxy_pass" not in call

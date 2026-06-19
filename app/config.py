@@ -13,6 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.edge.gates import GatePolicy
 from app.edge.value_policy import ValuePolicy
+from app.ingestion.base import ScraperProxy
 from app.risk.staking import StakePolicy
 
 # leagues=all scrapes oddsportal's WORLDWIDE daily pages — typically 100-300+
@@ -116,6 +117,31 @@ def parse_proxy_urls(raw: str, env_name: str = "ARCADIA_PROXY_URLS") -> tuple[st
         seen.add(url)
         urls.append(url)
     return tuple(urls)
+
+
+def parse_scraper_proxy_pool(
+    raw: str, env_name: str = "SCRAPER_PROXY_POOL"
+) -> tuple[ScraperProxy, ...]:
+    """Parse comma-separated ``host|port|user|pass`` quads into frozen proxy
+    entries. Never echoes credentials in errors (index/shape only)."""
+    out: list[ScraperProxy] = []
+    seen: set[str] = set()
+    for idx, entry in enumerate(raw.split(","), start=1):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split("|")
+        if len(parts) != 4 or not all(p.strip() for p in parts):
+            raise ValueError(f"{env_name}: entry #{idx} must be 'host|port|user|pass'")
+        host, port, user, pwd = (p.strip() for p in parts)
+        if not port.isdigit():
+            raise ValueError(f"{env_name}: entry #{idx} port must be numeric")
+        url = f"http://{host}:{port}"
+        if url in seen:
+            raise ValueError(f"{env_name}: duplicate proxy host:port at #{idx}")
+        seen.add(url)
+        out.append(ScraperProxy(url=url, username=user, password=pwd))
+    return tuple(out)
 
 
 class Settings(BaseSettings):
@@ -455,6 +481,10 @@ class Settings(BaseSettings):
     # The parser deliberately never echoes the configured URLs in validation
     # errors because proxy usernames/passwords are secrets.
     arcadia_proxy_urls: SecretStr = SecretStr("")
+    # Optional rotating proxy pool for the LIVE OddsPortal scrape (read-only GET).
+    # Empty = scrape from the host IP. Format: comma-separated host|port|user|pass
+    # quads. SecretStr so the credentials stay out of logs/repr.
+    scraper_proxy_pool: SecretStr = SecretStr("")
     # When true, the settlement-time snapshot close ALSO injects the STRICT
     # cross-source match's Pinnacle ARCHIVE close (app/resolution, ADR-0013), so
     # incremental CLV anchors on a real sharp close. OFF by default: it changes
@@ -577,6 +607,7 @@ class Settings(BaseSettings):
                 "constraint — set both or neither."
             )
         parse_proxy_urls(self.arcadia_proxy_urls.get_secret_value())
+        parse_scraper_proxy_pool(self.scraper_proxy_pool.get_secret_value())
         return self
 
     def odds_api_keys(self) -> tuple[str, ...]:
@@ -587,6 +618,10 @@ class Settings(BaseSettings):
     def arcadia_proxies(self) -> tuple[str, ...]:
         """Configured Arcadia/Pinnacle outbound proxies, in rotation order."""
         return parse_proxy_urls(self.arcadia_proxy_urls.get_secret_value())
+
+    def scraper_proxies(self) -> tuple[ScraperProxy, ...]:
+        """Live OddsPortal scrape outbound proxy pool, in rotation order."""
+        return parse_scraper_proxy_pool(self.scraper_proxy_pool.get_secret_value())
 
 
 def gate_policy(settings: Settings) -> GatePolicy:

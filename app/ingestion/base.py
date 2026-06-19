@@ -26,6 +26,18 @@ class EventTeams:
     starts_at: datetime | None = None  # kickoff (UTC) when the source knows it
 
 
+@dataclass(frozen=True)
+class ScraperProxy:
+    """One live-scrape outbound proxy. ``url`` is scheme+host:port ONLY; the
+    credentials live in ``username``/``password`` and reach Playwright as
+    separate fields, never embedded in the URL, so the scraper's INFO log of the
+    proxy URL cannot leak them."""
+
+    url: str
+    username: str
+    password: str
+
+
 class EventDirectory:
     """Shared event_id -> teams registry, populated by loaders and read by
     models (e.g. Dixon-Coles needs team names, snapshots carry only ids)."""
