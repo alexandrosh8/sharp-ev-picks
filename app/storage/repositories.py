@@ -949,47 +949,111 @@ async def shadow_match_rate_outcomes(
 
 
 async def pinnacle_archive_capture_by_sport(
-    session: AsyncSession, *, horizon_days: int = 7
+    session: AsyncSession, *, horizon_days: int = 7, max_day_drift: int = 1
 ) -> list[dict[str, object]]:
-    """Per-arcadia-sport upcoming-fixture counts: how many fixtures the Pinnacle
-    sharp-close archive has captured vs how many we scraped, for kickoffs in the
-    next ``horizon_days``.
+    """Per-arcadia-sport upcoming coverage for the dashboard's Pinnacle panel.
 
-    Unlike the pick-based match rate (which only surfaces sports that produce
-    picks), this covers EVERY arcadia sport — tennis and american_football
-    included — via a cheap COUNT, no matcher. It lets the dashboard show that the
-    archive captures all four sports, not only the pick sports. Read-only
-    diagnostic; attaches nothing and changes no pick.
+    For each arcadia sport and kickoffs in the next ``horizon_days`` it reports:
+      - ``captured``: fixtures the Pinnacle sharp-close archive holds,
+      - ``scraped``:  fixtures WE scraped,
+      - ``matched``:  of OURS, how many strict-match a captured Pinnacle close.
+
+    Covers EVERY arcadia sport (tennis + american_football included), so the
+    visibility-only sports — which mint no picks and so never appear in the
+    pick-based match rate — still get an honest "can a sharp close be attached?"
+    number. Uses the SAME strict matcher app.clv_trueup uses at settlement:
+    ordered home/away for soccer/basketball/american_football, and the unordered
+    two-player match with surname+initial canonicalization for tennis (mirroring
+    scripts/research/tennis_clv_readiness.py). Read-only diagnostic — it attaches
+    no close and changes no pick.
     """
-    from app.resolution.shadow import ARCADIA_SPORTS, arcadia_base_sport
+    from app.resolution import EventCandidate, default_aliases, match_event
+    from app.resolution.matching import normalize_name
+    from app.resolution.shadow import ARCADIA_SPORTS
+    from app.resolution.tennis_names import canonical_tennis_name
+
+    def _toks(name: str) -> set[str]:
+        return set(normalize_name(name).split())
 
     now = datetime.now(tz=UTC)
     until = now + timedelta(days=horizon_days)
-    rows = (
-        await session.execute(
-            select(Sport.key, func.count(Event.id))
-            .join(Event, Event.sport_id == Sport.id)
-            .where(
-                Event.starts_at.is_not(None),
-                Event.starts_at >= now,
-                Event.starts_at <= until,
+    pad = timedelta(days=max_day_drift + 1)
+    aliases = default_aliases()
+    out: list[dict[str, object]] = []
+    for base in sorted(ARCADIA_SPORTS):
+        is_tennis = base == "tennis"
+        fh, fa = aliased(Team), aliased(Team)
+        fixtures = (
+            await session.execute(
+                select(fh.name, fa.name, Event.starts_at)
+                .select_from(Event)
+                .join(Sport, Event.sport_id == Sport.id)
+                .join(fh, Event.home_team_id == fh.id)
+                .join(fa, Event.away_team_id == fa.id)
+                .where(Sport.key == base, Event.starts_at >= now, Event.starts_at <= until)
             )
-            .group_by(Sport.key)
+        ).all()
+        ah, aw = aliased(Team), aliased(Team)
+        arc_rows = (
+            await session.execute(
+                select(ah.name, aw.name, Event.starts_at)
+                .select_from(Event)
+                .join(Sport, Event.sport_id == Sport.id)
+                .join(ah, Event.home_team_id == ah.id)
+                .join(aw, Event.away_team_id == aw.id)
+                .where(
+                    Sport.key == f"pinnacle_{base}",
+                    Event.starts_at >= now - pad,
+                    Event.starts_at <= until + pad,
+                )
+            )
+        ).all()
+        captured = sum(1 for _, _, ko in arc_rows if now <= ko <= until)
+        candidates = [
+            EventCandidate(
+                ref=str(i),
+                home=canonical_tennis_name(h) if is_tennis else h,
+                away=canonical_tennis_name(a) if is_tennis else a,
+                kickoff=ko,
+            )
+            for i, (h, a, ko) in enumerate(arc_rows)
+        ]
+        matched = 0
+        for home, away, kickoff in fixtures:
+            qh = canonical_tennis_name(home) if is_tennis else home
+            qa = canonical_tennis_name(away) if is_tennis else away
+            in_window = [
+                c
+                for c in candidates
+                if abs((c.kickoff.date() - kickoff.date()).days) <= max_day_drift
+            ]
+            cand = match_event(
+                qh,
+                qa,
+                kickoff,
+                in_window,
+                aliases=aliases,
+                max_day_drift=max_day_drift,
+                ordered=not is_tennis,
+            )
+            if cand is None:
+                continue
+            # tennis: require a shared normalized token so a degenerate
+            # surname+initial pair can't match same-day noise (readiness-probe guard).
+            if is_tennis and not (
+                (_toks(home) | _toks(away)) & (_toks(cand.home) | _toks(cand.away))
+            ):
+                continue
+            matched += 1
+        out.append(
+            {
+                "sport": base,
+                "captured": captured,
+                "scraped": len(fixtures),
+                "matched": matched,
+            }
         )
-    ).all()
-    counts = {key: int(n) for key, n in rows}
-    return [
-        {
-            "sport": base,
-            "captured": counts.get(f"pinnacle_{base}", 0),
-            "scraped": sum(
-                n
-                for key, n in counts.items()
-                if not key.startswith("pinnacle_") and arcadia_base_sport(key) == base
-            ),
-        }
-        for base in sorted(ARCADIA_SPORTS)
-    ]
+    return out
 
 
 PickPersistOutcome = Literal["inserted", "upgraded", "duplicate"]

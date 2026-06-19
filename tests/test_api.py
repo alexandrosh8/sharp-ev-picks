@@ -387,12 +387,12 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
             ),  # coverage gap
         ]
 
-    async def fake_capture(session, *, horizon_days=7):  # type: ignore[no-untyped-def]
+    async def fake_capture(session, **_kw):  # type: ignore[no-untyped-def]
         return [
-            {"sport": "american_football", "captured": 4, "scraped": 0},
-            {"sport": "basketball", "captured": 96, "scraped": 64},
-            {"sport": "soccer", "captured": 218, "scraped": 149},
-            {"sport": "tennis", "captured": 60, "scraped": 6},
+            {"sport": "american_football", "captured": 4, "scraped": 0, "matched": 0},
+            {"sport": "basketball", "captured": 96, "scraped": 64, "matched": 20},
+            {"sport": "soccer", "captured": 218, "scraped": 149, "matched": 50},
+            {"sport": "tennis", "captured": 60, "scraped": 6, "matched": 5},
         ]
 
     monkeypatch.setattr(routes, "shadow_match_rate_outcomes", fake_outcomes)
@@ -413,6 +413,9 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     cap = {row["sport"]: row for row in body["archive_capture"]}
     assert set(cap) == {"soccer", "basketball", "tennis", "american_football"}
     assert cap["tennis"]["captured"] == 60
+    # tennis mints no picks yet carries a fixture-level close-match count, so the
+    # panel can show coverage instead of an empty cell.
+    assert cap["tennis"]["matched"] == 5
     assert cap["american_football"]["scraped"] == 0
 
 

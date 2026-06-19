@@ -1472,7 +1472,7 @@
                   <th>Sport</th>
                   <th>Captured</th>
                   <th>Ours</th>
-                  <th>Pick match</th>
+                  <th>Close found</th>
                 </tr>
               </thead>
               <tbody id="archive-rows">
@@ -1806,14 +1806,14 @@
         const capEl = $("archive-capture");
         capEl.textContent =
           "Captured = upcoming Pinnacle closes (next 7d) · Ours = our scraped " +
-          "games (next 7d) · Pick match = strict name-match over picks (180d). " +
-          "Tennis & American football are visibility-only — captured, but they " +
-          "mint no picks, so they carry no match rate.";
+          "games (next 7d) · Close found = of Ours, how many strict-match a " +
+          "captured Pinnacle close — the readiness signal for attaching a sharp " +
+          "close. Every arcadia sport is shown; tennis & American football are " +
+          "visibility-only (no picks) but still get a coverage number.";
         capEl.hidden = false;
         const tbody = $("archive-rows");
         tbody.replaceChildren();
         const cap = Array.isArray(a.archive_capture) ? a.archive_capture : [];
-        const bySport = a.by_sport || [];
         if (!cap.length) {
           const tr = document.createElement("tr");
           const cell = td(
@@ -1828,24 +1828,22 @@
         cap.forEach((c) => {
           const tr = document.createElement("tr");
           td(tr, SPORT_LABELS[c.sport] || c.sport);
+          const scraped = Number(c.scraped) || 0;
+          const matched = Number(c.matched) || 0;
           td(tr, String(Number(c.captured) || 0));
-          td(tr, String(Number(c.scraped) || 0));
-          const g = bySport.find(
-            (x) => x.key === c.sport || String(x.key).startsWith(c.sport + "_"),
-          );
-          if (g) {
-            const rateCell = td(
-              tr,
-              g.matched + " / " + g.total + " · " + ratePct(g.match_rate),
-            );
-            if (g.match_rate !== null && g.match_rate !== undefined) {
-              const r = Number(g.match_rate);
-              rateCell.style.color =
-                r >= 0.5 ? "var(--pos)" : r > 0 ? "var(--warn)" : "var(--neg)";
-            }
+          td(tr, String(scraped));
+          if (scraped > 0) {
+            const rate = matched / scraped;
+            const cell = td(tr, matched + " · " + ratePct(rate));
+            cell.style.color =
+              rate >= 0.5
+                ? "var(--pos)"
+                : rate > 0
+                  ? "var(--warn)"
+                  : "var(--neg)";
           } else {
-            const noPick = td(tr, "—");
-            noPick.title = "visibility-only — mints no picks";
+            const none = td(tr, "—");
+            none.title = "no games scraped in this window yet";
           }
           tbody.appendChild(tr);
         });
