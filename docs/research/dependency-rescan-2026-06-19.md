@@ -107,3 +107,29 @@ and used correctly. The single real opportunity surfaced by this re-scan is
 **regional-mirror / crypto-book harvesting to widen the soft-book set** (more
 line-shopping shots) — available today in 0.3.0, but gated on a validation probe
 before wiring, not a blind add.
+
+## Live proxy confirmation + Betfair reality (2026-06-19)
+
+Shipped the rotating UK-proxy pool (#63) and confirmed it end-to-end through the
+live `OddsPortalLoader` path:
+
+- **Soft-book coverage is the real win.** Through a UK proxy, MLS lists **14** and
+  the World Cup **18** mainstream UK soft books (William Hill, Paddy Power, Sky
+  Bet, BetVictor, Betfred, Betway, Unibet, 888sport, BetMGM, bet365 …) — vs only
+  **5 crypto books** (Betfury/GGBET/Roobet/Stake/bet365) from our host IP. More
+  soft books = more line-shopping targets, and the same book class our +22% edge
+  backtested on.
+- **No sharp book in the scrape.** Pinnacle is UK-restricted (a UK exit hides it),
+  and Betfair Exchange did NOT appear on ANY league probed (MLS, Brazil, Copa
+  Libertadores, even the World Cup). The loader's "Betfair Exchange" normalization
+  exists and would consume it IF listed, but OddsPortal serves exchange odds in a
+  separate Exchanges view our default scrape doesn't hit. So the earlier "Betfair
+  already works" was OVERSTATED — corrected.
+- **The sharp anchor is unaffected.** It comes from the free ARCADIA Pinnacle
+  close (a direct API feed, not the geo-bound scrape) plus the now-richer soft
+  consensus — exactly the doctrine design. We do not need Betfair in the scrape.
+
+**Verdict:** keep the proxy ON — soft-book breadth (5 -> 18) is a genuine ROI
+lever. Betfair via the scrape is a non-finding; the only future lever (uncertain,
+not pursued) would be scraping OddsPortal's separate Exchanges view — never the
+Betfair API (forbidden).
