@@ -1865,9 +1865,14 @@
         // the filtered view): how many football / basketball / tennis we are
         // pricing. "basketball" is ALL basketball scraped (not NBA-only) — it
         // matches the basketball sport_key + the BASKETBALL ingestion chip.
-        const sc = { soccer: 0, basketball: 0, tennis: 0 };
+        const sc = { soccer: 0, basketball: 0, tennis: 0, american_football: 0 };
         for (const g of GAMES) {
-          const k = String(g.sport).split("_")[0];
+          const s = String(g.sport);
+          // "american_football" has an underscore -> split("_")[0] would mangle
+          // it to "american" and drop it from the count; key it whole.
+          const k = s.startsWith("american_football")
+            ? "american_football"
+            : s.split("_")[0];
           if (k in sc) sc[k] += 1;
         }
         $("chip-sports").textContent =
@@ -1876,7 +1881,9 @@
           " · basketball " +
           sc.basketball +
           " · tennis " +
-          sc.tennis;
+          sc.tennis +
+          " · Am.football " +
+          sc.american_football;
         const sport = $("f-game-sport").value;
         const q = $("f-game-search").value.trim().toLowerCase();
         const rows = GAMES.filter(
