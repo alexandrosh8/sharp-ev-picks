@@ -813,3 +813,57 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
             assert leftover_snaps == 0
     finally:
         await probe_engine.dispose()
+
+
+# --------------------------------------------------------------------------- #
+# Review nits: parse_odds_value boundary contract + a DECIMAL basketball (2-way)
+# extraction test (the per-visitor odds-format cookie applies to every sport).
+# --------------------------------------------------------------------------- #
+
+# A 2-way basketball moneyline rendered DECIMAL: BACK home/away 1.80/2.10 then
+# LAY home/away, each + parenthesised £ liquidity. No draw cell.
+_BASKETBALL_DECIMAL_HTML = _scroll_el(
+    back=(_odd_cell("1.80", "(5000)") + _odd_cell("2.10", "(4200)") + _payout_cell("99.0%")),
+    lay=(_odd_cell("1.83", "(900)") + _odd_cell("2.16", "(1200)") + _payout_cell("101.0%")),
+)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("6.51", 6.51),
+        ("1.66", 1.66),
+        ("100", 100.0),  # integer-format decimal (extreme underdog) is valid
+        ("2", 2.0),
+        ("28/25", 2.12),
+        ("3/1", 4.0),
+        ("0", None),
+        ("1", None),  # <= 1.0 is not a backable price
+        ("1.00", None),
+        ("(1838)", None),  # a liquidity token must never parse as an odds value
+        ("99.3%", None),  # a payout % must never parse as an odds value
+        ("", None),
+    ],
+)
+def test_parse_odds_value_decimal_and_fractional(raw: str, expected: "float | None") -> None:
+    from app.ingestion.betfair_exchange import parse_odds_value
+
+    result = parse_odds_value(raw)
+    if expected is None:
+        assert result is None
+    else:
+        assert result == pytest.approx(expected, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_row_extract_js_basketball_decimal() -> None:
+    # The per-visitor odds-format cookie applies to basketball too: a 2-way
+    # moneyline can render DECIMAL. With outcomes=("home","away") the reader keeps
+    # the leading TWO BACK cells (1.80/2.10) and discards the LAY tail.
+    tokens = await _evaluate_row_extract(_exchange_section_html(_BASKETBALL_DECIMAL_HTML))
+    assert tokens == ["1.80", "(5000)", "2.10", "(4200)", "1.83", "(900)", "2.16", "(1200)"]
+    cells = _pair_tokens(tokens)
+    quotes = extract_back_quotes(cells, outcomes=("home", "away"), min_liquidity=0.0)
+    assert [q.designation for q in quotes] == ["home", "away"]
+    assert [q.decimal_odds for q in quotes] == [1.80, 2.10]
+    assert [q.liquidity for q in quotes] == [5000.0, 4200.0]
