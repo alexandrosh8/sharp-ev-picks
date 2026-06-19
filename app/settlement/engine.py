@@ -243,6 +243,8 @@ async def _settle_one(
             outcome=str(outcome),
             pnl=pnl,
             roi=pick_roi(pnl, stake),
+            home_score=home_score,
+            away_score=away_score,
             settled_at=now,
         )
         .on_conflict_do_nothing(constraint="uq_result_tracking_pick")

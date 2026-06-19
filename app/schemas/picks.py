@@ -52,6 +52,11 @@ class PickOut(InternalModel):
     # strategy. Persisted so live CLV can be stratified by anchor — the
     # consensus fallback's live verdict mechanism.
     anchor_type: str | None = None
+    # Final score of the settled game ("HOME-AWAY", e.g. "2-1"). None until the
+    # pick settles (or when no score was recorded). Surfaced in the dashboard
+    # SETTLED view; /picks serializes the repo dict, so this keeps the contract
+    # model in step with the served payload.
+    score: str | None = None
     created_at: datetime
     risk_warning: str = "Betting involves risk. Nothing here is guaranteed profit."
     manual_betting_reminder: str = MANUAL_BETTING_REMINDER
