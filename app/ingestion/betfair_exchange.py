@@ -363,6 +363,22 @@ class BetfairExchangeReader:
         return []
 
 
+_BETFAIR_EVENT_PREFIX = "betfair:"
+
+
+def _namespace_event_ref(event_id: str) -> str:
+    """Namespace the persisted event external_ref so a captured Betfair row
+    can NEVER graft onto a live event that shares the same OddsPortal match
+    URL. Events are keyed by external_ref ALONE (globally unique, not
+    sport-scoped); without this prefix persist_odds_snapshots would reuse the
+    live soccer Event row and let the Betfair Exchange sharp BACK price leak
+    into that event closing-CLV anchor. Arcadia avoids this with a disjoint
+    numeric id-space; here we prefix the URL-keyed ref instead."""
+    if event_id.startswith(_BETFAIR_EVENT_PREFIX):
+        return event_id
+    return f"{_BETFAIR_EVENT_PREFIX}{event_id}"
+
+
 @dataclass(frozen=True)
 class MatchTarget:
     """One match page to read: its OddsPortal URL + team/league/kickoff context
@@ -448,11 +464,16 @@ class BetfairExchangeCapture:
                     continue
                 if not quotes:
                     continue  # no row / all outcomes below the liquidity floor
-                snapshots = back_quotes_to_snapshots(target.event_id, quotes, target.teams, now=now)
-                event_fresh = self._select_fresh(sport, target.event_id, snapshots)
+                # Namespace the persisted external_ref so this Betfair row can
+                # NEVER graft onto a live event sharing the same match URL
+                # (events are keyed by external_ref ALONE). target.url stays
+                # raw for the page fetch above.
+                event_ref = _namespace_event_ref(target.event_id)
+                snapshots = back_quotes_to_snapshots(event_ref, quotes, target.teams, now=now)
+                event_fresh = self._select_fresh(sport, event_ref, snapshots)
                 if event_fresh:
                     fresh.extend(event_fresh)
-                    teams_by_event[target.event_id] = target.teams
+                    teams_by_event[event_ref] = target.teams
             if not fresh or self._session_factory is None:
                 written[sport] = 0
                 continue

@@ -35,9 +35,18 @@ reader of that row — replicating the arcadia archive's SHAPE exactly:
   runs ALONGSIDE the active source and mints **no picks/alerts**.
 - **Isolated `betfair_<sport>` warehouse namespace.** BACK observations persist
   via the normal `persist_odds_snapshots` path with `bookmaker="Betfair Exchange"`
-  under sport keys `betfair_soccer` (etc.). AVAILABLE GAMES filters to
-  `soccer`/`basketball`/`tennis` only, so the archive **never pollutes** the
-  dashboard or pick path — exactly as `pinnacle_<sport>` does not.
+  under sport keys `betfair_soccer` (etc.). Crucially, each captured event's
+  `external_ref` is **namespaced with a `betfair:` prefix**
+  (`_namespace_event_ref`): events are keyed by `external_ref` ALONE (globally
+  unique, NOT sport-scoped), so without the prefix `persist_odds_snapshots`
+  would reuse the live soccer Event row and the Betfair BACK price (a
+  SHARP_BOOK) would leak into that event's closing-CLV anchor — caught and
+  fixed in adversarial review. The `betfair:` events are therefore disjoint
+  from live events sharing the same OddsPortal match URL, exactly as
+  `pinnacle_<sport>` (keyed by Pinnacle's numeric id) is. AVAILABLE GAMES
+  filters to `soccer`/`basketball`/`tennis` only, so the archive **never
+  pollutes** the dashboard or pick path. A later cross-source resolution (by
+  team names) bridges the `betfair:` event to the live event when validated.
 - **Change-gated in memory** on the per-`(sport, event, selection)` BACK
   decimal price (mirrors arcadia's version-gate intent): one row per genuine
   reprice; the latest pre-kickoff row IS that selection's exchange close, picked

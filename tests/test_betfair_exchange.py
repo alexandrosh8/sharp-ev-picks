@@ -25,6 +25,7 @@ from app.ingestion.betfair_exchange import (
     BetfairExchangeError,
     BetfairExchangeReader,
     MatchTarget,
+    _namespace_event_ref,
     _pair_tokens,
     back_quotes_to_snapshots,
     extract_back_quotes,
@@ -32,7 +33,9 @@ from app.ingestion.betfair_exchange import (
     parse_liquidity,
 )
 from app.schemas.base import Market
+from app.schemas.odds import OddsSnapshotIn
 from app.storage.models import Event, OddsSnapshot
+from app.storage.repositories import persist_odds_snapshots
 
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
 NOW = datetime(2026, 6, 19, 18, 0, tzinfo=UTC)
@@ -284,7 +287,7 @@ async def test_capture_change_gate_emits_once_then_on_move() -> None:
     # Re-reading the SAME prices yields no fresh snapshots (all gated).
     fresh = capture._select_fresh(
         "soccer",
-        _target().event_id,
+        _namespace_event_ref(_target().event_id),
         back_quotes_to_snapshots(
             _target().event_id,
             await reader.read_back_quotes(_target().url),
@@ -297,7 +300,7 @@ async def test_capture_change_gate_emits_once_then_on_move() -> None:
     state["tokens"][0] = "6/5"
     moved = capture._select_fresh(
         "soccer",
-        _target().event_id,
+        _namespace_event_ref(_target().event_id),
         back_quotes_to_snapshots(
             _target().event_id,
             await reader.read_back_quotes(_target().url),
@@ -370,7 +373,7 @@ async def test_capture_persists_under_isolated_namespace() -> None:
                 await session.execute(
                     select(OddsSnapshot.bookmaker, OddsSnapshot.selection, OddsSnapshot.liquidity)
                     .join(Event, Event.id == OddsSnapshot.event_id)
-                    .where(Event.external_ref == url)
+                    .where(Event.external_ref == f"betfair:{url}")
                 )
             ).all()
             assert len(rows) == 3
@@ -380,11 +383,90 @@ async def test_capture_persists_under_isolated_namespace() -> None:
             assert all(r.liquidity is not None for r in rows)
             # Exactly one event row exists for this isolated-namespace external_ref.
             event_count = await session.scalar(
-                select(func.count()).select_from(Event).where(Event.external_ref == url)
+                select(func.count())
+                .select_from(Event)
+                .where(Event.external_ref == f"betfair:{url}")
             )
             assert event_count == 1
         # Re-capture with the SAME prices writes nothing new (change-gate + the
         # append-only unique key both hold).
         assert (await capture.capture_once())["soccer"] == 0
+    finally:
+        await engine.dispose()
+
+
+async def test_capture_does_not_graft_onto_live_event_with_same_url() -> None:
+    # Regression for the isolation breach the review caught: a live soccer event
+    # and the Betfair capture share the SAME OddsPortal match URL. Events are
+    # keyed by external_ref ALONE (globally unique, not sport-scoped), so without
+    # the "betfair:" namespace the capture would REUSE the soccer event row and
+    # its "Betfair Exchange" sharp BACK price would leak into that event closing
+    # CLV anchor. This pins true event-level isolation.
+    engine = await _engine_or_skip()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    url = f"https://op/betfair-collision-{uuid4()}"
+    teams = EventTeams(home="Real Madrid", away="Al Hilal", league="Club WC")
+
+    soft = OddsSnapshotIn(
+        event_id=url,
+        bookmaker="bet365",
+        market=Market.H2H,
+        selection="Real Madrid",
+        decimal_odds=2.0,
+        captured_at=NOW,
+        ingested_at=NOW,
+    )
+    await persist_odds_snapshots(
+        factory, [soft], {url: teams}, sport="soccer", default_league="Club WC"
+    )
+
+    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
+    capture = BetfairExchangeCapture(
+        reader,
+        session_factory=factory,
+        targets_fn=lambda sport: [_target(url)],
+        sports=("soccer",),
+        now_fn=lambda: NOW,
+    )
+    try:
+        written = await capture.capture_once()
+        assert written["soccer"] == 3
+        async with factory() as session:
+            soccer_books = (
+                (
+                    await session.execute(
+                        select(OddsSnapshot.bookmaker)
+                        .join(Event, Event.id == OddsSnapshot.event_id)
+                        .where(Event.external_ref == url)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert set(soccer_books) == {"bet365"}
+            assert BOOKMAKER not in soccer_books
+            bf_books = (
+                (
+                    await session.execute(
+                        select(OddsSnapshot.bookmaker)
+                        .join(Event, Event.id == OddsSnapshot.event_id)
+                        .where(Event.external_ref == f"betfair:{url}")
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert set(bf_books) == {BOOKMAKER}
+            assert len(bf_books) == 3
+            live_event_count = await session.scalar(
+                select(func.count()).select_from(Event).where(Event.external_ref == url)
+            )
+            betfair_event_count = await session.scalar(
+                select(func.count())
+                .select_from(Event)
+                .where(Event.external_ref == f"betfair:{url}")
+            )
+            assert live_event_count == 1
+            assert betfair_event_count == 1
     finally:
         await engine.dispose()
