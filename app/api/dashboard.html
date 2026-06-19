@@ -889,16 +889,15 @@
          * ============================================================== */
         #picks-table:not(.settled) tbody tr {
           display: grid;
-          grid-template-columns: 1fr 1fr auto;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           grid-template-areas:
             "match   match   kickoff"
             "pick    pick    odds"
             "book    book    odds"
-            "market  fairev  fairev"
-            "edge    conf    status"
+            "fairev  edge    conf"
             "clv     clv     status";
-          column-gap: 10px;
-          row-gap: 3px;
+          column-gap: 8px;
+          row-gap: 5px;
           align-items: start;
           padding: 11px 12px;
         }
@@ -967,70 +966,77 @@
         #picks-table:not(.settled) td:nth-child(6) small {
           font-size: 10px;
         }
-        /* tier 3 — the de-emphasised metrics grid: Market(3) · Fair/EV(7) on
-           one line, Edge(8) · Confidence(9) on the next, CLV(10) beside the
-           Status(11) badge. Each cell is an inline-flex of muted label + value
-           (labels dropped where the value names itself: stars, badges). The
-           hair-line above sets the strip apart from the actionable line. */
-        #picks-table:not(.settled) td:nth-child(3),
+        /* tier 3 — a tidy metrics strip: Fair/EV · Edge · Conf share three
+           equal columns above a CLV + Status row. Each is a STACKED stat (a
+           tiny uppercase label over its value) so nothing is unlabelled and
+           there is no big empty gap. A hair-line sets the strip apart. */
+        #picks-table:not(.settled) td:nth-child(3) {
+          display: none; /* Market is redundant on mobile — the Pick names it. */
+        }
         #picks-table:not(.settled) td:nth-child(7),
         #picks-table:not(.settled) td:nth-child(8),
         #picks-table:not(.settled) td:nth-child(9),
         #picks-table:not(.settled) td:nth-child(10),
         #picks-table:not(.settled) td:nth-child(11) {
           display: flex;
-          align-items: baseline;
-          gap: 4px;
-          font-size: 11px;
-        }
-        #picks-table:not(.settled) td:nth-child(3) {
-          grid-area: market;
-          margin-top: 7px;
-          padding-top: 7px;
-          border-top: 1px solid var(--line);
-          color: var(--dim);
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
-          font-size: 10px;
+          flex-direction: column;
+          gap: 2px;
+          font-size: 12px;
+          min-width: 0;
         }
         #picks-table:not(.settled) td:nth-child(7) {
           grid-area: fairev;
-          margin-top: 7px;
-          padding-top: 7px;
-          border-top: 1px solid var(--line);
-          justify-content: flex-end;
         }
         #picks-table:not(.settled) td:nth-child(8) {
           grid-area: edge;
         }
         #picks-table:not(.settled) td:nth-child(9) {
           grid-area: conf;
+          display: block; /* keep the 5 ★/☆ on ONE line (label sits above). */
+          white-space: nowrap;
         }
         #picks-table:not(.settled) td:nth-child(10) {
           grid-area: clv;
         }
         #picks-table:not(.settled) td:nth-child(11) {
           grid-area: status;
-          justify-content: flex-end;
-          align-self: center;
+          align-items: flex-end;
+          justify-content: flex-start;
         }
-        /* inline metric labels: tiny, muted, only where they aid scanning. */
-        #picks-table:not(.settled) td:nth-child(7)::before {
-          content: "fair";
-          display: inline;
+        /* the hair-line over the metrics row (the three top tier-3 cells). */
+        #picks-table:not(.settled) td:nth-child(7),
+        #picks-table:not(.settled) td:nth-child(8),
+        #picks-table:not(.settled) td:nth-child(9) {
+          margin-top: 7px;
+          padding-top: 7px;
+          border-top: 1px solid var(--line);
+        }
+        /* stacked-stat labels: tiny, muted, uppercase, above each value. */
+        #picks-table:not(.settled) td:nth-child(7)::before,
+        #picks-table:not(.settled) td:nth-child(8)::before,
+        #picks-table:not(.settled) td:nth-child(9)::before,
+        #picks-table:not(.settled) td:nth-child(10)::before {
+          display: block;
           color: var(--faint);
-          font-size: 9px;
-          letter-spacing: 0.06em;
+          font-size: 8.5px;
+          font-weight: 700;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+        }
+        #picks-table:not(.settled) td:nth-child(7)::before {
+          content: "Fair / EV";
         }
         #picks-table:not(.settled) td:nth-child(8)::before {
-          content: "edge";
-          display: inline;
-          color: var(--faint);
-          font-size: 9px;
-          letter-spacing: 0.06em;
+          content: "Edge";
+        }
+        #picks-table:not(.settled) td:nth-child(9)::before {
+          content: "Conf";
+        }
+        #picks-table:not(.settled) td:nth-child(10)::before {
+          content: "CLV";
         }
         #picks-table:not(.settled) td:nth-child(7) small {
-          font-size: 9px;
+          font-size: 10px;
         }
         /* drop the tiny edge sparkline on mobile — the % is the signal. */
         #picks-table:not(.settled) td:nth-child(8) .bar {
