@@ -1,16 +1,4 @@
 {
-  "Atletico Goianiense": [
-    "Atletico GO"
-  ],
-  "Hangzhou Linping Wuyue": [
-    "Hangzhou Linping"
-  ],
-  "Henan Songshan Longmen": [
-    "Henan"
-  ],
-  "Shenzhen Peng City": [
-    "Shenzhen Xinpengcheng"
-  ],
   "_comment": "Starter cross-source club-name alias table. Format: {\"teams\": {\"canonical\": [\"alias\", ...]}}. Names are normalized on load (matching.normalize_name strips accents/FC-noise), so list human-readable forms. Expand from withqwerty/reep (CC0) data/names.csv + custom_aliases.json over time. Do NOT add men's/women's-conflating aliases.",
   "teams": {
     "AC Milan": [
@@ -43,6 +31,9 @@
     "Atlas F.C.": [
       "Atlas",
       "Club de Futbol Rojinegros S.A. de C.V."
+    ],
+    "Atletico Goianiense": [
+      "Atletico GO"
     ],
     "Atletico Madrid": [
       "Atletico",
@@ -168,8 +159,14 @@
     "Hammarby Fotboll": [
       "Hammarby IF"
     ],
+    "Hangzhou Linping Wuyue": [
+      "Hangzhou Linping"
+    ],
     "Helsingin Jalkapalloklubi": [
       "HJK Helsinki"
+    ],
+    "Henan Songshan Longmen": [
+      "Henan"
     ],
     "IF Brommapojkarna": [
       "Idrottsföreningen  Brommapojkarna"
@@ -297,6 +294,9 @@
     ],
     "Shenavar Sazi Qeshm F.C.": [
       "Shenavarsazi Qeshm"
+    ],
+    "Shenzhen Peng City": [
+      "Shenzhen Xinpengcheng"
     ],
     "Sporting CP": [
       "Sporting Lisbon",
