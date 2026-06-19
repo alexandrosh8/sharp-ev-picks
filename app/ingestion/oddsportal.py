@@ -751,6 +751,11 @@ class OddsPortalLoader:
                 away=away,
                 league=league,
                 starts_at=_parse_ts(match.get("match_date")),
+                # Best-effort final score: present only on a post-finish scrape;
+                # convenience pre-fill for the manual settle prompt, never used
+                # to settle. Parsed only when the whole string is digits.
+                home_score=_parse_score(match.get("home_score")),
+                away_score=_parse_score(match.get("away_score")),
             ),
         )
         captured_at = _parse_ts(match.get("scraped_date")) or now
@@ -868,6 +873,16 @@ def _parse_odds(raw: Any) -> float | None:
     except ValueError:
         return None
     return value if value > 1.0 else None
+
+
+def _parse_score(raw: Any) -> int | None:
+    """OddsHarvester's scraped final score, as a non-negative int — None unless
+    the whole (stripped) string is digits. Guards the not-yet-finished cases
+    where upstream emits "" or "-" (and any other non-numeric text)."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return int(text) if text.isdigit() else None
 
 
 def _parse_ts(raw: Any) -> datetime | None:

@@ -89,15 +89,35 @@ async def _get_or_create_event(
     away_id: int,
     external_ref: str,
     starts_at: datetime | None,
+    scraped_home_score: int | None = None,
+    scraped_away_score: int | None = None,
 ) -> int:
     """starts_at=None means the source reported no kickoff — stored as NULL
-    (the dashboard's "TBD" signal), never as a pick-time placeholder."""
+    (the dashboard's "TBD" signal), never as a pick-time placeholder.
+
+    scraped_home_score/scraped_away_score is the best-effort post-finish score
+    (a CONVENIENCE pre-fill for the manual settle prompt — never settlement).
+    A later scrape that carries the score updates a previously-None row; a
+    None never overwrites a captured score (a finished match's score is fixed,
+    and a subsequent pre-kickoff-shaped scrape must not erase it)."""
     existing = await session.scalar(select(Event).where(Event.external_ref == external_ref))
     if existing is not None:
+        changed = False
         # Earlier rows may be NULL (or carry a legacy placeholder); a real
         # kickoff from the source upgrades them to the true start.
         if starts_at is not None and existing.starts_at != starts_at:
             existing.starts_at = starts_at
+            changed = True
+        # Set the scraped score when this scrape carries one and it differs
+        # (covers the None->score capture and a corrected score); never write
+        # None over a captured score.
+        if scraped_home_score is not None and existing.scraped_home_score != scraped_home_score:
+            existing.scraped_home_score = scraped_home_score
+            changed = True
+        if scraped_away_score is not None and existing.scraped_away_score != scraped_away_score:
+            existing.scraped_away_score = scraped_away_score
+            changed = True
+        if changed:
             await session.flush()
         return existing.id
     event = Event(
@@ -107,6 +127,8 @@ async def _get_or_create_event(
         away_team_id=away_id,
         external_ref=external_ref,
         starts_at=starts_at,
+        scraped_home_score=scraped_home_score,
+        scraped_away_score=scraped_away_score,
     )
     session.add(event)
     await session.flush()
@@ -176,6 +198,8 @@ async def latest_picks_with_events(
             ResultTracking.pnl,
             ResultTracking.home_score,
             ResultTracking.away_score,
+            Event.scraped_home_score,
+            Event.scraped_away_score,
         )
         .join(Event, Pick.event_id == Event.id)
         .join(home, Event.home_team_id == home.id)
@@ -246,6 +270,12 @@ async def latest_picks_with_events(
             # (void settlements, pre-column rows). The dashboard SETTLED view's
             # Score column.
             "score": f"{hs}-{aws}" if hs is not None and aws is not None else None,
+            # best-effort scraped final score (HOME-AWAY, e.g. "2-1") from the
+            # EVENT, captured only when we scraped the match after it finished.
+            # CONVENIENCE pre-fill for the manual settle prompt + a CLOSED-tab
+            # hint — NOT the confirmed result (that is `score`, above). null when
+            # either side is unscraped (the common case — the user types as today).
+            "scraped_score": (f"{shs}-{saws}" if shs is not None and saws is not None else None),
         }
         for (
             p,
@@ -257,6 +287,8 @@ async def latest_picks_with_events(
             pnl,
             hs,
             aws,
+            shs,
+            saws,
         ) in rows.all()
     ]
 
@@ -669,6 +701,9 @@ async def persist_odds_snapshots(
                         away_id,
                         external_ref,
                         starts_at=teams.starts_at,
+                        # best-effort scraped final score (pre-fills settle prompt)
+                        scraped_home_score=teams.home_score,
+                        scraped_away_score=teams.away_score,
                     )
                     rows: list[dict[str, Any]] = [
                         {
@@ -1146,6 +1181,9 @@ async def persist_pick(
         pick.event_id,
         # real kickoff when the loader knows it; else NULL ("kickoff TBD")
         starts_at=teams.starts_at,
+        # best-effort scraped final score (pre-fills the manual settle prompt)
+        scraped_home_score=teams.home_score,
+        scraped_away_score=teams.away_score,
     )
     model_version_id = await _get_or_create_model_version(
         session, sport_id, model_name, model_version

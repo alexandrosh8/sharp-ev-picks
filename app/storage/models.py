@@ -96,6 +96,14 @@ class Event(Base):
     # _get_or_create_event once a scrape reports the real start. Never a
     # pick-time placeholder — that rendered fake kickoffs as real.
     starts_at: Mapped[datetime | None]
+    # Best-effort final score scraped from OddsPortal AFTER the match finished
+    # (OddsHarvester surfaces it in the match dict). Plain ints — not money/odds,
+    # so no NUMERIC. Nullable: present only when we scraped the match post-finish,
+    # NULL otherwise (the common case) and for rows from before this column.
+    # CONVENIENCE ONLY: pre-fills the manual settle prompt and the CLOSED-tab
+    # hint — never auto-settles, never the confirmed result.
+    scraped_home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scraped_away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(onupdate=func.now())
 

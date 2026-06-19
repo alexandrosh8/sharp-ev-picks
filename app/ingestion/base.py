@@ -24,6 +24,13 @@ class EventTeams:
     away: str
     league: str = ""
     starts_at: datetime | None = None  # kickoff (UTC) when the source knows it
+    # Best-effort final score the loader scraped AFTER the match finished
+    # (OddsPortal surfaces it once the game is over). Threaded to the event row
+    # so the manual settle prompt can be pre-filled. None when the score was not
+    # scraped (the common case: pre-kickoff / in-play scrapes carry no score).
+    # CONVENIENCE ONLY — never drives settlement.
+    home_score: int | None = None
+    away_score: int | None = None
 
 
 @dataclass(frozen=True)

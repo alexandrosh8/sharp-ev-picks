@@ -14,6 +14,7 @@ from app.ingestion.oddsportal import (
     OddsPortalLoader,
     _line_from_key,
     _market_for_key,
+    _parse_score,
     _selections,
 )
 from app.schemas.base import Market
@@ -682,3 +683,59 @@ async def test_proxy_failover_capped_on_empty_slate() -> None:
     snaps = await loader.fetch_odds("soccer")
     assert snaps == []
     assert len(calls) == _MAX_PROXY_FAILOVER  # capped, NOT all 8 proxies
+
+
+# ---------------------------------------------------------------------------
+# Best-effort scraped final score (convenience settle-prompt pre-fill)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_score_digits_only() -> None:
+    # Finished match: upstream emits the score as a digit string.
+    assert _parse_score("2") == 2
+    assert _parse_score("0") == 0
+    assert _parse_score("12") == 12
+    assert _parse_score(" 3 ") == 3  # surrounding whitespace tolerated
+    # Not-yet-finished / non-numeric: never guess a score.
+    assert _parse_score(None) is None
+    assert _parse_score("") is None
+    assert _parse_score("-") is None
+    assert _parse_score("?") is None
+    assert _parse_score("2-1") is None  # a combined string is not a single score
+    assert _parse_score("1.5") is None
+
+
+async def test_convert_match_captures_scraped_score() -> None:
+    # A post-finish scrape carries home_score/away_score as digit strings; they
+    # land on the event's directory context (the seam threaded to the upsert).
+    directory = EventDirectory()
+    finished = {**MATCH, "home_score": "2", "away_score": "1"}
+    loader = make_loader(directory, [finished])
+    await loader.fetch_odds("soccer")
+
+    teams = directory.lookup(str(MATCH["match_link"]))
+    assert teams is not None
+    assert teams.home_score == 2
+    assert teams.away_score == 1
+
+
+async def test_convert_match_ignores_unfinished_score() -> None:
+    # Pre-kickoff / in-play scrape: no usable score -> None (the common case;
+    # the settle prompt then has nothing to pre-fill and the user types it).
+    directory = EventDirectory()
+    unfinished = {**MATCH, "home_score": "", "away_score": "-"}
+    loader = make_loader(directory, [unfinished])
+    await loader.fetch_odds("soccer")
+
+    teams = directory.lookup(str(MATCH["match_link"]))
+    assert teams is not None
+    assert teams.home_score is None
+    assert teams.away_score is None
+
+    # The bare MATCH carries no score keys at all -> also None.
+    directory2 = EventDirectory()
+    await make_loader(directory2, [MATCH]).fetch_odds("soccer")
+    teams2 = directory2.lookup(str(MATCH["match_link"]))
+    assert teams2 is not None
+    assert teams2.home_score is None
+    assert teams2.away_score is None
