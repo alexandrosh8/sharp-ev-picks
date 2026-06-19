@@ -7,9 +7,11 @@ that produces ShadowOutcome rows is covered in tests/test_resolution_db.py.
 import pytest
 
 from app.resolution.shadow import (
+    BetfairCoverageOutcome,
     GroupRate,
     ShadowOutcome,
     arcadia_base_sport,
+    summarize_betfair_coverage,
     summarize_match_rate,
 )
 
@@ -118,3 +120,58 @@ def test_as_dict_shape() -> None:
     assert d["unmatched_with_candidates"] == 0
     assert d["by_sport"] == [{"key": "soccer", "total": 2, "matched": 1, "match_rate": 0.5}]
     assert d["by_league"] == [{"key": "soccer_epl", "total": 1, "matched": 1, "match_rate": 1.0}]
+
+
+# --- Betfair Exchange coverage aggregation (pure) ------------------------------
+
+
+def _b(
+    pid: int, sport: str, league: str | None, has_event: bool, has_close: bool
+) -> BetfairCoverageOutcome:
+    return BetfairCoverageOutcome(
+        pick_id=pid,
+        sport=sport,
+        league=league,
+        has_betfair_event=has_event,
+        has_usable_close=has_close,
+    )
+
+
+def test_betfair_coverage_counts_event_and_close_buckets() -> None:
+    outcomes = [
+        _b(1, "soccer", "soccer_epl", True, True),  # captured + usable close
+        _b(2, "soccer", "soccer_epl", True, False),  # event but no usable close
+        _b(3, "soccer", None, False, False),  # never captured
+    ]
+    r = summarize_betfair_coverage(outcomes)
+    assert r.total == 3
+    assert r.with_event == 2
+    assert r.with_close == 1
+    assert r.close_rate == pytest.approx(1 / 3)
+    by_sport = {g.key: g for g in r.by_sport}
+    assert by_sport["soccer"].total == 3
+    assert by_sport["soccer"].matched == 1  # GroupRate.matched carries with_close
+
+
+def test_betfair_coverage_empty_is_zero_report() -> None:
+    r = summarize_betfair_coverage([])
+    assert r.total == 0
+    assert r.with_event == 0
+    assert r.with_close == 0
+    assert r.close_rate is None  # no division by zero
+    assert r.by_sport == ()
+    assert r.by_league == ()
+
+
+def test_betfair_coverage_as_dict_shape() -> None:
+    outcomes = [
+        _b(1, "soccer", "soccer_epl", True, True),
+        _b(2, "soccer", None, True, False),
+    ]
+    d = summarize_betfair_coverage(outcomes).as_dict()
+    assert d["total"] == 2
+    assert d["with_event"] == 2
+    assert d["with_close"] == 1
+    assert d["close_rate"] == 0.5
+    assert d["by_sport"] == [{"key": "soccer", "total": 2, "with_close": 1, "close_rate": 0.5}]
+    assert d["by_league"] == [{"key": "soccer_epl", "total": 1, "with_close": 1, "close_rate": 1.0}]

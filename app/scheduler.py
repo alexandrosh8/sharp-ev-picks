@@ -385,6 +385,7 @@ def build_scheduler(
                 slugs=_csv(settings.oddsportal_football_leagues),
                 seasons=_csv(settings.footballdata_seasons),
                 use_pinnacle_archive=settings.clv_use_pinnacle_archive,
+                use_betfair_exchange=settings.clv_use_betfair_exchange,
             )
         except Exception as exc:
             logger.error("settle_results failed: %s", type(exc).__name__)

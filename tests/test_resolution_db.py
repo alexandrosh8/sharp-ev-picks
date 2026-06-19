@@ -14,11 +14,12 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams
-from app.resolution.shadow import summarize_match_rate
+from app.resolution.shadow import summarize_betfair_coverage, summarize_match_rate
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.repositories import (
+    betfair_exchange_coverage_outcomes,
     persist_odds_snapshots,
     persist_pick,
     pinnacle_archive_capture_by_sport,
@@ -343,3 +344,104 @@ async def test_archive_capture_close_match_coverage_per_sport(factory) -> None: 
         matched, scraped = row["matched"], row["scraped"]
         assert isinstance(matched, int) and isinstance(scraped, int)
         assert matched <= scraped
+
+
+# --- Betfair Exchange coverage (EXACT match -> presence/absence) ---------------
+
+_BETFAIR_LEAGUE = "betfair-cov-epl"
+
+
+def _betfair_pick(event_id: str) -> PickOut:
+    """Soccer PickOut in the betfair-coverage league (persist_pick derives the
+    event's league from pick.league, so it must be set HERE, not just on
+    EventTeams)."""
+    return PickOut(
+        pick_id="p-betfair-cov",
+        sport="soccer",
+        league=_BETFAIR_LEAGUE,
+        event=f"{event_id} fixture",
+        event_id=event_id,
+        market=Market.H2H,
+        selection="Home",
+        bookmaker="testbook",
+        decimal_odds=2.10,
+        model_probability=0.55,
+        fair_probability=0.50,
+        edge=0.05,
+        ev=0.155,
+        confidence=0.70,
+        recommended_stake_fraction=0.02,
+        recommended_stake_amount=Decimal("20.00"),
+        stake_breakdown=StakeBreakdownOut(raw_kelly=0.1, fractional=0.025, capped=True, final=0.02),
+        odds_age_seconds=30.0,
+        liquidity=None,
+        reason_summary="betfair coverage test",
+        created_at=KO - timedelta(days=180),
+    )
+
+
+def _betfair_back_snaps(event_ref: str) -> list[OddsSnapshotIn]:
+    """A full 1X2 Betfair Exchange BACK close (H2H, detail-less), captured 2h
+    pre-kickoff so it clears the SNAPSHOT_CLOSE_MAX_GAP coverage gate."""
+    return [
+        OddsSnapshotIn(
+            event_id=event_ref,
+            bookmaker="Betfair Exchange",
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=o,
+            liquidity=5000.0,
+            captured_at=CAPTURED,
+            ingested_at=CAPTURED,
+        )
+        for sel, o in (("Home", 2.20), ("Draw", 3.40), ("Away", 3.30))
+    ]
+
+
+async def test_betfair_coverage_presence_absence(factory) -> None:  # type: ignore[no-untyped-def]
+    """betfair_exchange_coverage_outcomes reports, per pick, whether a
+    "betfair:"+ref event exists and carries a usable BACK close. Pick A has a
+    captured betfair event with a close (with_event + with_close); pick B has no
+    betfair event (neither). Read-only — attaches no close, writes no pick."""
+    async with factory() as session:
+        await persist_pick(
+            session,
+            _betfair_pick("evt-bf-A"),
+            EventTeams(home="Alpha", away="Beta", league=_BETFAIR_LEAGUE, starts_at=KO),
+            "value",
+            "vbf",
+        )
+        await persist_pick(
+            session,
+            _betfair_pick("evt-bf-B"),
+            EventTeams(home="Gamma", away="Delta", league=_BETFAIR_LEAGUE, starts_at=KO),
+            "value",
+            "vbf",
+        )
+        await session.commit()
+    # Only A's fixture got a Betfair page captured (namespaced "betfair:"+ref).
+    teams = {
+        "betfair:evt-bf-A": EventTeams(
+            home="Alpha", away="Beta", league="betfair_soccer", starts_at=KO
+        )
+    }
+    await persist_odds_snapshots(
+        factory, _betfair_back_snaps("betfair:evt-bf-A"), teams, "betfair_soccer", "betfair_soccer"
+    )
+
+    async with factory() as session:
+        outcomes = await betfair_exchange_coverage_outcomes(session)
+    mine = {o.pick_id: o for o in outcomes if o.league == _BETFAIR_LEAGUE}
+    assert len(mine) == 2
+    a = next(o for o in mine.values() if o.has_betfair_event)
+    assert a.has_betfair_event is True
+    assert a.has_usable_close is True
+    b = next(o for o in mine.values() if not o.has_betfair_event)
+    assert b.has_betfair_event is False
+    assert b.has_usable_close is False
+
+    report = summarize_betfair_coverage(list(mine.values()))
+    assert report.total == 2
+    assert report.with_event == 1
+    assert report.with_close == 1
+    assert report.close_rate == 0.5

@@ -523,6 +523,17 @@ class Settings(BaseSettings):
     # interval just tracks repricings; near kickoff is what matters. The >=30s
     # floor blocks hammering-by-typo on a free scraped source.
     betfair_exchange_poll_interval_seconds: int = Field(default=300, ge=30)
+    # When true, the settlement-time snapshot close ALSO injects the captured
+    # Betfair Exchange BACK close (EXACT match: the betfair event's external_ref
+    # is deterministically "betfair:"+pick_ref, ADR-0015) so incremental CLV can
+    # anchor on a real exchange sharp close. OFF by default, exactly like
+    # clv_use_pinnacle_archive: it changes anchor_type/CLV for picks that have a
+    # captured betfair close, so enable only after the betfair coverage report
+    # (scripts/reports/betfair_exchange_coverage.py) shows real coverage. Both
+    # flags may be on: event_fair_probs prefers Pinnacle (SHARP_BOOKS[0]) over
+    # Betfair (index 2), so Pinnacle wins where both price the market and Betfair
+    # only fills the gap. Requires BETFAIR_EXCHANGE_ENABLED so a close exists.
+    clv_use_betfair_exchange: bool = False
 
     @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":
