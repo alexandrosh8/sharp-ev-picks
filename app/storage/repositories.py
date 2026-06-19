@@ -949,7 +949,11 @@ async def shadow_match_rate_outcomes(
 
 
 async def pinnacle_archive_capture_by_sport(
-    session: AsyncSession, *, horizon_days: int = 7, max_day_drift: int = 1
+    session: AsyncSession,
+    *,
+    horizon_days: int = 7,
+    max_day_drift: int = 1,
+    now: datetime | None = None,
 ) -> list[dict[str, object]]:
     """Per-arcadia-sport upcoming coverage for the dashboard's Pinnacle panel.
 
@@ -975,7 +979,9 @@ async def pinnacle_archive_capture_by_sport(
     def _toks(name: str) -> set[str]:
         return set(normalize_name(name).split())
 
-    now = datetime.now(tz=UTC)
+    # ``now`` defaults to the wall clock; injectable so tests can window a
+    # fixed slice that contains only their seeded fixtures (no behaviour change).
+    now = now if now is not None else datetime.now(tz=UTC)
     until = now + timedelta(days=horizon_days)
     pad = timedelta(days=max_day_drift + 1)
     aliases = default_aliases()

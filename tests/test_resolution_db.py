@@ -21,6 +21,7 @@ from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.repositories import (
     persist_odds_snapshots,
     persist_pick,
+    pinnacle_archive_capture_by_sport,
     resolve_pinnacle_close_snaps,
     shadow_match_rate_outcomes,
 )
@@ -283,3 +284,60 @@ async def test_shadow_match_rate_since_filters_old_kickoffs(factory) -> None:  #
         outcomes = await shadow_match_rate_outcomes(session, since=KO + timedelta(days=1))
 
     assert all(o.league != _SHADOW_LEAGUE for o in outcomes)
+
+
+async def _seed_event(  # type: ignore[no-untyped-def]
+    factory, ref: str, home: str, away: str, kickoff: datetime, sport_key: str
+) -> None:
+    """Seed ONE event (+ its h2h snapshots) under an arbitrary sport key at a
+    caller-chosen kickoff — generalizes _seed_pinnacle_event (soccer/fixed-KO)
+    for the per-sport coverage test, which needs both ``pinnacle_<sport>``
+    archive events and our scraped fixtures at a now-relative kickoff."""
+    captured = kickoff - timedelta(hours=2)
+    snaps = [_pin_snap_at(home, 2.0, ref, captured), _pin_snap_at(away, 2.0, ref, captured)]
+    teams = {ref: EventTeams(home=home, away=away, league=f"{sport_key}-cov", starts_at=kickoff)}
+    await persist_odds_snapshots(factory, snaps, teams, sport_key, f"{sport_key}-cov")
+
+
+async def test_archive_capture_close_match_coverage_per_sport(factory) -> None:  # type: ignore[no-untyped-def]
+    """pinnacle_archive_capture_by_sport reports, per arcadia sport, how many of
+    OUR upcoming scraped fixtures strict-match a captured Pinnacle close.
+
+    The function aggregates over the whole DB, so we inject a FIXED far-future
+    ``now`` whose [now, now+7d] window contains ONLY the fixtures seeded here
+    (real scraped data sits ~a year earlier) — exact, race-free counts. Proves
+    the tennis cross-format match (surname-initial vs full-name, ordered=False),
+    the soccer alias match (ordered=True), that a non-matching fixture lifts
+    scraped but not matched, and the matched <= scraped invariant.
+    """
+    now = datetime(2027, 6, 1, 12, 0, tzinfo=UTC)
+    ko = now + timedelta(days=1)  # inside the injected [now, now + 7d] window
+
+    # tennis: archive "Firstname Surname", ours "Surname I." -> canonicalize equal
+    await _seed_event(
+        factory, "cov-pin-ten", "Frances Tiafoe", "Felix Auger-Aliassime", ko, "pinnacle_tennis"
+    )
+    await _seed_event(factory, "cov-our-ten", "Tiafoe F.", "Auger-Aliassime F.", ko, "tennis")
+    # soccer: alias match (Man Utd -> Manchester United), ordered home/away
+    await _seed_event(factory, "cov-pin-soc", "Manchester United", "Chelsea", ko, "pinnacle_soccer")
+    await _seed_event(factory, "cov-our-soc", "Man Utd", "Chelsea", ko, "soccer")
+    # soccer non-matching fixture (gibberish -> no archive) -> scraped++ only
+    await _seed_event(factory, "cov-our-soc-x", "Zzqx United FC", "Yywv City FC", ko, "soccer")
+
+    async with factory() as session:
+        rows = {r["sport"]: r for r in await pinnacle_archive_capture_by_sport(session, now=now)}
+
+    # tennis: 1 captured close, 1 our fixture, 1 matched (cross-format reconciled)
+    assert rows["tennis"]["captured"] == 1
+    assert rows["tennis"]["scraped"] == 1
+    assert rows["tennis"]["matched"] == 1
+    # soccer: 1 captured, 2 ours (Man Utd + gibberish), 1 matched (only Man Utd)
+    assert rows["soccer"]["captured"] == 1
+    assert rows["soccer"]["scraped"] == 2
+    assert rows["soccer"]["matched"] == 1
+    # untouched arcadia sports stay empty in this isolated future window
+    assert rows["basketball"]["scraped"] == 0
+    assert rows["american_football"]["scraped"] == 0
+    # invariant: a close can't be found for more games than we scraped
+    for row in rows.values():
+        assert int(row["matched"]) <= int(row["scraped"])
