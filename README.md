@@ -122,6 +122,40 @@ uv run uvicorn app.main:app --reload
 **`docs/HOW_TO_RUN.md`** has the exact verify-the-backtest and live-picks
 commands.
 
+### Optional: rotating scrape proxies (more soft books, no IP throttle)
+
+The free OddsPortal scrape runs from your host IP — which OddsPortal can throttle
+(it starts returning empty pages) and which only shows the books available in
+*your* region (often a thin, crypto-heavy set). Routing the scrape through a pool
+of proxies fixes both: it rotates the outbound IP (no single IP gets throttled),
+and via a deeper-market region it surfaces far more soft books for the engine to
+shop — a **UK** exit lists ~18 mainstream books (Sky Bet, Paddy Power, William
+Hill, BetVictor, Betfred, Betway, bet365…) vs ~5 from a region-restricted IP.
+
+**Where to set it** — in `.env` only (copy from `.env.example`; `.env` is `0600`
+and gitignored — **never commit it**):
+
+```bash
+# Optional rotating proxy pool for the live OddsPortal scrape (read-only GET).
+# Empty = scrape from the host IP (default). Comma-separated host|port|user|pass quads:
+SCRAPER_PROXY_POOL=host1|port1|user1|pass1,host2|port2|user2|pass2
+```
+
+- **Rotation + failover** — the scraper tries proxies in turn and fails over to
+  the next on an error *or* a zero-match result (the throttle signature), so a
+  dead proxy never silently drops a cycle.
+- **Off by default** — leave `SCRAPER_PROXY_POOL` empty to scrape from the host
+  IP. No proxy is required to run.
+- **Read-only + safe** — the proxy only changes the outbound IP of GET odds
+  requests; no login, cookies, or order path. Credentials reach the browser as
+  separate fields (never in the logged URL) and live only in `.env`. These are
+  *infrastructure* proxies, not betting accounts.
+
+> A UK exit hides **Pinnacle** (UK-restricted) and does **not** surface Betfair
+> Exchange in the scrape — the sharp anchor comes from the free Pinnacle ARCADIA
+> close, not the scrape. Details:
+> [`docs/research/dependency-rescan-2026-06-19.md`](docs/research/dependency-rescan-2026-06-19.md).
+
 ## The pick finder that actually works (backtested positive CLV)
 
 The honest result of backtesting (`docs/backtesting/`): a goals model
@@ -218,6 +252,10 @@ backtest, generate live picks, and run the full platform.
       UNVERIFIED / CLOSED / SETTLED tabs, matching login — `docs/design/DESIGN.md`);
       first-run `/setup` screen creates the admin password (stored hashed in
       Postgres), auth on by default in the deploy template
+- [x] Rotating scrape proxies — the live OddsPortal scrape routes through an
+      optional `SCRAPER_PROXY_POOL` (rotation + failover, off by default); a UK
+      exit surfaces ~18 mainstream UK soft books vs ~5 from a region-restricted
+      host IP, widening line-shopping coverage. Read-only; creds in `.env` only
 - [x] Anchor-calibration diagnostic — log-loss / Brier / ECE / reliability over
       the devigged sharp-anchor fair probs (diagnostic only; CLV stays the
       live validator)
