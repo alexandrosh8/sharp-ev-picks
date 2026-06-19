@@ -13,6 +13,12 @@
 # ever pre-built on a Mac and pushed (then: docker buildx --platform linux/amd64).
 FROM python:3.12-slim
 
+# OCI image metadata (repo hygiene; no licenses label — repo is private).
+LABEL org.opencontainers.image.title="betting-ai" \
+      org.opencontainers.image.description="Manual-betting +EV picks decision-support — picks-only, read-only market data, never places bets." \
+      org.opencontainers.image.source="https://github.com/alexandrosh8/betting-picks-bot" \
+      org.opencontainers.image.vendor="betting-ai"
+
 # PLAYWRIGHT_BROWSERS_PATH is mandatory: without it the browser installs to
 # /root/.cache/ms-playwright and is INVISIBLE to the non-root appuser at
 # runtime ("Executable doesn't exist" only when the first scrape launches).
@@ -22,7 +28,9 @@ ENV TZ=UTC \
     UV_COMPILE_BYTECODE=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# uv pinned for reproducible builds — bump in lockstep with
+# scripts/upgrade_deps.sh when the project uv version moves.
+COPY --from=ghcr.io/astral-sh/uv:0.11.8 /uv /usr/local/bin/uv
 
 WORKDIR /srv/betting-ai
 
@@ -65,4 +73,10 @@ EXPOSE 8000
 # the venv binaries directly — NEVER `uv run` without --no-sync here: a plain
 # `uv run` re-syncs the venv at container start and would UNINSTALL the
 # build-time extras (uv sync removes packages not requested).
+# Liveness against the unauthenticated /health endpoint, via the venv
+# python (slim base has no curl). start-period covers alembic upgrade +
+# scheduler warmup so the container is not killed during boot.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD ["/srv/betting-ai/.venv/bin/python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+
 ENTRYPOINT ["bash", "/srv/betting-ai/scripts/docker_entrypoint.sh"]
