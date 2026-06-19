@@ -684,8 +684,25 @@
           letter-spacing: 0.14em;
         }
         .sub {
-          font-size: 10px;
-          line-height: 1.45;
+          font-size: 11px;
+          line-height: 1.55;
+        }
+        /* The CLV scorecard + status/CLV legend are prose-dense blocks. Give
+           them breathing room and a faint card surround so they read as a
+           panel, not a cramped wall of grey text running edge-to-edge. */
+        #clv-scorecard,
+        #picks-legend {
+          padding: 9px 11px;
+          border: 1px solid var(--line);
+          border-radius: var(--radius);
+          background: var(--panel);
+          margin-bottom: 12px;
+        }
+        #clv-scorecard {
+          margin: 0 0 10px;
+        }
+        #picks-legend b {
+          color: var(--dim);
         }
         .statusbar,
         .controls {
@@ -698,6 +715,28 @@
         .stamp {
           width: 100%;
         }
+        /* Bigger tap targets on the interactive controls (44px-ish): the
+           operator filters on a phone, so the tier select, search box and
+           refresh need thumb-sized hit areas. */
+        select,
+        input[type="search"],
+        button {
+          padding: 11px 12px;
+          font-size: 13px;
+        }
+        /* Segmented status tabs: span full width and split evenly so all four
+           tabs are reachable instead of bunched at the left edge. */
+        .segmented {
+          display: flex;
+          width: 100%;
+        }
+        .segmented button {
+          flex: 1 1 0;
+          width: auto;
+          padding: 11px 6px;
+          font-size: 11px;
+          text-align: center;
+        }
         .section-toggle,
         .evtoggle {
           width: auto;
@@ -707,16 +746,27 @@
         }
         .cards {
           grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 6px;
+          margin-bottom: 12px;
         }
         .card {
-          padding: 10px 10px 9px;
+          padding: 9px 10px 8px;
         }
         .card .v {
-          font-size: 18px;
+          font-size: 17px;
         }
         .card .k {
           font-size: 9px;
-          letter-spacing: 0.1em;
+          letter-spacing: 0.08em;
+          margin-top: 2px;
+          line-height: 1.3;
+        }
+        /* keep the stale-flag from colliding with the value on the narrower
+           2-col card */
+        .card.stale::after {
+          top: 6px;
+          right: 8px;
+          font-size: 8px;
         }
         .evpanel {
           overflow-x: auto;
@@ -742,6 +792,10 @@
           border-bottom: 1px solid var(--line);
           padding: 8px 0;
         }
+        /* BASE per-cell layout — a labelled label|value grid. The games table
+           and the SETTLED picks view keep this stacked form (it suits a short,
+           browse-y column set); the LIVE/UNVERIFIED/CLOSED picks view OVERRIDES
+           it below with a compact card so several picks fit on one screen. */
         #games-table td,
         #picks-table td {
           display: grid;
@@ -820,6 +874,177 @@
         #picks-table.settled td::before {
           content: attr(data-label);
         }
+
+        /* ============================================================== *
+         * COMPACT PICK CARD — LIVE / UNVERIFIED / CLOSED views only.     *
+         * Each <tr> becomes a 2-column grid card with three tiers so 3-4 *
+         * picks fit per phone screen instead of one tall 11-row stack:   *
+         *   tier 1 — Match (bold, wide)        + Kickoff (right)         *
+         *   tier 2 — Pick (wide) | Odds        + Book under the pick     *
+         *   tier 3 — a wrapping metrics strip: Market · Fair/EV · Edge · *
+         *           Confidence · CLV · Status (labels muted/dropped      *
+         *           where the value already names itself).               *
+         * Scoped :not(.settled) so the SETTLED 8-col view keeps its own  *
+         * data-label stack above (and the games table is untouched).     *
+         * ============================================================== */
+        #picks-table:not(.settled) tbody tr {
+          display: grid;
+          grid-template-columns: 1fr 1fr auto;
+          grid-template-areas:
+            "match   match   kickoff"
+            "pick    pick    odds"
+            "book    book    odds"
+            "market  fairev  fairev"
+            "edge    conf    status"
+            "clv     clv     status";
+          column-gap: 10px;
+          row-gap: 3px;
+          align-items: start;
+          padding: 11px 12px;
+        }
+        /* rows that aren't real picks (skeleton / empty-state) carry a single
+           full-width colspan cell — let it span the whole card, never the
+           grid template. */
+        #picks-table:not(.settled) tbody tr:has(td[colspan]) {
+          display: block;
+          padding: 8px 0;
+        }
+        #picks-table:not(.settled) td {
+          display: block;
+          grid-template-columns: none;
+          gap: 0;
+          min-width: 0;
+        }
+        /* the card's own grouping makes most labels redundant — drop them and
+           re-introduce only the few that aid scanning, inline + muted. */
+        #picks-table:not(.settled) td::before {
+          content: "";
+          display: none;
+        }
+        /* tier 1 — Match headline (wide) + Kickoff (right, muted). */
+        #picks-table:not(.settled) td:nth-child(1) {
+          grid-area: kickoff;
+          text-align: right;
+          font-size: 10px;
+        }
+        #picks-table:not(.settled) td:nth-child(1) .ko small {
+          font-size: 9px;
+        }
+        #picks-table:not(.settled) td:nth-child(2) {
+          grid-area: match;
+          font-size: 13px;
+        }
+        #picks-table:not(.settled) td:nth-child(2) .match {
+          font-size: 14px;
+        }
+        /* tier 2 — the actionable line: Pick (wide) + Odds (big, right),
+           Book muted under the pick. */
+        #picks-table:not(.settled) td:nth-child(4) {
+          grid-area: pick;
+          font-size: 13px;
+        }
+        #picks-table:not(.settled) td:nth-child(5) {
+          grid-area: book;
+          color: var(--dim);
+          font-size: 11px;
+          max-width: none;
+        }
+        #picks-table:not(.settled) td:nth-child(5)::before {
+          content: "@ ";
+          display: inline;
+          color: var(--faint);
+          font-size: 11px;
+          letter-spacing: 0;
+        }
+        #picks-table:not(.settled) td:nth-child(6) {
+          grid-area: odds;
+          text-align: right;
+          align-self: center;
+        }
+        #picks-table:not(.settled) td:nth-child(6) .odds {
+          font-size: 17px;
+        }
+        #picks-table:not(.settled) td:nth-child(6) small {
+          font-size: 10px;
+        }
+        /* tier 3 — the de-emphasised metrics grid: Market(3) · Fair/EV(7) on
+           one line, Edge(8) · Confidence(9) on the next, CLV(10) beside the
+           Status(11) badge. Each cell is an inline-flex of muted label + value
+           (labels dropped where the value names itself: stars, badges). The
+           hair-line above sets the strip apart from the actionable line. */
+        #picks-table:not(.settled) td:nth-child(3),
+        #picks-table:not(.settled) td:nth-child(7),
+        #picks-table:not(.settled) td:nth-child(8),
+        #picks-table:not(.settled) td:nth-child(9),
+        #picks-table:not(.settled) td:nth-child(10),
+        #picks-table:not(.settled) td:nth-child(11) {
+          display: flex;
+          align-items: baseline;
+          gap: 4px;
+          font-size: 11px;
+        }
+        #picks-table:not(.settled) td:nth-child(3) {
+          grid-area: market;
+          margin-top: 7px;
+          padding-top: 7px;
+          border-top: 1px solid var(--line);
+          color: var(--dim);
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          font-size: 10px;
+        }
+        #picks-table:not(.settled) td:nth-child(7) {
+          grid-area: fairev;
+          margin-top: 7px;
+          padding-top: 7px;
+          border-top: 1px solid var(--line);
+          justify-content: flex-end;
+        }
+        #picks-table:not(.settled) td:nth-child(8) {
+          grid-area: edge;
+        }
+        #picks-table:not(.settled) td:nth-child(9) {
+          grid-area: conf;
+        }
+        #picks-table:not(.settled) td:nth-child(10) {
+          grid-area: clv;
+        }
+        #picks-table:not(.settled) td:nth-child(11) {
+          grid-area: status;
+          justify-content: flex-end;
+          align-self: center;
+        }
+        /* inline metric labels: tiny, muted, only where they aid scanning. */
+        #picks-table:not(.settled) td:nth-child(7)::before {
+          content: "fair";
+          display: inline;
+          color: var(--faint);
+          font-size: 9px;
+          letter-spacing: 0.06em;
+        }
+        #picks-table:not(.settled) td:nth-child(8)::before {
+          content: "edge";
+          display: inline;
+          color: var(--faint);
+          font-size: 9px;
+          letter-spacing: 0.06em;
+        }
+        #picks-table:not(.settled) td:nth-child(7) small {
+          font-size: 9px;
+        }
+        /* drop the tiny edge sparkline on mobile — the % is the signal. */
+        #picks-table:not(.settled) td:nth-child(8) .bar {
+          display: none;
+        }
+        #picks-table:not(.settled) td:nth-child(8) .edgecell {
+          min-width: 0;
+        }
+        /* the settle button (appears on past-kickoff open picks) sits in the
+           Status cell — don't force it onto its own row. */
+        #picks-table:not(.settled) td button {
+          margin-top: 0;
+        }
+
         .matchwrap,
         .gameswrap .matchwrap,
         .selwrap,
