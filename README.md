@@ -1,7 +1,8 @@
 # Manual-Betting +EV Picks Platform (betting-ai)
 
 A professional **picks-only decision-support system** that detects Positive
-Expected Value (+EV) betting opportunities for **Football/Soccer** and **NBA**.
+Expected Value (+EV) betting opportunities for **Football/Soccer** and
+**Basketball**.
 
 It ingests sports data and **read-only** odds/market data, builds model
 probabilities, removes bookmaker vig, detects +EV edges, computes recommended
@@ -18,12 +19,12 @@ results, ROI, and Closing Line Value (CLV).
 
 ## Sports coverage
 
-| Sport                         | Status                      | Notes                                                                                                                              |
-| ----------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Football / Soccer             | **Pick source** (validated) | The held-out CLV edge lives here — sharp-vs-soft line shopping.                                                                    |
-| Basketball (NBA / EuroLeague) | **Pick source**             | Moneyline + main totals; runs the same devig → edge gate.                                                                          |
-| Tennis (ATP / WTA)            | **Visibility-only**         | Scraped and shown, tagged `UNVALIDATED`; mints **no** picks — its free data source has no closing line, so CLV can't be evaluated. |
-| NFL (American football)       | **Visibility-only**         | Off-season yields no games; a free Pinnacle close is now being forward-captured so it can eventually be CLV-graded.                |
+| Sport                          | Status                      | Notes                                                                                                                              |
+| ------------------------------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Football / Soccer              | **Pick source** (validated) | The held-out CLV edge lives here — sharp-vs-soft line shopping.                                                                    |
+| Basketball (NBA / EuroLeague)  | **Pick source**             | Moneyline + main totals; runs the same devig → edge gate.                                                                          |
+| Tennis (ATP / WTA)             | **Visibility-only**         | Scraped and shown, tagged `UNVALIDATED`; mints **no** picks — its free data source has no closing line, so CLV can't be evaluated. |
+| American football (NFL + NCAA) | **Visibility-only**         | Off-season yields no games; a free Pinnacle close is now being forward-captured so it can eventually be CLV-graded.                |
 
 A sport only earns **alerting picks** after a held-out **incremental CLV vs the
 closing line > 2 SE**. Visibility-only sports are scraped, shown, and tracked
@@ -73,9 +74,12 @@ Stop it with `docker compose --profile prod down` (your data is kept in a
 Docker volume); start again later with `docker compose --profile prod up -d`.
 Logs: `docker compose --profile prod logs -f app`.
 
-Optional: edit `.env` and set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for
-pick alerts — leaving them blank just disables alerts, the dashboard still
-works. Local (loopback) use needs **no login**.
+On first launch the dashboard shows a one-time **setup screen** to create your
+admin password — auth is on by default in `.env.example`, and the password is
+stored hashed, never in the file. Prefer no login on your own PC? Set
+`DASHBOARD_AUTH_ENABLED=false` in `.env`. Optional: set `TELEGRAM_BOT_TOKEN` +
+`TELEGRAM_CHAT_ID` for pick alerts — blank just disables alerts, the dashboard
+still works.
 
 ### Option 2 — OpenClaw / Ubuntu VPS (always-on, 24/7)
 
@@ -89,8 +93,9 @@ sudo chown -R $USER /opt/betting-ai
 cd /opt/betting-ai
 cp .env.example .env
 chmod 600 .env
-# edit .env: uncomment COMPOSE_PROFILES=prod, set TELEGRAM_*, and — for a public
-# IP — enable DASHBOARD_AUTH_* + APP_HOST_BIND=0.0.0.0 (see the runbook)
+# edit .env: uncomment COMPOSE_PROFILES=prod, set TELEGRAM_*; auth is on by
+# default — create the password at /setup on first launch (over the SSH tunnel
+# BEFORE exposing the port). For a public IP also set APP_HOST_BIND=0.0.0.0.
 docker compose up -d --build
 ```
 
@@ -202,13 +207,17 @@ backtest, generate live picks, and run the full platform.
 - [x] Settlement engine (phase 4) — auto-settles from free results sources
       (World Cup, Brazil, European leagues), manual settle button for
       NBA/euroleague, ROI + stake-weighted CLV report on the dashboard
-- [x] Multisport visibility — Tennis (ATP/WTA) + NFL added as **visibility-only**
-      feeds (scraped, shown `UNVALIDATED`, no picks); NFL Pinnacle-close
-      forward-capture started; held-out tennis backtest documented
-      (visibility-only verdict, CLV unevaluable without a free closing line)
-- [x] Dashboard professionalization — refined trading-terminal UI, picks-first
-      layout, 1–5★ confidence ratings, clickable column sorting, honest
-      "now @ book" re-pricing, segmented LIVE / UNVERIFIED / SETTLED tabs
+- [x] Multisport visibility — Tennis (ATP/WTA) + American football (NFL + NCAA)
+      added as **visibility-only** feeds (scraped, shown `UNVALIDATED`, no picks);
+      Pinnacle-close forward-capture running; tennis player-name reconciliation +
+      a re-runnable per-sport CLV-readiness probe
+      (`scripts/research/clv_readiness.py`; all sports currently data-insufficient
+      — visibility-only stands)
+- [x] Dashboard professionalization — "PICKS TERMINAL" proof-led redesign
+      (desktop + mobile, 1–5★ confidence, clickable sorting, segmented LIVE /
+      UNVERIFIED / CLOSED / SETTLED tabs, matching login — `docs/design/DESIGN.md`);
+      first-run `/setup` screen creates the admin password (stored hashed in
+      Postgres), auth on by default in the deploy template
 - [x] Anchor-calibration diagnostic — log-loss / Brier / ECE / reliability over
       the devigged sharp-anchor fair probs (diagnostic only; CLV stays the
       live validator)
