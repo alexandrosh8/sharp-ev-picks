@@ -1055,13 +1055,13 @@ async def betfair_exchange_coverage_outcomes(
                 session, betfair_event_id, betfair_ref, kickoff
             )
             # USABLE = event scraped near kickoff (coverage gate) AND the close
-            # set has the >=2 H2H rows an anchor needs — the same two conditions
+            # set has the full 3-way (home/draw/away) H2H rows an anchor needs — the same two conditions
             # the consumption path requires to attach a fair.
             in_window = (
                 last_capture is not None and kickoff - last_capture <= SNAPSHOT_CLOSE_MAX_GAP
             )
             h2h_rows = sum(1 for s in snaps if s.market is Market.H2H)
-            has_close = in_window and h2h_rows >= 2
+            has_close = in_window and h2h_rows >= 3  # full 3-way (home/draw/away)
         outcomes.append(
             BetfairCoverageOutcome(
                 pick_id=pick_id,
