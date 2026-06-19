@@ -1470,8 +1470,9 @@
               <thead>
                 <tr>
                   <th>Sport</th>
-                  <th>Matched</th>
-                  <th>Rate</th>
+                  <th>Captured</th>
+                  <th>Ours</th>
+                  <th>Pick match</th>
                 </tr>
               </thead>
               <tbody id="archive-rows">
@@ -1519,7 +1520,12 @@
         team_totals: "TT",
         correct_score: "CS",
       };
-      const SPORT_LABELS = { soccer: "Football", basketball: "Basketball" };
+      const SPORT_LABELS = {
+        soccer: "Football",
+        basketball: "Basketball",
+        tennis: "Tennis",
+        american_football: "American football",
+      };
 
       // All times shown in Cyprus time (IANA zone — DST handled correctly).
       // The API stays UTC; conversion is display-only.
@@ -1768,7 +1774,7 @@
             "GET /resolution/match-rate failed — " + errLabel(err),
             "empty",
           );
-          cell.colSpan = 3;
+          cell.colSpan = 4;
           tbody.appendChild(tr);
         } finally {
           ARCHIVE_LOADING = false;
@@ -1794,62 +1800,52 @@
           (a.unmatched_with_candidates || 0) +
           " have one but no name match (alias gap). Enable the archive in CLV " +
           "only after a healthy rate AND a held-out CLV backtest.";
-        // Per-sport capture for ALL arcadia sports (tennis + american football
-        // included), so the panel shows the archive fetches every sport, not
-        // just the pick sports that appear in the match-rate table.
+        // Legend for the per-sport table. The table lists EVERY arcadia sport
+        // the archive captures — not just the pick sports — so tennis and
+        // american football show even though they mint no picks.
         const capEl = $("archive-capture");
-        const cap = Array.isArray(a.archive_capture) ? a.archive_capture : [];
-        if (cap.length) {
-          const fmt = (s) =>
-            String(s)
-              .replace(/_/g, " ")
-              .replace(/^\w/, (c) => c.toUpperCase());
-          const parts = cap.map(
-            (r) => fmt(r.sport) + " " + (Number(r.captured) || 0),
-          );
-          capEl.textContent =
-            "Pinnacle sharp-close capture, all arcadia sports (upcoming, next 7d): " +
-            parts.join(" · ") +
-            ". The archive captures every sport; only sports that produce picks " +
-            "appear in the match rate below.";
-          capEl.hidden = false;
-        } else {
-          capEl.hidden = true;
-        }
+        capEl.textContent =
+          "Captured = upcoming Pinnacle closes (next 7d) · Ours = our scraped " +
+          "games (next 7d) · Pick match = strict name-match over picks (180d). " +
+          "Tennis & American football are visibility-only — captured, but they " +
+          "mint no picks, so they carry no match rate.";
+        capEl.hidden = false;
         const tbody = $("archive-rows");
         tbody.replaceChildren();
-        if (!total) {
-          const tr = document.createElement("tr");
-          const cell = td(
-            tr,
-            "No picks with a known kickoff to evaluate yet.",
-            "empty",
-          );
-          cell.colSpan = 3;
-          tbody.appendChild(tr);
-          return;
-        }
+        const cap = Array.isArray(a.archive_capture) ? a.archive_capture : [];
         const bySport = a.by_sport || [];
-        if (!bySport.length) {
+        if (!cap.length) {
           const tr = document.createElement("tr");
           const cell = td(
             tr,
             "Archive empty — enable ARCADIA_ENABLED to start capturing Pinnacle closes.",
             "empty",
           );
-          cell.colSpan = 3;
+          cell.colSpan = 4;
           tbody.appendChild(tr);
           return;
         }
-        bySport.forEach((g) => {
+        cap.forEach((c) => {
           const tr = document.createElement("tr");
-          td(tr, SPORT_LABELS[g.key] || g.key);
-          td(tr, g.matched + " / " + g.total);
-          const rateCell = td(tr, ratePct(g.match_rate));
-          if (g.match_rate !== null && g.match_rate !== undefined) {
-            const r = Number(g.match_rate);
-            rateCell.style.color =
-              r >= 0.5 ? "var(--pos)" : r > 0 ? "var(--warn)" : "var(--neg)";
+          td(tr, SPORT_LABELS[c.sport] || c.sport);
+          td(tr, String(Number(c.captured) || 0));
+          td(tr, String(Number(c.scraped) || 0));
+          const g = bySport.find(
+            (x) => x.key === c.sport || String(x.key).startsWith(c.sport + "_"),
+          );
+          if (g) {
+            const rateCell = td(
+              tr,
+              g.matched + " / " + g.total + " · " + ratePct(g.match_rate),
+            );
+            if (g.match_rate !== null && g.match_rate !== undefined) {
+              const r = Number(g.match_rate);
+              rateCell.style.color =
+                r >= 0.5 ? "var(--pos)" : r > 0 ? "var(--warn)" : "var(--neg)";
+            }
+          } else {
+            const noPick = td(tr, "—");
+            noPick.title = "visibility-only — mints no picks";
           }
           tbody.appendChild(tr);
         });
