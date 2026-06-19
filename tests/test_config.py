@@ -111,6 +111,23 @@ def test_loopback_app_bind_does_not_require_dashboard_auth() -> None:
     assert make_settings(app_host_bind="127.0.0.1").dashboard_auth_enabled is False
 
 
+def test_dashboard_auth_enabled_with_blank_creds_is_first_run_mode() -> None:
+    # Auth ON but no .env hash/secret is allowed: the password is set via the
+    # first-run /setup screen (persisted to the DB), so nothing lives in .env.
+    s = make_settings(dashboard_auth_enabled=True)
+    assert s.dashboard_auth_enabled is True
+    assert s.dashboard_auth_password_hash == ""
+
+
+def test_dashboard_auth_requires_both_hash_and_secret_or_neither() -> None:
+    with pytest.raises(ValidationError, match="BOTH DASHBOARD_AUTH_PASSWORD_HASH"):
+        make_settings(
+            dashboard_auth_enabled=True,
+            dashboard_auth_password_hash="pbkdf2_sha256$1$abcd$1234",
+            dashboard_session_secret="",
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

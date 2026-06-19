@@ -3,7 +3,15 @@ read-only dashboard and its data API.
 
 Stdlib-only (no new dependency): PBKDF2-SHA256 password verification and an
 HMAC-SHA256-signed session cookie. The plaintext password NEVER lives in code
-or .env — only a salted PBKDF2 hash (config DASHBOARD_AUTH_PASSWORD_HASH).
+or .env — only a salted PBKDF2 hash.
+
+Credentials come from ONE of two places, DB first:
+  1. the ``dashboard_credentials`` row created by the first-run /setup screen
+     (the source of truth once set; loaded into memory at startup), or
+  2. the .env trio (DASHBOARD_AUTH_*) — back-compat for hand-provisioned hosts.
+If neither exists while auth is enabled, the app is UNCONFIGURED: every gated
+route redirects to /setup until a password is set (SetupRequired).
+
 /health is intentionally NOT gated (compose healthcheck / external watchdog).
 """
 
@@ -15,6 +23,7 @@ import hashlib
 import hmac
 import secrets
 import time
+from dataclasses import dataclass
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -26,6 +35,12 @@ _PBKDF2_ITERATIONS = 600_000  # OWASP 2023 floor for PBKDF2-SHA256
 class AuthRequired(Exception):
     """Raised by the dependency when a protected route lacks a valid session.
     The installed handler redirects HTML requests to /login, else returns 401."""
+
+
+class SetupRequired(Exception):
+    """Raised when auth is ENABLED but no admin credential exists yet (no DB
+    row, no .env hash). The installed handler redirects HTML requests to /setup
+    so the operator can create the first password; API requests get 503."""
 
 
 def hash_password(password: str, *, iterations: int = _PBKDF2_ITERATIONS) -> str:
@@ -86,39 +101,113 @@ def verify_session(token: str, secret: str, *, now: int | None = None) -> str | 
     return username
 
 
+# --- credential source: DB-loaded (preferred) -> .env (fallback) ------------
+
+
+@dataclass(frozen=True)
+class DashboardCredentials:
+    username: str
+    password_hash: str
+    session_secret: str
+
+
+_active: DashboardCredentials | None = None
+
+
+def set_active_credentials(username: str, password_hash: str, session_secret: str) -> None:
+    """Install the live admin credential. Called at startup from the DB row and
+    again right after first-run /setup writes one. Takes precedence over .env."""
+    global _active
+    _active = DashboardCredentials(username, password_hash, session_secret)
+
+
+def reset_active_credentials() -> None:
+    """Drop the in-memory credential (tests; returns to the .env fallback)."""
+    global _active
+    _active = None
+
+
+def _current_credentials() -> DashboardCredentials | None:
+    """The credential in force: the DB-loaded one if set, else the .env trio,
+    else None (unconfigured — first-run /setup pending)."""
+    if _active is not None:
+        return _active
+    from app.config import get_settings
+
+    s = get_settings()
+    if s.dashboard_auth_password_hash and s.dashboard_session_secret:
+        return DashboardCredentials(
+            s.dashboard_auth_username,
+            s.dashboard_auth_password_hash,
+            s.dashboard_session_secret,
+        )
+    return None
+
+
+def auth_is_configured() -> bool:
+    """True once an admin credential exists (DB or .env)."""
+    return _current_credentials() is not None
+
+
+def current_credentials() -> DashboardCredentials | None:
+    """The credential in force (DB-loaded or .env), or None if unconfigured.
+    The login/setup routes sign the session cookie with this credential's secret
+    — the SAME secret is_authenticated verifies against, never the (possibly
+    blank) .env one."""
+    return _current_credentials()
+
+
 def is_authenticated(request: Request) -> bool:
     from app.config import get_settings
 
-    settings = get_settings()
-    if not settings.dashboard_auth_enabled:
+    if not get_settings().dashboard_auth_enabled:
         return True
+    creds = _current_credentials()
+    if creds is None:
+        return False  # unconfigured: nobody is authenticated until /setup runs
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return False
-    return verify_session(token, settings.dashboard_session_secret) is not None
+    return verify_session(token, creds.session_secret) is not None
 
 
 def require_dashboard_auth(request: Request) -> None:
-    """FastAPI dependency for protected routes. Raises AuthRequired when auth
-    is enabled and the request carries no valid session."""
+    """FastAPI dependency for protected routes. When auth is enabled: raises
+    SetupRequired if no credential exists yet (-> /setup), else AuthRequired if
+    the request carries no valid session (-> /login)."""
+    from app.config import get_settings
+
+    if not get_settings().dashboard_auth_enabled:
+        return
+    if not auth_is_configured():
+        raise SetupRequired
     if not is_authenticated(request):
         raise AuthRequired
 
 
 def authenticate(username: str, password: str) -> bool:
-    from app.config import get_settings
-
-    settings = get_settings()
-    user_ok = hmac.compare_digest(username, settings.dashboard_auth_username)
-    pass_ok = verify_password(password, settings.dashboard_auth_password_hash)
+    creds = _current_credentials()
+    if creds is None:
+        return False
+    user_ok = hmac.compare_digest(username, creds.username)
+    pass_ok = verify_password(password, creds.password_hash)
     return user_ok and pass_ok
 
 
 def install_auth(app: FastAPI) -> None:
-    """Register the AuthRequired handler: redirect browsers to /login, 401 API."""
+    """Register the AuthRequired/SetupRequired handlers: redirect browsers to
+    /login or /setup respectively, else 401/503 for API clients."""
 
     @app.exception_handler(AuthRequired)
-    async def _handle(request: Request, exc: AuthRequired) -> RedirectResponse | JSONResponse:
+    async def _handle_auth(request: Request, exc: AuthRequired) -> RedirectResponse | JSONResponse:
         if "text/html" in request.headers.get("accept", ""):
             return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
         return JSONResponse({"detail": "authentication required"}, status_code=401)
+
+    @app.exception_handler(SetupRequired)
+    async def _handle_setup(
+        request: Request, exc: SetupRequired
+    ) -> RedirectResponse | JSONResponse:
+        if "text/html" in request.headers.get("accept", ""):
+            return RedirectResponse("/setup", status_code=status.HTTP_303_SEE_OTHER)
+        return JSONResponse({"detail": "setup required"}, status_code=503)

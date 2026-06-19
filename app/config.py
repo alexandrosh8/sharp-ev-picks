@@ -480,24 +480,28 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce_dashboard_auth_config(self) -> "Settings":
         if self.dashboard_auth_enabled:
-            missing = [
-                name
-                for name, value in (
-                    ("DASHBOARD_AUTH_PASSWORD_HASH", self.dashboard_auth_password_hash),
-                    ("DASHBOARD_SESSION_SECRET", self.dashboard_session_secret),
-                )
-                if not value
-            ]
-            if missing:
-                raise ValueError("DASHBOARD_AUTH_ENABLED=true requires: " + ", ".join(missing))
-            hash_parts = self.dashboard_auth_password_hash.split("$")
-            if len(hash_parts) != 4 or hash_parts[0] != "pbkdf2_sha256":
+            has_hash = bool(self.dashboard_auth_password_hash)
+            has_secret = bool(self.dashboard_session_secret)
+            # Both blank = the FIRST-RUN SETUP path: the password is set via the
+            # /setup screen on first launch and persisted to the database, so no
+            # hash/secret needs to live in .env. Supplying BOTH is the
+            # hand-provisioned path; supplying exactly ONE is a misconfiguration.
+            if has_hash != has_secret:
                 raise ValueError(
-                    "DASHBOARD_AUTH_PASSWORD_HASH must look like "
-                    "pbkdf2_sha256$iterations$salt$hash. In compose .env files, "
-                    "wrap it in single quotes so Docker Compose does not "
-                    "interpolate the $ separators."
+                    "set BOTH DASHBOARD_AUTH_PASSWORD_HASH and "
+                    "DASHBOARD_SESSION_SECRET, or NEITHER (leave both blank to set "
+                    "the password via the first-run /setup screen, which stores "
+                    "it in the database)."
                 )
+            if has_hash:
+                hash_parts = self.dashboard_auth_password_hash.split("$")
+                if len(hash_parts) != 4 or hash_parts[0] != "pbkdf2_sha256":
+                    raise ValueError(
+                        "DASHBOARD_AUTH_PASSWORD_HASH must look like "
+                        "pbkdf2_sha256$iterations$salt$hash. In compose .env files, "
+                        "wrap it in single quotes so Docker Compose does not "
+                        "interpolate the $ separators."
+                    )
         bind = self.app_host_bind.strip().lower().strip("[]")
         loopback = bind == "localhost" or bind == "::1" or bind.startswith("127.")
         if not loopback and not self.dashboard_auth_enabled:

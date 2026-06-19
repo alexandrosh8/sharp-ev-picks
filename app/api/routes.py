@@ -7,6 +7,7 @@ place a bet.
 
 import asyncio
 import logging
+import secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
@@ -22,9 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import (
     SESSION_COOKIE,
+    auth_is_configured,
     authenticate,
+    current_credentials,
+    hash_password,
     is_authenticated,
     require_dashboard_auth,
+    set_active_credentials,
     sign_session,
 )
 from app.api.deps import get_session
@@ -35,6 +40,7 @@ from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import (
+    create_dashboard_credentials,
     latest_available_games_with_events,
     latest_picks_with_events,
     live_evidence_rows,
@@ -231,9 +237,35 @@ class _LoginIn(BaseModel):
 
 @router.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_form(request: Request) -> Response:
+    from app.config import get_settings
+
+    # An enabled-but-unconfigured app has no password yet: send the operator to
+    # the first-run /setup screen rather than an unusable login form.
+    if get_settings().dashboard_auth_enabled and not auth_is_configured():
+        return RedirectResponse("/setup", status_code=303)
     if is_authenticated(request):
         return RedirectResponse("/", status_code=303)
     return HTMLResponse(_LOGIN_HTML)
+
+
+def _session_response(
+    username: str, session_secret: str, ttl_seconds: int, *, secure: bool
+) -> JSONResponse:
+    """Issue the signed-session cookie. Signed with the ACTIVE credential's
+    secret (DB-loaded or .env) — the same secret auth verifies against, never
+    the possibly-blank .env value."""
+    token = sign_session(username, session_secret, ttl_seconds)
+    resp = JSONResponse({"status": "ok"})
+    resp.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=ttl_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        path="/",
+    )
+    return resp
 
 
 @router.post("/login", include_in_schema=False)
@@ -246,22 +278,15 @@ async def login_submit(payload: _LoginIn) -> Response:
     # it every other request + the scheduler) until the hashes finish.
     if not await asyncio.to_thread(authenticate, payload.username, payload.password):
         return JSONResponse({"detail": "invalid credentials"}, status_code=401)
-    token = sign_session(
-        settings.dashboard_auth_username,
-        settings.dashboard_session_secret,
+    creds = current_credentials()
+    if creds is None:  # unconfigured (race): nothing to sign with
+        return JSONResponse({"detail": "invalid credentials"}, status_code=401)
+    return _session_response(
+        creds.username,
+        creds.session_secret,
         settings.dashboard_session_ttl_seconds,
-    )
-    resp = JSONResponse({"status": "ok"})
-    resp.set_cookie(
-        SESSION_COOKIE,
-        token,
-        max_age=settings.dashboard_session_ttl_seconds,
-        httponly=True,
-        samesite="lax",
         secure=(settings.app_env != "local"),
-        path="/",
     )
-    return resp
 
 
 @router.post("/logout", include_in_schema=False)
@@ -269,6 +294,238 @@ async def logout() -> Response:
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp
+
+
+# First-run setup page — shown ONLY while auth is enabled and no admin
+# credential exists yet. Same PICKS TERMINAL skin as /login; posts JSON to
+# /setup; on success the credential is stored in the DB and the operator is
+# signed in. Plaintext never leaves the form; errors render via textContent.
+_SETUP_HTML = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PICKS TERMINAL — first-run setup</title>
+    <style>
+      :root {
+        --bg: #0a0c10;
+        --surface-1: #0f1216;
+        --surface-2: #151921;
+        --line: #232a35;
+        --text: #e8edf4;
+        --dim: #aeb8c6;
+        --faint: #8793a3;
+        --pos: #34d399;
+        --neg: #f4525f;
+        --info: #38bdf8;
+        --radius: 10px;
+        --radius-sm: 6px;
+        --font-display:
+          "SF Pro Display", "Söhne", "Geist", "Helvetica Neue", system-ui,
+          -apple-system, sans-serif;
+        --mono:
+          ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
+          Consolas, monospace;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      html { background: var(--bg); }
+      body {
+        color: var(--text);
+        font: 13px/1.5 var(--mono);
+        font-variant-numeric: tabular-nums;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background:
+          radial-gradient(900px 380px at 50% -8%,
+            rgba(52, 211, 153, 0.06), transparent 60%), var(--bg);
+      }
+      .card {
+        width: 100%;
+        max-width: 360px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface-2);
+        padding: 26px 24px 22px;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+      }
+      .brand {
+        font-family: var(--font-display);
+        font-size: 19px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        color: var(--text);
+      }
+      .sub {
+        color: var(--faint);
+        font-size: 10px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        margin: 7px 0 20px;
+      }
+      label {
+        display: block;
+        color: var(--dim);
+        font-family: var(--font-display);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        margin: 14px 0 6px;
+      }
+      input {
+        width: 100%;
+        background: var(--surface-1);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        padding: 10px 12px;
+        font: 13px var(--mono);
+        letter-spacing: 0.02em;
+      }
+      input:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+      button {
+        width: 100%;
+        margin-top: 22px;
+        cursor: pointer;
+        background: rgba(52, 211, 153, 0.10);
+        color: var(--pos);
+        border: 1px solid var(--pos);
+        border-radius: var(--radius-sm);
+        padding: 11px 12px;
+        font: 600 11px var(--mono);
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        transition: background-color 120ms, box-shadow 120ms;
+      }
+      button:hover { background: rgba(52, 211, 153, 0.18); box-shadow: 0 0 0 1px var(--pos); }
+      button:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+      .hint { color: var(--faint); font-size: 10px; margin-top: 6px; letter-spacing: 0.02em; }
+      .err {
+        color: var(--neg);
+        font-size: 11px;
+        min-height: 16px;
+        margin-top: 13px;
+        letter-spacing: 0.02em;
+      }
+    </style>
+  </head>
+  <body>
+    <form class="card" id="setup-form" autocomplete="off">
+      <div class="brand">PICKS&nbsp;TERMINAL</div>
+      <div class="sub">first run · create your admin password</div>
+      <label for="u">Username</label>
+      <input id="u" name="username" type="text" autocomplete="username" value="admin" />
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="new-password" autofocus />
+      <div class="hint">At least 8 characters. Stored only as a salted hash.</div>
+      <label for="c">Confirm password</label>
+      <input id="c" name="confirm" type="password" autocomplete="new-password" />
+      <button type="submit">Create &amp; sign in</button>
+      <div class="err" id="err" role="alert"></div>
+    </form>
+    <script>
+      "use strict";
+      const form = document.getElementById("setup-form");
+      const errEl = document.getElementById("err");
+      const MIN = 8;
+      form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        errEl.textContent = "";
+        const username = document.getElementById("u").value.trim() || "admin";
+        const password = document.getElementById("p").value;
+        const confirm = document.getElementById("c").value;
+        if (password.length < MIN) {
+          errEl.textContent = "Password must be at least " + MIN + " characters";
+          return;
+        }
+        if (password !== confirm) {
+          errEl.textContent = "Passwords do not match";
+          return;
+        }
+        try {
+          const res = await fetch("/setup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+          if (res.ok) {
+            window.location = "/";
+            return;
+          }
+          let detail = "Setup failed (HTTP " + res.status + ")";
+          try {
+            const j = await res.json();
+            if (j && j.detail) detail = j.detail;
+          } catch (e) {}
+          errEl.textContent = detail;
+        } catch (e) {
+          errEl.textContent = "Setup failed — could not reach the server";
+        }
+      });
+    </script>
+  </body>
+</html>
+"""
+
+_MIN_PASSWORD_LEN = 8
+
+
+class _SetupIn(BaseModel):
+    username: str
+    password: str
+
+
+@router.get("/setup", response_class=HTMLResponse, include_in_schema=False)
+async def setup_form() -> Response:
+    from app.config import get_settings
+
+    # /setup exists ONLY while auth is enabled and no credential is set yet.
+    # Once configured it disappears — changing the password later must go
+    # through an authenticated path, never this unauthenticated endpoint.
+    if not get_settings().dashboard_auth_enabled or auth_is_configured():
+        return RedirectResponse("/", status_code=303)
+    return HTMLResponse(_SETUP_HTML)
+
+
+@router.post("/setup", include_in_schema=False)
+async def setup_submit(
+    payload: _SetupIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not settings.dashboard_auth_enabled:
+        return JSONResponse({"detail": "auth is disabled"}, status_code=404)
+    if auth_is_configured():
+        return JSONResponse({"detail": "already configured"}, status_code=409)
+    username = payload.username.strip() or "admin"
+    if len(payload.password) < _MIN_PASSWORD_LEN:
+        return JSONResponse(
+            {"detail": f"password must be at least {_MIN_PASSWORD_LEN} characters"},
+            status_code=400,
+        )
+    # 600k-iteration PBKDF2 — offload off the event loop, like /login.
+    password_hash = await asyncio.to_thread(hash_password, payload.password)
+    session_secret = secrets.token_urlsafe(48)
+    created = await create_dashboard_credentials(
+        session,
+        username=username,
+        password_hash=password_hash,
+        session_secret=session_secret,
+    )
+    if not created:  # raced another first-run request
+        return JSONResponse({"detail": "already configured"}, status_code=409)
+    set_active_credentials(username, password_hash, session_secret)
+    return _session_response(
+        username,
+        session_secret,
+        settings.dashboard_session_ttl_seconds,
+        secure=(settings.app_env != "local"),
+    )
 
 
 @router.get("/health")

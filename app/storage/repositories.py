@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -23,6 +24,7 @@ from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
 from app.storage.models import (
+    DashboardCredential,
     Event,
     League,
     ModelVersion,
@@ -1116,3 +1118,45 @@ async def persist_pick(
         )
         return "upgraded"
     return "duplicate"
+
+
+async def load_dashboard_credentials(
+    session: AsyncSession,
+) -> tuple[str, str, str] | None:
+    """The stored admin credential as ``(username, password_hash,
+    session_secret)``, or None if first-run /setup has not created one yet.
+    Read once at startup and again right after /setup writes — never per
+    request (auth keeps an in-memory copy)."""
+    row = await session.scalar(select(DashboardCredential).limit(1))
+    if row is None:
+        return None
+    return (row.username, row.password_hash, row.session_secret)
+
+
+async def create_dashboard_credentials(
+    session: AsyncSession,
+    *,
+    username: str,
+    password_hash: str,
+    session_secret: str,
+) -> bool:
+    """INSERT the single admin credential row. Returns False and writes nothing
+    if one already exists — first-run /setup is one-shot, and a later password
+    change must go through an authenticated path, never this endpoint. The
+    UNIQUE(singleton) constraint backstops a concurrent double-insert."""
+    existing = await session.scalar(select(DashboardCredential.id).limit(1))
+    if existing is not None:
+        return False
+    session.add(
+        DashboardCredential(
+            username=username,
+            password_hash=password_hash,
+            session_secret=session_secret,
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return False
+    return True

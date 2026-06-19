@@ -344,3 +344,26 @@ class BacktestRun(Base):
     metrics: Mapped[dict[str, Any] | None]
     seed: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class DashboardCredential(Base):
+    """The single admin login set by the first-run /setup screen.
+
+    One row only — the ``singleton`` column is a constant TRUE with a UNIQUE
+    constraint, so a second INSERT fails at the DB layer (defence-in-depth on
+    top of the repo's already-configured guard). The plaintext password is
+    NEVER stored — only the salted PBKDF2 hash (app/api/auth.py). The session
+    secret signs the auth cookie. Both live ONLY here in the DB, never in the
+    repo or .env.
+    """
+
+    __tablename__ = "dashboard_credentials"
+    __table_args__ = (UniqueConstraint("singleton", name="uq_dashboard_credentials_singleton"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    singleton: Mapped[bool] = mapped_column(server_default="true")
+    username: Mapped[str] = mapped_column(String(128))
+    password_hash: Mapped[str] = mapped_column(String(256))
+    session_secret: Mapped[str] = mapped_column(String(256))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(onupdate=func.now())

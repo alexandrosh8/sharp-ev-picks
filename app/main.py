@@ -9,12 +9,13 @@ import httpx
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
-from app.api.auth import install_auth
+from app.api.auth import install_auth, set_active_credentials
 from app.api.routes import router
 from app.config import get_settings
 from app.database import create_engine, create_session_factory
 from app.risk.exposure import DailyExposureLedger
 from app.scheduler import build_scheduler, seed_exposure_ledger
+from app.storage.repositories import load_dashboard_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
+
+    # Load the admin credential (if first-run /setup already created one) into
+    # the in-memory auth holder; auth falls back to the .env trio otherwise, and
+    # to the first-run /setup screen if neither exists.
+    try:
+        async with session_factory() as cred_session:
+            stored_credentials = await load_dashboard_credentials(cred_session)
+        if stored_credentials is not None:
+            set_active_credentials(*stored_credentials)
+    except Exception as exc:
+        logger.error("dashboard credential load failed: %s", type(exc).__name__)
 
     http_client = httpx.AsyncClient()
     redis = Redis.from_url(settings.redis_url)
