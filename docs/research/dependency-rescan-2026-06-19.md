@@ -63,6 +63,17 @@ sharp anchor **is** our edge — so this is the highest-value OddsHarvester leve
 and it needs **no upgrade** (it is in our installed 0.3.0; we simply never pass
 `base_url`, defaulting to `www.oddsportal.com`).
 
+**PROBED 2026-06-19 — NEGATIVE; do NOT wire `base_url`.** Read-only probe (`/tmp/mirror_probe.py`) scraped Brazil Serie A 1X2 from `www.oddsportal.com` vs `centroquote.it` and compared the distinct bookmaker set per fixture:
+
+- Both domains returned the **identical 5 books** (Betfury, GGBET, Roobet, Stake.com, bet365) — **zero** mirror-only books, same 5.0 avg/fixture over 9 shared fixtures.
+- The mirror WAS genuinely hit (its output carried Italian dates, `'22 Lug 2026'`), so `base_url` works — the domain swap simply does not change the books.
+- **Root cause:** OddsPortal keys the bookmaker set to the visitor's **geolocation (IP)**, not the domain. The only book-changing lever is a **regional proxy** (appear from that country) — ToS-gray geolocation spoofing, infra-heavy (paid proxies), and against our no-anti-bot-bypass posture.
+- The mirror also serves localized dates that **break our `%d %b %Y` parser** (Italian month `Lug`) — it would introduce a bug, not just fail to help.
+
+**Verdict: dead end.** The thin, crypto-heavy live book set is a geo artifact of our scrape IP; widening it needs a proxy we will not run. Our validated edge (+22% ROI soccer) is on mainstream football-data.co.uk closing odds anyway, not the live OddsPortal book set. No `base_url` wiring; no proxy.
+
+<details><summary>Original pre-probe plan (superseded)</summary>
+
 **Not a blind add — validate first.** Before wiring a config knob:
 - **Probe**: scrape one league from a candidate mirror (e.g. an Italian/Spanish
   domain) and count *distinct bookmakers per fixture* vs `www`. Only worth it if
@@ -73,6 +84,8 @@ and it needs **no upgrade** (it is in our installed 0.3.0; we simply never pass
 - **ToS posture is unchanged**: still a read-only OddsPortal scrape, just a
   regional domain ("page structure identical; only the domain changes") — no new
   anti-bot bypass, same caution.
+
+</details>
 
 ### Everything else in the README — not needed
 
