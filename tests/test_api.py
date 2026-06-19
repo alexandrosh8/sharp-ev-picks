@@ -387,7 +387,16 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
             ),  # coverage gap
         ]
 
+    async def fake_capture(session, *, horizon_days=7):  # type: ignore[no-untyped-def]
+        return [
+            {"sport": "american_football", "captured": 4, "scraped": 0},
+            {"sport": "basketball", "captured": 96, "scraped": 64},
+            {"sport": "soccer", "captured": 218, "scraped": 149},
+            {"sport": "tennis", "captured": 60, "scraped": 6},
+        ]
+
     monkeypatch.setattr(routes, "shadow_match_rate_outcomes", fake_outcomes)
+    monkeypatch.setattr(routes, "pinnacle_archive_capture_by_sport", fake_capture)
     body = TestClient(make_app()).get("/resolution/match-rate").json()
     assert body["total"] == 3
     assert body["matched"] == 1
@@ -399,6 +408,12 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     assert sport["total"] == 3
     assert sport["matched"] == 1
     assert sport["match_rate"] == pytest.approx(1 / 3)
+    # archive_capture lists ALL arcadia sports — tennis + american_football too,
+    # not just the pick sports that surface in the match rate above.
+    cap = {row["sport"]: row for row in body["archive_capture"]}
+    assert set(cap) == {"soccer", "basketball", "tennis", "american_football"}
+    assert cap["tennis"]["captured"] == 60
+    assert cap["american_football"]["scraped"] == 0
 
 
 def test_dashboard_html_is_not_browser_cached() -> None:

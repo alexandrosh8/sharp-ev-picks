@@ -1464,6 +1464,7 @@
         </div>
         <div id="archive-panel" hidden="">
           <div class="sub" id="archive-purpose"></div>
+          <div class="sub" id="archive-capture" hidden=""></div>
           <div class="tablewrap gameswrap">
             <table id="archive-table">
               <thead>
@@ -1793,6 +1794,28 @@
           (a.unmatched_with_candidates || 0) +
           " have one but no name match (alias gap). Enable the archive in CLV " +
           "only after a healthy rate AND a held-out CLV backtest.";
+        // Per-sport capture for ALL arcadia sports (tennis + american football
+        // included), so the panel shows the archive fetches every sport, not
+        // just the pick sports that appear in the match-rate table.
+        const capEl = $("archive-capture");
+        const cap = Array.isArray(a.archive_capture) ? a.archive_capture : [];
+        if (cap.length) {
+          const fmt = (s) =>
+            String(s)
+              .replace(/_/g, " ")
+              .replace(/^\w/, (c) => c.toUpperCase());
+          const parts = cap.map(
+            (r) => fmt(r.sport) + " " + (Number(r.captured) || 0),
+          );
+          capEl.textContent =
+            "Pinnacle sharp-close capture, all arcadia sports (upcoming, next 7d): " +
+            parts.join(" · ") +
+            ". The archive captures every sport; only sports that produce picks " +
+            "appear in the match rate below.";
+          capEl.hidden = false;
+        } else {
+          capEl.hidden = true;
+        }
         const tbody = $("archive-rows");
         tbody.replaceChildren();
         if (!total) {

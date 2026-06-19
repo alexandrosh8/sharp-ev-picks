@@ -45,6 +45,7 @@ from app.storage.repositories import (
     latest_picks_with_events,
     live_evidence_rows,
     performance_report,
+    pinnacle_archive_capture_by_sport,
     shadow_match_rate_outcomes,
 )
 
@@ -713,7 +714,12 @@ async def resolution_match_rate(
     """
     since = datetime.now(tz=UTC) - timedelta(days=days) if days is not None else None
     outcomes = await shadow_match_rate_outcomes(session, since=since)
-    return summarize_match_rate(outcomes).as_dict()
+    report = summarize_match_rate(outcomes).as_dict()
+    # Per-sport upcoming capture for ALL arcadia sports (tennis + american_football
+    # included), so the panel shows the archive captures every sport, not just the
+    # pick sports that appear in the match rate above.
+    report["archive_capture"] = await pinnacle_archive_capture_by_sport(session)
+    return report
 
 
 @router.post("/events/{event_id}/result", dependencies=[Depends(require_dashboard_auth)])

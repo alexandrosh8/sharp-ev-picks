@@ -948,6 +948,50 @@ async def shadow_match_rate_outcomes(
     return outcomes
 
 
+async def pinnacle_archive_capture_by_sport(
+    session: AsyncSession, *, horizon_days: int = 7
+) -> list[dict[str, object]]:
+    """Per-arcadia-sport upcoming-fixture counts: how many fixtures the Pinnacle
+    sharp-close archive has captured vs how many we scraped, for kickoffs in the
+    next ``horizon_days``.
+
+    Unlike the pick-based match rate (which only surfaces sports that produce
+    picks), this covers EVERY arcadia sport — tennis and american_football
+    included — via a cheap COUNT, no matcher. It lets the dashboard show that the
+    archive captures all four sports, not only the pick sports. Read-only
+    diagnostic; attaches nothing and changes no pick.
+    """
+    from app.resolution.shadow import ARCADIA_SPORTS, arcadia_base_sport
+
+    now = datetime.now(tz=UTC)
+    until = now + timedelta(days=horizon_days)
+    rows = (
+        await session.execute(
+            select(Sport.key, func.count(Event.id))
+            .join(Event, Event.sport_id == Sport.id)
+            .where(
+                Event.starts_at.is_not(None),
+                Event.starts_at >= now,
+                Event.starts_at <= until,
+            )
+            .group_by(Sport.key)
+        )
+    ).all()
+    counts = {key: int(n) for key, n in rows}
+    return [
+        {
+            "sport": base,
+            "captured": counts.get(f"pinnacle_{base}", 0),
+            "scraped": sum(
+                n
+                for key, n in counts.items()
+                if not key.startswith("pinnacle_") and arcadia_base_sport(key) == base
+            ),
+        }
+        for base in sorted(ARCADIA_SPORTS)
+    ]
+
+
 PickPersistOutcome = Literal["inserted", "upgraded", "duplicate"]
 
 
