@@ -1,5 +1,32 @@
 # Decisions Log
 
+- 2026-06-20 (/goal correctness review + sharp-anchor-at-pick-time — local main,
+  968 green) — 5-agent review (Explore x4 + research) answered the user's audit:
+  (1) **Picks were CONSENSUS-anchored, NOT sharp** — run_value_pipeline only saw
+  OddsPortal soft books (Pinnacle absent there, Betfair in a skipped section);
+  Betfair/Pinnacle archives were consumed ONLY at settlement for CLV. So live
+  picks ran a WEAKER variant than the validated Pinnacle-anchored backtest. FIX:
+  `VALUE_SHARP_ANCHOR_FROM_ARCHIVES` (default OFF) — PipelineDeps.sharp_anchor_loader
+  merges the captured free Betfair (EXACT ref) + Pinnacle ARCADIA (STRICT match),
+  re-keyed to each scraped event, into the anchor set at pick time (anchor only;
+  the scrape is what's persisted). clv_trueup.build_sharp_anchor_loader +
+  resolve_betfair_back_snaps extracted; reuses the SAME resolve path as the
+  settlement close (no new false-match surface); isolated try/except so picking
+  never breaks. Tested (soft->consensus vs +Betfair->sharp). (2) **Team matching
+  is SOUND** — soccer/basketball false-negatives only (the ~37% structural alias
+  gap, not a bug); Betfair EXACT-ref safe; tennis Pinnacle resolve is ordered=True
+  (conservative — misses reversed-order tennis, but NO false-positive; tennis CLV
+  is unvalidatable anyway so low impact; the reviewer's "false-positive" framing
+  was inaccurate for the current code). (3) **Markets** — all configured reach
+  picks EXCEPT Asian Handicap (scraped but deliberately not wired; ah_bridge.py
+  complete but needs a backtest first); no silent drops. (4) **Runtime CLEAN** —
+  app live-verified (only the intentional xgboost upstream notice; 0 JS console
+  errors; OddsHarvester 0.3.0 patch-guarded; httpx silenced). (5) **Free
+  historical data CONFIRMED ABSENT** for NBA/tennis/NFL with Pinnacle open+close
+  — football works only via football-data.co.uk's PSH+PSCH pair; the repo the user
+  recalled is marcoblume/pinnacle.data (real Pinnacle but MLB+election ONLY).
+  Dashboard: mobile+PC+tablet screenshot-verified (720->860 card breakpoint).
+
 - 2026-06-20 (/goal multi-sport high-EV optimization — IMPLEMENTED, branch
   feat/clv-close-provenance, all local) — realized the ESPN auto-settlement
   decision below + more, full suite 967 green, ruff/mypy/safety clean each step:
