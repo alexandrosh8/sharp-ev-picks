@@ -1,5 +1,29 @@
 # Decisions Log
 
+- 2026-06-20 (RESULTS-tab merge + auto-settlement + live sharp-anchor verified +
+  goal audit — local main, 974 green) — (1) **Sharp anchor ENABLED + live-proven**:
+  set VALUE*SHARP_ANCHOR_FROM_ARCHIVES=true in .env; live run logged "merged 93
+  free sharp-anchor snapshot(s)" -> "3 premium picks, 2 volume" — picks now anchor
+  on the free Betfair/Pinnacle sharp price, not consensus. (2) **CLOSED+SETTLED ->
+  one RESULTS tab** (user chose merge): inResultsTab = kicked-off OR settled;
+  reuses the settled column layout (settledView = STATUS_TAB==="results"); cellResult/
+  Score/Pnl fall back to provisional*\*; cellStatus drops the CLOSED badge + the
+  manual settle button. Scorecard = W-L-P + %beat-close + mean CLV (ROI stays in
+  the header; stake never surfaced — test_dashboard_renders_confidence_stars
+  forbids recommended_stake_amount in the page). (3) **Auto-settlement, no manual**:
+  outcomes.provisional_result() grades a kicked-off pick from the SCRAPED score
+  (read-time, RESULTS tab); engine.\_load_scraped_finals + settle_from_scraped_scores
+  (default ON) RECORDS it — minor leagues with no feed auto-settle from the score
+  on the pick's OWN event (exact name match, no cross-source risk). Feed/ESPN take
+  precedence; feed outage still warns. (4) **arcadia NFL warning** -> warn-once per
+  sport (off-season spam killed). (5) **calibration**: added ignorance score (bits
+  = log_loss/ln2, Good 1952) beside Brier; RPS deliberately skipped for the binary
+  pick-conditional report (=Brier for 2 outcomes). (6) **10-agent goal audit**:
+  9/10 DONE + 1 PARTIAL (calibration metrics) NOW CLOSED -> all original-goal
+  components verified DONE with file/commit evidence; the "OFF by default" notes are
+  intended conservative defaults, not gaps. SCREENSHOT-VERIFIED RESULTS tab. 19
+  commits ahead of origin, NOT pushed.
+
 - 2026-06-20 (/goal correctness review + sharp-anchor-at-pick-time — local main,
   968 green) — 5-agent review (Explore x4 + research) answered the user's audit:
   (1) **Picks were CONSENSUS-anchored, NOT sharp** — run_value_pipeline only saw
