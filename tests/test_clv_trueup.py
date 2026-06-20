@@ -277,6 +277,52 @@ async def test_offwindow_open_picks_revalidated_via_match_links(factory) -> None
         assert pick.revalidated_at is not None
 
 
+async def test_capture_finished_scores_writes_score_for_settlement(factory) -> None:  # type: ignore[no-untyped-def]
+    # A FINISHED, still-open pick in a league with no results feed: re-scraping
+    # its match page captures the final score -> Event.scraped_* -> auto-settle
+    # (no manual entry). POST-kickoff + score-only (never re-prices).
+    from datetime import timedelta
+
+    from app.clv_trueup import capture_finished_scores
+    from app.ingestion.base import EventDirectory
+    from app.storage.models import Event
+
+    event_id = "https://www.oddsportal.com/football/australia/npl-wa/home-fc-vs-away-fc/ZZ2/"
+    async with factory() as session:
+        from sqlalchemy import update as sa_update
+
+        await session.execute(
+            sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+        )
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=2)),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    directory = EventDirectory()
+
+    class ResultLoader(FakeLoader):
+        async def fetch_match_odds(self, sport_key, match_links, markets=None):  # type: ignore[no-untyped-def]
+            for ref in match_links:  # simulate scraping the FINISHED match page
+                directory.register(
+                    ref,
+                    EventTeams(home="Home FC", away="Away FC", home_score=2, away_score=1),
+                )
+            return []
+
+    written = await capture_finished_scores(ResultLoader([]), factory, directory, "soccer", now=NOW)
+    assert written == 1
+    async with factory() as session:
+        ev = await session.scalar(select(Event).where(Event.external_ref == event_id))
+        assert ev is not None
+        assert ev.scraped_home_score == 2
+        assert ev.scraped_away_score == 1
+
+
 async def test_offwindow_skips_picks_already_covered_by_cycle(factory) -> None:  # type: ignore[no-untyped-def]
     from datetime import timedelta
 

@@ -418,6 +418,18 @@ def build_scheduler(
             return
         from app.settlement.engine import run_settlement_cycle
 
+        # FIRST capture final scores for finished, still-open picks from their
+        # match pages (leagues with no free results feed) so they auto-settle
+        # THIS cycle — no manual entry. OddsPortalLoader only; others no-op.
+        if settings.settle_from_scraped_scores and loader is not None and directory is not None:
+            from app.clv_trueup import capture_finished_scores
+
+            for sport_key in sport_keys:
+                try:
+                    await capture_finished_scores(loader, session_factory, directory, sport_key)
+                except Exception as exc:
+                    logger.error("results scrape failed for %s: %s", sport_key, type(exc).__name__)
+
         try:
             await run_settlement_cycle(
                 http_client,

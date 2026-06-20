@@ -392,6 +392,89 @@ async def revalidate_offwindow_picks(
     return await revalidate_open_picks(session_factory, snapshots, devig_method)
 
 
+#: How far back to re-scrape finished, still-open picks for their final score.
+#: Bounds the backlog so a long-dead link can't keep burning scrape slots.
+RESULTS_SCRAPE_WINDOW = timedelta(days=3)
+#: Cap finished-score scrapes per cycle so one backlog can't drive 100s of
+#: browser pages at once; the un-scored remainder drains over the next cycles.
+RESULTS_SCRAPE_MAX_PER_CYCLE = 40
+
+
+async def capture_finished_scores(
+    loader: OddsLoader,
+    session_factory: "async_sessionmaker",
+    directory: EventDirectory,
+    sport_key: str,
+    now: datetime | None = None,
+) -> int:
+    """Re-scrape FINISHED, still-open picks' OddsPortal match pages to capture
+    their final SCORE (Event.scraped_*), so leagues with no free results feed
+    auto-settle (settle_from_scraped_scores) with NO manual entry. The odds
+    revalidation path stops at kickoff, so finished games are never otherwise
+    re-fetched — this is the missing post-kickoff score pass.
+
+    Unlike revalidate_offwindow_picks this NEVER re-prices (post-match odds are
+    stale): it only reads the score the scrape registered in `directory` and
+    writes it via a guarded UPDATE (scraped_home_score IS NULL — never clobbers
+    an existing score). Requires fetch_match_odds (OddsPortalLoader); other
+    loaders skip. Returns events whose score was written.
+    """
+    fetch = getattr(loader, "fetch_match_odds", None)
+    if fetch is None:
+        return 0
+    now = now or datetime.now(tz=UTC)
+    async with session_factory() as session:
+        refs = (
+            (
+                await session.execute(
+                    select(Event.external_ref)
+                    .join(Pick, Pick.event_id == Event.id)
+                    .where(
+                        Pick.status == "alerted",
+                        Event.starts_at.is_not(None),
+                        Event.starts_at < now,
+                        Event.starts_at > now - RESULTS_SCRAPE_WINDOW,
+                        Event.scraped_home_score.is_(None),
+                    )
+                    .distinct()
+                    .limit(RESULTS_SCRAPE_MAX_PER_CYCLE)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    segment_for = getattr(loader, "sport_segment", None)
+    segment = segment_for(sport_key) if callable(segment_for) else None
+    links = [r for r in refs if segment is None or f"/{segment}/" in r]
+    if not links:
+        return 0
+    await fetch(sport_key, links)  # registers final scores in `directory`
+    written = 0
+    async with session_factory() as session:
+        for ref in links:
+            teams = directory.lookup(ref)
+            if teams is None or teams.home_score is None or teams.away_score is None:
+                continue
+            res = await session.execute(
+                update(Event)
+                .where(
+                    Event.external_ref == ref,
+                    Event.scraped_home_score.is_(None),  # never clobber a recorded score
+                )
+                .values(
+                    scraped_home_score=teams.home_score,
+                    scraped_away_score=teams.away_score,
+                )
+            )
+            written += res.rowcount or 0
+        await session.commit()
+    if written:
+        logger.info(
+            "results scrape %s: captured %d final score(s) for settlement", sport_key, written
+        )
+    return written
+
+
 # --- closing-line capture from our OWN odds_snapshots ------------------------
 # Scrape-coverage gate for the snapshot close: the EVENT's last pre-kickoff
 # snapshot must be at most this old at kickoff. This guards events that FELL
