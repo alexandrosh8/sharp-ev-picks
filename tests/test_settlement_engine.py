@@ -18,7 +18,7 @@ from app.settlement.engine import (
     settle_open_picks,
 )
 from app.settlement.results import FinalScore, ScoreBook
-from app.storage.models import ManualBetLog, Pick, ResultTracking
+from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import persist_pick
 
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
@@ -331,6 +331,70 @@ async def test_run_settlement_cycle_end_to_end(factory) -> None:  # type: ignore
         )
         assert row is not None
         assert row.outcome == "won"
+
+
+def _nba_final(home: str, away: str, hs: int, a_s: int, d) -> dict:  # type: ignore[no-untyped-def]
+    return {
+        "events": [
+            {
+                "date": d.isoformat() + "T23:00Z",
+                "competitions": [
+                    {
+                        "status": {"type": {"name": "STATUS_FINAL", "completed": True}},
+                        "competitors": [
+                            {
+                                "homeAway": "home",
+                                "score": str(hs),
+                                "winner": hs > a_s,
+                                "team": {"displayName": home},
+                            },
+                            {
+                                "homeAway": "away",
+                                "score": str(a_s),
+                                "winner": a_s > hs,
+                                "team": {"displayName": away},
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+async def test_run_settlement_cycle_auto_settles_basketball_from_espn(factory) -> None:  # type: ignore[no-untyped-def]
+    # The CLOSED-tab auto-result win: a basketball pick (no free CSV feed)
+    # settles from ESPN scores through the SAME cycle, no manual entry.
+    home, away = "Philadelphia 76ers", "Houston Rockets"
+    async with factory() as session:
+        teams = EventTeams(home=home, away=away, league="nba", starts_at=KICKOFF)
+        pick = make_pick("evt-bball-espn", market=Market.H2H, selection=home).model_copy(
+            update={"sport": "basketball", "event": f"{home} vs {away}"}
+        )
+        assert await persist_pick(session, pick, teams, "value", "test-v")
+        await session.commit()
+
+    nba = _nba_final(home, away, 124, 115, KICKOFF.date())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "basketball/nba" in request.url.path:
+            return httpx.Response(200, json=nba)
+        return httpx.Response(404)  # no soccer CSV; other ESPN feeds empty
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        settled = await run_settlement_cycle(client, factory, slugs=[], seasons=[], now=NOW)
+    assert settled == 1
+    async with factory() as session:
+        row = await session.scalar(
+            select(ResultTracking)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .where(Event.external_ref == "evt-bball-espn")
+        )
+        assert row is not None
+        assert row.outcome == "won"  # 124-115 home win, selection = home
+        assert row.home_score == 124
+        assert row.away_score == 115
 
 
 async def test_settle_event_picks_settles_all_open_picks_of_event(session) -> None:  # type: ignore[no-untyped-def]

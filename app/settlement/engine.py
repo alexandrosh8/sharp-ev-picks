@@ -289,10 +289,10 @@ async def run_settlement_cycle(
     the settlement-time snapshot close must all speak one devig.
     """
     now = now or datetime.now(tz=UTC)
-    if devig_method is None:
-        from app.config import get_settings  # composition-root parity, lazy
+    from app.config import get_settings  # composition-root parity, lazy
 
-        settings = get_settings()
+    settings = get_settings()
+    if devig_method is None:
         devig_method = (
             DevigMethod(settings.value_devig)
             if settings.pick_strategy == "value"
@@ -304,6 +304,15 @@ async def run_settlement_cycle(
         await void_stale_null_kickoff_picks(session, now)
         await session.commit()
     scores = await load_scores(client, slugs, seasons, on_or_after=(now - SCORE_WINDOW).date())
+    # ESPN free scores add basketball / NFL / tennis auto-settlement (soccer
+    # already uses the football-data CSV feeds above). Read-only SCORES only —
+    # ESPN odds are soft and are NEVER used as a close.
+    if settings.espn_settle_enabled:
+        from app.ingestion.espn_scores import load_espn_scores
+
+        espn_sports = [s.strip() for s in settings.espn_settle_sports.split(",") if s.strip()]
+        espn_dates = [now.date() - timedelta(days=i) for i in range(settings.espn_settle_days)]
+        scores = [*scores, *await load_espn_scores(client, espn_sports, espn_dates)]
     if not scores:
         logger.error("settle_results: results providers returned no scores — nothing settled")
         return 0

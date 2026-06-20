@@ -568,6 +568,22 @@ class Settings(BaseSettings):
     # only fills the gap. Requires BETFAIR_EXCHANGE_ENABLED so a close exists.
     clv_use_betfair_exchange: bool = False
 
+    # --- ESPN free results auto-settlement (read-only SCORES, never odds) ----
+    # ESPN's public site API gives final scores for basketball / NFL / tennis
+    # with no key (app/ingestion/espn_scores.py), so the CLOSED tab auto-shows
+    # the result + auto-calcs ROI for those sports too (soccer already settles
+    # from football-data CSVs). Scores/fixtures ONLY — ESPN odds are soft and
+    # are NEVER used as a close. On by default; harmless when a sport has no
+    # picks (the feed is queried but nothing matches).
+    espn_settle_enabled: bool = True
+    # csv of warehouse sport keys to fetch ESPN scores for (see
+    # espn_scores.SPORT_ESPN_SOURCES). Soccer is intentionally absent.
+    espn_settle_sports: str = "basketball,american_football,tennis"
+    # Days back to query ESPN each cycle (today .. today-N+1). Picks settle
+    # within hours of kickoff; this bounds the catch-up window + request count
+    # (days x feeds per cycle).
+    espn_settle_days: int = Field(default=4, ge=1)
+
     @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":
         if self.auto_betting or self.bet_execution_enabled:
