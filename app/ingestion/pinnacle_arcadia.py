@@ -744,8 +744,17 @@ class PinnacleArcadiaCapture:
                 raw_matchups = await self._client.fetch_matchups(sport_id)
                 raw_markets = await self._client.fetch_straight_markets(sport_id)
             except (httpx.HTTPError, PinnacleArcadiaError) as exc:
-                logger.warning(
-                    "pinnacle arcadia fetch failed for %s: %s", sport, type(exc).__name__
+                # A single sport failing to price is EXPECTED when discovery is
+                # unavailable (live_ids is None) and the sport is simply out of
+                # season / hidden upstream (e.g. NFL in June) — INFO, not a noisy
+                # per-cycle WARNING. With discovery available the sport WAS listed
+                # as live, so a failure here is genuinely unexpected -> WARNING.
+                level = logging.WARNING if live_ids is not None else logging.INFO
+                logger.log(
+                    level,
+                    "pinnacle arcadia: no data for %s this cycle (%s)",
+                    sport,
+                    type(exc).__name__,
                 )
                 continue
             matchups = parse_matchups(raw_matchups, now=now, horizon_end=horizon_end)
