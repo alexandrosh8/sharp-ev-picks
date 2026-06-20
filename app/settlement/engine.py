@@ -25,7 +25,7 @@ from sqlalchemy.orm import aliased
 from app.probabilities.devig import DevigMethod
 from app.schemas.base import Outcome
 from app.settlement.outcomes import pick_pnl, pick_roi, settle_selection
-from app.settlement.results import ScoreBook, load_scores
+from app.settlement.results import FinalScore, ScoreBook, load_scores
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking, Team
 
 if TYPE_CHECKING:
@@ -267,6 +267,47 @@ async def _settle_one(
     return True
 
 
+async def _load_scraped_finals(session: AsyncSession, now: datetime) -> list[FinalScore]:
+    """FinalScore rows from EVENTS that carry an OddsPortal-scraped final score,
+    for still-open picks whose match has kicked off. Lets leagues with no free
+    results feed AUTO-settle (no manual entry) from the score already fetched at
+    scrape time. The score is on the pick's OWN event, so the ScoreBook matches
+    it exactly by the same team names — no cross-source name risk."""
+    home_t, away_t = aliased(Team), aliased(Team)
+    rows = (
+        await session.execute(
+            select(
+                home_t.name,
+                away_t.name,
+                Event.starts_at,
+                Event.scraped_home_score,
+                Event.scraped_away_score,
+            )
+            .join(Pick, Pick.event_id == Event.id)
+            .join(home_t, Event.home_team_id == home_t.id)
+            .join(away_t, Event.away_team_id == away_t.id)
+            .where(
+                Pick.status == "alerted",
+                Event.scraped_home_score.is_not(None),
+                Event.scraped_away_score.is_not(None),
+                Event.starts_at.is_not(None),
+                Event.starts_at < now,
+            )
+            .distinct()
+        )
+    ).all()
+    return [
+        FinalScore(
+            home_team=h,
+            away_team=a,
+            match_date=ko.date(),
+            home_score=int(hs),
+            away_score=int(as_),
+        )
+        for h, a, ko, hs, as_ in rows
+    ]
+
+
 async def run_settlement_cycle(
     client: httpx.AsyncClient,
     session_factory: "async_sessionmaker",
@@ -313,8 +354,23 @@ async def run_settlement_cycle(
         espn_sports = [s.strip() for s in settings.espn_settle_sports.split(",") if s.strip()]
         espn_dates = [now.date() - timedelta(days=i) for i in range(settings.espn_settle_days)]
         scores = [*scores, *await load_espn_scores(client, espn_sports, espn_dates)]
+    # Auto-settle from the OddsPortal-scraped final score too (no manual entry):
+    # the score was already fetched at scrape time and lives on the pick's own
+    # event. Feed/ESPN scores are listed first, so they take precedence in the
+    # ScoreBook; scraped scores cover the leagues no free feed reaches.
+    feed_count = len(scores)
+    if settings.settle_from_scraped_scores:
+        async with session_factory() as session:
+            scraped = await _load_scraped_finals(session, now)
+        scores = [*scores, *scraped]
+        if scraped and feed_count == 0:
+            logger.warning(
+                "settle_results: result feeds returned nothing — settling %d game(s) "
+                "from scraped final scores",
+                len(scraped),
+            )
     if not scores:
-        logger.error("settle_results: results providers returned no scores — nothing settled")
+        logger.error("settle_results: no scores from any source — nothing settled")
         return 0
     async with session_factory() as session:
         settled = await settle_open_picks(

@@ -600,6 +600,12 @@ class Settings(BaseSettings):
     # within hours of kickoff; this bounds the catch-up window + request count
     # (days x feeds per cycle).
     espn_settle_days: int = Field(default=4, ge=1)
+    # Also auto-settle from the OddsPortal-SCRAPED final score (Event.scraped_*),
+    # so leagues with no free results feed (minor soccer etc.) settle themselves
+    # with NO manual entry — the score was already fetched at scrape time, and it
+    # lives on the pick's OWN event so settlement matches it exactly (no
+    # cross-source name risk). Feed/ESPN scores still take precedence. Default ON.
+    settle_from_scraped_scores: bool = True
 
     # Opt-in EXPERIMENTAL picks for UNVALIDATED sports (tennis, american_football).
     # OFF by default (committed) — these sports have not cleared the > 2 SE

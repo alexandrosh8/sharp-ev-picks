@@ -397,6 +397,41 @@ async def test_run_settlement_cycle_auto_settles_basketball_from_espn(factory) -
         assert row.away_score == 115
 
 
+async def test_run_settlement_cycle_auto_settles_from_scraped_score(factory) -> None:  # type: ignore[no-untyped-def]
+    # No free results feed reaches this minor league, but OddsPortal scraped the
+    # final score after the match -> it AUTO-settles from Event.scraped_* through
+    # the same cycle, no manual entry (settle_from_scraped_scores).
+    home, away = "Balcatta SC", "Perth Azzurri"
+    async with factory() as session:
+        teams = EventTeams(home=home, away=away, league="npl-wa", starts_at=KICKOFF)
+        pick = make_pick("evt-scraped", market=Market.H2H, selection=home).model_copy(
+            update={"sport": "soccer", "event": f"{home} vs {away}"}
+        )
+        assert await persist_pick(session, pick, teams, "value", "test-v")
+        ev = await session.scalar(select(Event).where(Event.external_ref == "evt-scraped"))
+        ev.scraped_home_score = 2  # OddsPortal scraped the final score post-match
+        ev.scraped_away_score = 1
+        await session.commit()
+
+    # every feed 404s + ESPN empty -> the scraped score is the only source
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(404))
+    ) as client:
+        settled = await run_settlement_cycle(client, factory, slugs=[], seasons=[], now=NOW)
+    assert settled == 1
+    async with factory() as session:
+        row = await session.scalar(
+            select(ResultTracking)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .where(Event.external_ref == "evt-scraped")
+        )
+        assert row is not None
+        assert row.outcome == "won"  # 2-1 home win, selection = home
+        assert row.home_score == 2
+        assert row.away_score == 1
+
+
 async def test_settle_event_picks_settles_all_open_picks_of_event(session) -> None:  # type: ignore[no-untyped-def]
     pick = await seed_pick(session, "evt-manual-1")  # totals Over 2.5
     teams = EventTeams(home=HOME, away=AWAY, league="test-league-settlement", starts_at=KICKOFF)
