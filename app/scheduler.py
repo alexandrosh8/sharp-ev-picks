@@ -182,6 +182,10 @@ def build_scheduler(
     # Sport keys that scrape for the AVAILABLE GAMES view only (no picks/
     # alerts) — populated by the oddsportal branch when tennis is enabled.
     visibility_only_sports: frozenset[str] = frozenset()
+    # Unvalidated sports promoted to EXPERIMENTAL picks (volume/shadow tier only,
+    # never alerted) when ENABLE_UNVALIDATED_PICKS is on; else they stay
+    # visibility-only. Passed to PipelineDeps.experimental_sports.
+    experimental_sports: frozenset[str] = frozenset()
 
     if settings.odds_source == "oddsportal":
         directory = EventDirectory()
@@ -205,7 +209,10 @@ def build_scheduler(
             config["tennis"] = ("tennis", tennis_leagues)
             markets_by["tennis"] = tuple(_csv(settings.oddsportal_tennis_markets))
             sport_keys = (*sport_keys, "tennis")
-            visibility_only_sports = visibility_only_sports | frozenset({"tennis"})
+            if settings.enable_unvalidated_picks:
+                experimental_sports = experimental_sports | frozenset({"tennis"})
+            else:
+                visibility_only_sports = visibility_only_sports | frozenset({"tennis"})
         # American football / NFL is ALSO VISIBILITY-ONLY / UNVALIDATED (its
         # forward Pinnacle-close archive is only now being captured via arcadia
         # sport-id 15; held-out CLV cannot be evaluated until it accrues —
@@ -218,7 +225,10 @@ def build_scheduler(
             config["american_football"] = ("american-football", nfl_leagues)
             markets_by["american_football"] = tuple(_csv(settings.oddsportal_nfl_markets))
             sport_keys = (*sport_keys, "american_football")
-            visibility_only_sports = visibility_only_sports | frozenset({"american_football"})
+            if settings.enable_unvalidated_picks:
+                experimental_sports = experimental_sports | frozenset({"american_football"})
+            else:
+                visibility_only_sports = visibility_only_sports | frozenset({"american_football"})
         loader = OddsPortalLoader(
             directory=directory,
             leagues_by_sport_key=config,
@@ -340,8 +350,10 @@ def build_scheduler(
             value_policy=value_policy(settings),
             value_filter=value_filter,
             value_ml_filter_enabled=ml_filter_enforced,
-            # tennis (if enabled) is scraped for visibility only — no picks
+            # tennis/NFL: visibility-only by default, or EXPERIMENTAL (volume/
+            # shadow picks, never alerted) when ENABLE_UNVALIDATED_PICKS is on.
             visibility_only_sports=visibility_only_sports,
+            experimental_sports=experimental_sports,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 

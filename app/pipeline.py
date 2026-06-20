@@ -288,6 +288,14 @@ class PipelineDeps:
     # alerts, and touches NO exposure ledger — they have not cleared the
     # doctrine CLV gate. Default empty: football/basketball are validated.
     visibility_only_sports: frozenset[str] = frozenset()
+    # EXPERIMENTAL sport keys (e.g. {"tennis", "american_football"}) when the
+    # operator opts in (ENABLE_UNVALIDATED_PICKS): these DO mint picks, but every
+    # pick is FORCED to the volume (shadow) tier — persisted + CLV-tracked + (via
+    # ESPN) auto-settled, yet NEVER alerted and NEVER reserving exposure, because
+    # the sport has not cleared the > 2 SE held-out CLV gate. Honest "give me
+    # picks for tennis/NFL" without claiming a validated edge. A sport is either
+    # visibility_only OR experimental, never both. Default empty.
+    experimental_sports: frozenset[str] = frozenset()
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
@@ -696,6 +704,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_stale = 0
     n_ml_demoted = 0
     n_major_demoted = 0
+    n_experimental = 0
     n_off_band = 0
     n_thin_books = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
@@ -768,6 +777,16 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     tier = "volume"
                     n_major_demoted += 1
                     major_note = " | non-major league: demoted to volume (shadow)"
+            # Experimental (unvalidated) sport: FORCE every pick to the volume
+            # (shadow) tier — never alerted, no exposure — regardless of edge.
+            # It is still persisted + CLV-tracked + (via ESPN) auto-settled so it
+            # builds its OWN forward evidence; it just never claims a validated
+            # edge until its held-out incremental CLV clears > 2 SE.
+            experimental_note = ""
+            if tier == "premium" and sport_key in deps.experimental_sports:
+                tier = "volume"
+                n_experimental += 1
+                experimental_note = " | UNVALIDATED sport: experimental (shadow) only"
             # Meta-model score AFTER the edge gate (meta-labeling: the
             # deterministic rule generates, the model only filters).
             ml_score = _score_value_candidate(
@@ -869,6 +888,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         else ""
                     )
                     + major_note
+                    + experimental_note
                     + ml_note
                 ),
                 tier=tier,
@@ -962,6 +982,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "value pipeline %s: major-league gate demoted %d premium candidate(s) to volume",
             sport_key,
             n_major_demoted,
+        )
+    if n_experimental:
+        # Experimental (unvalidated) sport: these would-be premium candidates were
+        # forced to the volume/shadow tier — surfaced + CLV-tracked, never alerted.
+        logger.info(
+            "value pipeline %s: UNVALIDATED sport — %d candidate(s) kept experimental (shadow)",
+            sport_key,
+            n_experimental,
         )
     if n_off_band:
         # VALUE_ODDS_BANDS intervention is never silent either: these

@@ -590,6 +590,15 @@ class Settings(BaseSettings):
     # (days x feeds per cycle).
     espn_settle_days: int = Field(default=4, ge=1)
 
+    # Opt-in EXPERIMENTAL picks for UNVALIDATED sports (tennis, american_football).
+    # OFF by default (committed) — these sports have not cleared the > 2 SE
+    # held-out CLV gate, and tennis has NO free closing line so it can never be
+    # CLV-validated. When ON, they DO mint picks, but every pick is forced to the
+    # volume (shadow) tier: surfaced + CLV-tracked + auto-settled (ESPN), yet
+    # NEVER alerted and NEVER reserving exposure. Honest "give me picks for
+    # tennis/NFL" without claiming a validated edge or guaranteed ROI.
+    enable_unvalidated_picks: bool = False
+
     @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":
         if self.auto_betting or self.bet_execution_enabled:

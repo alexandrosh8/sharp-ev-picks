@@ -155,6 +155,24 @@ async def test_major_league_gate_keeps_premium_in_major_league() -> None:
     assert LAST_POLL["soccer"]["picks"] == 1
 
 
+async def test_experimental_sport_forces_premium_pick_to_volume() -> None:
+    # An experimental (unvalidated) sport mints picks but every one is FORCED to
+    # the volume/shadow tier: persisted + CLV-tracked, never alerted, no exposure
+    # — honest "picks for tennis/NFL" without claiming a validated edge.
+    from dataclasses import replace
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = replace(
+        make_deps(sink, FakeLoader(market_snapshots())),
+        experimental_sports=frozenset({"soccer"}),
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # experimental sport is never alerted
+    assert LAST_POLL["soccer"]["picks"] == 0  # n_premium == 0 (forced to volume)
+
+
 async def test_major_league_gate_disabled_keeps_all_premium() -> None:
     # Empty major_leagues = gate OFF: the obscure-league pick still alerts
     # (current behavior, the non-breaking default).
