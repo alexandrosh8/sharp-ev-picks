@@ -34,11 +34,14 @@ jobs:
       - name: Tests
         run: uv run pytest -q
 
+      # Pin ruff so CI formatting matches local exactly — an unpinned `uvx ruff`
+      # resolves whatever version the runner cached, which silently drifts from
+      # the dev's ruff and fails format-check on identical code.
       - name: Lint
-        run: uvx ruff check app tests
+        run: uvx ruff@0.15.18 check app tests
 
       - name: Format check
-        run: uvx ruff format --check app tests
+        run: uvx ruff@0.15.18 format --check app tests
 
       - name: Types
         run: uv run mypy app

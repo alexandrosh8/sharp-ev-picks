@@ -241,6 +241,12 @@ def _loader_matches_found(loader: OddsLoader, sport_key: str) -> int | None:
     return None
 
 
+#: Pick-time sharp-anchor injector (PipelineDeps.sharp_anchor_loader): returns
+#: extra OddsSnapshotIn rows (captured free Betfair/Pinnacle prices) to merge
+#: into the scrape before anchoring. One line so ruff format is version-stable.
+SharpAnchorLoader = Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[Sequence[OddsSnapshotIn]]]
+
+
 @dataclass
 class PipelineDeps:
     loader: OddsLoader
@@ -305,9 +311,7 @@ class PipelineDeps:
     # a free sharp price is available. Signature: async (sport_key, snapshots)
     # -> list[OddsSnapshotIn]. Wired at the composition root (app/scheduler.py)
     # behind VALUE_SHARP_ANCHOR_FROM_ARCHIVES; tests inject a stub.
-    sharp_anchor_loader: (
-        "Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[Sequence[OddsSnapshotIn]]] | None"
-    ) = None
+    sharp_anchor_loader: SharpAnchorLoader | None = None
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
