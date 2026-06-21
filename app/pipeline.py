@@ -651,7 +651,15 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
 
     No prediction model involved; deps.model is unused here.
     """
-    from app.edge.value import CONSENSUS_ANCHOR, anchor_type_for, find_value_bets_with_fair
+    from app.edge.value import (
+        CONSENSUS_ANCHOR,
+        SHARP_BOOKS,
+        anchor_type_for,
+        find_value_bets_with_fair,
+    )
+
+    # thin-coverage gate measures SOFT liquidity — exclude sharp/injected books
+    _sharp_norm = frozenset(b.lower() for b in SHARP_BOOKS)
 
     snapshots = await deps.loader.fetch_odds(sport_key)
     # `now` AFTER the fetch — see run_pick_pipeline comment (negative ages).
@@ -759,7 +767,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         # too few books is skipped wholesale — scaffolding for new lines/
         # divisions where thin coverage makes the anchor untrustworthy.
         min_books = min_books_for(deps.value_policy, str(market), detail)
-        if min_books and distinct_book_count(prices) < min_books:
+        if min_books and distinct_book_count(prices, exclude=_sharp_norm) < min_books:
             n_thin_books += 1
             continue
         anchored = fair.get((event_id, market, detail))

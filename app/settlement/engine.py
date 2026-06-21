@@ -354,33 +354,45 @@ async def run_settlement_cycle(
         espn_sports = [s.strip() for s in settings.espn_settle_sports.split(",") if s.strip()]
         espn_dates = [now.date() - timedelta(days=i) for i in range(settings.espn_settle_days)]
         scores = [*scores, *await load_espn_scores(client, espn_sports, espn_dates)]
-    # Auto-settle from the OddsPortal-scraped final score too (no manual entry):
-    # the score was already fetched at scrape time and lives on the pick's own
-    # event. Feed/ESPN scores are listed first, so they take precedence in the
-    # ScoreBook; scraped scores cover the leagues no free feed reaches.
-    feed_count = len(scores)
+    # FEED/ESPN scores are authoritative + clean -> settle FIRST. Scraped final
+    # scores (DOM-fragile) then settle ONLY the picks no feed reached, in an
+    # idempotent SECOND pass, so a scrape can never override a feed result
+    # (review 2026-06-21 — earlier the merged ScoreBook let scraped win on the
+    # pick's exact-name key).
+    feed_scores = scores
+    scraped: list[FinalScore] = []
     if settings.settle_from_scraped_scores:
         async with session_factory() as session:
             scraped = await _load_scraped_finals(session, now)
-        scores = [*scores, *scraped]
-        if scraped and feed_count == 0:
-            logger.warning(
-                "settle_results: result feeds returned nothing — settling %d game(s) "
-                "from scraped final scores",
-                len(scraped),
-            )
-    if not scores:
+    if not feed_scores and not scraped:
         logger.error("settle_results: no scores from any source — nothing settled")
         return 0
-    async with session_factory() as session:
-        settled = await settle_open_picks(
-            session,
-            ScoreBook(scores),
-            now,
-            devig_method=devig_method,
-            use_pinnacle_archive=use_pinnacle_archive,
-            use_betfair_exchange=use_betfair_exchange,
+    if not feed_scores and scraped:
+        logger.warning(
+            "settle_results: result feeds returned nothing — settling %d game(s) "
+            "from scraped final scores",
+            len(scraped),
         )
+    settled = 0
+    async with session_factory() as session:
+        if feed_scores:
+            settled += await settle_open_picks(
+                session,
+                ScoreBook(feed_scores),
+                now,
+                devig_method=devig_method,
+                use_pinnacle_archive=use_pinnacle_archive,
+                use_betfair_exchange=use_betfair_exchange,
+            )
+        if scraped:  # second pass: only feed-missed picks remain open (idempotent)
+            settled += await settle_open_picks(
+                session,
+                ScoreBook(scraped),
+                now,
+                devig_method=devig_method,
+                use_pinnacle_archive=use_pinnacle_archive,
+                use_betfair_exchange=use_betfair_exchange,
+            )
         await session.commit()
     return settled
 

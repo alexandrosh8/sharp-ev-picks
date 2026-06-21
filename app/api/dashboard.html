@@ -1662,7 +1662,12 @@
       // ones show their won/lost/awaiting result (graded from the auto-fetched
       // score), settled ones show the recorded outcome + P&L. One ledger.
       function inResultsTab(p) {
-        return hasStarted(p) || p.status === "settled";
+        // Open kicked-off (alerted) OR settled — NOT superseded (a superseded
+        // pick's settled successor still shows via the second clause), so the
+        // W-L / CLV ledger never double-counts a replaced pick (review 2026-06-21).
+        return (
+          (p.status === "alerted" && hasStarted(p)) || p.status === "settled"
+        );
       }
       function inUnverifiedTab(p) {
         return p.status === "alerted" && !hasStarted(p) && !inLiveTab(p);
@@ -2891,7 +2896,7 @@
             if (resd.length)
               parts.push(
                 resd.length +
-                  " settled · " +
+                  " graded · " +
                   w +
                   "W-" +
                   l +

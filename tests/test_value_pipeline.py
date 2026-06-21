@@ -889,17 +889,20 @@ async def test_odds_band_gate_passes_in_band_prices() -> None:
 
 
 async def test_min_books_floor_skips_thinly_quoted_markets() -> None:
-    # The fixture quotes h2h at exactly 2 books; a 3-book floor skips the
-    # whole market before any anchoring/scanning happens.
+    # The fixture quotes h2h at 1 SOFT book (Pinnacle is a sharp anchor — NOT
+    # counted toward soft liquidity); a 2-book floor skips the whole market
+    # before any anchoring/scanning happens.
     sink = RecordingSink()
     deps = make_deps(sink, FakeLoader(market_snapshots()))
-    deps.value_policy = ValuePolicy(min_books_by_market=(("h2h", 3),))
+    deps.value_policy = ValuePolicy(min_books_by_market=(("h2h", 2),))
     assert await run_value_pipeline(deps, "soccer") == []
     assert sink.sent == []
 
 
 async def test_min_books_floor_at_actual_count_changes_nothing() -> None:
+    # 1 soft book -> a 1-book floor is a no-op (the sharp anchor never counts
+    # toward the soft-liquidity gate).
     sink = RecordingSink()
     deps = make_deps(sink, FakeLoader(market_snapshots()))
-    deps.value_policy = ValuePolicy(min_books_by_market=(("h2h", 2),))
+    deps.value_policy = ValuePolicy(min_books_by_market=(("h2h", 1),))
     assert len(await run_value_pipeline(deps, "soccer")) == 1

@@ -131,12 +131,27 @@ def odds_in_bands(odds: float, bands: tuple[tuple[float, float], ...]) -> bool:
     return any(lo <= odds <= hi for lo, hi in bands)
 
 
-def distinct_book_count(prices: Mapping[str, Mapping[str, float]]) -> int:
+def distinct_book_count(
+    prices: Mapping[str, Mapping[str, float]],
+    exclude: frozenset[str] = frozenset(),
+) -> int:
     """Distinct normalized bookmakers quoting ANY selection of one market.
 
     Union (not full-market intersection) deliberately: the knob is a
     liquidity proxy for "is this market priced widely enough to trust",
     while full-market completeness is already enforced by the anchor rules
     in app/edge/value.py.
+
+    `exclude` (normalized book names) is dropped from the count so the thin-
+    coverage gate measures SOFT liquidity only — injected sharp-anchor lines
+    (Pinnacle/Betfair) must not inflate it into passing the floor (review
+    2026-06-21).
     """
-    return len({book.strip().lower() for selection in prices.values() for book in selection})
+    return len(
+        {
+            norm
+            for selection in prices.values()
+            for book in selection
+            if (norm := book.strip().lower()) not in exclude
+        }
+    )
