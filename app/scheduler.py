@@ -53,19 +53,29 @@ from app.risk.exposure import DailyExposureLedger
 logger = logging.getLogger(__name__)
 
 
+#: Interval-poll CAPTURE jobs whose max-instances skip is BY DESIGN (the interval
+#: is a ceiling; an overrunning cycle coalesces the next slot). CRON jobs
+#: (settle_results / refit / snapshot / upstream_watch) are NOT here — a skip
+#: there is a real signal and stays a WARNING.
+_CONTINUOUS_POLL_JOBS = ("poll_odds", "capture_pinnacle_arcadia", "capture_betfair_exchange")
+
+
 class _PollSkipNoiseFilter(logging.Filter):
-    """Downgrade apscheduler's max-instances skip warning for poll_odds ONLY.
+    """Downgrade apscheduler's max-instances skip warning for the interval-poll
+    capture jobs (poll_odds, capture_pinnacle_arcadia, capture_betfair_exchange).
 
     The short interval + max_instances=1 + coalesce is the documented
-    continuous-polling design (see the poll_odds registration): while a
-    20-40 min scrape cycle runs, every interval slot is skipped by design.
-    Downgraded to INFO (not dropped) — the skip is the only scheduler-side
-    evidence of a HUNG poll cycle. Skips of any other job remain warnings.
+    continuous-polling design: while a long capture cycle runs, every interval
+    slot is skipped by design. Downgraded to INFO (not dropped) — the skip is the
+    only scheduler-side evidence of a HUNG cycle. Skips of any OTHER (cron) job
+    remain warnings.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        if "poll_odds" in msg and "maximum number of running instances reached" in msg:
+        if "maximum number of running instances reached" in msg and any(
+            job in msg for job in _CONTINUOUS_POLL_JOBS
+        ):
             record.levelno = logging.INFO
             record.levelname = "INFO"
             # The logger's level gate already passed at WARNING before filters

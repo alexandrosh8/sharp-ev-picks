@@ -59,11 +59,31 @@ def test_downgraded_skip_suppressed_under_warning_level(
     assert record.levelno == logging.INFO  # downgrade applied, emission denied
 
 
+@pytest.mark.parametrize("job", ["capture_betfair_exchange", "capture_pinnacle_arcadia"])
+def test_downgrades_interval_capture_skips_to_info(
+    scheduler_logger: logging.Logger, job: str
+) -> None:
+    # The interval CAPTURE jobs (betfair/arcadia) use the SAME continuous-poll
+    # coalesce design as poll_odds — their max-instances skip is by-design while a
+    # long cycle runs, not WARNING-worthy. (Real-time monitoring SNR: keep the
+    # benign skip at INFO so genuine warnings stand out.)
+    scheduler_logger.setLevel(logging.INFO)
+    record = _rec(
+        f'Execution of job "build_scheduler.<locals>.{job} (trigger: '
+        'interval[0:05:00], next run at: 2026-06-21 19:25:21 EEST)" '
+        "skipped: maximum number of running instances reached (1)"
+    )
+    assert _PollSkipNoiseFilter().filter(record)
+    assert record.levelno == logging.INFO
+
+
 def test_keeps_other_job_skips_and_other_warnings_at_warning(
     scheduler_logger: logging.Logger,
 ) -> None:
     scheduler_logger.setLevel(logging.WARNING)
     f = _PollSkipNoiseFilter()
+    # A CRON job (settle_results) is NOT continuous-poll — its skip is a real
+    # signal and must stay WARNING.
     other_skip = _rec(
         'Execution of job "settle_results" skipped: maximum number of running instances reached (1)'
     )
