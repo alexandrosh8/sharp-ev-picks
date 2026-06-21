@@ -25,6 +25,10 @@ dependencies = [
 [project.optional-dependencies]
 football = ["penaltyblog>=1.11"]
 nba = ["nba_api>=1.4"]
+# nflreadpy (nflverse, MIT): read-only NFL schedules/scores/CONSENSUS lines for
+# the screen-only NFL data spine (app/ingestion/nfl_data.py). Pulls polars +
+# pyarrow transitively; loaded in a worker thread, GET-only, never an order venue.
+nfl = ["nflreadpy>=0.1"]
 models = ["lightgbm>=4.3", "xgboost>=2.0"]
 # EXACT pin: app/ingestion/oddsportal.py patches six 0.3.0 internals at
 # runtime; _patch_upstream_quirks hard-fails on any other version.
