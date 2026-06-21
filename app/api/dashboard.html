@@ -1363,25 +1363,24 @@
       <section class="panels">
         <div class="evpanel" id="evidence-panel" style="display: none">
           <div class="evtitle" id="evidence-title">Live evidence</div>
-          <!-- plain-English guide to the stratified CLV table below -->
+          <!-- plain-English guide to the table below -->
           <div class="evhelp">
-            How to read this: each row is one <b>slice</b> of your settled picks
-            (by ML-score bucket, by tier, or by fair-value anchor). <b>n</b> =
-            picks in the slice · <b>n&nbsp;CLV</b> = how many have a
-            closing-line grade · <b>sw&nbsp;CLV</b>
-            = stake-weighted closing-line value (your price vs the de-vigged
-            close) ·
+            How to read this: each row groups your settled picks into a
+            <b>slice</b> and shows how that slice did. <b>picks</b> = number of
+            settled picks · <b>graded</b> = how many had a closing line to score
+            against · <b>CLV</b> = how much better your price was than the
+            closing line — the proven edge signal, positive&nbsp;=&nbsp;good ·
             <b>beat&nbsp;close</b> = share that beat the closing line ·
-            <b>ROI</b> = return on those picks. A slice with fewer than 50
-            graded picks shows “insufficient data” instead of a noisy estimate.
+            <b>ROI</b> = profit per unit staked. A slice with under 50 graded
+            picks shows “not enough data yet” instead of a noisy number.
           </div>
-          <table class="evtable" aria-label="Live evidence by stratum">
+          <table class="evtable" aria-label="Live evidence by slice">
             <thead>
               <tr>
-                <th>stratum</th>
-                <th>n</th>
-                <th>n CLV</th>
-                <th>sw CLV</th>
+                <th>slice</th>
+                <th>picks</th>
+                <th>graded</th>
+                <th>CLV</th>
                 <th>beat close</th>
                 <th>ROI</th>
               </tr>
@@ -2089,11 +2088,11 @@
         lg.className = "league";
         lg.textContent = p.league;
         m.append(name, lg);
-        // Multi-sport badge: soccer is the default (no badge); other sports get
-        // a chip. Tennis / American football are UNVALIDATED (experimental) — a
-        // warn-coloured "EXPERIMENTAL" tag, honest about the lack of a proven
-        // CLV edge (basketball is a validated pick source -> neutral info chip).
-        if (p.sport && !String(p.sport).startsWith("soccer")) {
+        // Sport badge on EVERY game (consistency — football was previously the
+        // unlabelled default). Tennis / American football are UNVALIDATED
+        // (experimental) — a warn-coloured "EXPERIMENTAL" tag, honest about the
+        // lack of a proven CLV edge; soccer/basketball are validated -> info chip.
+        if (p.sport) {
           const sportKey = String(p.sport);
           const exp =
             sportKey.startsWith("tennis") ||
@@ -3218,10 +3217,9 @@
         const tbody = $("evidence-rows");
         tbody.replaceChildren();
         $("evidence-title").textContent =
-          "Live evidence — " +
+          "Live evidence — how your " +
           ev.n_settled +
-          " settled picks · stake-wtd CLV by stratum · instrument for the " +
-          "VALUE_ML_FILTER flip";
+          " settled picks performed";
         // Below the floor EVERY stratum reads "insufficient data" — show one
         // clear accumulating line instead of a wall of identical rows. This
         // panel is an AGGREGATE CLV instrument; per-match detail is the SETTLED
@@ -3254,8 +3252,13 @@
           scored: "ML scored (no q* configured)",
           unscored: "unscored (out of model scope)",
         };
+        // Hide the model-score slice when nothing is actually scored (the only
+        // bucket is "unscored / out of model scope") — that is dev noise, not
+        // user signal; the overall number already lives in the PROOF OF EDGE
+        // banner and the by-tier / by-anchor slices below.
         const scoreKeys = Object.keys(ev.by_score || {});
-        if (scoreKeys.length) {
+        const meaningfulScore = scoreKeys.some((k) => k !== "unscored");
+        if (scoreKeys.length && meaningfulScore) {
           const open = evGroupRow(
             tbody,
             "score",
