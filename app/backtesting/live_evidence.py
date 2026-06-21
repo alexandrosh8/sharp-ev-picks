@@ -32,6 +32,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from app.backtesting.calibration import (
+    CalibrationObservation,
+    CalibrationReport,
+    calibration_report,
+)
+
 #: Below this many CLV observations a stratum is "insufficient" — the
 #: dashboard shows the state instead of point estimates.
 MIN_STRATUM_N = 50
@@ -122,6 +128,25 @@ def _score_bucket(score: float | None, q_star: float | None) -> str:
     return "score_ge_q" if score >= q_star else "score_lt_q"
 
 
+def meta_model_calibration(
+    rows: Sequence[SettledPickRow], *, min_n: int = MIN_STRATUM_N
+) -> CalibrationReport:
+    """Is the value-filter meta-model's P(beats close) CALIBRATED in production?
+
+    For every settled pick carrying BOTH a meta-model score and a realized
+    beat-close label, score `value_filter_score` (predicted P beat-close) against
+    the actual outcome. Well calibrated means a 0.7 reads as a 70% beat-close
+    rate. Diagnostic only — held-out CLV stays the staking arbiter (ADR-0017);
+    this closes with REAL production outcomes the loop the offline calibrator
+    bake-off opened on the trainer's holdout."""
+    observations = [
+        CalibrationObservation(fair_prob=r.value_filter_score, won=r.beat_close)
+        for r in rows
+        if r.value_filter_score is not None and r.beat_close is not None
+    ]
+    return calibration_report(observations, min_n=min_n)
+
+
 def live_evidence_report(
     rows: Sequence[SettledPickRow],
     *,
@@ -155,10 +180,21 @@ def live_evidence_report(
     # revalidation fallback). Always reported — n=0 honestly says "none yet".
     sharp_rows = [r for r in rows if r.sharp_close]
 
+    cal = meta_model_calibration(rows, min_n=min_n)
     return {
         "n_settled": len(rows),
         "q_star": ml_threshold,
         "min_n": min_n,
+        # Is the meta-model's P(beats close) calibrated against realized outcomes?
+        "meta_model_calibration": {
+            "n": cal.n,
+            "insufficient": cal.insufficient,
+            "log_loss": cal.log_loss,
+            "brier": cal.brier,
+            "ece": cal.ece,
+            "base_rate": cal.base_rate,
+            "mean_pred": cal.mean_pred,
+        },
         "by_score": {k: _stratum_stats(v, min_n) for k, v in sorted(by_score.items())},
         "by_tier": {k: _stratum_stats(v, min_n) for k, v in sorted(by_tier.items())},
         # by_anchor stratifies on the CREATION anchor (the consensus-fallback

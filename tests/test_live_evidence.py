@@ -13,6 +13,7 @@ from app.backtesting.live_evidence import (
     MIN_STRATUM_N,
     SettledPickRow,
     live_evidence_report,
+    meta_model_calibration,
 )
 
 
@@ -188,3 +189,38 @@ def test_empty_rows_yield_empty_but_valid_report() -> None:
 def test_non_finite_threshold_rejected() -> None:
     with pytest.raises(ValueError):
         live_evidence_report([], ml_threshold=math.nan)
+
+
+def test_meta_model_calibration_scores_score_vs_beat_close() -> None:
+    # value_filter_score is the predicted P(beat close); beat_close is the realized
+    # outcome. 0.7-scored picks beat close 70% of the time, 0.3-scored 30% -> the
+    # meta-model is well calibrated in production (low ECE).
+    rows = (
+        [row(score=0.7, beat=True) for _ in range(7)]
+        + [row(score=0.7, beat=False) for _ in range(3)]
+        + [row(score=0.3, beat=True) for _ in range(3)]
+        + [row(score=0.3, beat=False) for _ in range(7)]
+    )
+    rep = meta_model_calibration(rows, min_n=10)
+    assert rep.n == 20
+    assert rep.insufficient is False
+    assert rep.base_rate == pytest.approx(0.5)
+    assert rep.ece is not None and rep.ece < 0.1  # well calibrated
+
+
+def test_meta_model_calibration_excludes_rows_without_score_or_label() -> None:
+    # Only picks carrying BOTH a meta-model score and a realized beat-close label
+    # are scorable — a missing score or an unrevalidated pick is dropped.
+    rows = [
+        row(score=0.6, beat=True),
+        row(score=None, beat=True),  # no meta-model score
+        row(score=0.6, beat=None),  # never revalidated against a close
+    ]
+    rep = meta_model_calibration(rows, min_n=1)
+    assert rep.n == 1
+
+
+def test_meta_model_calibration_insufficient_below_min_n() -> None:
+    rep = meta_model_calibration([row(score=0.6, beat=True)], min_n=50)
+    assert rep.insufficient is True
+    assert rep.ece is None
