@@ -406,6 +406,8 @@ async def capture_finished_scores(
     directory: EventDirectory,
     sport_key: str,
     now: datetime | None = None,
+    window: timedelta | None = None,
+    limit: int | None = None,
 ) -> int:
     """Re-scrape FINISHED, still-open picks' OddsPortal match pages to capture
     their final SCORE (Event.scraped_*), so leagues with no free results feed
@@ -423,6 +425,8 @@ async def capture_finished_scores(
     if fetch is None:
         return 0
     now = now or datetime.now(tz=UTC)
+    window = window or RESULTS_SCRAPE_WINDOW  # wider = clear an older backlog
+    limit = limit or RESULTS_SCRAPE_MAX_PER_CYCLE
     async with session_factory() as session:
         refs = (
             (
@@ -433,11 +437,11 @@ async def capture_finished_scores(
                         Pick.status == "alerted",
                         Event.starts_at.is_not(None),
                         Event.starts_at < now,
-                        Event.starts_at > now - RESULTS_SCRAPE_WINDOW,
+                        Event.starts_at > now - window,
                         Event.scraped_home_score.is_(None),
                     )
                     .distinct()
-                    .limit(RESULTS_SCRAPE_MAX_PER_CYCLE)
+                    .limit(limit)
                 )
             )
             .scalars()

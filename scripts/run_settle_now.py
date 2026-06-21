@@ -7,6 +7,7 @@ Run: uv run python scripts/run_settle_now.py
 """
 
 import asyncio
+from datetime import timedelta
 
 import httpx
 
@@ -43,7 +44,10 @@ async def main() -> None:
     )
     for sk in config:
         try:
-            n = await capture_finished_scores(loader, session_factory, directory, sk)
+            # wider window + higher cap than the hourly job: one-time backlog clear
+            n = await capture_finished_scores(
+                loader, session_factory, directory, sk, window=timedelta(days=14), limit=120
+            )
             print(f"capture_finished_scores[{sk}] -> {n} score(s) written", flush=True)
         except Exception as exc:  # noqa: BLE001 - report + continue
             print(f"capture_finished_scores[{sk}] FAILED: {type(exc).__name__}", flush=True)
