@@ -3105,7 +3105,12 @@
             (clvPct >= 0 ? "+" : "") + clvPct.toFixed(1) + "%";
           clvEl.style.color = clvPct < 0 ? "var(--neg)" : "";
         }
-        renderEvidence(perf.live_evidence);
+        // Live-evidence panel removed from the dashboard (2026-06-21): it was a
+        // dev instrument (stratified CLV "for the VALUE_ML_FILTER flip") that read
+        // as jargon to users; the PROOF OF EDGE banner above carries the
+        // user-facing CLV/ROI/beat-close. The data still ships in /performance
+        // (perf.live_evidence) for any future use. The hidden #evidence-panel div
+        // is kept only as the picksFirst() layout anchor.
       }
 
       // --- live evidence panel -----------------------------------------------
