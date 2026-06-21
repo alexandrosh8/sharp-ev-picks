@@ -188,6 +188,18 @@ def test_unsupported_market_rejected_at_construction() -> None:
         )
 
 
+def test_push_bearing_over_under_lines_rejected() -> None:
+    # Integer/quarter totals carry a PUSH outcome (exact total) — direct devig is
+    # invalid; only half-lines (1.5, 2.5, …) are accepted (audit #6, 2026-06-21).
+    for bad in ("over_under_2", "over_under_2_25", "over_under_3_75"):
+        with pytest.raises(ValueError, match="half line"):
+            OddsPortalLoader(
+                directory=EventDirectory(),
+                leagues_by_sport_key={},
+                markets=("1x2", bad),
+            )
+
+
 def test_push_bearing_handicap_lines_rejected() -> None:
     # Integer/quarter AH lines carry PUSH outcomes (probs do not sum to 1) —
     # direct devig is invalid; only half-lines are accepted.

@@ -761,8 +761,9 @@ async def test_fallback_book_selected_by_effective_odds(factory) -> None:  # typ
         await session.commit()
 
     snaps = closing_snapshots(event_id)
-    # Raw 2.35 beats SoftBook's raw 2.30, but 5% commission nets it to
-    # 1 + 1.35*0.95 = 2.2825 < 2.30 -> SoftBook must win the fallback.
+    # Betfair Exchange (a SHARP book) is EXCLUDED from the re-price fallback
+    # entirely (audit #3) -> SoftBook wins regardless. (Even if it were eligible,
+    # 5% commission nets 2.35 to 2.2825 < 2.30, so SoftBook would still win.)
     snaps.append(
         OddsSnapshotIn(
             event_id=event_id,
@@ -782,6 +783,17 @@ async def test_fallback_book_selected_by_effective_odds(factory) -> None:  # typ
         assert pick.current_odds == Decimal("2.3000")  # NOT betfair's raw 2.35
         fair = float(pick.closing_fair_probability)
         assert float(pick.current_edge) == pytest.approx(fair - 1.0 / 2.30, abs=1e-4)
+
+
+def test_best_soft_book_excludes_sharp_anchor_books() -> None:
+    # audit #3: the re-price fallback must never land on a sharp/anchor book.
+    from app.clv_trueup import _best_soft_book
+
+    book, odds = _best_soft_book(
+        {"Pinnacle": 2.10, "SoftA": 1.95, "Betfair Exchange": 2.20, "SoftB": 1.90}
+    )
+    assert (book, odds) == ("SoftA", 1.95)  # best SOFT; sharp books excluded
+    assert _best_soft_book({"Pinnacle": 2.10, "Betfair Exchange": 2.20}) == (None, None)
 
 
 async def test_clv_log_uses_effective_fill_odds_for_exchange_picks(factory) -> None:  # type: ignore[no-untyped-def]

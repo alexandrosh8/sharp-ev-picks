@@ -26,7 +26,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import aliased
 
 from app.backtesting.clv import clv_log
-from app.edge.value import anchor_type_for, effective_odds
+from app.edge.value import SHARP_BOOKS, anchor_type_for, effective_odds
 from app.ingestion.base import EventDirectory, OddsLoader
 from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
@@ -40,6 +40,20 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = logging.getLogger(__name__)
+
+
+def _best_soft_book(books: dict[str, float]) -> tuple[str | None, float | None]:
+    """Best SOFT book by EFFECTIVE odds — sharp/anchor books (Pinnacle/Betfair/…)
+    excluded. The re-price fallback (when a pick's own book dropped the selection)
+    must never land on a sharp book: you cannot bet it, and its price beating its
+    own fair is not "still value" (audit #3). Mirrors value._best_other_book's
+    SHARP_BOOKS exclusion. Returns (None, None) when no soft book quotes it."""
+    sharp = {b.strip().lower() for b in SHARP_BOOKS}
+    soft = {b: o for b, o in books.items() if b.strip().lower() not in sharp}
+    if not soft:
+        return None, None
+    book = max(soft, key=lambda b: effective_odds(b, soft[b]))
+    return book, soft[book]
 
 
 async def revalidate_open_picks(
@@ -124,14 +138,15 @@ async def revalidate_open_picks(
             # "best" by EFFECTIVE odds, so selection agrees with the
             # effective-odds valuation below (and with pick-time selection in
             # app/edge/value.py).
+            current_book: str | None
+            current: float | None
             if pick.bookmaker in books:
                 current_book, current = pick.bookmaker, books[pick.bookmaker]
-            elif books:
-                current_book, current = max(
-                    books.items(), key=lambda kv: effective_odds(kv[0], kv[1])
-                )
             else:
-                current_book, current = None, None
+                # Pick's own (soft) book dropped the selection -> best remaining
+                # SOFT book, never a sharp/anchor (audit #3): re-pricing onto
+                # Pinnacle/Betfair would fake a "still value" verdict.
+                current_book, current = _best_soft_book(books)
             if current_book is not None and current is not None and current > 1.0:
                 pick.current_odds = Decimal(f"{current:.4f}")
                 # Record which book this price came from — normally the pick's
@@ -610,12 +625,13 @@ async def finalize_closing_from_snapshots(
         if str(market) == pick.market and pick.selection in prices:
             books = prices[pick.selection]
             break
+    close_odds: float | None
     if pick.bookmaker in books:
         close_odds = books[pick.bookmaker]
-    elif books:
-        _, close_odds = max(books.items(), key=lambda kv: effective_odds(kv[0], kv[1]))
-    else:  # unreachable when fair exists (the anchor priced the selection)
-        close_odds = None
+    else:
+        # best remaining SOFT close, never a sharp/anchor (audit #3) — and None
+        # when only sharp books quote it (no soft close to mark).
+        _, close_odds = _best_soft_book(books)
     pick.closing_fair_probability = Decimal(f"{fair:.6f}")
     pick.clv_log = Decimal(f"{clv:.6f}")
     pick.beat_close = clv > 0

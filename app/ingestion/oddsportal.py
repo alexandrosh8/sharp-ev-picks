@@ -125,8 +125,14 @@ def _validate_markets(markets: Sequence[str]) -> None:
                 raise ValueError(
                     f"asian handicap line must be a half line (±0.5, ±1.5, …), got: {m}"
                 )
-        if m.startswith("over_under_") and _line_from_key(m) is None:
-            raise ValueError(f"cannot parse totals line from: {m}")
+        if m.startswith("over_under_"):
+            line = _line_from_key(m)
+            if line is None:
+                raise ValueError(f"cannot parse totals line from: {m}")
+            if abs(line % 1.0) != 0.5:
+                # integer/quarter totals have a PUSH outcome -> direct devig is
+                # invalid; only half-lines (1.5, 2.5, …) settle cleanly.
+                raise ValueError(f"over/under line must be a half line (1.5, 2.5, …), got: {m}")
         if m.startswith("european_handicap_") and _line_from_key(m) is None:
             raise ValueError(f"cannot parse handicap line from: {m}")
 
