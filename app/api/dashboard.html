@@ -3906,7 +3906,12 @@
             const sels = r.selections || [];
             const dropped = sels.find((s) => s.dropped) || sels[0] || {};
             const tr = document.createElement("tr");
-            td(tr, r.kickoff_label || "");
+            // Kickoff: use the SAME local formatter as the other tabs (Cyprus tz,
+            // "Jun 25, 04:00") off the UTC field — not betmonitor's own label.
+            td(
+              tr,
+              r.kickoff_utc ? fmtLocal(r.kickoff_utc) : r.kickoff_label || "",
+            );
             // League cell: league name (minus the "Sport ·" prefix) + a sport
             // badge below it, matching how the other tabs surface the game type.
             const lc = document.createElement("td");
@@ -3920,7 +3925,21 @@
             tr.appendChild(lc);
             td(tr, r.match || "");
             td(tr, r.market || "");
-            td(tr, dropped.label || "");
+            // Dropped: resolve 1/X/2 to the actual side (home/Draw/away) from the
+            // match; Over/Under pass through. The bare code is meaningless alone.
+            const sides = (r.match || "").split("—");
+            const home = (sides[0] || "").trim();
+            const away = sides.slice(1).join("—").trim();
+            const lbl = dropped.label || "";
+            const droppedName =
+              lbl === "1"
+                ? home || lbl
+                : lbl === "2"
+                  ? away || lbl
+                  : lbl === "X"
+                    ? "Draw"
+                    : lbl;
+            td(tr, droppedName);
             // Odds cell: OPENING -> CURRENT (dropped) price, like the site.
             const oc = document.createElement("td");
             if (r.open_odds != null) {
@@ -4022,7 +4041,11 @@
       );
       $("f-game-sport").addEventListener("change", renderGames);
       $("f-game-search").addEventListener("input", renderGames);
-      $("refresh").addEventListener("click", load);
+      $("refresh").addEventListener("click", () => {
+        // Refresh whatever tab is showing — the DROPPING tab has its own feed.
+        if (STATUS_TAB === "dropping") loadDropping();
+        else load();
+      });
       // Optional dashboard auth: clear the session cookie server-side, then
       // land on the login page. Harmless when auth is OFF — /logout always
       // redirects to /login, which immediately bounces back to / .
