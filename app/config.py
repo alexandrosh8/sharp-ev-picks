@@ -165,6 +165,13 @@ class Settings(BaseSettings):
     app_env: str = "local"
     log_level: str = "INFO"
 
+    # --- Sentry error monitoring (opt-in; DISABLED unless a DSN is set) -----
+    # The DSN is a credential — set it in .env ONLY (never committed). Empty =
+    # off. Events are scrubbed of secrets before send (see app/observability.py).
+    sentry_dsn: str = ""
+    sentry_environment: str = ""  # falls back to app_env when empty
+    sentry_traces_sample_rate: float = 0.0  # 0.0 = errors only (no perf tracing)
+
     database_url: str = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
     redis_url: str = "redis://localhost:6380/0"
     # Mirrors docker-compose.yml's host-side app bind. It does not configure

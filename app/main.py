@@ -13,6 +13,7 @@ from app.api.auth import install_auth, set_active_credentials
 from app.api.routes import router
 from app.config import get_settings
 from app.database import create_engine, create_session_factory
+from app.observability import init_sentry
 from app.risk.exposure import DailyExposureLedger
 from app.scheduler import build_scheduler, seed_exposure_ledger
 from app.storage.repositories import load_dashboard_credentials
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()  # safety validator fires here, first
     logging.basicConfig(level=settings.log_level)
     _silence_url_logging()
+    init_sentry(settings)  # opt-in error monitoring; no-op without SENTRY_DSN
 
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)

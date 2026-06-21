@@ -18,6 +18,7 @@ dependencies = [
     "uvicorn>=0.30",
     "redis>=5.0",
     "tenacity>=8.3",
+    "sentry-sdk>=2.0",
 ]
 
 # Proven third-party engines used DIRECTLY (ADR-0011, user direction
