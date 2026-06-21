@@ -313,6 +313,7 @@ _ROW_EXTRACT_JS = r"""
   // so the pairing is never scrambled by duplicates. extract_back_quotes keeps
   // the leading len(outcomes) cells as BACK and discards the LAY tail.
   const out = [];
+  let anyReal = false;
   for (let c = 0; c < cells.length; c++) {
     let odd = null;
     let liq = null;
@@ -322,9 +323,16 @@ _ROW_EXTRACT_JS = r"""
       if (odd === null) { if (isOdd(t)) odd = t; }
       if (liq === null) { if (isLiq(t)) liq = t; }
     });
-    if (odd !== null) { out.push(odd); if (liq !== null) out.push(liq); }
+    // Emit ONE odds token per cell so an EMPTY cell (a suspended/no-price
+    // selection) keeps its POSITION. Skipping it shifts the home/draw/away
+    // pairing -> the wrong price maps to a selection (corrupt CLV, the cardinal
+    // sin). The '0' sentinel parses to None (<= 1.0), so extract_back_quotes
+    // drops it while the surviving selections stay aligned.
+    if (odd !== null) anyReal = true;
+    out.push(odd !== null ? odd : '0');
+    if (liq !== null) out.push(liq);
   }
-  if (out.length < 2) return null;
+  if (!anyReal) return null;  // closed/unhydrated market -> no real price yet
   return out;
 }
 """

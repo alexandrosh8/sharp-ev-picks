@@ -32,6 +32,7 @@ def test_defaults_are_safe_and_load() -> None:
         {"picks_only": False},
         {"manual_betting_only": False},
         {"read_only_market_data": False},
+        {"paper_trading": True},  # locked false — not a paper-trading system
     ],
 )
 def test_safety_flag_tampering_is_fatal(overrides: dict[str, object]) -> None:

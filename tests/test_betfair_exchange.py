@@ -189,6 +189,30 @@ def test_extract_back_quotes_two_way_outcomes() -> None:
     assert [q.designation for q in quotes] == ["home", "away"]
 
 
+def test_empty_back_cell_dropped_misaligns_selections() -> None:
+    # Bug #5 (audit 2026-06-21): if an EMPTY (suspended) BACK cell is dropped
+    # rather than position-padded, the pairing shifts and away's price wrongly
+    # maps to DRAW — the wrong-odds-to-selection corruption the JS now prevents.
+    cells = _pair_tokens(("2.50", "(1000)", "1.80", "(2000)"))  # draw cell dropped
+    quotes = extract_back_quotes(cells, min_liquidity=500.0)
+    assert [(q.designation, round(q.decimal_odds, 2)) for q in quotes] == [
+        ("home", 2.50),
+        ("draw", 1.80),  # MISALIGNED — away's 1.80 landed on draw
+    ]
+
+
+def test_empty_back_cell_sentinel_keeps_alignment() -> None:
+    # The fix: the row JS emits a '0' sentinel for an empty cell so its POSITION
+    # is preserved. '0' parses to <=1.0 -> dropped, but the surviving selections
+    # keep their RIGHT odds (home=2.50, away=1.80; draw correctly absent).
+    cells = _pair_tokens(("2.50", "(1000)", "0", "1.80", "(2000)"))  # draw sentinel
+    quotes = extract_back_quotes(cells, min_liquidity=500.0)
+    assert [(q.designation, round(q.decimal_odds, 2)) for q in quotes] == [
+        ("home", 2.50),
+        ("away", 1.80),
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Snapshot construction (selection naming + liquidity carried through)
 # --------------------------------------------------------------------------- #

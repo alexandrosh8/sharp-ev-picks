@@ -628,6 +628,12 @@ class Settings(BaseSettings):
                 "SAFETY VIOLATION: PICKS_ONLY, MANUAL_BETTING_ONLY and "
                 "READ_ONLY_MARKET_DATA must stay true (ADR-0002)."
             )
+        if self.paper_trading:
+            raise ValueError(
+                "SAFETY VIOLATION: PAPER_TRADING must stay false — this is a "
+                "manual-betting decision-support platform, not a paper-trading "
+                "system (CLAUDE.md safety table / ADR-0002)."
+            )
         return self
 
     @model_validator(mode="after")

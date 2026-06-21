@@ -59,14 +59,20 @@ class NflGame(InternalModel):
 def _opt_int(v: Any) -> int | None:
     if v is None:
         return None
-    f = float(v)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None  # one bad cell -> skip THIS field, never abort the season
     return None if math.isnan(f) else int(f)
 
 
 def _opt_float(v: Any) -> float | None:
     if v is None:
         return None
-    f = float(v)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None  # one bad cell -> skip THIS field, never abort the season
     return None if math.isnan(f) else f
 
 
