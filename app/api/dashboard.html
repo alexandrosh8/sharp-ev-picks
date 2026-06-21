@@ -715,6 +715,20 @@
       tr.drop-changed td {
         animation: dropflash 1.4s ease-out;
       }
+      /* DROPPING controls: bold, uppercase labels (the selects stay readable). */
+      #dropping-controls label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      #dropping-controls select {
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: normal;
+      }
       @keyframes shimmer {
         to {
           background-position: -200% 0;
