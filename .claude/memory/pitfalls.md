@@ -99,3 +99,14 @@
   liquidity per cell, BACK-triple-first, payout-container excluded). Betfair
   BASKETBALL liquidity is THIN (£28-£342, under the £500 floor) — Pinnacle is the
   deep basketball anchor, so basketball needs no Betfair to have a sharp close.
+- **`uv sync` (bare) PRUNES the optional extras the running app needs — use
+  `uv sync --all-extras`.** The real engines live in `[project.optional-
+dependencies]`: `football` (penaltyblog → `app/models/football_dc.py`),
+  `backfill` (oddsharvester==0.3.0 → `app/ingestion/oddsportal.py`), plus
+  playwright (transitive) for betfair_exchange/oddsportal. A plain `uv sync`
+  (e.g. to add a dep) installs ONLY the default set and REMOVES everything else
+  → the live app then throws `PackageNotFoundError` (oddsharvester) /
+  `ModuleNotFoundError` (penaltyblog, playwright) and the football/extra test
+  suites silently SKIP. To add a dependency without breaking the env, run
+  `uv add <pkg>` or follow a bare sync with `uv sync --all-extras`. (Hit
+  2026-06-22 adding sentry-sdk; restored with `uv sync --all-extras`.)
