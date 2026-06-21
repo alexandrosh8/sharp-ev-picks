@@ -86,6 +86,52 @@ async def test_parse_canonicalizes_betfair_exchange_keys() -> None:
     assert {s.bookmaker for s in snaps} == {"betfair exchange", "pinnacle"}
 
 
+async def test_parse_line_qualifies_totals_and_spreads_market_detail() -> None:
+    # audit #1: distinct totals/spreads LINES must land in distinct devig groups.
+    # Totals share the point across Over/Under; spreads are ±point on the SAME
+    # line and must normalize to one group.
+    payload = [
+        {
+            "id": "evt-lines",
+            "bookmakers": [
+                {
+                    "key": "pinnacle",
+                    "last_update": "2026-06-10T12:00:00Z",
+                    "markets": [
+                        {
+                            "key": "totals",
+                            "outcomes": [
+                                {"name": "Over", "price": 1.9, "point": 2.5},
+                                {"name": "Under", "price": 1.9, "point": 2.5},
+                                {"name": "Over", "price": 2.6, "point": 3.5},
+                                {"name": "Under", "price": 1.5, "point": 3.5},
+                            ],
+                        },
+                        {
+                            "key": "spreads",
+                            "outcomes": [
+                                {"name": "Alpha", "price": 1.9, "point": -1.5},
+                                {"name": "Beta", "price": 1.9, "point": 1.5},
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload))
+
+    client = make_client(httpx.MockTransport(handler), ("k",))
+    snaps = await client.fetch_odds("soccer_epl")
+    detail = {s.selection: s.market_detail for s in snaps}
+    assert detail["Over 2.5"] == detail["Under 2.5"]  # one line -> one group
+    assert detail["Over 3.5"] == detail["Under 3.5"]
+    assert detail["Over 2.5"] != detail["Over 3.5"]  # distinct lines -> distinct groups
+    assert detail["Alpha -1.5"] == detail["Beta 1.5"]  # ±1.5 are one spread line
+
+
 async def test_regions_param_is_configurable() -> None:
     seen: dict[str, str | None] = {}
 

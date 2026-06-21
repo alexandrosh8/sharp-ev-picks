@@ -38,6 +38,7 @@ from app.edge.confidence import confidence_rating
 from app.resolution.shadow import summarize_match_rate
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
+from app.settlement.outcomes import pick_pnl, pick_roi
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import (
     betfair_archive_capture_by_sport,
@@ -764,15 +765,16 @@ async def record_result(
     pnl: Decimal | None = None
     roi: Decimal | None = None
     if payload.bet_placed and payload.actual_stake is not None:
-        odds = payload.actual_odds or float(pick.decimal_odds)
-        if payload.outcome == "won":
-            pnl = payload.actual_stake * Decimal(str(odds - 1.0))
-        elif payload.outcome == "lost":
-            pnl = -payload.actual_stake
-        else:  # void / push: stake returned
-            pnl = Decimal("0.00")
-        if payload.actual_stake > 0:
-            roi = pnl / payload.actual_stake
+        # Canonical settlement math (audit #2): the old inline branches paid 0 for
+        # HALF_WON/HALF_LOST (Asian quarter lines) and used unquantized float odds.
+        # pick_pnl/pick_roi handle every outcome with Decimal money.
+        odds = (
+            Decimal(str(payload.actual_odds))
+            if payload.actual_odds is not None
+            else pick.decimal_odds
+        )
+        pnl = pick_pnl(payload.outcome, payload.actual_stake, odds)
+        roi = pick_roi(pnl, payload.actual_stake)
 
     await session.execute(
         insert(ManualBetLog).values(

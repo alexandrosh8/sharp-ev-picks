@@ -134,12 +134,26 @@ class OddsApiClient:
                         if not isinstance(price, int | float) or price <= 1.0:
                             continue
                         selection = f"{name} {point}" if point is not None else name
+                        # Line-qualified devig group (audit #1): without a per-line
+                        # market_detail, distinct totals/spreads lines (Over 2.5 vs
+                        # Over 3.5) collapse into ONE devig group and corrupt the
+                        # fair. Totals share the point across Over/Under; spreads are
+                        # ±point opposite sides of the SAME line -> normalize via abs
+                        # so the two sides group together.
+                        detail: str | None
+                        if point is None:
+                            detail = None
+                        elif mapped is Market.SPREADS:
+                            detail = str(abs(float(point)))
+                        else:
+                            detail = str(float(point))
                         snapshots.append(
                             OddsSnapshotIn(
                                 event_id=event_id,
                                 bookmaker=book_key,
                                 market=mapped,
                                 selection=selection,
+                                market_detail=detail,
                                 decimal_odds=float(price),
                                 captured_at=last_update,
                                 ingested_at=now,
