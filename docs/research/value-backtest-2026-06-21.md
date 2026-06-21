@@ -77,3 +77,26 @@ to within a quarter of a percent. The sharp anchor is empirically near-perfectly
 calibrated on a fully independent 22-country sample, and **shin is the best devig**
 (lowest ECE + MCE) — confirming the project's choice. jokecamp carries no soft
 best-price column, so this is anchor CALIBRATION, not a sharp-vs-soft ROI test.
+
+## ROI corroboration — BeatTheBookie consensus-vs-max (479k worldwide, 2026-06-21)
+
+`scripts/beatthebookie_backtest.py` on the BeatTheBookie set (arXiv 1710.02824) —
+479,388 complete matches, 912 leagues worldwide, train ≤2012 / test ≥2013. No sharp
+book, so **fair = devig(avg consensus)**, bet the **max** best price on the
+highest-edge selection. Because max ≥ avg, the bet-everything baseline already
+banks the best-price premium, so the honest signal is **incremental ROI over that
+baseline**.
+
+| Held-out (≥2013)                           | n      | Hit   | ROI            |
+| ------------------------------------------ | ------ | ----- | -------------- |
+| baseline thr=0.00 (bet every best price)   | 79,723 | 34.1% | +0.24%         |
+| chosen thr=0.08 (big consensus-deviations) | 705    | 42.0% | **+18.52%**    |
+| **incremental over baseline**              |        |       | **+18.28 pts** |
+
+The baseline ≈0% is the key result: the **mechanical best-price premium is NOT free
+money** — the entire +18.5% comes from _selecting_ the largest consensus-deviations,
+out-of-sample, on a sample 25x larger than football-data.co.uk. This independently
+corroborates the Pinnacle-fair +22% finding above. Caveats: consensus (not sharp)
+fair = a weaker test; small held-out n (705) at the top threshold; the big
+deviations skew toward thin/low-liquidity markets (where soft books misprice most
+but also limit fastest). Frozen 2000-2015.
