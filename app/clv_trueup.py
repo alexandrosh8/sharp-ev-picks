@@ -683,9 +683,8 @@ async def resolve_betfair_back_snaps(
     _namespace_event_ref), globally unique, so one deterministic lookup finds it.
     Re-keys rows off the "betfair:" namespace to ``external_ref`` so they group
     with that event's market in event_fair_probs. Used BOTH at settlement (the
-    close) and at PICK TIME (the live sharp anchor) — at pick time the cutoff is
-    the future kickoff, so closing_odds_from_snapshots returns the latest
-    CAPTURED price = the current sharp line.
+    close) and at PICK TIME (the live sharp anchor). Each row carries captured_at,
+    so a pick-time caller can gate freshness on the event's most-recent row.
     """
     from app.ingestion.betfair_exchange import _namespace_event_ref
 
@@ -737,6 +736,7 @@ def build_sharp_anchor_loader(
 
     async def loader(sport_key: str, snapshots: Sequence[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
         base = arcadia_base_sport(sport_key)
+        now = datetime.now(tz=UTC)
         out: list[OddsSnapshotIn] = []
         seen: set[str] = set()
         async with session_factory() as session:
@@ -748,10 +748,13 @@ def build_sharp_anchor_loader(
                 teams = directory.lookup(ref)
                 if teams is None or teams.starts_at is None:
                     continue  # need a kickoff for the cutoff + the pinnacle match
+                event_snaps: list[OddsSnapshotIn] = []
                 if use_betfair:
-                    out.extend(await resolve_betfair_back_snaps(session, ref, teams.starts_at))
+                    event_snaps.extend(
+                        await resolve_betfair_back_snaps(session, ref, teams.starts_at)
+                    )
                 if use_pinnacle:
-                    out.extend(
+                    event_snaps.extend(
                         await resolve_pinnacle_close_snaps(
                             session,
                             pinnacle_sport_key=f"pinnacle_{base}",
@@ -761,9 +764,22 @@ def build_sharp_anchor_loader(
                             kickoff=teams.starts_at,
                         )
                     )
-        # Drop stale captured lines — a live pick-time anchor must be current.
-        cutoff = datetime.now(tz=UTC) - timedelta(seconds=max_age_seconds)
-        return [s for s in out if s.captured_at is not None and s.captured_at >= cutoff]
+                if not event_snaps:
+                    continue
+                # EVENT-WIDE freshness (review 2026-06-21): keep the event's anchor
+                # only if it is STILL being captured — gauge by the event's
+                # most-recent row, NOT per-row, because change-only persistence
+                # leaves a STEADY sharp price's row old yet still current. This
+                # drops only events that fell OUT of capture, never a quiet liquid
+                # market (where this feature is supposed to win).
+                last = max(
+                    (s.captured_at for s in event_snaps if s.captured_at is not None),
+                    default=None,
+                )
+                if last is None or (now - last).total_seconds() > max_age_seconds:
+                    continue
+                out.extend(event_snaps)
+        return out
 
     return loader
 

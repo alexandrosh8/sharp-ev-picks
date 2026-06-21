@@ -341,11 +341,11 @@ def build_scheduler(
                 directory,
                 use_betfair=settings.betfair_exchange_enabled,
                 use_pinnacle=settings.arcadia_enabled,
-                # A live anchor must be CURRENT: drop captured sharp lines older
-                # than 30 min. Generous vs the 5-min scrape gate (the arcadia/
-                # betfair archives capture on their own slower cadence) but still
-                # rejects an hours-old line pricing a live pick (review 2026-06-21).
-                max_age_seconds=1800.0,
+                # EVENT-WIDE freshness: keep an event's sharp anchor unless it
+                # FELL OUT of capture (no row in 4h). Generous so a STEADY liquid
+                # price (change-only persistence -> old row, still current) is NOT
+                # dropped; only a stale/abandoned event is (review 2026-06-21).
+                max_age_seconds=14400.0,
             )
             logger.info(
                 "LIVE sharp-anchor injection ENABLED (betfair=%s pinnacle=%s) — picks "

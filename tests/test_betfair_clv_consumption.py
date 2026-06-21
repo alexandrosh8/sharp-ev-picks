@@ -360,3 +360,60 @@ async def test_flag_on_anchors_on_betfair_basketball_two_way_close(factory) -> N
         assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
         # Fill is commission-free SoftBook (raw 2.50).
         assert float(pick.clv_log) == pytest.approx(math.log(2.50 * fair), abs=1e-5)
+
+
+async def test_sharp_anchor_loader_event_wide_freshness(factory) -> None:  # type: ignore[no-untyped-def]
+    # REGRESSION (review 2026-06-21): the pick-time sharp-anchor freshness gate is
+    # EVENT-WIDE — a recently-captured event keeps its Betfair anchor; an event
+    # that FELL OUT of capture (most-recent row older than max_age) is dropped.
+    # Per-event, NOT per-row (change-only persistence: a steady price's row may be
+    # old yet still current — it must NOT be dropped).
+    from app.clv_trueup import build_sharp_anchor_loader
+    from app.ingestion.base import EventDirectory
+
+    now = datetime.now(UTC)
+    kickoff = now + timedelta(hours=2)
+
+    async def seed(ref: str, captured: datetime) -> None:
+        bref = f"betfair:{ref}"
+        snaps = [
+            OddsSnapshotIn(
+                event_id=bref,
+                bookmaker="Betfair Exchange",
+                market=Market.H2H,
+                selection=sel,
+                decimal_odds=o,
+                captured_at=captured,
+                ingested_at=captured,
+            )
+            for sel, o in (("Home FC", 2.40), ("Draw", 3.50), ("Away FC", 3.20))
+        ]
+        teams = {bref: EventTeams(home="Home FC", away="Away FC", starts_at=kickoff)}
+        await persist_odds_snapshots(factory, snaps, teams, "betfair_soccer", "betfair_soccer")
+
+    await seed("evt-fresh", now - timedelta(hours=1))  # still being captured
+    await seed("evt-stale", now - timedelta(hours=10))  # fell out of capture
+
+    directory = EventDirectory()
+    for ref in ("evt-fresh", "evt-stale"):
+        directory.register(ref, EventTeams(home="Home FC", away="Away FC", starts_at=kickoff))
+
+    loader = build_sharp_anchor_loader(
+        factory, directory, use_betfair=True, use_pinnacle=False, max_age_seconds=14400.0
+    )
+    scrape = [
+        OddsSnapshotIn(
+            event_id=ref,
+            bookmaker="SoftBook",
+            market=Market.H2H,
+            selection="Home FC",
+            decimal_odds=2.90,
+            captured_at=now,
+            ingested_at=now,
+        )
+        for ref in ("evt-fresh", "evt-stale")
+    ]
+    out = await loader("soccer", scrape)
+    refs = {s.event_id for s in out}
+    assert "evt-fresh" in refs  # fresh -> anchor kept
+    assert "evt-stale" not in refs  # fell out of capture -> dropped

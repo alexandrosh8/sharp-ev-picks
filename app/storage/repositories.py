@@ -921,7 +921,9 @@ async def resolve_pinnacle_close_snaps(
 ) -> list[OddsSnapshotIn]:
     """Strict-match a pick's fixture to its `pinnacle_<sport>` ARCHIVE event and
     return that event's CLOSE snapshots, re-keyed to the pick's event_id and
-    selection vocabulary (bookmaker stays "Pinnacle").
+    selection vocabulary (bookmaker stays "Pinnacle"). Each row carries
+    captured_at, so a pick-time caller can gate freshness on the event's most-
+    recent row. [] when there is no unambiguous match.
 
     Returns [] when there is no UNAMBIGUOUS match or no Pinnacle coverage — a
     wrong close corrupts CLV, so this never guesses. Matching is the pure
