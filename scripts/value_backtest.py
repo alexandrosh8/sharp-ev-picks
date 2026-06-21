@@ -310,7 +310,7 @@ async def main() -> None:
     print(f"\nVERDICT (computed): {verdict}")
     print(
         "\nCaveats: Max line assumes line-shopping every book at snapshot time; soft "
-        "books limit winners; ~120 bets/yr across 6 leagues at this threshold."
+        f"books limit winners; high thresholds are selective ({len(leagues)} leagues swept)."
     )
     print("Manual review required. This system does not place bets.")
 
