@@ -130,17 +130,18 @@ bash scripts/safety_audit.sh     # no-autobet + secret-leak greps (CI-gated)
 
 All secrets live in `.env` only (copy from `.env.example`; `.env` is `0600` and gitignored — **never commit it**). Highlights:
 
-| Key                                       | Default      | What it does                                                                       |
-| ----------------------------------------- | ------------ | ---------------------------------------------------------------------------------- |
-| `ODDS_SOURCE`                             | `oddsportal` | Free OddsPortal scrape (default) or `odds_api` (The Odds API, includes Pinnacle).  |
-| `DASHBOARD_AUTH_ENABLED`                  | `true`       | First-run `/setup` creates the admin password (stored hashed). `false` = no login. |
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty        | Pick alerts. Blank just disables alerts; the dashboard still works.                |
-| `SCRAPER_PROXY_POOL`                      | empty        | Optional rotating proxy pool for the scrape — see below.                           |
-| `BETFAIR_EXCHANGE_ENABLED`                | `false`      | Optional read-only Betfair Exchange BACK-odds capture — see below.                 |
-| `SCRAPE_NAV_TIMEOUT_MS`                   | `30000`      | Per-match-page navigation timeout (ms); raise on a slow VPS (floor `15000`).       |
-| `RESULTS_SCRAPE_INTERVAL_SECONDS`         | `900`        | Cadence of the dedicated finished-score job that settles results promptly.         |
-| `RESULTS_SCRAPE_LINK_TIMEOUT_SECONDS`     | `90`         | Per-match-page timeout for the score scrape (one hung proxy can't stall the pass). |
-| `RESULTS_SCRAPE_CYCLE_BUDGET_SECONDS`     | `600`        | Per-cycle wall-clock budget for the score scrape; remainder drains next cycle.     |
+| Key                                       | Default      | What it does                                                                             |
+| ----------------------------------------- | ------------ | ---------------------------------------------------------------------------------------- |
+| `ODDS_SOURCE`                             | `oddsportal` | Free OddsPortal scrape (default) or `odds_api` (The Odds API, includes Pinnacle).        |
+| `DASHBOARD_AUTH_ENABLED`                  | `true`       | First-run `/setup` creates the admin password (stored hashed). `false` = no login.       |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty        | Pick alerts. Blank just disables alerts; the dashboard still works.                      |
+| `SCRAPER_PROXY_POOL`                      | empty        | Optional rotating proxy pool for the scrape — see below.                                 |
+| `BETFAIR_EXCHANGE_ENABLED`                | `false`      | Optional read-only Betfair Exchange BACK-odds capture — see below.                       |
+| `SCRAPE_NAV_TIMEOUT_MS`                   | `30000`      | Per-match-page navigation timeout (ms); raise on a slow VPS (floor `15000`).             |
+| `RESULTS_SCRAPE_INTERVAL_SECONDS`         | `900`        | Cadence of the dedicated finished-score job that settles results promptly.               |
+| `RESULTS_SCRAPE_LINK_TIMEOUT_SECONDS`     | `90`         | Per-match-page timeout for the score scrape (one hung proxy can't stall the pass).       |
+| `RESULTS_SCRAPE_CYCLE_BUDGET_SECONDS`     | `600`        | Per-cycle wall-clock budget for the score scrape; remainder drains next cycle.           |
+| `RESULTS_SCRAPE_WINDOW_DAYS`              | `14`         | Re-scrape stale, unscored finished picks this far back (clears stuck "awaiting result"). |
 
 > **All env keys ship with safe defaults — production works with none of them set.** The four scrape-tuning rows above matter mainly on a slow VPS/proxy: a dedicated, time-boxed finished-score job commits each game's score as it's scraped, so a slow odds pass can't leave finished picks stuck on "awaiting result" on the deployed site.
 

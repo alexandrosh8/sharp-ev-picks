@@ -410,8 +410,12 @@ async def revalidate_offwindow_picks(
 
 
 #: How far back to re-scrape finished, still-open picks for their final score.
-#: Bounds the backlog so a long-dead link can't keep burning scrape slots.
-RESULTS_SCRAPE_WINDOW = timedelta(days=3)
+#: Wide enough that a slow VPS which missed a score for several days still
+#: recovers it — the old 3-day window stranded older picks on "awaiting result"
+#: forever (cactusbets.cloud: Australian-league soccer 9 days past kickoff, no
+#: results feed). The per-cycle limit/budget still bound the backlog.
+#: Overridable via RESULTS_SCRAPE_WINDOW_DAYS (the scheduler injects it).
+RESULTS_SCRAPE_WINDOW = timedelta(days=14)
 #: Cap finished-score scrapes per cycle so one backlog can't drive 100s of
 #: browser pages at once; the un-scored remainder drains over the next cycles.
 RESULTS_SCRAPE_MAX_PER_CYCLE = 40

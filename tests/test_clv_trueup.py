@@ -325,6 +325,54 @@ async def test_capture_finished_scores_writes_score_for_settlement(factory) -> N
         assert ev.scraped_away_score == 1
 
 
+async def test_capture_finished_scores_recovers_stale_pick_past_old_3day_window(factory) -> None:  # type: ignore[no-untyped-def]
+    # A finished, still-open pick 9 days past kickoff (a slow VPS missed its score
+    # for >3 days; the league has no results feed): the OLD 3-day window abandoned
+    # it forever ("awaiting result" on cactusbets.cloud). The widened 14d window
+    # must still re-scrape and capture its final score.
+    from datetime import timedelta
+
+    from app.clv_trueup import capture_finished_scores
+    from app.ingestion.base import EventDirectory
+    from app.storage.models import Event
+
+    event_id = "https://www.oddsportal.com/football/australia/npl/stale-fc-vs-old-fc/ZZ9/"
+    async with factory() as session:
+        from sqlalchemy import update as sa_update
+
+        await session.execute(
+            sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+        )
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(days=9)),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    directory = EventDirectory()
+
+    class ResultLoader(FakeLoader):
+        async def fetch_match_odds(self, sport_key, match_links, markets=None):  # type: ignore[no-untyped-def]
+            for ref in match_links:
+                directory.register(
+                    ref,
+                    EventTeams(home="Home FC", away="Away FC", home_score=2, away_score=1),
+                )
+            return []
+
+    # default window (now 14d) must include the 9-day-old pick; the old 3d -> 0.
+    written = await capture_finished_scores(ResultLoader([]), factory, directory, "soccer", now=NOW)
+    assert written == 1
+    async with factory() as session:
+        ev = await session.scalar(select(Event).where(Event.external_ref == event_id))
+        assert ev is not None
+        assert ev.scraped_home_score == 2
+        assert ev.scraped_away_score == 1
+
+
 async def test_capture_finished_scores_skips_in_play_match(factory) -> None:  # type: ignore[no-untyped-def]
     # REGRESSION (review 2026-06-21 critical): a match only 2h past kickoff is
     # still IN PLAY for soccer (floor 3.5h). OddsPortal shows a LIVE running

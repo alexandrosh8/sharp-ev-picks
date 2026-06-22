@@ -639,6 +639,11 @@ class Settings(BaseSettings):
     # unbounded. Default 10 min; cap keeps a typo from letting a cycle run for
     # hours. Should comfortably exceed one link timeout.
     results_scrape_cycle_budget_seconds: float = Field(default=600.0, ge=30.0, le=3600.0)
+    # How far back (days) the finished-score pass re-scrapes still-open, unscored
+    # picks for their final score. The old hardcoded 3d window stranded older picks
+    # on "awaiting result" forever when a slow VPS missed their score in time; 14d
+    # recovers them, and the per-cycle limit/budget still bound the work. PROD-SAFE.
+    results_scrape_window_days: int = Field(default=14, ge=1, le=90)
 
     # Opt-in EXPERIMENTAL picks for UNVALIDATED sports (tennis, american_football).
     # OFF by default (committed) — these sports have not cleared the > 2 SE

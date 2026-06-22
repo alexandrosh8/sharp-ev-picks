@@ -464,6 +464,7 @@ def build_scheduler(
                     session_factory,
                     directory,
                     sport_key,
+                    window=timedelta(days=settings.results_scrape_window_days),
                     per_link_timeout=settings.results_scrape_link_timeout_seconds,
                     time_budget=settings.results_scrape_cycle_budget_seconds,
                 )
