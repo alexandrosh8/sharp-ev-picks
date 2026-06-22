@@ -14,10 +14,7 @@ MANUAL_BETTING_REMINDER = "Manual review required. This system does not place be
 
 # Compact one-line disclaimer at the foot of every pick alert: informational
 # only, the user places any bet themselves (the system never does), no guarantee.
-ALERT_FOOTER = (
-    "ℹ️ Informational only — you place any bet; this system does not place bets. "
-    "No profit guaranteed."
-)
+ALERT_FOOTER = "ℹ️ Informational only — you place any bet. No profit guaranteed."
 
 
 class StakeBreakdownOut(InternalModel):
