@@ -493,7 +493,7 @@ _PATCHED_UPSTREAM_VERSION = "0.3.0"
 
 def _patch_upstream_quirks() -> None:
     """Apply the quirk fixes in place (idempotent; lazy oddsharvester import)."""
-    global _upstream_patched
+    global _upstream_patched, _ORIG_EXTRACT_HEADER
     # LOUD version guard, checked BEFORE the idempotency early-return: the
     # patches replace private upstream internals, so running them against any
     # other release risks silently corrupted scraping.
@@ -506,6 +506,7 @@ def _patch_upstream_quirks() -> None:
         )
     if _upstream_patched:
         return
+    from oddsharvester.core.base_scraper import BaseScraper
     from oddsharvester.core.browser.market_navigation import MarketTabNavigator
     from oddsharvester.core.browser.selection import SelectionManager
     from oddsharvester.core.market_extraction.navigation_manager import NavigationManager
@@ -527,6 +528,11 @@ def _patch_upstream_quirks() -> None:
     # the already-selected short-circuit fires — kills the benign per-market
     # "Failed to set period to: Full Time" ERROR at its source (no false click).
     SelectionManager._get_current_value = _patched_get_current_value
+    # Augment the match-detail header with OddsPortal's explicit finished-status
+    # (isFinished / eventStageId) so finished-score capture settles on the page's
+    # "Finished" flag within minutes, and NEVER on an in-play partial.
+    _ORIG_EXTRACT_HEADER = BaseScraper._extract_match_details_event_header
+    BaseScraper._extract_match_details_event_header = _patched_extract_match_details_event_header
     logging.getLogger("OddsParser").addFilter(_EXCHANGE_NOISE_FILTER)
     for gap_logger in (
         "PageScroller",
@@ -1130,6 +1136,58 @@ def _coerce_finished(is_finished: Any, stage_id: Any, stage_name: Any) -> bool |
     if is_finished is None and stage_id is None and not stage_name:
         return None
     return False
+
+
+def _event_finished_fields(html: str) -> dict[str, Any]:
+    """Pull OddsPortal's explicit finished-status from the react-event-header
+    JSON (eventData.isFinished, eventBody.eventStageId/eventStageName) so
+    finished-score capture can trust the page's "Finished" flag, not just a
+    timer. Returns {} when the header/JSON is absent or unparseable — the
+    caller's _coerce_finished then yields None -> conservative time-floor."""
+    try:
+        import json
+
+        from bs4 import BeautifulSoup
+
+        div = BeautifulSoup(html, "html.parser").find("div", id="react-event-header")
+        data = div.get("data") if div is not None else None
+        if not isinstance(data, str) or not data:
+            return {}
+        payload = json.loads(data)
+        body = payload.get("eventBody") or {}
+        event = payload.get("eventData") or {}
+        return {
+            "is_finished": event.get("isFinished"),
+            "event_stage_id": body.get("eventStageId"),
+            "event_stage_name": body.get("eventStageName"),
+        }
+    except (ValueError, TypeError, AttributeError):
+        return {}
+
+
+# Bound to the upstream BaseScraper._extract_match_details_event_header at
+# _patch_upstream_quirks() time so the wrapper below can delegate to it.
+_ORIG_EXTRACT_HEADER: Any = None
+
+
+async def _patched_extract_match_details_event_header(self: Any, page: Any, match_link: str) -> Any:
+    """Drop-in wrapper for BaseScraper._extract_match_details_event_header:
+    returns the upstream dict AUGMENTED with explicit finished-status fields
+    (is_finished / event_stage_id / event_stage_name) from the same
+    react-event-header JSON, so capture settles on the page's "Finished" flag
+    rather than only a timer. Augment-only — upstream team/score fields are
+    untouched; on ANY error the upstream dict passes through unchanged (status
+    -> None -> time-floor fallback). An in-play 2nd-half (stage 13) yields
+    finished=False downstream and is never recorded as final."""
+    details = await _ORIG_EXTRACT_HEADER(self, page, match_link)
+    if not isinstance(details, dict):
+        return details
+    try:
+        html = await page.content()
+        return {**details, **_event_finished_fields(html)}
+    except Exception as exc:  # never let status-augment break score extraction
+        self.logger.debug("finished-status augment skipped: %s", type(exc).__name__)
+        return details
 
 
 def _parse_ts(raw: Any) -> datetime | None:
