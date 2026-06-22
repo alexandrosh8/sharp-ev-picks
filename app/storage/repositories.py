@@ -45,41 +45,58 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Race-safe get-or-create (audit #11): a concurrent inserter may create the same
+# entity between the SELECT and the INSERT. ON CONFLICT DO NOTHING + re-SELECT
+# avoids the IntegrityError that would otherwise abort the session and silently
+# drop the pick — the same discipline persist_odds_snapshots already uses. Not
+# reachable under today's single sequential writer, but mandatory before any
+# parallel writer / second poller.
 async def _get_or_create_sport(session: AsyncSession, key: str, name: str) -> int:
     found = await session.scalar(select(Sport.id).where(Sport.key == key))
     if found is not None:
         return found
-    sport = Sport(key=key, name=name)
-    session.add(sport)
-    await session.flush()
-    return sport.id
+    await session.execute(
+        pg_insert(Sport).values(key=key, name=name).on_conflict_do_nothing(index_elements=["key"])
+    )
+    found = await session.scalar(select(Sport.id).where(Sport.key == key))
+    if found is None:  # pragma: no cover - insert+select in one tx always resolves
+        raise RuntimeError(f"could not resolve sport {key!r}")
+    return found
 
 
 async def _get_or_create_league(session: AsyncSession, sport_id: int, key: str) -> int:
-    found = await session.scalar(
-        select(League.id).where(League.sport_id == sport_id, League.key == key)
-    )
+    where = (League.sport_id == sport_id, League.key == key)
+    found = await session.scalar(select(League.id).where(*where))
     if found is not None:
         return found
-    league = League(sport_id=sport_id, key=key, name=key)
-    session.add(league)
-    await session.flush()
-    return league.id
+    await session.execute(
+        pg_insert(League)
+        .values(sport_id=sport_id, key=key, name=key)
+        .on_conflict_do_nothing(constraint="uq_leagues_sport_key")
+    )
+    found = await session.scalar(select(League.id).where(*where))
+    if found is None:  # pragma: no cover
+        raise RuntimeError(f"could not resolve league {key!r}")
+    return found
 
 
 async def _get_or_create_team(
     session: AsyncSession, sport_id: int, league_id: int, name: str
 ) -> int:
     normalized = name.strip().lower()
-    found = await session.scalar(
-        select(Team.id).where(Team.sport_id == sport_id, Team.normalized_name == normalized)
-    )
+    where = (Team.sport_id == sport_id, Team.normalized_name == normalized)
+    found = await session.scalar(select(Team.id).where(*where))
     if found is not None:
         return found
-    team = Team(sport_id=sport_id, league_id=league_id, name=name, normalized_name=normalized)
-    session.add(team)
-    await session.flush()
-    return team.id
+    await session.execute(
+        pg_insert(Team)
+        .values(sport_id=sport_id, league_id=league_id, name=name, normalized_name=normalized)
+        .on_conflict_do_nothing(constraint="uq_teams_sport_normalized")
+    )
+    found = await session.scalar(select(Team.id).where(*where))
+    if found is None:  # pragma: no cover
+        raise RuntimeError(f"could not resolve team {name!r}")
+    return found
 
 
 async def _get_or_create_event(
@@ -108,35 +125,44 @@ async def _get_or_create_event(
             existing.starts_at = starts_at
             await session.flush()
         return existing.id
-    event = Event(
-        sport_id=sport_id,
-        league_id=league_id,
-        home_team_id=home_id,
-        away_team_id=away_id,
-        external_ref=external_ref,
-        starts_at=starts_at,
+    await session.execute(
+        pg_insert(Event)
+        .values(
+            sport_id=sport_id,
+            league_id=league_id,
+            home_team_id=home_id,
+            away_team_id=away_id,
+            external_ref=external_ref,
+            starts_at=starts_at,
+        )
+        .on_conflict_do_nothing(constraint="uq_events_external_ref")
     )
-    session.add(event)
-    await session.flush()
-    return event.id
+    event_id = await session.scalar(select(Event.id).where(Event.external_ref == external_ref))
+    if event_id is None:  # pragma: no cover
+        raise RuntimeError(f"could not resolve event {external_ref!r}")
+    return event_id
 
 
 async def _get_or_create_model_version(
     session: AsyncSession, sport_id: int, name: str, version: str
 ) -> int:
-    found = await session.scalar(
-        select(ModelVersion.id).where(
-            ModelVersion.sport_id == sport_id,
-            ModelVersion.name == name,
-            ModelVersion.version == version,
-        )
+    where = (
+        ModelVersion.sport_id == sport_id,
+        ModelVersion.name == name,
+        ModelVersion.version == version,
     )
+    found = await session.scalar(select(ModelVersion.id).where(*where))
     if found is not None:
         return found
-    mv = ModelVersion(name=name, version=version, sport_id=sport_id)
-    session.add(mv)
-    await session.flush()
-    return mv.id
+    await session.execute(
+        pg_insert(ModelVersion)
+        .values(name=name, version=version, sport_id=sport_id)
+        .on_conflict_do_nothing(constraint="uq_model_versions_sport_name_version")
+    )
+    found = await session.scalar(select(ModelVersion.id).where(*where))
+    if found is None:  # pragma: no cover
+        raise RuntimeError(f"could not resolve model version {name!r}/{version!r}")
+    return found
 
 
 def _provisional_result_fields(
@@ -1540,6 +1566,11 @@ async def persist_pick(
         existing.closing_fair_probability = None
         existing.clv_log = None
         existing.beat_close = None
+        # close-side provenance also described the OLD fill — clear it so a future
+        # refactor that writes closing_odds earlier can't leave stale close data
+        # on a re-priced row (audit #6; closing_odds is NULL here today).
+        existing.closing_odds = None
+        existing.closing_anchor_type = None
         existing.current_odds = None
         existing.current_edge = None
         existing.current_bookmaker = None

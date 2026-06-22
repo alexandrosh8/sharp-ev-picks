@@ -104,6 +104,31 @@ def fitted() -> tuple[DixonColesFootballModel, EventDirectory]:
     return model, directory
 
 
+def test_fit_excludes_same_day_results_no_leak() -> None:
+    # audit #8: the live refit must NOT train on a same-day (== as_of) result
+    # before pricing later-same-day fixtures. A row dated == AS_OF is excluded,
+    # so 49 historical + 1 same-day leaves only 49 usable -> below the >=50 floor.
+    hist49 = [r for r in synthetic_history() if r.match_date < AS_OF][:49]
+    assert len(hist49) == 49
+    same_day = MatchRow(
+        match_date=AS_OF,
+        home_team="Alpha",
+        away_team="Beta FC",
+        home_goals=1,
+        away_goals=0,
+        result="H",
+        b365_home=None,
+        b365_draw=None,
+        b365_away=None,
+        pinnacle_closing_home=None,
+        pinnacle_closing_draw=None,
+        pinnacle_closing_away=None,
+    )
+    model = DixonColesFootballModel(EventDirectory(), confidence=0.7)
+    with pytest.raises(ValueError, match="got 49"):
+        model.fit([*hist49, same_day], AS_OF)
+
+
 async def test_predictions_are_coherent_probabilities(
     fitted: tuple[DixonColesFootballModel, EventDirectory],
 ) -> None:

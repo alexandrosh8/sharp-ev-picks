@@ -128,7 +128,10 @@ class DixonColesFootballModel:
             if neutral_venues
             else [(r, False) for r in rows]
         )
-        usable = [(r, n) for r, n in pairs if r.match_date <= as_of]
+        # Strict `<`: a same-day (== as_of) result must NEVER train the model that
+        # prices later-same-day fixtures (no same-day leak, audit #8). MatchRow is
+        # date-only, so `<` excludes the whole as_of date.
+        usable = [(r, n) for r, n in pairs if r.match_date < as_of]
         if len(usable) < 50:
             raise ValueError(f"need >= 50 historical matches to fit, got {len(usable)}")
 
