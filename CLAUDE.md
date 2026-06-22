@@ -40,7 +40,7 @@ places any bet personally.
 
 ## Project context
 
-- **Stack:** Python 3.11+ (uv), httpx async, pydantic v2, numpy/scipy,
+- **Stack:** Python 3.12+ (uv), httpx async, pydantic v2, numpy/scipy,
   SQLAlchemy 2.0 async + asyncpg + Alembic, APScheduler (AsyncIOScheduler),
   FastAPI, Redis, PostgreSQL, Docker Compose.
 - **Stage 1 (now):** local Mac development. **Stage 2:** Ubuntu VPS with

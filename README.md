@@ -111,7 +111,7 @@ Hot-reload for development — the app runs on the host, only Postgres/Redis are
 
 ```bash
 docker compose up -d postgres redis
-uv sync --extra football --extra backfill
+uv sync --extra football --extra backfill   # basketball/NBA: also --extra nba --extra models --extra ml
 uv run playwright install chromium
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
@@ -164,7 +164,7 @@ The live spine uses proven open-source engines directly, bound into one pipeline
 - **penaltyblog** Dixon-Coles prices football, fitted on free football-data.co.uk history → `app/models/football_dc.py`.
 - The app owns the **+EV core**: a 7-method devig (`app/probabilities/devig.py`, parity-tested 1e-8), edge/EV gate (`app/edge/value.py`), fractional-Kelly sizing with exposure caps (`app/risk/`), and a strict no-fuzzy cross-source matcher (`app/resolution/`) for CLV resolution.
 - **Sharp anchors:** the free Pinnacle ARCADIA close (`app/ingestion/pinnacle_arcadia.py`), and optionally Betfair Exchange BACK odds — both isolated, both read-only.
-- Picks persist to **Postgres** (SQLAlchemy 2.0 async + Alembic, 14-table warehouse) and serve via `GET /picks`; **APScheduler** drives polling, settlement, CLV true-up, and the sharp-anchor captures; **FastAPI** serves the "PICKS TERMINAL" dashboard.
+- Picks persist to **Postgres** (SQLAlchemy 2.0 async + Alembic, 15-table warehouse) and serve via `GET /picks`; **APScheduler** drives polling, settlement, CLV true-up, and the sharp-anchor captures; **FastAPI** serves the "PICKS TERMINAL" dashboard.
 
 **Stack:** Python 3.12 · FastAPI · SQLAlchemy 2.0 async + asyncpg · APScheduler · Redis · PostgreSQL · Playwright (Chromium) · Docker Compose. Pure-math modules (`probabilities`, `edge`, `risk`) take no env/DB/HTTP — policies enter as frozen dataclasses at the composition root.
 
