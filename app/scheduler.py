@@ -261,6 +261,10 @@ def build_scheduler(
             # Raise OddsHarvester's hardcoded 15s match-page goto timeout so
             # fewer heavy OddsPortal pages time out (read-only; see oddsportal.py).
             nav_timeout_ms=settings.scrape_nav_timeout_ms,
+            # HARD per-scrape-pass watchdog: a hung Over/Under extraction can
+            # never make poll_odds run forever (and so starve settle_results) —
+            # each scrape pass is bounded and cancelled on timeout (prod fix).
+            cycle_timeout_seconds=settings.scrape_cycle_timeout_seconds,
         )
         league_label = settings.oddsportal_football_leagues
 

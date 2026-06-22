@@ -455,6 +455,20 @@ class Settings(BaseSettings):
     # 120000 so a typo can't make a single page stall a cycle. Increasing a
     # timeout is configuration, never an anti-bot bypass.
     scrape_nav_timeout_ms: int = Field(default=30000, ge=15000, le=120000)
+    # HARD per-scrape-pass watchdog (seconds). A single hung OddsPortal
+    # Over/Under extraction (PageScroller burns ~20s per missing sub-line, x52
+    # across a slate) otherwise made a poll cycle run FOREVER — every later
+    # interval slot then skipped ("max running instances reached") and
+    # settle_results never ran (the cactusbets.cloud incident). Each
+    # _scrape_with_failover pass (per date in fetch_odds, and the match-page
+    # pass in fetch_match_odds) is bounded by this many seconds; on timeout the
+    # hung scrape is CANCELLED and that pass is treated as empty (recovered next
+    # cycle). Generous so a healthy worldwide slate finishes inside it, finite so
+    # a wedge can't run unbounded. Floor 60s blocks a typo cutting healthy
+    # cycles; cap 2h is the absolute sanity ceiling. PROD-SAFE WITH NO CONFIG —
+    # the watchdog is ON by default. Only ever BOUNDS a read-only scrape; never
+    # an anti-bot bypass.
+    scrape_cycle_timeout_seconds: float = Field(default=900.0, ge=60.0, le=7200.0)
     # Browser locale, paired with the loader's forced UTC timezone for a
     # coherent human fingerprint (UTC = London -> en-GB).
     oddsportal_locale: str = "en-GB"

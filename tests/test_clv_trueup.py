@@ -325,6 +325,69 @@ async def test_capture_finished_scores_writes_score_for_settlement(factory) -> N
         assert ev.scraped_away_score == 1
 
 
+async def test_capture_finished_scores_scrapes_score_only_not_markets(factory) -> None:  # type: ignore[no-untyped-def]
+    # ROOT CAUSE (cactusbets.cloud, only 1 of ~24 scores captured): the
+    # finished-score scrape requested the FULL market list, so each finished
+    # match page re-ran the slow/hang-prone Over/Under extraction. The per-link
+    # timeout then fired BEFORE the already-available header score was read.
+    # The fix scrapes SCORE-ONLY (no markets). This loader registers the score
+    # ONLY when called score-only; a full-market call would never have scored it.
+    from datetime import timedelta
+
+    from app.clv_trueup import capture_finished_scores
+    from app.ingestion.base import EventDirectory
+    from app.storage.models import Event
+
+    # An obscure no-feed league fixture (June 17-18 class), finished + unscored.
+    event_id = "https://www.oddsportal.com/football/gambia/gfa-league/real-banjul-vs-x/RB1/"
+    async with factory() as session:
+        from sqlalchemy import update as sa_update
+
+        await session.execute(
+            sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+        )
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=5)),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    directory = EventDirectory()
+
+    class ScoreOnlyLoader(FakeLoader):
+        def __init__(self, snapshots) -> None:  # type: ignore[no-untyped-def]
+            super().__init__(snapshots)
+            self.score_only_seen: list[bool] = []
+
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, sport_key, match_links, markets=None, *, score_only=False, **_: object
+        ):
+            self.score_only_seen.append(score_only)
+            # Mirror the real loader: the HEADER score is only available because
+            # we did NOT pay for the slow market scrape. A non-score-only call
+            # here registers nothing (modelling the live timeout that lost it).
+            if score_only:
+                for ref in match_links:
+                    directory.register(
+                        ref,
+                        EventTeams(home="Home FC", away="Away FC", home_score=2, away_score=1),
+                    )
+            return []
+
+    loader = ScoreOnlyLoader([])
+    written = await capture_finished_scores(loader, factory, directory, "soccer", now=NOW)
+    assert written == 1
+    assert loader.score_only_seen == [True]  # the finished-score pass is score-only
+    async with factory() as session:
+        ev = await session.scalar(select(Event).where(Event.external_ref == event_id))
+        assert ev is not None
+        assert ev.scraped_home_score == 2
+        assert ev.scraped_away_score == 1
+
+
 async def test_capture_finished_scores_recovers_stale_pick_past_old_3day_window(factory) -> None:  # type: ignore[no-untyped-def]
     # A finished, still-open pick 9 days past kickoff (a slow VPS missed its score
     # for >3 days; the league has no results feed): the OLD 3-day window abandoned

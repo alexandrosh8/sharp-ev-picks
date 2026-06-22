@@ -10,6 +10,7 @@ The oddsharvester import is lazy so the default (extras-free) install and CI
 profile keep working; install with `uv sync --extra backfill`.
 """
 
+import asyncio
 import importlib.metadata
 import logging
 import re
@@ -362,6 +363,46 @@ def _patched_extract_bookmaker_name(self: Any, block: Any) -> Any:
     return None
 
 
+# OddsHarvester's NavigationManager.select_specific_market scrolls for a sub-line
+# with PageScroller.scroll_until_visible_and_click_parent, which DEFAULTS to a 20s
+# timeout (SCROLL_UNTIL_CLICK_TIMEOUT_S). When a match page simply does not offer
+# an Over/Under sub-line (the common gap on thin/obscure leagues) that is a full
+# 20s burned PER missing line — the live "52x Failed to find and click parent ...
+# Over/Under +NNN.5 within timeout" wedge that made one match page take minutes
+# and a whole cycle effectively unbounded. A missing sub-line is an EXPECTED gap,
+# not a slow-network case, so it should fail FAST: the patched methods below pass
+# a short bounded timeout. Still strictly read-only — only LOWERS a wait, never
+# bypasses anti-bot. The per-cycle watchdog (OddsPortalLoader._scrape_bounded) is
+# the hard backstop; this keeps a single page cheap so the backstop rarely fires.
+_SUBMARKET_SELECT_TIMEOUT_S = 4
+
+
+async def _patched_select_specific_market(self: Any, page: Any, specific_market: str) -> bool:
+    """Drop-in for NavigationManager.select_specific_market: a missing sub-line
+    fails fast (bounded scroll-and-click) instead of burning the upstream 20s."""
+    return bool(
+        await self.scroller.scroll_until_visible_and_click_parent(
+            page=page,
+            selector="div.flex.w-full.items-center.justify-start.pl-3.font-bold p",
+            text=specific_market,
+            timeout=_SUBMARKET_SELECT_TIMEOUT_S,
+        )
+    )
+
+
+async def _patched_close_specific_market(self: Any, page: Any, specific_market: str) -> bool:
+    """Drop-in for NavigationManager.close_specific_market — bounded the same way."""
+    self.logger.info("Closing sub-market: %s", specific_market)
+    return bool(
+        await self.scroller.scroll_until_visible_and_click_parent(
+            page=page,
+            selector="div.flex.w-full.items-center.justify-start.pl-3.font-bold p",
+            text=specific_market,
+            timeout=_SUBMARKET_SELECT_TIMEOUT_S,
+        )
+    )
+
+
 class _ScrapeGapDowngradeFilter(logging.Filter):
     """Downgrade expected scrape-gap messages to INFO (never drop them): a
     match simply not offering a submarket is normal. The durable DOM-break
@@ -435,6 +476,10 @@ def _patch_upstream_quirks() -> None:
         OddsPortalSelectors.MARKET_TAB_SELECTORS
     )
     NavigationManager.wait_for_market_switch = _patched_wait_for_market_switch
+    # Bound the submarket scroll-and-click so a missing Over/Under sub-line fails
+    # FAST (4s) instead of upstream's 20s — the headline Over/Under wedge fix.
+    NavigationManager.select_specific_market = _patched_select_specific_market
+    NavigationManager.close_specific_market = _patched_close_specific_market
     MarketTabNavigator._wait_and_click = _patched_wait_and_click
     MarketTabNavigator._click_more_if_market_hidden = _patched_click_more_if_market_hidden
     OddsParser._extract_bookmaker_name = _patched_extract_bookmaker_name
@@ -528,6 +573,7 @@ class OddsPortalLoader:
         locale: str = "en-GB",
         proxy_pool: Sequence[ScraperProxy] = (),
         nav_timeout_ms: int | None = None,
+        cycle_timeout_seconds: float | None = None,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -590,9 +636,44 @@ class OddsPortalLoader:
         # and read-only; see _apply_nav_timeout_override.
         self._nav_timeout_ms = nav_timeout_ms
         _apply_nav_timeout_override(nav_timeout_ms)
+        # HARD per-scrape watchdog (cactusbets.cloud prod fix): a single hung
+        # OddsPortal Over/Under extraction (PageScroller burns its 20s
+        # scroll-and-click timeout per missing sub-line, x52 across a slate)
+        # otherwise made a poll cycle run FOREVER — every later interval slot
+        # then skipped ("max running instances reached") and settle_results
+        # never ran. Each _scrape_with_failover call is bounded by this many
+        # seconds; on timeout the hung scrape is CANCELLED and that pass is
+        # treated as empty (recovered next cycle). None = unbounded (the
+        # default for in-process callers/tests; the scheduler injects a value
+        # from Settings, so prod is always bounded).
+        self._cycle_timeout_seconds = cycle_timeout_seconds
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
+
+    async def _scrape_bounded(self, **kwargs: Any) -> Any:
+        """`_scrape_with_failover` under the per-cycle watchdog.
+
+        On timeout the underlying scrape coroutine is cancelled (asyncio.wait_for
+        cancels the awaitable) and a sentinel "no matches" result is returned, so
+        ONE hung match-page/Over-Under extraction can never wedge the whole cycle.
+        Logs type-only (never the URL / proxy creds). ``None`` timeout = the
+        unbounded legacy path (byte-identical to before)."""
+        timeout = self._cycle_timeout_seconds
+        if timeout is None:
+            return await self._scrape_with_failover(**kwargs)
+        try:
+            return await asyncio.wait_for(self._scrape_with_failover(**kwargs), timeout=timeout)
+        except TimeoutError:
+            # asyncio.wait_for raises the builtin TimeoutError (3.11+).
+            # Bound exceeded: the scrape was cancelled. Treat this pass as empty —
+            # the slate recovers next cycle. NEVER log the URL/league/proxy.
+            logger.warning(
+                "oddsportal scrape pass timed out (>%ss) — cancelled and skipped "
+                "this cycle (recovered next cycle)",
+                timeout,
+            )
+            return None
 
     async def _scrape_with_failover(self, **kwargs: Any) -> Any:
         """Scrape via the proxy pool, rotating with failover: on an exception OR
@@ -655,7 +736,9 @@ class OddsPortalLoader:
         matches: list[dict[str, Any]] = []
         seen_links: set[str] = set()
         for scrape_date in dates:
-            result = await self._scrape_with_failover(
+            # Per-DATE bound: a late date hanging never discards earlier dates'
+            # already-collected matches (incremental progress, prod fix).
+            result = await self._scrape_bounded(
                 sport=sport,
                 date=scrape_date,
                 leagues=scrape_leagues,
@@ -744,6 +827,7 @@ class OddsPortalLoader:
         markets: Sequence[str] | None = None,
         *,
         prefiltered: bool = False,
+        score_only: bool = False,
     ) -> list[OddsSnapshotIn]:
         """Scrape SPECIFIC match pages (open picks outside the dated window
         still need fresh prices). Links from other sports are filtered out
@@ -762,7 +846,19 @@ class OddsPortalLoader:
         page; the full configured list is 18-21 tabs). Narrowing only ever
         selects from the validated configured list — unknown keys are
         dropped, and an empty intersection falls back to the full list so a
-        trimmed request can never have WORSE coverage than no request."""
+        trimmed request can never have WORSE coverage than no request.
+
+        `score_only=True` requests ZERO markets: OddsHarvester then skips market
+        scraping entirely and only reads the match HEADER (which carries the
+        finished home/away score). This is the finished-score capture path — it
+        needs the score, never odds — and it MATTERS because scraping the full
+        market list on a finished page re-runs the slow (sometimes hung)
+        Over/Under extraction, so the per-link timeout could fire BEFORE the
+        already-available score was read (only 1 of ~24 scores landed live,
+        cactusbets.cloud). score_only OVERRIDES the market-trim fallback: it
+        forces an empty market list (never the full-list fallback), so the
+        finished-score scrape stays cheap and reliable. No odds snapshots come
+        back (the score reaches the caller via the EventDirectory register)."""
         if sport_key not in self._config:
             return []
         sport, _leagues = self._config[sport_key]
@@ -773,14 +869,21 @@ class OddsPortalLoader:
         )
         if not links:
             return []
-        requested = self._markets_for(sport_key)
-        if markets is not None:
-            wanted = set(markets)
-            trimmed = tuple(key for key in requested if key in wanted)
-            if trimmed:
-                requested = trimmed
+        if score_only:
+            # Force NO markets — skip the (slow, hang-prone) market extraction;
+            # only the header score is needed. Overrides the trim fallback below.
+            requested: tuple[str, ...] = ()
+        else:
+            requested = self._markets_for(sport_key)
+            if markets is not None:
+                wanted = set(markets)
+                trimmed = tuple(key for key in requested if key in wanted)
+                if trimmed:
+                    requested = trimmed
         now = datetime.now(tz=UTC)
-        result = await self._scrape_with_failover(
+        # Same per-cycle watchdog as fetch_odds: one hung match-page extraction
+        # (Over/Under wedge) must not stall the off-window / finished-score pass.
+        result = await self._scrape_bounded(
             sport=sport,
             match_links=links,
             markets=list(requested),

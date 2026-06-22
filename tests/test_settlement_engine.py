@@ -432,6 +432,65 @@ async def test_run_settlement_cycle_auto_settles_from_scraped_score(factory) -> 
         assert row.away_score == 1
 
 
+async def test_run_settlement_cycle_drains_obscure_no_feed_league_via_scraped_score(  # type: ignore[no-untyped-def]
+    factory,
+) -> None:
+    # THE cactusbets.cloud end-state regression: a FINISHED obscure-league
+    # fixture (Real Banjul — no ESPN/CSV results feed) whose Event carries a
+    # scraped final score must be DRAINED from 'alerted' to settled by
+    # run_settlement_cycle through the existing scraped-score SECOND pass, with
+    # the correct outcome — no manual entry, no feed. This is what the 24 stuck
+    # "awaiting result" June 17-18 picks needed once their score was captured
+    # (bug 2) and settle_results actually ran (bug 1's watchdog).
+    home, away = "Real Banjul", "Gamtel FC"
+    async with factory() as session:
+        teams = EventTeams(home=home, away=away, league="gambia-gfa-league", starts_at=KICKOFF)
+        pick = make_pick("evt-real-banjul", market=Market.H2H, selection=home).model_copy(
+            update={"sport": "soccer", "event": f"{home} vs {away}"}
+        )
+        assert await persist_pick(session, pick, teams, "value", "test-v")
+        ev = await session.scalar(select(Event).where(Event.external_ref == "evt-real-banjul"))
+        # The score the finished-score scrape captured (bug 2 fix) lands here.
+        ev.scraped_home_score = 2
+        ev.scraped_away_score = 0  # Real Banjul win -> H2H on home = WON
+        await session.commit()
+        # Precondition: the pick is OPEN ("alerted") before settlement.
+        open_pick = await session.scalar(
+            select(Pick)
+            .join(Event, Pick.event_id == Event.id)
+            .where(Event.external_ref == "evt-real-banjul")
+        )
+        assert open_pick is not None
+        assert open_pick.status == "alerted"
+
+    # Every results feed 404s and ESPN is empty: this obscure GFA-league fixture
+    # has NO free feed, so the scraped score is the ONLY source -> the SECOND
+    # (scraped) settle pass must drain it.
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(404))
+    ) as client:
+        settled = await run_settlement_cycle(client, factory, slugs=[], seasons=[], now=NOW)
+    assert settled == 1
+    async with factory() as session:
+        drained = await session.scalar(
+            select(Pick)
+            .join(Event, Pick.event_id == Event.id)
+            .where(Event.external_ref == "evt-real-banjul")
+        )
+        assert drained is not None
+        assert drained.status == "settled"  # drained off "awaiting result"
+        row = await session.scalar(
+            select(ResultTracking)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .where(Event.external_ref == "evt-real-banjul")
+        )
+        assert row is not None
+        assert row.outcome == "won"  # 2-0 Real Banjul win, picked home
+        assert row.home_score == 2
+        assert row.away_score == 0
+
+
 async def test_settle_event_picks_settles_all_open_picks_of_event(session) -> None:  # type: ignore[no-untyped-def]
     pick = await seed_pick(session, "evt-manual-1")  # totals Over 2.5
     teams = EventTeams(home=HOME, away=AWAY, league="test-league-settlement", starts_at=KICKOFF)

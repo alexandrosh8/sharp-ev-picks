@@ -507,6 +507,183 @@ async def test_inplay_url_fork_collapses_to_one_event() -> None:
     assert directory.lookup(base_link) is not None
 
 
+# ---------------------------------------------------------------------------
+# Per-cycle scrape watchdog (cactusbets.cloud prod fix): a hung Over/Under
+# extraction (PageScroller 20s timeout per missing sub-line, 52x across the
+# slate) made poll_odds run forever, so every later interval slot skipped with
+# "maximum number of running instances reached" and settle_results never ran.
+# A bounded asyncio.wait_for at OUR scrape boundary ends the cycle cleanly.
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_odds_watchdog_cancels_a_hung_scrape() -> None:
+    # A scrape that never returns (the Over/Under wedge) must be cancelled by
+    # the per-cycle timeout so fetch_odds returns cleanly instead of running
+    # forever. The hung coroutine is cancelled, not left dangling.
+    import asyncio
+
+    cancelled = asyncio.Event()
+
+    async def hung_scrape(**kwargs: Any) -> Any:
+        try:
+            await asyncio.Event().wait()  # never returns
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])  # pragma: no cover
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=hung_scrape,
+        cycle_timeout_seconds=0.05,
+    )
+    snapshots = await loader.fetch_odds("soccer")
+    assert snapshots == []  # cycle ended cleanly, no wedge
+    assert cancelled.is_set()  # the hung scrape was actually cancelled
+    assert loader.last_fetch_matches["soccer"] == 0
+
+
+async def test_fetch_odds_watchdog_does_not_leak_secrets_on_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Secret hygiene: a timeout must log type-only, never the URL/proxy creds.
+    import asyncio
+    import logging
+
+    async def hung_scrape(**kwargs: Any) -> Any:
+        await asyncio.Event().wait()
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=hung_scrape,
+        cycle_timeout_seconds=0.05,
+    )
+    with caplog.at_level(logging.WARNING, logger="app.ingestion.oddsportal"):
+        await loader.fetch_odds("soccer")
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "oddsportal.com" not in msgs  # no URL leak
+    assert "testland-league" not in msgs  # no league slug / URL fragment
+    assert any("timed out" in r.getMessage().lower() for r in caplog.records)
+
+
+async def test_fetch_odds_persists_partial_progress_per_date() -> None:
+    # Incremental progress: a multi-date cycle whose SECOND date hangs must
+    # still return the FIRST date's snapshots (the per-date scrape is bounded
+    # individually, so a late wedge never discards earlier progress).
+    import asyncio
+
+    seen_dates: list[str] = []
+
+    async def flaky_scrape(**kwargs: Any) -> Any:
+        seen_dates.append(kwargs["date"])
+        if len(seen_dates) == 1:
+            return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+        await asyncio.Event().wait()  # second date hangs forever
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=flaky_scrape,
+        days_ahead=1,  # two dated scrapes: today + tomorrow
+        cycle_timeout_seconds=0.05,
+    )
+    snapshots = await loader.fetch_odds("soccer")
+    assert len(seen_dates) == 2  # both dates attempted
+    assert snapshots  # the first date's odds survived the second date's hang
+    assert {s.event_id for s in snapshots} == {str(MATCH["match_link"])}
+
+
+async def test_fetch_match_odds_watchdog_cancels_a_hung_scrape() -> None:
+    # The finished-score / off-window match-page path is bounded too: one hung
+    # match-page extraction must not wedge the cycle.
+    import asyncio
+
+    async def hung_scrape(**kwargs: Any) -> Any:
+        await asyncio.Event().wait()
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=hung_scrape,
+        cycle_timeout_seconds=0.05,
+    )
+    snapshots = await loader.fetch_match_odds(
+        "soccer", ["https://www.oddsportal.com/football/a/b-vs-c/XY1/"]
+    )
+    assert snapshots == []  # bounded, returned cleanly
+
+
+async def test_cycle_timeout_none_keeps_unbounded_behaviour() -> None:
+    # Default None = no watchdog (in-process callers/tests that pass nothing):
+    # a normal scrape is byte-for-byte unchanged.
+    directory = EventDirectory()
+    loader = make_loader(directory, [MATCH])  # no cycle_timeout_seconds
+    assert loader._cycle_timeout_seconds is None
+    snapshots = await loader.fetch_odds("soccer")
+    assert len(snapshots) == 8  # unchanged happy path
+
+
+# ---------------------------------------------------------------------------
+# Score-only match-page scrape (finished-score capture fix, cactusbets.cloud):
+# the finished-score pass only needs the match HEADER score (home/away result),
+# never any market. Scraping it WITH markets re-runs the slow (and sometimes
+# hung) Over/Under extraction, which made the per-link timeout fire BEFORE the
+# already-available score was read — only 1 of ~24 scores landed. score_only
+# requests NO markets so OddsHarvester skips market scraping entirely.
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_match_odds_score_only_requests_no_markets() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["all"])},
+        markets=("1x2", "over_under_2_5"),
+        scrape_fn=fake_scrape,
+        days_ahead=1,
+    )
+    link = "https://www.oddsportal.com/football/world/a-vs-b/XY9/"
+    snaps = await loader.fetch_match_odds("soccer", [link], score_only=True)
+    # NO markets scraped — the slow Over/Under path is never entered, so a hung
+    # sub-line can't burn the per-link timeout before the score is read.
+    assert calls[-1]["markets"] == []
+    assert snaps == []  # score-only path yields no odds snapshots (only the score)
+
+
+async def test_fetch_match_odds_score_only_overrides_market_fallback() -> None:
+    # The normal trim falls back to the FULL list on an empty intersection;
+    # score_only must NOT — it forces an empty market list regardless.
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["all"])},
+        markets=("1x2", "over_under_2_5"),
+        scrape_fn=fake_scrape,
+        days_ahead=1,
+    )
+    link = "https://www.oddsportal.com/football/world/a-vs-b/XY9/"
+    # Even passing markets=[] (empty intersection) must stay empty under score_only.
+    await loader.fetch_match_odds("soccer", [link], markets=[], score_only=True)
+    assert calls[-1]["markets"] == []
+    # And the score still registers in the directory (the header carries it).
+    await loader.fetch_match_odds("soccer", [link], score_only=True)
+    teams = loader._directory.lookup(str(MATCH["match_link"]))
+    assert teams is not None
+    assert teams.home == "Alpha FC"
+
+
 def _expected_market_and_outcomes(key: str) -> tuple[Market, int]:
     """Doctrine layout per market family: 2-way vs 3-way full outcome sets."""
     exact = {

@@ -174,6 +174,9 @@ def test_dashboard_auth_requires_both_hash_and_secret_or_neither() -> None:
         ("scrape_nav_timeout_ms", 14999),  # below the upstream-default floor
         ("scrape_nav_timeout_ms", 120001),  # above the stall-guard cap
         ("scrape_nav_timeout_ms", 0),
+        ("scrape_cycle_timeout_seconds", 59),  # below the 60s floor
+        ("scrape_cycle_timeout_seconds", 7201),  # above the 2h cap
+        ("scrape_cycle_timeout_seconds", 0),
     ],
 )
 def test_out_of_range_pacing_knobs_fail_at_startup(field: str, value: float) -> None:
@@ -193,10 +196,22 @@ def test_out_of_range_pacing_knobs_fail_at_startup(field: str, value: float) -> 
         ("scrape_nav_timeout_ms", 15000),  # floor = upstream default (allowed)
         ("scrape_nav_timeout_ms", 30000),  # the recommended default
         ("scrape_nav_timeout_ms", 120000),  # cap
+        ("scrape_cycle_timeout_seconds", 60),  # floor
+        ("scrape_cycle_timeout_seconds", 900),  # the recommended default
+        ("scrape_cycle_timeout_seconds", 7200),  # cap
     ],
 )
 def test_in_range_pacing_knobs_pass(field: str, value: float) -> None:
     assert getattr(make_settings(**{field: value}), field) == value
+
+
+def test_scrape_cycle_timeout_default_is_prod_safe() -> None:
+    # The per-cycle scrape watchdog must be ON by default (no .env needed): a
+    # hung Over/Under extraction can never wedge poll_odds in prod. Generous
+    # enough that a healthy worldwide slate finishes, finite so a wedge can't.
+    s = make_settings()
+    assert s.scrape_cycle_timeout_seconds == 900.0
+    assert 60.0 <= s.scrape_cycle_timeout_seconds <= 7200.0
 
 
 def test_scrape_nav_timeout_default_raises_the_upstream_15s_floor() -> None:

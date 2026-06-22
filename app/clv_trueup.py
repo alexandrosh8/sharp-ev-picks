@@ -471,7 +471,12 @@ async def _scrape_one_finished_score(
     # prefiltered=True: the caller already routed `ref` to this sport by the DB
     # sport on the open pick, so scrape the stored URL AS-IS (no URL sport-segment
     # filter) — robust to an OddsPortal per-game-type URL change.
-    coro = fetch(sport_key, [ref], prefiltered=True)  # registers the score in `directory`
+    # score_only=True: scrape NO markets — only the match header (which carries
+    # the finished score). The full market list would re-run the slow/hang-prone
+    # Over/Under extraction, so the per-link timeout fired BEFORE the score was
+    # read (only 1 of ~24 scores landed on cactusbets.cloud). Score-only keeps the
+    # finished-score scrape cheap and reliable; the score reaches us via `directory`.
+    coro = fetch(sport_key, [ref], prefiltered=True, score_only=True)
     if per_link_timeout is not None:
         await asyncio.wait_for(coro, timeout=per_link_timeout)
     else:

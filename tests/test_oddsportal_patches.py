@@ -619,6 +619,79 @@ def test_loader_without_nav_timeout_leaves_upstream_default() -> None:
         base_scraper.NAVIGATION_TIMEOUT_MS = original
 
 
+# --- bounded submarket selection (Over/Under wedge fix) ---------------------
+
+
+@pytest.mark.asyncio
+async def test_select_specific_market_uses_a_short_bounded_timeout() -> None:
+    """A missing Over/Under sub-line must fail FAST: upstream
+    scroll_until_visible_and_click_parent defaults to a 20s timeout per missing
+    sub-line (the '52x Failed to find and click parent ... within timeout' log),
+    which made one match page burn minutes. The patch passes a short bounded
+    timeout so a stubborn line is skipped quickly, never wedging the cycle."""
+    from app.ingestion.oddsportal import (
+        _SUBMARKET_SELECT_TIMEOUT_S,
+        _patched_select_specific_market,
+    )
+
+    assert _SUBMARKET_SELECT_TIMEOUT_S < 20  # shorter than upstream's default
+
+    seen: dict[str, object] = {}
+
+    class _Scroller:
+        async def scroll_until_visible_and_click_parent(self, **kwargs: Any) -> bool:
+            seen.update(kwargs)
+            return False  # the sub-line is absent (the gap case)
+
+    nav = SimpleNamespace(logger=logging.getLogger("test.NavigationManager"), scroller=_Scroller())
+    ok = await _patched_select_specific_market(
+        nav, page=object(), specific_market="Over/Under +2.5"
+    )
+    assert ok is False  # absence is reported (caller skips the sub-line)
+    assert seen["text"] == "Over/Under +2.5"
+    assert seen["timeout"] == _SUBMARKET_SELECT_TIMEOUT_S  # bounded, not the 20s default
+
+
+@pytest.mark.asyncio
+async def test_close_specific_market_is_also_bounded() -> None:
+    from app.ingestion.oddsportal import (
+        _SUBMARKET_SELECT_TIMEOUT_S,
+        _patched_close_specific_market,
+    )
+
+    seen: dict[str, object] = {}
+
+    class _Scroller:
+        async def scroll_until_visible_and_click_parent(self, **kwargs: Any) -> bool:
+            seen.update(kwargs)
+            return True
+
+    nav = SimpleNamespace(logger=logging.getLogger("test.NavigationManager"), scroller=_Scroller())
+    await _patched_close_specific_market(nav, page=object(), specific_market="Over/Under +2.5")
+    assert seen["timeout"] == _SUBMARKET_SELECT_TIMEOUT_S
+
+
+def test_patched_select_market_matches_upstream_parameter_names() -> None:
+    """Pin the patched submarket-selection methods to the installed signatures —
+    a silent oddsharvester bump that reshapes them turns RED here."""
+    from app.ingestion.oddsportal import (
+        _patched_close_specific_market,
+        _patched_select_specific_market,
+    )
+
+    for patched, method in (
+        (_patched_select_specific_market, "select_specific_market"),
+        (_patched_close_specific_market, "close_specific_market"),
+    ):
+        ours = list(inspect.signature(patched).parameters)
+        upstream = _upstream_method_params(
+            "oddsharvester.core.market_extraction.navigation_manager",
+            "NavigationManager",
+            method,
+        )
+        assert ours == upstream, f"{method}: patched params {ours} != upstream {upstream}"
+
+
 def test_patch_upstream_quirks_applies_and_is_idempotent() -> None:
     from oddsharvester.core.browser.market_navigation import MarketTabNavigator
     from oddsharvester.core.market_extraction.navigation_manager import NavigationManager
@@ -627,6 +700,8 @@ def test_patch_upstream_quirks_applies_and_is_idempotent() -> None:
 
     _patch_upstream_quirks()
     _patch_upstream_quirks()  # second call must be a no-op
+    assert NavigationManager.select_specific_market.__module__ == "app.ingestion.oddsportal"
+    assert NavigationManager.close_specific_market.__module__ == "app.ingestion.oddsportal"
 
     assert NavigationManager.wait_for_market_switch.__module__ == "app.ingestion.oddsportal"
     assert MarketTabNavigator._click_more_if_market_hidden.__module__ == (
