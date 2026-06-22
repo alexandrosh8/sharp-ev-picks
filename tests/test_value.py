@@ -299,3 +299,19 @@ def test_anchor_type_for_categorizes_every_anchor() -> None:
     # named non-Pinnacle sharps are their own stratum, never "pinnacle"
     assert anchor_type_for("Betfair Exchange") == "sharp"
     assert anchor_type_for("Smarkets") == "sharp"
+
+
+def test_consensus_anchor_dedups_casing_variant_books() -> None:
+    # audit #5: two raw keys that normalize to the same book ('BookA' + 'booka')
+    # must count ONCE in the per-selection median. 'home' deduped median of
+    # {1.9, 2.0, 2.1} = 2.0; the old double-counted [1.9, 1.9, 2.0, 2.1] = 1.95.
+    from app.edge.value import CONSENSUS_ANCHOR, _consensus_anchor
+
+    prices = {
+        "home": {"BookA": 1.9, "booka": 1.9, "BookB": 2.0, "BookC": 2.1},
+        "away": {"BookA": 1.9, "BookB": 2.0, "BookC": 2.1},
+    }
+    anchor, med = _consensus_anchor(prices, ["home", "away"], {}, max_overround=0.2)
+    assert anchor == CONSENSUS_ANCHOR
+    assert med is not None
+    assert med[0] == pytest.approx(2.0)  # deduped, not the double-counted 1.95

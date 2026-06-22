@@ -869,6 +869,10 @@ async def record_result(
         pnl = pick_pnl(payload.outcome, payload.actual_stake, odds)
         roi = pick_roi(pnl, payload.actual_stake)
 
+    # ManualBetLog is append-only audit history (audit #10): a correction/re-post
+    # intentionally appends a new row (no unique key); the settlement reader takes
+    # the LATEST row per pick_id. Only ResultTracking below is upserted to a single
+    # current row — that is what the "idempotent" note refers to.
     await session.execute(
         insert(ManualBetLog).values(
             pick_id=pick_id,
@@ -879,8 +883,9 @@ async def record_result(
             notes=payload.notes,
         )
     )
-    # Idempotent: re-posting a result (a correction or a duplicate submit) must
-    # UPDATE the existing row, not 500 on the unique (pick_id) constraint.
+    # Idempotent (ResultTracking only): re-posting a result (a correction or a
+    # duplicate submit) must UPDATE the existing row, not 500 on the unique
+    # (pick_id) constraint.
     result_stmt = pg_insert(ResultTracking).values(
         pick_id=pick_id,
         outcome=str(payload.outcome),
@@ -900,29 +905,40 @@ async def record_result(
     await session.execute(result_stmt)
     # Flip status on the OBJECT (not a bulk update) so finalize sees it settled.
     pick.status = "settled"
+    event_id = pick.event_id
+    # The user's manual result (ManualBetLog + ResultTracking + status) is
+    # authoritative — commit it FIRST so a transient error in the OPTIONAL
+    # snapshot-close enrichment below can never roll it back (audit #9).
+    await session.commit()
     # audit #4: logging a result settles the pick, removing it from the auto-settle
     # cycle — so without finalizing the snapshot close here, a pick the user logs
-    # BEFORE the cycle runs would never enter the sharp-CLV subset.
-    event = await session.get(Event, pick.event_id)
-    if event is not None and event.starts_at is not None:
-        from app.clv_trueup import finalize_closing_from_snapshots
-        from app.config import get_settings
-        from app.probabilities.devig import DevigMethod
+    # BEFORE the cycle runs would never enter the sharp-CLV subset. Best-effort:
+    # any error is logged (type only — secret hygiene) and the recorded result stands.
+    try:
+        event = await session.get(Event, event_id)
+        fresh_pick = await session.get(Pick, pick_id)
+        if event is not None and event.starts_at is not None and fresh_pick is not None:
+            from app.clv_trueup import finalize_closing_from_snapshots
+            from app.config import get_settings
+            from app.probabilities.devig import DevigMethod
 
-        settings = get_settings()
-        devig = (
-            DevigMethod(settings.value_devig)
-            if settings.pick_strategy == "value"
-            else DevigMethod.POWER
-        )
-        await finalize_closing_from_snapshots(
-            session,
-            pick,
-            event.external_ref,
-            event.starts_at,
-            devig,
-            use_pinnacle_archive=settings.clv_use_pinnacle_archive,
-            use_betfair_exchange=settings.clv_use_betfair_exchange,
-        )
-    await session.commit()
+            settings = get_settings()
+            devig = (
+                DevigMethod(settings.value_devig)
+                if settings.pick_strategy == "value"
+                else DevigMethod.POWER
+            )
+            await finalize_closing_from_snapshots(
+                session,
+                fresh_pick,
+                event.external_ref,
+                event.starts_at,
+                devig,
+                use_pinnacle_archive=settings.clv_use_pinnacle_archive,
+                use_betfair_exchange=settings.clv_use_betfair_exchange,
+            )
+            await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logger.warning("record_result: snapshot-close finalize skipped: %s", type(exc).__name__)
     return {"status": "recorded", "outcome": str(payload.outcome)}

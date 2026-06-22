@@ -318,8 +318,19 @@ def _consensus_anchor(
         return None, None
     med: list[float] = []
     for s in selections:
-        eff = [effective_odds(b, o, commissions) for b, o in prices[s].items() if _norm(b) in books]
-        med.append(statistics.median(eff))
+        # Deduplicate by NORMALIZED book name before the median: two raw keys that
+        # normalize to the same book ('Bet365' + 'bet365') must count ONCE, or they
+        # skew the median (audit #5). Keep the best (max effective) price per book,
+        # matching the normalized intersection above and distinct_book_count.
+        by_norm: dict[str, float] = {}
+        for b, o in prices[s].items():
+            nb = _norm(b)
+            if nb not in books:
+                continue
+            e = effective_odds(b, o, commissions)
+            if nb not in by_norm or e > by_norm[nb]:
+                by_norm[nb] = e
+        med.append(statistics.median(by_norm.values()))
     if not 0.0 <= _overround(med) <= max_overround:
         return None, None
     return CONSENSUS_ANCHOR, med
