@@ -368,6 +368,13 @@ class BetfairExchangeReader:
     optional read-only proxy, mirroring oddsportal.py's launch fingerprint.
     """
 
+    # A proxy slot that raises (e.g. TimeoutError) is skipped for this many
+    # subsequent reads before being retried, so a chronically-slow slot is not
+    # re-probed — burning a full nav timeout — on every cycle. Failover is
+    # unchanged and stays loud (the per-slot WARNING still fires); this only
+    # reorders which healthy slot is tried first.
+    _SLOT_COOLDOWN_READS = 8
+
     def __init__(
         self,
         *,
@@ -384,6 +391,9 @@ class BetfairExchangeReader:
         self._min_liquidity = min_liquidity
         self._proxy_pool = tuple(proxy_pool)
         self._proxy_cursor = 0
+        # Proxy slot index -> reads remaining before it is retried after a
+        # failure. Empty == all slots eligible. Read-only bookkeeping only.
+        self._slot_cooldown: dict[int, int] = {}
         self._page_loader = page_loader
         self._headless = headless
         self._locale = locale
@@ -466,20 +476,38 @@ class BetfairExchangeReader:
         pool = self._proxy_pool or (None,)
         n = len(pool)
         last_exc: Exception | None = None
-        for attempt in range(n):
-            proxy = pool[(self._proxy_cursor + attempt) % n] if self._proxy_pool else None
+        # Tick cooldowns down once per read, then try healthy slots first and
+        # any still-cooling slot only as a last resort — we never refuse to
+        # read, we just stop burning a nav timeout on a known-slow slot.
+        if self._proxy_pool:
+            for slot in list(self._slot_cooldown):
+                self._slot_cooldown[slot] -= 1
+                if self._slot_cooldown[slot] <= 0:
+                    del self._slot_cooldown[slot]
+        rotation = [(self._proxy_cursor + offset) % n for offset in range(n)]
+        if self._proxy_pool:
+            order = [s for s in rotation if s not in self._slot_cooldown] + [
+                s for s in rotation if s in self._slot_cooldown
+            ]
+        else:
+            order = rotation
+        for slot in order:
+            proxy = pool[slot] if self._proxy_pool else None
             try:
                 tokens = await self._load_tokens(url, proxy)
             except Exception as exc:  # network / anti-bot / timeout
                 last_exc = exc
+                if self._proxy_pool:
+                    self._slot_cooldown[slot] = self._SLOT_COOLDOWN_READS
                 logger.warning(
                     "betfair exchange read via proxy slot %d failed (%s); trying next",
-                    (self._proxy_cursor + attempt) % n if self._proxy_pool else -1,
+                    slot if self._proxy_pool else -1,
                     type(exc).__name__,
                 )
                 continue
             if self._proxy_pool:
-                self._proxy_cursor = (self._proxy_cursor + attempt + 1) % n
+                self._slot_cooldown.pop(slot, None)  # recovered -> clear cooldown
+                self._proxy_cursor = (slot + 1) % n
             if not tokens:
                 return []  # no Betfair Exchange row (expected on thin matches)
             cells = _pair_tokens(tokens)

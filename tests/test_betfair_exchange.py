@@ -333,6 +333,39 @@ async def test_reader_proxy_failover_then_raises() -> None:
         assert secret not in str(exc.value)
 
 
+@pytest.mark.asyncio
+async def test_reader_cooldown_skips_a_slot_that_just_timed_out() -> None:
+    # A chronically-slow slot must not be re-probed (burning a full nav timeout)
+    # on the very next read. With a 2-slot pool the cursor oscillates back to
+    # slot 0 every read, so without a cooldown slot 0 is hit — and times out —
+    # on EVERY cycle. The cooldown de-prioritises it for the next reads; the
+    # healthy slot serves the data. Failover stays loud (the WARNING remains).
+    calls: dict[str, int] = {}
+
+    async def loader(*, url: str, proxy: ScraperProxy | None) -> list[str] | None:  # noqa: ARG001
+        key = proxy.url if proxy else "host"
+        calls[key] = calls.get(key, 0) + 1
+        if proxy is not None and proxy.url == "http://bad:1":
+            raise TimeoutError("transport")
+        return list(_LIVE_ROW_TOKENS)
+
+    pool = (
+        ScraperProxy(url="http://bad:1", username="u", password="p"),
+        ScraperProxy(url="http://good:2", username="u", password="p"),
+    )
+    reader = BetfairExchangeReader(min_liquidity=0.0, proxy_pool=pool, page_loader=loader)
+
+    first = await reader.read_back_quotes("https://op/m1")
+    second = await reader.read_back_quotes("https://op/m2")
+
+    assert [q.designation for q in first] == ["home", "draw", "away"]
+    assert [q.designation for q in second] == ["home", "draw", "away"]
+    # Bad slot tried once (first read), then cooled down — NOT re-probed on the
+    # second read; the healthy slot served both.
+    assert calls["http://bad:1"] == 1
+    assert calls["http://good:2"] == 2
+
+
 # --------------------------------------------------------------------------- #
 # DOM extraction against the REAL structure (static HTML, no network).
 #
