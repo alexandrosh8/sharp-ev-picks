@@ -25,12 +25,18 @@ class EventTeams:
     league: str = ""
     starts_at: datetime | None = None  # kickoff (UTC) when the source knows it
     # Best-effort final score the loader scraped AFTER the match finished
-    # (OddsPortal surfaces it once the game is over). Threaded to the event row
-    # so the manual settle prompt can be pre-filled. None when the score was not
-    # scraped (the common case: pre-kickoff / in-play scrapes carry no score).
-    # CONVENIENCE ONLY — never drives settlement.
+    # (OddsPortal surfaces it once the game is over), threaded to the event row.
+    # The finished-score capture path DOES settle from these (gated by
+    # `finished` below) — so an in-play partial must NEVER reach here as a final.
+    # None when no score was scraped (pre-kickoff / in-play scrapes).
     home_score: int | None = None
     away_score: int | None = None
+    # Explicit OddsPortal finished-status for the scraped score, so capture can
+    # trust the page's "Finished" flag instead of only a conservative time-floor:
+    #   True  = page reports Finished -> score is FINAL, safe to settle now
+    #   False = reported but in-play/scheduled -> reject (never settle a partial)
+    #   None  = source gave no status -> caller falls back to the time-floor
+    finished: bool | None = None
 
 
 @dataclass(frozen=True)

@@ -968,11 +968,17 @@ class OddsPortalLoader:
                 away=away,
                 league=league,
                 starts_at=_parse_ts(match.get("match_date")),
-                # Best-effort final score: present only on a post-finish scrape;
-                # convenience pre-fill for the manual settle prompt, never used
-                # to settle. Parsed only when the whole string is digits.
+                # Final score + explicit finished-status, present on a post-finish
+                # scrape. The capture path settles from these, gated by `finished`
+                # so an in-play partial (stage 13, populated live score) is never
+                # taken as final. Scores parsed only when the whole string is digits.
                 home_score=_parse_score(match.get("home_score")),
                 away_score=_parse_score(match.get("away_score")),
+                finished=_coerce_finished(
+                    match.get("is_finished"),
+                    match.get("event_stage_id"),
+                    match.get("event_stage_name"),
+                ),
             ),
         )
         captured_at = _parse_ts(match.get("scraped_date")) or now
@@ -1100,6 +1106,30 @@ def _parse_score(raw: Any) -> int | None:
         return None
     text = str(raw).strip()
     return int(text) if text.isdigit() else None
+
+
+def _coerce_finished(is_finished: Any, stage_id: Any, stage_name: Any) -> bool | None:
+    """Map OddsPortal's event status to a settlement-safe finished flag.
+
+    True  — explicitly Finished (eventData.isFinished, eventStageId == 3, or
+            eventStageName == "Finished"): the score is FINAL, safe to capture.
+    False — a status WAS reported but is not Finished — Scheduled, or (the
+            dangerous case) an in-play 2nd Half (stage 13) whose homeResult/
+            awayResult carry a LIVE partial: must NEVER be recorded as final.
+    None  — the source carried no status at all (obscure league / dehydrated
+            page); the caller falls back to the conservative time-floor.
+
+    isLive is deliberately NOT used — it was observed False even mid-match.
+    """
+    if is_finished is True:
+        return True
+    if stage_id == 3:
+        return True
+    if isinstance(stage_name, str) and stage_name.strip().lower() == "finished":
+        return True
+    if is_finished is None and stage_id is None and not stage_name:
+        return None
+    return False
 
 
 def _parse_ts(raw: Any) -> datetime | None:
