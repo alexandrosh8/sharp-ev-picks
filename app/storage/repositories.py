@@ -384,6 +384,12 @@ async def latest_available_games_with_events(
     as_of = now or datetime.now(tz=UTC)
     event_cutoff = as_of - timedelta(hours=12)
     recent_odds_cutoff = as_of - timedelta(hours=24)
+    # Hide already-FINISHED games: a fixture whose kickoff is more than this long
+    # ago is over and must not render as bettable in GET /games (the old query had
+    # NO upper bound, so kicked-off events with recent odds leaked in). A NULL
+    # kickoff (TBD) is kept — it has no finish to be past. 3h30m covers a full
+    # match incl. stoppage/extra-time/penalties so a live fixture is never hidden.
+    in_play_grace = as_of - timedelta(hours=3, minutes=30)
 
     home = aliased(Team)
     away = aliased(Team)
@@ -419,7 +425,10 @@ async def latest_available_games_with_events(
         .join(home, Event.home_team_id == home.id)
         .join(away, Event.away_team_id == away.id)
         .outerjoin(OddsSnapshot, OddsSnapshot.event_id == Event.id)
-        .where((Event.starts_at >= event_cutoff) | (OddsSnapshot.ingested_at >= recent_odds_cutoff))
+        .where(
+            (Event.starts_at >= event_cutoff) | (OddsSnapshot.ingested_at >= recent_odds_cutoff),
+            (Event.starts_at.is_(None)) | (Event.starts_at > in_play_grace),
+        )
         .group_by(
             Sport.key,
             Sport.name,

@@ -505,6 +505,47 @@ async def test_available_games_fallback_reads_current_warehouse_events(session) 
     assert row["updated_at"] == (captured + timedelta(seconds=20)).isoformat()
 
 
+async def test_available_games_excludes_finished_fixtures(session) -> None:  # type: ignore[no-untyped-def]
+    # GET /games must NOT show an already-FINISHED game as bettable: a fixture
+    # kicked off >3h30m ago is over, even if it still carries recent odds rows
+    # (the old query had no upper bound, so those leaked in). Live + upcoming stay.
+    now = datetime.now(tz=UTC)
+    captured = now - timedelta(minutes=10)  # recent odds (passes the OR clause)
+
+    async def _seed(ref: str, kickoff: datetime) -> None:
+        teams = EventTeams(
+            home=f"{ref} H", away=f"{ref} A", league="test-league-fin", starts_at=kickoff
+        )
+        await persist_pick(
+            session, make_pick(ref, league="test-league-fin"), teams, "value-sharp-vs-soft", "t-fin"
+        )
+        ev = await session.scalar(select(Event).where(Event.external_ref == ref))
+        assert ev is not None
+        session.add(
+            OddsSnapshot(
+                event_id=ev.id,
+                bookmaker="Pinnacle",
+                market="h2h",
+                selection="X",
+                decimal_odds=Decimal("2.0000"),
+                liquidity=None,
+                captured_at=captured,
+                ingested_at=captured,
+            )
+        )
+        await session.flush()
+
+    await _seed("evt-fin-over", now - timedelta(hours=5))  # finished -> excluded
+    await _seed("evt-fin-live", now - timedelta(hours=1))  # in-play  -> kept
+    await _seed("evt-fin-soon", now + timedelta(hours=2))  # upcoming -> kept
+
+    rows = await latest_available_games_with_events(session, limit=5000, now=now)
+    refs = {r["event_id"] for r in rows}
+    assert "evt-fin-over" not in refs  # finished game hidden
+    assert "evt-fin-live" in refs  # live fixture still visible
+    assert "evt-fin-soon" in refs  # upcoming visible
+
+
 async def test_latest_picks_tier_scope_protects_premium_window(session) -> None:  # type: ignore[no-untyped-def]
     """Volume-flood regression: the volume shadow tier runs ~6x premium, so
     an unscoped latest-N window fills with volume rows and an open premium
