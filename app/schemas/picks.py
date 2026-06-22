@@ -7,7 +7,17 @@ from pydantic import Field, field_validator
 
 from app.schemas.base import InternalModel, Market, to_utc
 
+# Formal safety statement. The literal "This system does not place bets" is
+# asserted by scripts/safety_audit.sh (CI gate) and is the platform's picks-only
+# guarantee — kept here even though pick alerts render the compact ALERT_FOOTER.
 MANUAL_BETTING_REMINDER = "Manual review required. This system does not place bets."
+
+# Compact one-line disclaimer at the foot of every pick alert: informational
+# only, the user places any bet themselves (the system never does), no guarantee.
+ALERT_FOOTER = (
+    "ℹ️ Informational only — you place any bet; this system does not place bets. "
+    "No profit guaranteed."
+)
 
 
 class StakeBreakdownOut(InternalModel):

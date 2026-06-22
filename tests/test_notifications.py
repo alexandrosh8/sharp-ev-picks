@@ -13,7 +13,7 @@ from app.notifications.dedupe import (
 )
 from app.notifications.dispatcher import AlertDispatcher
 from app.schemas.base import Market
-from app.schemas.picks import MANUAL_BETTING_REMINDER, PickOut, StakeBreakdownOut
+from app.schemas.picks import ALERT_FOOTER, PickOut, StakeBreakdownOut
 
 
 class RecordingSink:
@@ -195,16 +195,16 @@ async def test_redis_idempotency_ttl_keeps_unchanged_odds_quiet_for_seven_days()
 
 def test_pick_alert_contains_required_fields_and_reminder() -> None:
     alert = build_pick_alert(make_pick())
-    assert MANUAL_BETTING_REMINDER in alert.body
+    assert ALERT_FOOTER in alert.body  # compact informational / manual-betting footer
     for fragment in (
         "Alpha FC vs Beta United",
-        "Model probability: 0.550",
-        "Fair (vig-free) probability: 0.500",
-        "Edge: +0.050",
-        "EV: +0.155",
-        "Recommended stake: 2.00%",
-        "informational only",
-        "Odds age: 60s",
+        "Alpha FC @ 2.10 · bookie_one",
+        "Edge +5.0%",
+        "EV +15.5%",
+        "Conf 75%",
+        "Fair 2.00",
+        "Stake 2.0% of bankroll",
+        "odds 60s old",
     ):
         assert fragment in alert.body, fragment
     assert len(alert.dedupe_key) == 32
@@ -219,11 +219,11 @@ def test_pick_alert_still_ev_line_from_value_min_edge() -> None:
     # the sharp fair prob there, so the floor is 1/(0.55-0.03)=1.923 -> 1.93
     # after the round-UP display rule (rounding down would lose the edge).
     alert = build_pick_alert(make_pick(), value_min_edge=0.03)
-    assert "Still +EV down to: 1.93 at bookie_one" in alert.body
-    assert "skip" in alert.body
+    assert "Value holds to 1.93" in alert.body
+    assert "skip below" in alert.body
     # default (model strategy / legacy callers): no line, identical key
     plain = build_pick_alert(make_pick())
-    assert "Still +EV down to" not in plain.body
+    assert "Value holds to" not in plain.body
     assert plain.dedupe_key == alert.dedupe_key
 
 
@@ -261,4 +261,4 @@ def test_pick_alert_omits_still_ev_line_when_no_price_retains_edge() -> None:
     # print, and the alert must not invent one.
     pick = make_pick().model_copy(update={"model_probability": 0.02})
     alert = build_pick_alert(pick, value_min_edge=0.03)
-    assert "Still +EV down to" not in alert.body
+    assert "Value holds to" not in alert.body

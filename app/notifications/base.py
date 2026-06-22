@@ -9,7 +9,17 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.edge.value import ceil_odds, min_acceptable_odds
-from app.schemas.picks import MANUAL_BETTING_REMINDER, PickOut
+from app.schemas.picks import ALERT_FOOTER, PickOut
+
+# Per-sport emoji for the alert header (neutral fallback for any new sport).
+_SPORT_EMOJI = {
+    "soccer": "⚽",
+    "basketball": "🏀",
+    "basketball_nba": "🏀",
+    "basketball_euroleague": "🏀",
+    "tennis": "🎾",
+    "american_football": "🏈",
+}
 
 
 @dataclass(frozen=True)
@@ -61,34 +71,30 @@ def build_pick_alert(
     )
     dedupe_key = hashlib.sha256(raw_key.encode()).hexdigest()[:32]
     title = f"+EV pick: {pick.event} — {pick.selection} @ {pick.decimal_odds:.2f}"
-    still_ev_line: list[str] = []
+    fair_odds = 1.0 / pick.fair_probability if pick.fair_probability > 0 else 0.0
+    anchor = f" ({pick.anchor_type.title()})" if pick.anchor_type else ""
+    value_line: list[str] = []
     if value_min_edge is not None:
         floor = min_acceptable_odds(pick.model_probability, value_min_edge, book=pick.bookmaker)
         if floor is not None:
-            still_ev_line.append(
-                f"Still +EV down to: {ceil_odds(floor):.2f} at {pick.bookmaker} "
-                f"(below that the edge drops under {value_min_edge:.1%} — skip)"
-            )
+            value_line.append(f"⏳ Value holds to {ceil_odds(floor):.2f} — skip below")
+    sport_emoji = _SPORT_EMOJI.get(pick.sport, "🏟️")
+    liq = f" · liquidity {pick.liquidity}" if pick.liquidity is not None else ""
     body = "\n".join(
         [
-            title,
-            f"Sport/League: {pick.sport} / {pick.league}",
-            f"Market: {pick.market} | Bookmaker: {pick.bookmaker}",
-            f"Model probability: {pick.model_probability:.3f}",
-            f"Fair (vig-free) probability: {pick.fair_probability:.3f}",
-            f"Edge: {pick.edge:+.3f} | EV: {pick.ev:+.3f}",
-            f"Confidence: {pick.confidence:.2f}",
-            (
-                f"Recommended stake: {pick.recommended_stake_fraction:.2%} of bankroll"
-                f" (~{pick.recommended_stake_amount}) — informational only"
-            ),
-            *still_ev_line,
-            f"Odds age: {pick.odds_age_seconds:.0f}s"
-            + (f" | Liquidity: {pick.liquidity}" if pick.liquidity is not None else ""),
-            f"Why: {pick.reason_summary}",
-            f"Generated: {pick.created_at.isoformat()}",
-            pick.risk_warning,
-            MANUAL_BETTING_REMINDER,
+            f"🎯 +EV PICK — {pick.event}",
+            f"✅ {pick.selection} @ {pick.decimal_odds:.2f} · {pick.bookmaker}",
+            "",
+            f"📈 Edge {pick.edge:+.1%} · EV {pick.ev:+.1%} · Conf {pick.confidence:.0%}",
+            f"🎯 Fair {fair_odds:.2f}{anchor} → {pick.decimal_odds:.2f} beats it",
+            f"💰 Stake {pick.recommended_stake_fraction:.1%} of bankroll "
+            f"(~{pick.recommended_stake_amount})",
+            *value_line,
+            f"{sport_emoji} {pick.sport.replace('_', ' ').title()} · {pick.league}"
+            f" · odds {pick.odds_age_seconds:.0f}s old{liq}",
+            "",
+            f"💡 {pick.reason_summary}",
+            ALERT_FOOTER,
         ]
     )
     return Alert(pick_id=pick.pick_id, title=title, body=body, dedupe_key=dedupe_key)
