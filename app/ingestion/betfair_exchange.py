@@ -635,11 +635,17 @@ class BetfairExchangeCapture:
                 if not quotes:
                     continue  # no row / all outcomes below the liquidity floor
                 events_with_quotes += 1
-                # Namespace the persisted external_ref so this Betfair row can
-                # NEVER graft onto a live event sharing the same match URL
-                # (events are keyed by external_ref ALONE). target.url stays
-                # raw for the page fetch above.
-                event_ref = _namespace_event_ref(target.event_id)
+                # INLINE BINDING (ADR-0015 v2): persist under the CANONICAL
+                # external_ref (target.event_id == the OddsPortal match URL, the
+                # same ref the main scrape's soft-book rows use), so the Betfair
+                # row becomes just another bookmaker on the canonical event — no
+                # cross-source matching needed for any Betfair-priced game. The
+                # attach-only persist below guarantees this can ONLY attach to a
+                # canonical event the main scrape already created; it never mints
+                # a (partial) event from Betfair data, so a same-URL graft is
+                # safe BY CONSTRUCTION (the event identity + metadata are the
+                # main scrape's, not ours).
+                event_ref = target.event_id
                 snapshots = back_quotes_to_snapshots(event_ref, quotes, target.teams, now=now)
                 event_fresh = self._select_fresh(sport, event_ref, snapshots)
                 if event_fresh:
@@ -667,13 +673,19 @@ class BetfairExchangeCapture:
                             events_with_quotes,
                         )
                 continue
-            namespace = f"betfair_{sport}"
+            # INLINE BINDING (ADR-0015 v2): persist under the CANONICAL sport
+            # ("soccer"/"basketball") with attach_only_to_existing=True, so the
+            # Betfair rows ATTACH to the canonical event the main scrape already
+            # created and NEVER mint one from Betfair-only data. A fixture whose
+            # canonical event has not landed yet is skipped THIS cycle (counted +
+            # logged by persist_odds_snapshots) and attaches on a later one.
             rows = await persist_odds_snapshots(
                 self._session_factory,
                 fresh,
                 teams_by_event,
-                sport=namespace,
-                default_league=namespace,
+                sport=sport,
+                default_league=sport,
+                attach_only_to_existing=True,
             )
             written[sport] = rows
             if rows:

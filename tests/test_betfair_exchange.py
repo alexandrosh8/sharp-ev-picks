@@ -31,7 +31,6 @@ from app.ingestion.betfair_exchange import (
     BetfairExchangeError,
     BetfairExchangeReader,
     MatchTarget,
-    _namespace_event_ref,
     _pair_tokens,
     back_outcomes_for_segment,
     back_quotes_to_snapshots,
@@ -611,10 +610,12 @@ async def test_capture_change_gate_emits_once_then_on_move() -> None:
     )
     # First cycle persists nothing (session_factory None) but PRIMES the gate.
     assert await capture.capture_once() == {"soccer": 0}
+    # The gate is keyed on the CANONICAL event_ref now (inline binding, ADR-0015
+    # v2): capture_once primes it under target.event_id, NOT a "betfair:" ref.
     # Re-reading the SAME prices yields no fresh snapshots (all gated).
     fresh = capture._select_fresh(
         "soccer",
-        _namespace_event_ref(_target().event_id),
+        _target().event_id,
         back_quotes_to_snapshots(
             _target().event_id,
             await reader.read_back_quotes(_target().url),
@@ -627,7 +628,7 @@ async def test_capture_change_gate_emits_once_then_on_move() -> None:
     state["tokens"][0] = "6/5"
     moved = capture._select_fresh(
         "soccer",
-        _namespace_event_ref(_target().event_id),
+        _target().event_id,
         back_quotes_to_snapshots(
             _target().event_id,
             await reader.read_back_quotes(_target().url),
@@ -703,9 +704,31 @@ async def factory():  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
-async def test_capture_persists_under_isolated_namespace(factory) -> None:  # type: ignore[no-untyped-def]
-    # uuid keeps the external_ref unique within the (rolled-back) transaction.
+async def test_capture_persists_inline_onto_canonical_event(factory) -> None:  # type: ignore[no-untyped-def]
+    # INLINE BINDING (ADR-0015 v2): Betfair rows persist onto the CANONICAL event
+    # (external_ref == url), as another bookmaker, with NUMERIC liquidity; a
+    # re-capture of the SAME prices writes nothing (change-gate + the append-only
+    # unique key both hold). uuid keeps the ref unique within the rolled-back tx.
     url = f"https://op/betfair-iso-{uuid4()}"
+
+    # The MAIN scrape creates the canonical event first; Betfair attaches inline.
+    await persist_odds_snapshots(
+        factory,
+        [
+            OddsSnapshotIn(
+                event_id=url,
+                bookmaker="bet365",
+                market=Market.H2H,
+                selection="Real Madrid",
+                decimal_odds=2.0,
+                captured_at=NOW,
+                ingested_at=NOW,
+            )
+        ],
+        {url: _teams()},
+        sport="soccer",
+        default_league="Club WC",
+    )
 
     reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
     capture = BetfairExchangeCapture(
@@ -722,7 +745,7 @@ async def test_capture_persists_under_isolated_namespace(factory) -> None:  # ty
             await session.execute(
                 select(OddsSnapshot.bookmaker, OddsSnapshot.selection, OddsSnapshot.liquidity)
                 .join(Event, Event.id == OddsSnapshot.event_id)
-                .where(Event.external_ref == f"betfair:{url}")
+                .where(Event.external_ref == url, OddsSnapshot.bookmaker == BOOKMAKER)
             )
         ).all()
         assert len(rows) == 3
@@ -730,14 +753,123 @@ async def test_capture_persists_under_isolated_namespace(factory) -> None:  # ty
         assert {r.selection for r in rows} == {"Real Madrid", "Draw", "Al Hilal"}
         # Liquidity persisted as NUMERIC (Decimal at the boundary).
         assert all(r.liquidity is not None for r in rows)
-        # Exactly one event row exists for this isolated-namespace external_ref.
+        # Exactly one canonical event row; the Betfair capture never minted one.
         event_count = await session.scalar(
-            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
+            select(func.count()).select_from(Event).where(Event.external_ref == url)
         )
         assert event_count == 1
+        # No legacy "betfair:" event was created.
+        legacy = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
+        )
+        assert legacy == 0
     # Re-capture with the SAME prices writes nothing new (change-gate + the
     # append-only unique key both hold) — visible within the same transaction.
     assert (await capture.capture_once())["soccer"] == 0
+
+
+async def test_capture_binds_inline_onto_existing_canonical_event(factory) -> None:  # type: ignore[no-untyped-def]
+    # INLINE BINDING (ADR-0015 v2): Betfair rows land on the CANONICAL event the
+    # main scrape already created (same external_ref == the match URL,
+    # bookmaker="Betfair Exchange") — NOT a separate "betfair:"-prefixed event.
+    # Betfair becomes just another bookmaker on the canonical event, so no
+    # cross-source matching is needed for any Betfair-priced game.
+    url = f"https://op/betfair-inline-{uuid4()}"
+    teams = EventTeams(home="Real Madrid", away="Al Hilal", league="Club WC")
+
+    # The MAIN scrape creates the canonical soccer event first (a soft book).
+    soft = OddsSnapshotIn(
+        event_id=url,
+        bookmaker="bet365",
+        market=Market.H2H,
+        selection="Real Madrid",
+        decimal_odds=2.0,
+        captured_at=NOW,
+        ingested_at=NOW,
+    )
+    await persist_odds_snapshots(
+        factory, [soft], {url: teams}, sport="soccer", default_league="Club WC"
+    )
+
+    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
+    capture = BetfairExchangeCapture(
+        reader,
+        session_factory=factory,
+        targets_fn=lambda sport: [_target(url)],
+        sports=("soccer",),
+        now_fn=lambda: NOW,
+    )
+    written = await capture.capture_once()
+    assert written["soccer"] == 3  # home/draw/away BACK rows
+    async with factory() as session:
+        # All books — soft + Betfair — sit on the SAME canonical event.
+        books = (
+            (
+                await session.execute(
+                    select(OddsSnapshot.bookmaker)
+                    .join(Event, Event.id == OddsSnapshot.event_id)
+                    .where(Event.external_ref == url)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert set(books) == {"bet365", BOOKMAKER}
+        assert books.count(BOOKMAKER) == 3
+        # The Betfair selections + NUMERIC liquidity rode onto the canonical event.
+        bf_rows = (
+            await session.execute(
+                select(OddsSnapshot.selection, OddsSnapshot.liquidity)
+                .join(Event, Event.id == OddsSnapshot.event_id)
+                .where(Event.external_ref == url, OddsSnapshot.bookmaker == BOOKMAKER)
+            )
+        ).all()
+        assert {r.selection for r in bf_rows} == {"Real Madrid", "Draw", "Al Hilal"}
+        assert all(r.liquidity is not None for r in bf_rows)
+        # Exactly ONE canonical event; NO legacy "betfair:" event was created.
+        canonical = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == url)
+        )
+        legacy = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
+        )
+        assert canonical == 1
+        assert legacy == 0
+
+
+async def test_capture_does_not_create_event_when_canonical_absent(factory) -> None:  # type: ignore[no-untyped-def]
+    # SAFETY: when the MAIN scrape has NOT yet created the canonical event, the
+    # Betfair capture must NOT mint one (attach-only). The cycle writes nothing
+    # for that fixture and no event row exists under EITHER the canonical ref or
+    # the legacy "betfair:" ref — it simply attaches on a later cycle.
+    url = f"https://op/betfair-noevent-{uuid4()}"
+
+    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
+    capture = BetfairExchangeCapture(
+        reader,
+        session_factory=factory,
+        targets_fn=lambda sport: [_target(url)],
+        sports=("soccer",),
+        now_fn=lambda: NOW,
+    )
+    written = await capture.capture_once()
+    assert written["soccer"] == 0  # nothing written: no canonical event to attach to
+    async with factory() as session:
+        canonical = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == url)
+        )
+        legacy = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
+        )
+        snaps = await session.scalar(
+            select(func.count())
+            .select_from(OddsSnapshot)
+            .join(Event, Event.id == OddsSnapshot.event_id)
+            .where(Event.external_ref.in_([url, f"betfair:{url}"]))
+        )
+        assert canonical == 0  # the capture never minted a canonical event
+        assert legacy == 0  # nor a legacy namespaced one
+        assert snaps == 0
 
 
 async def test_capture_does_not_graft_onto_live_event_with_same_url(factory) -> None:  # type: ignore[no-untyped-def]

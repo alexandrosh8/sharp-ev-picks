@@ -771,6 +771,8 @@ async def persist_odds_snapshots(
     teams_by_event: Mapping[str, EventTeams],
     sport: str,
     default_league: str,
+    *,
+    attach_only_to_existing: bool = False,
 ) -> int:
     """Append price observations into odds_snapshots (the backtest /
     line-movement / CLV dataset). Returns the number of NEW rows written.
@@ -783,6 +785,16 @@ async def persist_odds_snapshots(
     (event, bookmaker, market, selection, captured_at) via ON CONFLICT DO
     NOTHING. Odds cross the boundary Decimal-via-string; captured_at is the
     provider-reported observation time, never now().
+
+    ATTACH-ONLY mode (``attach_only_to_existing=True``): persist ONLY for
+    external_refs whose Event row ALREADY exists; refs with no event are
+    skipped this cycle (logged as a count, never an error) and attach next
+    cycle once the canonical event lands. This is the Betfair inline-binding
+    safety contract (ADR-0015): the Betfair capture rides the MAIN scrape's
+    canonical event and must NEVER MINT one from its own partial data
+    (creating an event from Betfair-only metadata could set wrong/partial
+    fields and break settlement). The normal create path (default False) is
+    unchanged for the main scrape + the pinnacle arcadia archive.
 
     Failure isolation: each event resolves and inserts inside its OWN
     SAVEPOINT — one poisoned event (e.g. an external_ref longer than its
@@ -805,6 +817,33 @@ async def persist_odds_snapshots(
     written = 0
     failed_events = 0
     async with session_factory() as session:
+        if attach_only_to_existing:
+            # ATTACH-ONLY: keep ONLY refs whose Event already exists. The
+            # remainder are not errors — they are fixtures the main scrape has
+            # not persisted YET (the capture runs in the gap before the next
+            # main poll); they attach on a later cycle. One pre-query (a single
+            # IN on the globally-unique external_ref), not a per-event create.
+            present = set(
+                (
+                    await session.execute(
+                        select(Event.external_ref).where(Event.external_ref.in_(list(by_event)))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            skipped = len(by_event) - len(present)
+            by_event = {ref: snaps for ref, snaps in by_event.items() if ref in present}
+            if skipped:
+                logger.info(
+                    "odds snapshot attach-only (%s): %d/%d events not yet created "
+                    "by the main scrape — skipped this cycle, will attach next",
+                    sport,
+                    skipped,
+                    skipped + len(by_event),
+                )
+            if not by_event:
+                return 0
         sport_id = await _get_or_create_sport(session, sport, sport.title())
         for external_ref, event_snapshots in by_event.items():
             teams = teams_by_event[external_ref]
