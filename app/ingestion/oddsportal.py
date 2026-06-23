@@ -24,6 +24,43 @@ from app.schemas.odds import OddsSnapshotIn
 
 logger = logging.getLogger(__name__)
 
+
+def _is_orphaned_playwright_timeout(context: dict[str, Any]) -> bool:
+    """True for an asyncio 'Future exception was never retrieved' whose exception
+    is a Playwright TimeoutError — a scrape wait orphaned when OddsHarvester
+    closed a tab on a DOM miss. Matched by class name + module so playwright need
+    not be imported here."""
+    exc = context.get("exception")
+    msg = context.get("message") or ""
+    return (
+        exc is not None
+        and type(exc).__name__ == "TimeoutError"
+        and type(exc).__module__.startswith("playwright")
+        and "never retrieved" in msg
+    )
+
+
+def scrape_loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """asyncio exception handler that HANDLES — never hides — Playwright wait
+    futures orphaned when a scrape tab closes mid-operation. Their TimeoutError
+    is a benign DOM-fragility scrape miss, but asyncio otherwise dumps it as an
+    ERROR traceback ("Future exception was never retrieved"). We retrieve it and
+    log it honestly (WARNING + type); EVERYTHING else is delegated to the default
+    handler, so genuine unhandled-future bugs still surface loudly."""
+    if _is_orphaned_playwright_timeout(context):
+        logger.warning(
+            "playwright scrape future orphaned on tab close (benign DOM miss): %s",
+            type(context["exception"]).__name__,
+        )
+        return
+    loop.default_exception_handler(context)
+
+
+def install_scrape_future_handler(loop: asyncio.AbstractEventLoop) -> None:
+    """Install scrape_loop_exception_handler on `loop` (call once at startup)."""
+    loop.set_exception_handler(scrape_loop_exception_handler)
+
+
 ScrapeFn = Callable[..., Awaitable[Any]]
 
 # OddsPortal forks a fixture's URL once it goes live: the SAME match page is
