@@ -54,6 +54,57 @@ def normalize_name(name: str) -> str:
     return " ".join(tokens)
 
 
+# Fixture-distinguishing markers. A women's / youth / reserve side is a DIFFERENT
+# fixture from the men's / senior one. `normalize_name` deliberately KEEPS these
+# tokens, but the OddsPortal URL slug DROPS them — so the slug-fallback matcher
+# must refuse a slug match that loses a marker the display name carries, else a
+# women's/youth pick attaches the men's/senior Pinnacle close (a wrong-game CLV
+# defect). Bare digits / single non-"w" letters are NOT markers (false-positive
+# risk: "Boca Juniors", "Bayer 04" are senior sides).
+_WOMEN_MARKERS = frozenset(
+    {
+        "w",
+        "women",
+        "womens",
+        "ladies",
+        "fem",
+        "femenino",
+        "femenina",
+        "feminin",
+        "feminine",
+        "feminino",
+        "frauen",
+        "damen",
+        "dames",
+        "kvinner",
+        "kvinnor",
+    }
+)
+_YOUTH_WORD_MARKERS = frozenset({"youth", "juvenil", "juvenis", "jugend"})
+_RESERVE_MARKERS = frozenset({"ii", "reserve", "reserves"})
+_YOUTH_AGE = re.compile(r"^(?:u|sub)(?:1[0-9]|2[0-3])$")  # u14..u23 / sub14..sub23
+
+
+def distinguishing_markers(name: str) -> frozenset[str]:
+    """Return the {'women','youth','reserve'} markers a name carries.
+
+    Operates on the normalized token set. Used by the slug-fallback guard to
+    refuse a match that would conflate a women's/youth/reserve fixture with the
+    men's/senior one. "junior(s)" is intentionally NOT a youth marker (it is part
+    of senior club names like Boca/Argentinos Juniors); youth is detected via the
+    age pattern (u20/sub20) and unambiguous words only.
+    """
+    out: set[str] = set()
+    for tok in normalize_name(name).split():
+        if tok in _WOMEN_MARKERS:
+            out.add("women")
+        elif tok in _YOUTH_WORD_MARKERS or _YOUTH_AGE.match(tok):
+            out.add("youth")
+        elif tok in _RESERVE_MARKERS:
+            out.add("reserve")
+    return frozenset(out)
+
+
 _ODDSPORTAL_ID = re.compile(r"-[A-Za-z0-9]{8}$")
 
 

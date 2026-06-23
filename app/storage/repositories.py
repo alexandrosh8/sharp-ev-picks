@@ -969,6 +969,7 @@ async def resolve_pinnacle_close_snaps(
     from app.resolution import (
         EventCandidate,
         default_aliases,
+        distinguishing_markers,
         match_event,
         normalize_name,
         oddsportal_slug_names,
@@ -1026,24 +1027,31 @@ async def resolve_pinnacle_close_snaps(
         ordered=not is_tennis,
     )
     if matched is None:
-        # Fallback: OddsPortal's URL slug is a cleaner match key than the scraped
-        # display name (it drops the women-league "W" suffix + sponsor tails) — so
-        # retry with it. Still STRICT + unique-candidate, so it cannot attach a
-        # wrong close (the cardinal sin); it only recovers fixtures the display
-        # name spelled differently (live basketball match rate 36% -> 41%).
+        # Fallback: OddsPortal's URL slug recovers fixtures the scraped display
+        # name spelled differently (sponsor tails, abbreviations; live basketball
+        # match rate 36% -> 41%). BUT the slug also DROPS women/youth/reserve
+        # markers ("W"/"U20"/"II") the display name carries — matching on the
+        # marker-less slug would conflate a women's/youth pick with the men's/
+        # senior fixture and attach ITS Pinnacle close (a WRONG-GAME CLV defect:
+        # the men's "Brasiliense v Sobradinho" close onto a "... U20" pick). So
+        # use the slug only when it RETAINS every distinguishing marker the
+        # display name has; otherwise the recovery is unsafe and we skip it.
         slug = oddsportal_slug_names(pick_external_ref)
         if slug is not None:
             sh = canonical_tennis_name(slug[0]) if is_tennis else slug[0]
             sa = canonical_tennis_name(slug[1]) if is_tennis else slug[1]
-            matched = match_event(
-                sh,
-                sa,
-                kickoff,
-                candidates,
-                aliases=aliases,
-                max_day_drift=max_day_drift,
-                ordered=not is_tennis,
-            )
+            display_markers = distinguishing_markers(home) | distinguishing_markers(away)
+            slug_markers = distinguishing_markers(sh) | distinguishing_markers(sa)
+            if display_markers <= slug_markers:
+                matched = match_event(
+                    sh,
+                    sa,
+                    kickoff,
+                    candidates,
+                    aliases=aliases,
+                    max_day_drift=max_day_drift,
+                    ordered=not is_tennis,
+                )
     if matched is None:
         return []
     # tennis: require a shared normalized token between the pick and the matched

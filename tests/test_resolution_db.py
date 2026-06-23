@@ -106,6 +106,24 @@ async def test_resolver_no_match_returns_empty(factory) -> None:  # type: ignore
     assert out == []
 
 
+async def test_resolver_slug_fallback_refuses_mens_close_for_womens_pick(factory) -> None:  # type: ignore[no-untyped-def]
+    # WRONG-GAME GUARD: a women's pick ("Lanus W"/"Union W") whose OddsPortal URL
+    # slug DROPPED the "W" must NOT borrow the men's "Lanus"/"Union" Pinnacle close
+    # via the slug fallback — the men's game is a DIFFERENT fixture (fake CLV).
+    await _seed_pinnacle_event(factory, "pin-lanus-union", "Lanus", "Union")
+    mens_slug_url = "https://www.oddsportal.com/football/argentina/l/lanus-Ab12Cd34/union-Ef56Gh78/"
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_soccer",
+            pick_external_ref=mens_slug_url,
+            home="Lanus W",
+            away="Union W",
+            kickoff=KO,
+        )
+    assert out == []  # slug dropped the marker -> guard refuses the men's close
+
+
 async def test_resolver_duplicate_archive_matches_one(factory) -> None:  # type: ignore[no-untyped-def]
     # Two archive events for the SAME fixture (same teams + kickoff) are
     # DUPLICATE captures of ONE game, not two distinct fixtures (a team plays

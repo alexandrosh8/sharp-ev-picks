@@ -11,6 +11,7 @@ from app.resolution.matching import (
     AliasTable,
     EventCandidate,
     default_aliases,
+    distinguishing_markers,
     match_event,
     normalize_name,
     oddsportal_slug_names,
@@ -32,6 +33,22 @@ def test_oddsportal_slug_names_none_for_non_oddsportal_refs() -> None:
     assert oddsportal_slug_names("1631993947") is None  # Pinnacle numeric ref
     assert oddsportal_slug_names("betfair:abc-123") is None
     assert oddsportal_slug_names("") is None
+
+
+def test_distinguishing_markers_flag_women_youth_reserve() -> None:
+    # Women/youth/reserve markers DISTINGUISH a fixture. The slug-fallback guard
+    # uses these to REFUSE matching a women's/youth pick onto the men's/senior
+    # game when the URL slug has dropped the marker (the wrong-game CLV defect).
+    assert distinguishing_markers("Lanus W") == frozenset({"women"})
+    assert distinguishing_markers("Arsenal Women") == frozenset({"women"})
+    assert distinguishing_markers("Boca Juniors U20") == frozenset({"youth"})
+    assert distinguishing_markers("Brasiliense Sub20") == frozenset({"youth"})
+    assert distinguishing_markers("Spartak Reserves") == frozenset({"reserve"})
+    # plain senior/men names carry NO marker
+    assert distinguishing_markers("Lanus") == frozenset()
+    assert distinguishing_markers("Manchester United") == frozenset()
+    # a bare digit / single letter is NOT a marker (too many false positives)
+    assert distinguishing_markers("Bayer 04 Leverkusen") == frozenset()
 
 
 KO = datetime(2026, 6, 20, 18, 0, tzinfo=UTC)
