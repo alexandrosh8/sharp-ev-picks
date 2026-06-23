@@ -950,26 +950,17 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             )
             outcome = await _maybe_persist(deps, pick, event_id)
             if tier == "volume":
-                # Shadow tier: now ALSO alerted (tagged 🔵 VOLUME, per operator
-                # request) but STILL never on the exposure ledger — `granted` is
-                # breakdown.final here (never reserved above), so there is
-                # nothing to release. Its picks ride the same event pages as
-                # premium ones, so the CLV revalidation below re-prices them for
-                # free — that accumulating live evidence is the tier's other
-                # purpose. It alerts ONCE, on first detection ("inserted"); a
-                # later DB "duplicate" re-detection stays silent (no spam) and
-                # an unpersisted volume pick is dropped entirely.
+                # Shadow tier: persisted + CLV-tracked but NOT alerted and NEVER
+                # on the exposure ledger. (Volume alerting was trialed 2026-06-23
+                # then reverted: live CLV ~0% (-0.3% over n=21) showed no edge vs
+                # premium's +11.9% — premium-only alerts. The build_pick_alert
+                # 🔵 VOLUME tag + tier-keyed dedupe stay in place, so re-enabling
+                # is a one-line `await deps.dispatcher.dispatch(...)` here.) Its
+                # picks ride the same event pages as premium ones, so the CLV
+                # revalidation below re-prices them for free — the tier's purpose.
                 if outcome == "inserted":
                     picks.append(pick)
                     n_volume += 1
-                    await deps.dispatcher.dispatch(
-                        build_pick_alert(
-                            pick,
-                            deps.value_min_edge,
-                            model_name=deps.model_name,
-                            model_version=deps.model_version,
-                        )
-                    )
                 continue
             if outcome == "duplicate":
                 # Confirmed DB duplicate (the picks unique key ignores odds):

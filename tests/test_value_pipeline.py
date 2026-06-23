@@ -553,13 +553,13 @@ def patch_persist_recording(
     return seen
 
 
-async def test_volume_tier_pick_alerts_but_takes_no_exposure(
+async def test_volume_tier_pick_persists_without_alert_or_exposure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shadow tier's UPDATED contract (operator wants both tiers alerted):
-    persisted (with the informational stake breakdown computed) and (a) NOW
-    alerted with a 🔵 VOLUME-tagged message, but STILL (b) NO exposure-ledger
-    reservation — it must never consume the cap premium picks need."""
+    """The shadow tier's contract: persisted (with the informational stake
+    breakdown computed) but (a) NO alert dispatch and (b) NO exposure-ledger
+    reservation — it must never consume the cap premium picks need. (Volume
+    alerting was trialed then reverted 2026-06-23: live CLV ~0 showed no edge.)"""
     seen = patch_persist_recording(monkeypatch, ["inserted"])
 
     sink = RecordingSink()
@@ -573,9 +573,8 @@ async def test_volume_tier_pick_alerts_but_takes_no_exposure(
 
     assert [p.tier for p in picks] == ["volume"]
     assert seen == [("Home FC", "volume")]
-    assert len(sink.sent) == 1  # (a) NOW alerted (operator request)...
-    assert "🔵 VOLUME" in sink.sent[0].title  # ...clearly tagged as the volume tier
-    assert deps.ledger.used(day) == 0.0  # (b) still never on the ledger
+    assert sink.sent == []  # (a) shadow tier: never alerted (premium-only alerts)
+    assert deps.ledger.used(day) == 0.0  # (b) never on the ledger
     assert picks[0].stake_breakdown.final > 0.0  # stake computed, informational
     from app.pipeline import LAST_POLL
 
@@ -619,13 +618,11 @@ async def test_volume_redetection_of_existing_key_stays_silent(
 async def test_volume_to_premium_upgrade_alerts_and_reserves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The upgrade transition: a key first persisted as volume alerts ONCE
-    (🔵 VOLUME, no exposure), then later clears the premium threshold -> the
-    repository promotes the row ('upgraded') and the pipeline treats it as a NEW
-    premium pick — a SECOND alert (⭐ PREMIUM) fires and exposure is reserved
-    (the shadow row never held one). The two alerts are DISTINCT because the
-    dedupe key includes the tier: the volume alert must not suppress the
-    premium upgrade at the same odds."""
+    """The upgrade transition: a key first persisted as volume (tracked silently
+    — no alert, no exposure) later clears the premium threshold -> the repository
+    promotes the row ('upgraded') and the pipeline treats it as a NEW premium
+    pick — THIS is the alert moment (⭐ PREMIUM) and exposure is reserved (the
+    shadow row never held one)."""
     seen = patch_persist_recording(monkeypatch, ["inserted", "upgraded"])
 
     sink = RecordingSink()
@@ -637,9 +634,8 @@ async def test_volume_to_premium_upgrade_alerts_and_reserves(
     day = datetime.now(tz=UTC).date()
     first = await run_value_pipeline(deps, "soccer")
     assert [p.tier for p in first] == ["volume"]
-    assert len(sink.sent) == 1  # cycle 1: volume NOW alerts (tagged)...
-    assert "🔵 VOLUME" in sink.sent[0].title
-    assert deps.ledger.used(day) == 0.0  # ...but takes no exposure
+    assert sink.sent == []  # cycle 1: volume tracked silently (not alerted)
+    assert deps.ledger.used(day) == 0.0  # ...and takes no exposure
 
     # cycle 2: the same candidate now clears premium (threshold change here;
     # a price move in production) — the volume row upgrades in place.
@@ -647,8 +643,8 @@ async def test_volume_to_premium_upgrade_alerts_and_reserves(
     second = await run_value_pipeline(deps, "soccer")
     assert [p.tier for p in second] == ["premium"]
     assert seen == [("Home FC", "volume"), ("Home FC", "premium")]
-    assert len(sink.sent) == 2  # the PREMIUM upgrade is a SECOND, distinct alert
-    assert "⭐ PREMIUM" in sink.sent[1].title  # not suppressed by the volume one
+    assert len(sink.sent) == 1  # the premium upgrade IS the alert moment
+    assert "⭐ PREMIUM" in sink.sent[0].title  # tagged premium
     assert deps.ledger.used(day) > 0.0  # exposure reserved on upgrade
 
 
