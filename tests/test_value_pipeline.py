@@ -374,7 +374,7 @@ async def test_value_pipeline_produces_pick_and_alert() -> None:
     assert pick.anchor_type == "pinnacle"  # live CLV stratification key
     assert pick.event == "Home FC vs Away FC"
     assert len(sink.sent) == 1
-    assert "you place any bet" in sink.sent[0].body  # informational footer
+    assert "you place any bet" not in sink.sent[0].body  # footer removed per operator request
     assert "value: Pinnacle fair" in pick.reason_summary
 
 

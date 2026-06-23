@@ -213,9 +213,9 @@ async def test_redis_idempotency_ttl_keeps_unchanged_odds_quiet_for_seven_days()
     assert await redis.ttl("alert:dedupe:key-custom") == 3600
 
 
-def test_pick_alert_contains_required_fields_and_reminder() -> None:
+def test_pick_alert_contains_required_fields_without_footer() -> None:
     alert = build_pick_alert(make_pick())
-    assert ALERT_FOOTER in alert.body  # compact informational / manual-betting footer
+    assert ALERT_FOOTER not in alert.body  # footer removed per operator request
     for fragment in (
         "Alpha FC vs Beta United",
         "Alpha FC @ 2.10 · bookie_one",

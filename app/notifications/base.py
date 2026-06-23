@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.edge.value import ceil_odds, min_acceptable_odds
-from app.schemas.picks import ALERT_FOOTER, PickOut
+from app.schemas.picks import PickOut
 
 # Per-sport emoji for the alert header (neutral fallback for any new sport).
 _SPORT_EMOJI = {
@@ -99,7 +99,6 @@ def build_pick_alert(
             f" · odds {pick.odds_age_seconds:.0f}s old{liq}",
             "",
             f"💡 {pick.reason_summary}",
-            ALERT_FOOTER,
         ]
     )
     return Alert(pick_id=pick.pick_id, title=title, body=body, dedupe_key=dedupe_key)
