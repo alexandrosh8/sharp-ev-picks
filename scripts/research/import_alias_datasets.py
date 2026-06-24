@@ -46,6 +46,11 @@ from app.resolution.matching import _SEED_PATH, distinguishing_markers, normaliz
 
 _FOOTBALL_SRC = Path("/tmp/final_aliases.json")
 _NBA_SRC = Path("/tmp/nba_aliases.json")
+# Rank 1.5 part B exotic/lower-league sources (CC0): the fixture-CONFIRMED
+# exotic hand-map (scripts/research/exotic_slate_aliases.py) and the Wikidata
+# altLabel pull (scripts/research/import_wikidata_aliases.py). Both write to /tmp.
+_EXOTIC_SRC = Path("/tmp/exotic_slate_aliases.json")
+_WIKIDATA_SRC = Path("/tmp/wikidata_aliases.json")
 
 # Reserve teams whose name DIFFERS from the parent (so a plain alias would be
 # wrong). These carry NO women/youth/reserve marker token, so they survive the
@@ -158,7 +163,13 @@ def main() -> None:
     args = parser.parse_args()
 
     sources: dict[str, list[str]] = {}
-    for src in (_load_source(_FOOTBALL_SRC), _load_source(_NBA_SRC), _RESERVE_HAND_MAPS):
+    for src in (
+        _load_source(_FOOTBALL_SRC),
+        _load_source(_NBA_SRC),
+        _load_source(_EXOTIC_SRC),
+        _load_source(_WIKIDATA_SRC),
+        _RESERVE_HAND_MAPS,
+    ):
         for canonical, aliases in src.items():
             sources.setdefault(canonical, [])
             for a in aliases:

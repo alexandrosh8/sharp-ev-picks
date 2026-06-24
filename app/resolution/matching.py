@@ -81,27 +81,44 @@ _WOMEN_MARKERS = frozenset(
     }
 )
 _YOUTH_WORD_MARKERS = frozenset({"youth", "juvenil", "juvenis", "jugend"})
-_RESERVE_MARKERS = frozenset({"ii", "reserve", "reserves"})
+# Position-INDEPENDENT reserve tokens (roman ordinals + the explicit words). "ii"
+# and "iii" name the 2nd/3rd team and never appear as a senior club's word.
+_RESERVE_MARKERS = frozenset({"ii", "iii", "reserve", "reserves"})
+# Position-DEPENDENT reserve tokens: a bare "2"/"3" (MLS Next Pro "Los Angeles
+# FC 2", "Minnesota United 2") or a standalone "b" (European "Real Madrid B" =
+# Castilla, "Barcelona B") marks a RESERVE side — but ONLY as the LAST token.
+# Anchored to the trailing position so a club-FOUNDING-YEAR ("Schalke 04",
+# "Bayer 04 Leverkusen") or a leading/mid "B" is never misfired. ERR TOWARD
+# catching: a false reserve only costs recall (a REJECT); a MISSED one anchors a
+# reserve onto the senior team's Pinnacle line — the wrong-game CLV defect.
+_TRAILING_RESERVE_TOKENS = frozenset({"2", "3", "b"})
 _YOUTH_AGE = re.compile(r"^(?:u|sub)(?:1[0-9]|2[0-3])$")  # u14..u23 / sub14..sub23
 
 
 def distinguishing_markers(name: str) -> frozenset[str]:
     """Return the {'women','youth','reserve'} markers a name carries.
 
-    Operates on the normalized token set. Used by the slug-fallback guard to
-    refuse a match that would conflate a women's/youth/reserve fixture with the
-    men's/senior one. "junior(s)" is intentionally NOT a youth marker (it is part
-    of senior club names like Boca/Argentinos Juniors); youth is detected via the
-    age pattern (u20/sub20) and unambiguous words only.
+    Operates on the normalized token set. Used by the slug-fallback guard and the
+    hardened matcher's veto to refuse a match that would conflate a women's/
+    youth/reserve fixture with the men's/senior one. "junior(s)" is intentionally
+    NOT a youth marker (it is part of senior club names like Boca/Argentinos
+    Juniors); youth is detected via the age pattern (u20/sub20) and unambiguous
+    words only. Reserve is detected from the position-independent roman/word
+    tokens AND a TRAILING bare "2"/"3"/"B" (the ordinal-suffix reserve naming).
     """
     out: set[str] = set()
-    for tok in normalize_name(name).split():
+    tokens = normalize_name(name).split()
+    for tok in tokens:
         if tok in _WOMEN_MARKERS:
             out.add("women")
         elif tok in _YOUTH_WORD_MARKERS or _YOUTH_AGE.match(tok):
             out.add("youth")
         elif tok in _RESERVE_MARKERS:
             out.add("reserve")
+    # Trailing reserve ordinal: only the LAST token, and only when there is a real
+    # club name in front of it (a bare "2"/"B" alone is not a reserve side).
+    if len(tokens) >= 2 and tokens[-1] in _TRAILING_RESERVE_TOKENS:
+        out.add("reserve")
     return frozenset(out)
 
 
@@ -132,8 +149,15 @@ def strip_markers(name: str) -> str:
     norm = normalize_name(name)
     if norm in _KNOWN_CLUB_WHITELIST:
         return norm
+    tokens = norm.split()
+    # Drop a TRAILING bare reserve ordinal ("2"/"3"/"b") so the base club is what
+    # remains ("real madrid b" -> "real madrid") — mirrors distinguishing_markers
+    # so a reserve and its senior side share a base name (the marker veto, not the
+    # base, is what keeps them apart).
+    if len(tokens) >= 2 and tokens[-1] in _TRAILING_RESERVE_TOKENS:
+        tokens = tokens[:-1]
     kept: list[str] = []
-    for tok in norm.split():
+    for tok in tokens:
         if tok in _WOMEN_MARKERS or tok in _YOUTH_WORD_MARKERS or tok in _RESERVE_MARKERS:
             continue
         if _YOUTH_AGE.match(tok):
