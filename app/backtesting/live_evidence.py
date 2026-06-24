@@ -65,14 +65,28 @@ class SettledPickRow:
     closing_anchor_type: str | None = None  # pinnacle / sharp / consensus; None = unknown
     has_snapshot_close: bool = False  # closing_odds present => a true snapshot close,
     #                                   not a poll-time revalidation fallback
+    # INDEPENDENCE provenance (P0-1/P0-3): True  = the close anchor book differs
+    # from the fill book (genuine, independent close); False = the close was
+    # anchored by the pick's OWN fill book (CIRCULAR — closing == fill,
+    # |clv_log|~0 — the fake-CLV that masked the -EV); None = unknown
+    # (pre-column row, feature-detected). Only a definite False excludes.
+    close_independent_of_fill: bool | None = None
 
     @property
     def sharp_close(self) -> bool:
         """A TRUSTED close for honest CLV: snapshot-sourced (not a poll-time
-        revalidation fallback) AND anchored by a named sharp book (not a
-        soft-book consensus median). These are the closes whose CLV the
-        platform can stand behind."""
-        return self.has_snapshot_close and self.closing_anchor_type in _SHARP_CLOSE_ANCHORS
+        revalidation fallback), anchored by a named sharp book (not a soft-book
+        consensus median), AND independent of the fill book — the close anchor
+        is NOT the pick's own fill book (a circular self-priced close is fake
+        CLV, |clv_log|~0, and is what masked the -EV). `close_independent_of_fill
+        is False` is the ONLY value that excludes; None (unknown / pre-column) is
+        treated as not-proven-circular so historical sharp closes are unchanged.
+        These are the closes whose CLV the platform can stand behind."""
+        return (
+            self.has_snapshot_close
+            and self.closing_anchor_type in _SHARP_CLOSE_ANCHORS
+            and self.close_independent_of_fill is not False
+        )
 
 
 def _stratum_stats(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]:

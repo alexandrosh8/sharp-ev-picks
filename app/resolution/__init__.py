@@ -9,16 +9,26 @@ from app.resolution.matching import (
     AliasTable,
     EventCandidate,
     default_aliases,
+    distinguishing_markers,
+    jaro_winkler,
     match_event,
+    match_event_hardened,
     normalize_name,
     oddsportal_slug_names,
+    strip_markers,
+    token_sort_ratio,
 )
 
 __all__ = [
     "AliasTable",
     "EventCandidate",
     "default_aliases",
+    "distinguishing_markers",
+    "jaro_winkler",
     "match_event",
+    "match_event_hardened",
     "normalize_name",
     "oddsportal_slug_names",
+    "strip_markers",
+    "token_sort_ratio",
 ]

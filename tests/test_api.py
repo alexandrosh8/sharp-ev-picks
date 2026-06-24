@@ -338,8 +338,14 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
             SettledPickRow("volume", None, None, None, 5.0, None),
         ]
 
+    async def fake_band(session):  # type: ignore[no-untyped-def]
+        # The route also reads the claimed-fair reliability monitor's rows (P1-1);
+        # stub them at the route's own import so this test stays DB-free.
+        return []
+
     monkeypatch.setattr(routes, "performance_report", fake_perf)
     monkeypatch.setattr(routes, "live_evidence_rows", fake_rows)
+    monkeypatch.setattr(routes, "bet_band_observations", fake_band)
     monkeypatch.setattr(routes, "_ml_operating_point", lambda: 0.725)
 
     body = TestClient(make_app()).get("/performance").json()
@@ -359,6 +365,12 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
     assert ev["by_tier"]["premium"]["roi"] is None
     # anchor dimension feature-detected: absent until the column lands
     assert ev["by_anchor"] is None
+    # P1-1 claimed-fair reliability monitor rides alongside (report-only); with
+    # no settled binary picks it is honestly empty + insufficient, never a crash.
+    cal = body["calibration"]
+    assert cal["n_total"] == 0
+    assert cal["insufficient"] is True
+    assert cal["ece"] is None
 
 
 def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -398,14 +410,25 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
         ]
 
     async def fake_betfair_capture(session, **_kw):  # type: ignore[no-untyped-def]
+        # Near-empty archive path (separate betfair: namespace, default OFF) — it
+        # feeds the per-sport panel body, NOT the headline anymore.
         return [
-            {"sport": "soccer", "scraped": 149, "captured": 46},
+            {"sport": "soccer", "scraped": 149, "captured": 4},
+            {"sport": "basketball", "scraped": 64, "captured": 0},
+        ]
+
+    async def fake_betfair_inline_capture(session, **_kw):  # type: ignore[no-untyped-def]
+        # The REAL pick-feeding anchor: inline Betfair Exchange rows on the
+        # canonical event (~66% of scraped soccer fixtures with soft odds).
+        return [
+            {"sport": "soccer", "scraped": 149, "captured": 99},
             {"sport": "basketball", "scraped": 64, "captured": 0},
         ]
 
     monkeypatch.setattr(routes, "shadow_match_rate_outcomes", fake_outcomes)
     monkeypatch.setattr(routes, "pinnacle_archive_capture_by_sport", fake_capture)
     monkeypatch.setattr(routes, "betfair_archive_capture_by_sport", fake_betfair_capture)
+    monkeypatch.setattr(routes, "betfair_inline_capture_by_sport", fake_betfair_inline_capture)
     body = TestClient(make_app()).get("/resolution/match-rate").json()
     assert body["total"] == 3
     assert body["matched"] == 1
@@ -426,6 +449,26 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     # panel can show coverage instead of an empty cell.
     assert cap["tennis"]["matched"] == 5
     assert cap["american_football"]["scraped"] == 0
+    # The headline's Betfair number now comes from the INLINE coverage (the real
+    # pick-feeding anchor: Betfair Exchange bound onto the canonical event), NOT
+    # the near-empty archive path. The per-sport panel body keeps the archive
+    # numbers so a structural-vs-thin-slate read stays available.
+    bf_panel = {row["sport"]: row for row in body["betfair_capture"]}
+    assert bf_panel["soccer"]["captured"] == 4  # archive path stays near-empty
+    bf_inline = {row["sport"]: row for row in body["betfair_inline_capture"]}
+    assert bf_inline["soccer"]["captured"] == 99  # inline canonical-event coverage
+    # coverage_summary is the always-populated headline the panel shows BEFORE
+    # the operator expands it (replaces the bare "—"). Betfair = sum(INLINE
+    # captured)/sum(scraped) = 99/(149+64)=99/213; Pinnacle = sum(matched)/
+    # sum(scraped) = (0+20+50+5)/(0+64+149+6)=75/219.
+    cov = body["coverage_summary"]
+    assert cov["betfair_captured"] == 99
+    assert cov["betfair_scraped"] == 213
+    assert cov["betfair_rate"] == pytest.approx(99 / 213)
+    assert cov["pinnacle_matched"] == 75
+    assert cov["pinnacle_scraped"] == 219
+    assert cov["pinnacle_rate"] == pytest.approx(75 / 219)
+    assert cov["headline"] == "Betfair 46% · Pinnacle 34%"
 
 
 def test_dashboard_html_is_not_browser_cached() -> None:
@@ -472,6 +515,50 @@ def test_dashboard_has_archive_coverage_panel() -> None:
     assert 'id="archive-panel"' in text
     assert 'id="toggle-archive"' in text
     assert "/resolution/match-rate" in text
+
+
+def test_dashboard_surfaces_coverage_headline_eagerly() -> None:
+    """The sharp-anchor coverage panel HEADER shows the real Betfair/Pinnacle %
+    up front (the operator saw a bare '—'). The headline comes from the backend
+    coverage_summary and is populated on initial load, BEFORE the lazy panel is
+    expanded — so the dashboard reads coverage_summary and calls the eager
+    loader at boot."""
+    text = TestClient(make_app()).get("/").text
+    # eager headline loader exists and is invoked at boot (not only on expand)
+    assert "function loadCoverageHeadline" in text
+    assert "loadCoverageHeadline();" in text
+    # the header reads the backend's coverage_summary.headline
+    assert "coverage_summary" in text
+    assert "function setCoverageHeadline" in text
+    # the clean two-column panel header layout replaces the old games-head row
+    assert 'class="panel-head"' in text
+    assert 'class="panel-sub"' in text
+    assert "games-head" not in text  # old cluttered layout fully removed
+    assert "innerHTML" not in text  # untrusted strings stay on textContent
+
+
+def test_dashboard_surfaces_unvalidated_sport_in_plain_language() -> None:
+    """Visibility-only sports (tennis, American football) show a clear,
+    plain-language 'not validated — informational only' status in the games
+    table, not a bare confusing 'UNVALIDATED' word."""
+    text = TestClient(make_app()).get("/").text
+    assert "NOT VALIDATED" in text
+    assert "model not yet validated — informational only" in text
+    # the per-row flag still drives it (validated===false OR unvalidated===true)
+    assert "g.validated === false || g.unvalidated === true" in text
+
+
+def test_dashboard_renders_known_kickoff_and_clean_tbd() -> None:
+    """Kickoff renders a real local time when starts_at is present, and a clean
+    tooltipped 'TBD' (never a bare 'kickoff unknown') when it is null — in BOTH
+    the picks table and the games table."""
+    text = TestClient(make_app()).get("/").text
+    # known kickoff -> real local time via fmtLocal; TBD branch is tooltipped
+    assert "fmtLocal(g.starts_at)" in text
+    assert "the odds source has not reported a kickoff time" in text
+    # the bare confusing "kickoff unknown" copy is gone everywhere
+    assert "kickoff unknown" not in text
+    assert "time to be confirmed" in text
 
 
 def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
@@ -742,87 +829,3 @@ def test_dashboard_picks_table_columns_are_sortable() -> None:
     assert "SORT_COLS[savedSortCol]" in text
     # the default best-on-top sort is still the no-active-column fallback
     assert "confLevel" in text
-
-
-def test_dropping_odds_endpoint_serves_attributed_view(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    from app.api import routes
-    from app.ingestion.oddsmath_dropping import MatchDrop, OutcomeMove
-
-    routes._DROPPING_CACHE.clear()
-
-    async def fake_fetch(_client, **_kw):  # type: ignore[no-untyped-def]
-        return [
-            MatchDrop(
-                sport="soccer",
-                kickoff_utc=None,
-                league="FIFA - World Cup 2026",
-                match="Netherlands — Tunisia",
-                market="1X2",
-                book="1XBET",
-                outcomes=(
-                    OutcomeMove("1", 1.32, 1.14, -13.64),
-                    OutcomeMove("X", 5.1, 8.0, 56.86),
-                    OutcomeMove("2", 7.5, 17.0, 126.67),
-                ),
-                max_drop=-13.64,
-            )
-        ]
-
-    monkeypatch.setattr(routes, "fetch_oddsmath_book", fake_fetch)
-    body = TestClient(make_app()).get("/dropping-odds").json()
-    assert body["available"] is True
-    assert body["source"] == "oddsmath.com"
-    assert any(p["name"] == "1XBET" for p in body["providers"])  # bookmaker selector list
-    row = body["rows"][0]
-    assert row["book"] == "1XBET"  # attributed to a named book
-    assert row["match"] == "Netherlands — Tunisia"
-    assert row["outcomes"][0] == {"label": "1", "open": 1.32, "current": 1.14, "drop_pct": -13.64}
-
-
-def test_dropping_odds_endpoint_fails_soft_when_unavailable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    from app.api import routes
-
-    routes._DROPPING_CACHE.clear()
-
-    async def empty(_client, **_kw):  # type: ignore[no-untyped-def]
-        return []
-
-    monkeypatch.setattr(routes, "fetch_oddsmath_book", empty)
-    body = TestClient(make_app()).get("/dropping-odds").json()
-    assert body["available"] is False
-    assert body["rows"] == []
-    assert body["providers"]  # the bookmaker selector list is still served
-
-
-def test_dropping_odds_fresh_param_bypasses_cache(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    from app.api import routes
-    from app.ingestion.oddsmath_dropping import MatchDrop, OutcomeMove
-
-    routes._DROPPING_CACHE.clear()
-    calls = {"n": 0}
-
-    async def fetch(_client, **_kw):  # type: ignore[no-untyped-def]
-        calls["n"] += 1
-        return [
-            MatchDrop(
-                "soccer",
-                None,
-                "L",
-                f"A{calls['n']} — B",
-                "1X2",
-                "1XBET",
-                (OutcomeMove("1", 2.0, 1.5, -25.0),),
-                -25.0,
-            )
-        ]
-
-    monkeypatch.setattr(routes, "fetch_oddsmath_book", fetch)
-    client = TestClient(make_app())
-    b1 = client.get("/dropping-odds").json()
-    b2 = client.get("/dropping-odds").json()  # served from the 5s cache
-    assert calls["n"] == 1
-    assert b2["rows"][0]["match"] == b1["rows"][0]["match"]
-    # manual Refresh -> ?fresh=1 bypasses the cache, fetching new data instantly
-    b3 = client.get("/dropping-odds?fresh=1").json()
-    assert calls["n"] == 2
-    assert b3["rows"][0]["match"] != b1["rows"][0]["match"]

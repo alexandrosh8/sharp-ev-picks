@@ -276,6 +276,16 @@ class Pick(Base):
     # CLV can trust only genuine sharp closes. NULL = no close computed yet /
     # pre-column row.
     closing_anchor_type: Mapped[str | None] = mapped_column(String(16))
+    # INDEPENDENCE provenance (P0-1/P0-3 fake-CLV guard): True = the book that
+    # ANCHORED the close is NOT this pick's own fill book (bookmaker) — a genuine,
+    # independent close; False = the close was anchored by the fill book itself
+    # (CIRCULAR: the pick's own book pricing its own close, closing == fill,
+    # |clv_log|~0 — the fake CLV that masked the -EV). A consensus(median) close
+    # spans >=3 books, so it is independent of any single fill by construction
+    # (True). NULL = no snapshot close computed yet / pre-column row. The trusted
+    # sharp-CLV subset (n_sharp / sharp_stake_weighted_clv_log) excludes rows
+    # where this is False, so a self-priced close can never count as honest CLV.
+    close_independent_of_fill: Mapped[bool | None] = mapped_column(Boolean)
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)

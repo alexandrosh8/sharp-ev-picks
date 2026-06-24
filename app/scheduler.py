@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import Settings, gate_policy, stake_policy, value_policy
-from app.ingestion.base import EventDirectory, OddsLoader
+from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
 from app.ingestion.football_data import (
     MatchRow,
     fetch_new_league_csv,
@@ -265,6 +265,11 @@ def build_scheduler(
             # never make poll_odds run forever (and so starve settle_results) —
             # each scrape pass is bounded and cancelled on timeout (prod fix).
             cycle_timeout_seconds=settings.scrape_cycle_timeout_seconds,
+            # SELECTABLE curl_cffi JSON-feed per-match odds (OFF by default). When
+            # on, the listing runs markets=[] (no per-match Playwright odds) and a
+            # per-match JSON failure is a scrape gap — NO Playwright odds fallback
+            # (operator 2026-06-23). See config.py.
+            use_json_feed=settings.oddsportal_use_json_feed,
         )
         league_label = settings.oddsportal_football_leagues
 
@@ -522,14 +527,37 @@ def build_scheduler(
         except Exception as exc:
             logger.error("upstream watch failed: %s", type(exc).__name__)
 
+    async def run_self_audit_job() -> None:
+        # Runtime self-audit: cheap READ-ONLY DB anomaly checks (awaiting-result
+        # backlog, stale odds) that WARN/ERROR so the health monitor catches
+        # operational problems proactively. Never raises (self_audit_job guards).
+        if session_factory is None:
+            return
+        from app.maintenance.self_audit import self_audit_job
+
+        await self_audit_job(session_factory)
+
     scheduler.add_job(
         settle_results,
-        CronTrigger(minute=15),
+        # Short interval (was hourly CronTrigger(minute=15)): settle_results only
+        # reads scraped scores from the DB and settles — cheap, no scrape — so a
+        # freshly-captured FINAL score settles within ~1 cycle instead of up to
+        # an hour. Paired with the 60s finished-score capture, a result lands
+        # within ~1-2 min of FT.
+        IntervalTrigger(seconds=settings.settle_interval_seconds),
         id="settle_results",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=None,  # run on Mac wake, don't skip
     )
+    if session_factory is not None:
+        scheduler.add_job(
+            run_self_audit_job,
+            IntervalTrigger(seconds=settings.self_audit_interval_seconds),
+            id="self_audit",
+            max_instances=1,
+            coalesce=True,
+        )
     # DEDICATED finished-score scrape on its OWN light interval, decoupled from
     # both the heavy odds poll and the hourly settle cron (cactusbets.cloud prod
     # fix). Only registered when the source can actually scrape match pages
@@ -626,20 +654,31 @@ def build_scheduler(
     # Independent read-only Betfair Exchange BACK-odds ARCHIVE capture
     # (ADR-0015). Like arcadia, it runs ALONGSIDE the active odds_source, mints
     # NO picks/alerts, and persists into the isolated `betfair_<sport>`
-    # namespace (bookmaker="Betfair Exchange"). It re-reads the SAME fixtures the
-    # OddsPortal scrape already discovered (loader.directory + the last fetch's
-    # event ids = match links), so it owns no listing/scheduling policy. OFF
-    # unless BETFAIR_EXCHANGE_ENABLED=true, the source is oddsportal (so the
-    # directory is populated), and a DB session factory exists.
+    # namespace (bookmaker="Betfair Exchange"). OFF unless
+    # BETFAIR_EXCHANGE_ENABLED=true, the source is oddsportal, and a DB session
+    # factory exists.
+    #
+    # TARGETS — DB-SOURCED, BOUNDED, ROTATING (CPU-aware, prod fix 2026-06-23).
+    # Previously _betfair_targets re-read loader.last_fetch_event_ids[sport],
+    # which the OddsPortal scrape populates ONLY when a full multi-league scrape
+    # COMPLETES. On the CPU-bound box one slow scrape held poll_odds's single
+    # slot (poll_odds_completions=0 / skips=12 in an hour), so that map stayed
+    # empty -> the reader got NO targets -> captured nothing, even a £270k-liquid
+    # major. select_betfair_targets reads the WAREHOUSE instead (recent upcoming
+    # events with odds that haven't kicked off), so the capture is DECOUPLED from
+    # full-scrape completion. It is its own scheduler job (its own browser/slot),
+    # so this only changes where its URLs come from. BOUNDED to
+    # BETFAIR_EXCHANGE_MAX_TARGETS_PER_CYCLE per cycle and ROTATING
+    # (never-captured first, then stalest Betfair capture), so the reader NEVER
+    # opens all ~91 pages at once and the slate is swept over cycles.
     #
     # Per-sport: BETFAIR_EXCHANGE_SPORTS is a csv ("soccer", or
-    # "soccer,basketball"). _betfair_targets(sport) keys into THAT sport's scrape
-    # ids (last_fetch_event_ids[sport]), so a betfair sport only sees fixtures
-    # when its OddsPortal scrape is also enabled — e.g. basketball needs
-    # ODDSPORTAL_BASKETBALL_LEAGUES set. A betfair sport with no scrape this
-    # cycle simply has no targets (an honest 0, not an error). The reader reads
-    # 3 BACK cells for soccer (1X2) and 2 for basketball (moneyline), and each
-    # sport keeps its own betfair_<sport> namespace + error isolation.
+    # "soccer,basketball"); each sport's targets are its canonical DB events
+    # (Sport.key == the sport key), so a betfair sport only sees fixtures once
+    # its OddsPortal scrape has priced them (e.g. basketball needs
+    # ODDSPORTAL_BASKETBALL_LEAGUES). The reader reads 3 BACK cells for soccer
+    # (1X2) and 2 for basketball (moneyline); each keeps its own betfair_<sport>
+    # namespace + error isolation.
     if (
         settings.betfair_exchange_enabled
         and settings.odds_source == "oddsportal"
@@ -652,23 +691,36 @@ def build_scheduler(
             BetfairExchangeReader,
             MatchTarget,
         )
+        from app.storage.repositories import select_betfair_targets
 
-        bfx_directory = directory
-        bfx_loader = loader
+        bfx_session_factory = session_factory
+        bfx_target_limit = settings.betfair_exchange_max_targets_per_cycle
+        bfx_target_window = timedelta(hours=settings.betfair_exchange_target_window_hours)
 
-        def _betfair_targets(sport: str) -> list[MatchTarget]:
-            # Re-read the fixtures the last OddsPortal scrape listed for this
-            # sport; the event_id IS the match-link URL. Team context comes from
-            # the shared directory the scrape already populated.
-            targets: list[MatchTarget] = []
-            for event_id in bfx_loader.last_fetch_event_ids.get(sport, ()):  # noqa: B023
-                if not event_id.startswith("http"):
-                    continue  # synthetic id (no usable URL) — skip
-                teams = bfx_directory.lookup(event_id)  # noqa: B023
-                if teams is None:
-                    continue
-                targets.append(MatchTarget(event_id=event_id, url=event_id, teams=teams))
-            return targets
+        async def _betfair_targets(sport: str) -> list[MatchTarget]:
+            # DB-sourced (decoupled from full-scrape completion): bounded +
+            # rotating canonical events for THIS sport. The event external_ref IS
+            # the OddsPortal match-link URL, and team/league context comes from
+            # the same warehouse rows the main scrape wrote.
+            rows = await select_betfair_targets(
+                bfx_session_factory,
+                sport=sport,
+                window=bfx_target_window,
+                limit=bfx_target_limit,
+            )
+            return [
+                MatchTarget(
+                    event_id=row.external_ref,
+                    url=row.external_ref,
+                    teams=EventTeams(
+                        home=row.home,
+                        away=row.away,
+                        league=row.league,
+                        starts_at=row.starts_at,
+                    ),
+                )
+                for row in rows
+            ]
 
         betfair_capture = BetfairExchangeCapture(
             reader=BetfairExchangeReader(

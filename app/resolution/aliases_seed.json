@@ -1,134 +1,3434 @@
 {
-  "_comment": "Starter cross-source club-name alias table. Format: {\"teams\": {\"canonical\": [\"alias\", ...]}}. Names are normalized on load (matching.normalize_name strips accents/FC-noise), so list human-readable forms. Expand from withqwerty/reep (CC0) data/names.csv + custom_aliases.json over time. Do NOT add men's/women's-conflating aliases.",
+  "_comment": "Cross-source club/team name alias table. Format: {\"teams\": {\"canonical\": [\"alias\", ...]}}. Names are normalized on load (matching.normalize_name strips accents/FC-noise), so list human-readable forms. Do NOT add men's/women's/youth/reserve-conflating aliases — every import is marker-filtered via distinguishing_markers and collision-checked (scripts/research/import_alias_datasets.py + import_reep_soccer_aliases.py).",
+  "_provenance": "LICENSE-CLEAN sources only (CC0/MIT). (1) openfootball/clubs (CC0) — men's-senior top-5 Europe + Portugal/Netherlands club names, dotted bookmaker abbreviations + [en] exonyms. (2) pretrehr/Sports-betting translation.json (MIT) — odds-feed names (mostly already covered / French-localization rejected). (3) withqwerty/reep names.csv reep_t rows (CC0) — Wikidata-derived club aliases bounded to scraped teams. (4) swar/nba_api static teams (MIT) — the 30 NBA full-name<->tricode<->nickname maps. WNBA 'W'-suffix forms are hand-curated and stay gender-distinct. Reserve hand-maps (Real Madrid Castilla, Jong Ajax/PSV/AZ, Sanse, Bilbao Athletic, Barca B) are explicit. EXCLUDED (non-commercial): TheSportsDB, engsoccerdata, Sackmann, tennis-data. (5) Wikidata SPARQL/REST altLabels (CC0) — exotic clubs + national teams + native-script (Arabic/Chinese/Icelandic) forms for the off-season slate (Real de Banjul, Al-Shorta Baghdad, Wydad Casablanca, Vikingur Reykjavik, Shanghai Port, ...), gated on P31 football-club/national-team and exact-normalized to a slate feed name (scripts/research/import_wikidata_aliases.py). (6) Fixture-CONFIRMED exotic hand-map (scripts/research/exotic_slate_aliases.py) — feed<->Pinnacle pairs verified same-day same-opponent against our own warehouse (Lidkoping/Lidkopings, Kinondoni MC/KMC, Hammarby TFF/Talang, ...); marker-filtered, cross-sport collisions rejected on merge (FC Jazz/Utah Jazz, Miami FC/Miami Heat).",
   "teams": {
-    "Atlanta Dream": ["Atlanta Dream W"],
-    "Chicago Sky": ["Chicago Sky W"],
-    "Connecticut Sun": ["Connecticut Sun W"],
-    "Dallas Wings": ["Dallas Wings W"],
-    "Golden State Valkyries": ["Golden State Valkyries W"],
-    "Indiana Fever": ["Indiana Fever W"],
-    "Las Vegas Aces": ["Las Vegas Aces W"],
-    "Los Angeles Sparks": ["Los Angeles Sparks W"],
-    "Minnesota Lynx": ["Minnesota Lynx W"],
-    "New York Liberty": ["New York Liberty W"],
-    "Phoenix Mercury": ["Phoenix Mercury W"],
-    "Seattle Storm": ["Seattle Storm W"],
-    "Washington Mystics": ["Washington Mystics W"],
-    "Legia": ["Legia Warszawa"],
-    "Barangay Ginebra": ["Barangay Ginebra San Miguel"],
-    "Fubon Braves": ["Taipei Fubon Braves"],
-    "Pau-Orthez": ["Pau Lacq Orthez", "Pau Orthez"],
-    "AC Milan": ["Milan"],
-    "AS Roma": ["Roma"],
-    "Adamstown Rosebuds FC": ["Adamstown Rosebud"],
-    "Akademia Ontustik": ["Akademiya Ontustik"],
-    "Al-Shabab Football Club": ["Al-Shabab Club"],
-    "Al-Tadamon SC": ["Al-Tadhamon"],
-    "América Futebol Clube": ["América Mineiro"],
-    "Athletic Club": ["Athletic Bilbao"],
-    "Athlone Town F.C.": ["Athlone Town"],
-    "Atlas F.C.": ["Atlas", "Club de Futbol Rojinegros S.A. de C.V."],
-    "Atletico Goianiense": ["Atletico GO"],
-    "Atletico Madrid": ["Atletico", "Atletico de Madrid", "Atl Madrid"],
-    "Atleticos de San German": ["San German"],
-    "Ballyclare Comrades F.C.": ["Ballyclare Comrades"],
-    "Ballymena United F.C.": ["Ballymena United"],
-    "Bangor F.C.": ["Bangor"],
-    "Barracas Central": ["Club Atlético Barracas Central"],
-    "Bayer Leverkusen": ["Leverkusen"],
-    "Bayern Munich": ["Bayern Munchen", "Bayern", "FC Bayern"],
-    "Belmont Swansea Utd": ["Belmont Swansea United"],
-    "Boca Juniors": ["CA Boca Juniors", "CABJ", "Club Atletico Boca Juniors"],
-    "Borussia Dortmund": ["Dortmund", "BVB"],
-    "Borussia Monchengladbach": ["Monchengladbach", "Gladbach"],
-    "Bosnia and Herzegovina": ["Bosnia & Herzegovina"],
-    "Bray Wanderers A.F.C.": ["Bray Wanderers"],
-    "Brighton and Hove Albion": ["Brighton"],
-    "Bulleen Lions": ["Bulleen"],
-    "CD Pamplona": ["Pamplona"],
-    "CD Universidad César Vallejo": ["Universidad César Vallejo"],
-    "Club Athletico Paranaense": ["Clube Atlético Paranaense"],
-    "Cobh Ramblers F.C.": ["Cobh Ramblers"],
-    "Colon de Santa Fe": ["Colon Santa Fe"],
-    "Colón F.C.": ["Colón FC"],
-    "Comunicaciones F.C.": ["Comunicaciones"],
-    "Coritiba F.C.": ["Coritiba", "Coritiba Foot Ball Club"],
-    "Czechia": ["Czech Republic"],
-    "DR Congo": ["D.R. Congo"],
-    "Defensa y Justicia": ["Club Social y Deportivo Defensa y Justicia"],
-    "Derry City F.C.": ["Derry City"],
-    "Difaa El Jadida": ["Difaa El Jadidi"],
-    "Drogheda United F.C.": ["Drogheda United"],
-    "Dundalk F.C.": ["Dundalk"],
-    "Finn Harps F.C.": ["Finn Harps"],
-    "Fluminense F.C.": ["Fluminense", "Fluminense Football Club"],
-    "Galway United F.C.": ["Galway United"],
-    "Gareji": ["Gareji Sagarejo"],
-    "Glentoran F.C.": ["Glentoran"],
-    "Grindavik": ["UMF Grindavik"],
-    "Hammarby Fotboll": ["Hammarby IF"],
-    "Hangzhou Linping Wuyue": ["Hangzhou Linping"],
-    "Helsingin Jalkapalloklubi": ["HJK Helsinki"],
-    "Henan Songshan Longmen": ["Henan"],
-    "IF Brommapojkarna": ["Idrottsföreningen  Brommapojkarna"],
-    "IF Elfsborg": ["Idrottsföreningen Elfsborg"],
-    "IK Franke": ["Franke"],
-    "Ikorodu City F.C.": ["Ikorodu City"],
-    "Independiente Rivadavia": ["Club Sportivo Independiente Rivadavia"],
-    "Internazionale": ["Inter", "Inter Milan"],
-    "Juventus FC": ["Juventus Football Club"],
-    "Kolkheti 1913 Poti": ["Kolkheti 1913"],
-    "Labasa F.C.": ["Labasa"],
-    "Landvetter": ["Landvetter IS"],
-    "Lautoka F.C.": ["Lautoka"],
-    "Leeds United": ["Leeds"],
-    "Longford Town F.C.": ["Longford Town"],
-    "Macae Esporte RJ": ["Macae"],
-    "Maghreb Fes": ["Maghreb Fez"],
-    "Malmö FF": ["Malmö Fotbollförening"],
-    "Manchester City": ["Man City"],
-    "Manchester United": ["Man Utd", "Man United", "Manchester Utd"],
-    "Molde FK": ["Molde Fotballklubb"],
-    "Monaco": ["AS Monaco"],
-    "Málaga CF": ["Málaga Club de Fútbol"],
-    "Nasinu F.C.": ["Nasinu"],
-    "Navua F.C.": ["Navua"],
-    "Newcastle United": ["Newcastle"],
-    "Nottingham Forest": ["Nottm Forest", "Notts Forest"],
-    "Odishi 1919 Zugdidi": ["Odishi 1919"],
-    "Paris Saint-Germain": ["PSG", "Paris SG"],
-    "Paysandú F.C.": ["Paysandú FC"],
-    "Racing Club": ["Racing Club Asociación Civil de Avellaneda"],
-    "Real Betis": ["Betis"],
-    "Real Sociedad": ["Sociedad"],
-    "Rewa F.C.": ["Rewa"],
-    "Rosenborg BK": ["Rosenborg Ballklub"],
-    "SK Austria Klagenfurt": ["Austria Klagenfurt"],
-    "SSC Napoli": ["Napoli"],
-    "SV Wals-Grünau": ["Wals-Grünau"],
+    "1. CfR Pforzheim": [
+      "1. Club für Rasenspiele Pforzheim"
+    ],
+    "1. FC Düren": [
+      "1. Fußball-Club Düren"
+    ],
+    "1. FC Heidenheim": [
+      "Heidenheim",
+      "1. FC Heidenh.",
+      "1. FC Heidenheim 1846",
+      "1. Fußballclub Heidenheim 1846"
+    ],
+    "1. FC Kaan-Marienborn": [
+      "1. FC Kaan-Marienborn 07"
+    ],
+    "1. FC Kaiserslautern": [
+      "K'lautern",
+      "Kaiserslautern",
+      "1. FC K'lautern",
+      "1. Fußball-Club Kaiserslautern"
+    ],
+    "1. FC Köln": [
+      "Köln",
+      "1. Fußball-Club Köln"
+    ],
+    "1. FC Lokomotive Leipzig (1966-1991)": [
+      "1. FC Lok",
+      "1. FC Lok Leipzig",
+      "Lok Leipzig",
+      "Lokomotive Leipzig"
+    ],
+    "1. FC Magdeburg": [
+      "Magdeburg",
+      "1. Fußballclub Magdeburg"
+    ],
+    "1. FC Nürnberg": [
+      "Nürnberg",
+      "1. Fußball-Club Nürnberg - Verein für Leibesübungen",
+      "1. FC Nuremberg"
+    ],
+    "1. FC Phönix Lübeck": [
+      "Phönix Lübeck"
+    ],
+    "1. FC Rielasingen-Arlen": [
+      "Rielasingen-Arlen",
+      "FC Rielasingen-A."
+    ],
+    "1. FC Saarbrücken": [
+      "Saarbrücken"
+    ],
+    "1. FC Schweinfurt 05": [
+      "Schweinfurt",
+      "Schweinfurt 05"
+    ],
+    "1. FC Union Berlin": [
+      "Union",
+      "Union B.",
+      "Un. Berlin",
+      "Union Berlin",
+      "1. FC Union",
+      "1. Fußball-Club Union Berlin"
+    ],
+    "1. FSV Mainz 05": [
+      "Mainz",
+      "Mainz 05",
+      "FSV Mainz 05",
+      "1. Fußball-und Sportverein Mainz 05"
+    ],
+    "AC Ajaccio": [
+      "Athletic Club Ajaccien"
+    ],
+    "AC Ancona": [
+      "Associazione Calcio Ancona"
+    ],
+    "AC Arles-Avignon": [
+      "Arles",
+      "Athletic Club Arles-Avignon"
+    ],
+    "AC Cesena (1940-2018)": [
+      "Cesena",
+      "Associazione Calcio Cesena"
+    ],
+    "AC Chievo Verona": [
+      "Chievo",
+      "Associazione Calcio Chievo Verona"
+    ],
+    "AC Milan": [
+      "Milan",
+      "Associazione Calcio Milan",
+      "AC Mailand"
+    ],
+    "AC Monza": [
+      "Associazione Calcio Monza",
+      "SS Monza",
+      "SS Monza 1912",
+      "SSD Monza 1912"
+    ],
+    "AC Perugia": [
+      "Associazione Calcistica Perugia Calcio"
+    ],
+    "AC Pisa": [
+      "AC Pisa 1909",
+      "Associazione Calcio Pisa 1909",
+      "Pisa Sporting Club"
+    ],
+    "AC Reggiana": [
+      "AC Reggiana 1919",
+      "Reggio Audace",
+      "Reggio Audace Football Club",
+      "Associazione Calcio Reggiana 1919"
+    ],
+    "AC Renate": [
+      "Associazione Calcio Renate"
+    ],
+    "ACD Treviso": [
+      "Treviso",
+      "Associazione Calcio Dilettanti Treviso",
+      "Football Club Treviso",
+      "FBC Treviso"
+    ],
+    "ACF Fiorentina": [
+      "Fiorentina",
+      "AC Firenze",
+      "Associazione Calcio Firenze Fiorentina",
+      "AC Florenz"
+    ],
+    "ACR Messina SSD": [
+      "Messina",
+      "ACR Messina",
+      "Associazioni Calcio Riunite Messina"
+    ],
+    "AD Alcorcón": [
+      "Alcorcón",
+      "Agrupación Deportiva Alcorcón",
+      "Alcorcón AD"
+    ],
+    "ADO Den Haag": [
+      "Den Haag",
+      "Alles Door Oefening Den Haag"
+    ],
+    "AFC Bournemouth": [
+      "A.F.C. Bournemouth",
+      "Athletic Football Club Bournemouth"
+    ],
+    "AJ Auxerre": [
+      "Auxerre",
+      "Association de la Jeunesse Auxerroise"
+    ],
+    "AS Beauvais Oise": [
+      "Beauvais"
+    ],
+    "AS Béziers": [
+      "Béziers",
+      "Avenir Sportif Béziers"
+    ],
+    "AS Cannes": [
+      "Cannes"
+    ],
+    "AS Gubbio": [
+      "Gubbio",
+      "AS Gubbio 1910"
+    ],
+    "AS Livorno Calcio": [
+      "Livorno",
+      "Associazione Sportiva Livorno Calcio"
+    ],
+    "AS Lucchese Libertas": [
+      "Lucchese",
+      "AS Lucchese Libertas 1905"
+    ],
+    "AS Nancy Lorraine": [
+      "Nancy",
+      "AS Nancy",
+      "Association Sportive Nancy-Lorraine"
+    ],
+    "AS Roma": [
+      "Roma",
+      "Associazione Sportiva Roma",
+      "AS Rom"
+    ],
+    "AS Saint-Priest": [
+      "Association Sportive de Saint Priest",
+      "Saint-Priest"
+    ],
+    "AS Saint-Étienne": [
+      "St-Étienne",
+      "Saint-Étienne",
+      "AS St-Étienne",
+      "Association Sportive de Saint-Étienne",
+      "Association Sportive de Saint-Étienne Loire"
+    ],
+    "ASD Castel di Sangro": [
+      "C. Sangro"
+    ],
+    "ASD Nocerina": [
+      "Nocerina",
+      "ASD Nocerina 1910"
+    ],
+    "ASD Savoia": [
+      "Savoia",
+      "ASD Savoia 1908"
+    ],
+    "ASD US Grosseto": [
+      "Grosseto",
+      "ASD US Grosseto 1912"
+    ],
+    "ASD Virtus Bergamo": [
+      "Alzano",
+      "ASD Virtus Bergamo 1909",
+      "Virtus Bergamo",
+      "Alzano Virescit"
+    ],
+    "ASK Vorwärts Berlin": [
+      "Vorwärts",
+      "Vorwärts Berlin",
+      "Armeesportklub Vorwärts Berlin"
+    ],
+    "ASOA Valence": [
+      "Valence"
+    ],
+    "AVS Futebol": [
+      "AVS",
+      "AVS Futebol SAD"
+    ],
+    "AZ Alkmaar": [
+      "AZ",
+      "Alkmaar Zaanstreek"
+    ],
+    "Académica de Coimbra": [
+      "Académica",
+      "Académ. Coimbra",
+      "A. Académica de Coimbra",
+      "Associação Académica de Coimbra",
+      "Associação Académica de Coimbra - Organismo Autónomo de Futebol",
+      "Associação Académica de Coimbra - O.A.F"
+    ],
+    "Académico Viseu": [
+      "Académico de Viseu"
+    ],
+    "Accrington FC (1878-1896)": [
+      "Accrington F.C."
+    ],
+    "Accrington Stanley FC": [
+      "Accrington",
+      "Accrington Stanley Football Club"
+    ],
+    "Adamstown Rosebuds FC": [
+      "Adamstown Rosebud"
+    ],
+    "Ajax Amsterdam": [
+      "Ajax",
+      "Amsterdamsche Football Club Ajax",
+      "Ajax Amsterd."
+    ],
+    "Akademia Ontustik": [
+      "Akademiya Ontustik"
+    ],
+    "Al-Fahaheel FC": [
+      "Al Fehayheel"
+    ],
+    "Al-Karamah SC": [
+      "Al Karama",
+      "Al Karama Homs",
+      "Al-Karamah Sporting Club",
+      "Al-Karamah Sports Club"
+    ],
+    "Al-Shabab Football Club": [
+      "Al-Shabab Club"
+    ],
+    "Al-Shorta Baghdad": [
+      "Al Shorta",
+      "Al Shorta Bagdad",
+      "Al Shorta Football Club",
+      "Al Shurta",
+      "Al-Shorta Sports Club",
+      "Police Club"
+    ],
+    "Al-Tadamon SC": [
+      "Al-Tadhamon"
+    ],
+    "Al-Wahda S.C.C.": [
+      "Al Wahda",
+      "Al Wahda Abu Dhabi",
+      "Club Cultural y Deportivo Al Wahda"
+    ],
+    "Albacete Balompié": [
+      "Albacete"
+    ],
+    "Aldershot Town FC": [
+      "Aldershot"
+    ],
+    "Alemannia Aachen": [
+      "Aachen",
+      "TSV Alemannia Aachen"
+    ],
+    "Alessandria": [
+      "Unione Sportiva Alessandria Calcio",
+      "Unione Sportiva Alessandria Calcio 1912"
+    ],
+    "Almere City FC": [
+      "Almere City Football Club"
+    ],
+    "Amarante FC": [
+      "Amarante Futebol Clube"
+    ],
+    "Amiens SC": [
+      "Amiens Sporting Club Football"
+    ],
+    "Amsterdamsche FC": [
+      "Amsterdamsche Football Club"
+    ],
+    "América Futebol Clube": [
+      "América Mineiro"
+    ],
+    "Anadia FC": [
+      "Anadia Futebol Clube"
+    ],
+    "Angers SCO": [
+      "Angers",
+      "Angers Sporting Club de l'Ouest",
+      "SCO Angers"
+    ],
+    "Angoulême-Soyaux Charente": [
+      "Angoulême",
+      "AS Angoulême",
+      "Angoulême Charente FC"
+    ],
+    "Arminia Bielefeld": [
+      "Bielefeld",
+      "DSC Arminia Bielefeld",
+      "Deutscher Sport-Club Arminia Bielefeld",
+      "Arminia",
+      "Arm. Bielefeld"
+    ],
+    "Arsenal FC": [
+      "Arsenal Football Club",
+      "The Arsenal FC",
+      "Woolwich Arsenal FC",
+      "Royal Arsenal FC"
+    ],
+    "Ascoli": [
+      "Ascoli Calcio 1898 FC",
+      "Ascoli Picchio FC",
+      "Ascoli Picchio FC 1898"
+    ],
+    "Aston Villa FC": [
+      "Villa",
+      "Aston Villa Football Club"
+    ],
+    "Atalanta Bergamo": [
+      "At. Bergamo",
+      "Atalanta",
+      "Atalanta BC",
+      "Atalanta Bergamasca Calcio"
+    ],
+    "Atherton Collieries": [
+      "Atherton Colli."
+    ],
+    "Athletic Bilbao B": [
+      "Bilbao Athletic"
+    ],
+    "Athletic Club": [
+      "Athletic Bilbao"
+    ],
+    "Athlone Town F.C.": [
+      "Athlone Town"
+    ],
+    "Atlanta Dream": [
+      "Atlanta Dream W"
+    ],
+    "Atlanta Hawks": [
+      "ATL",
+      "Hawks",
+      "Atlanta"
+    ],
+    "Atlas F.C.": [
+      "Atlas",
+      "Club de Futbol Rojinegros S.A. de C.V."
+    ],
+    "Atletico Goianiense": [
+      "Atletico GO"
+    ],
+    "Atletico Madrid": [
+      "Atletico",
+      "Atletico de Madrid",
+      "Atl Madrid",
+      "Ath Madrid"
+    ],
+    "Atleticos de San German": [
+      "San German"
+    ],
+    "Atlético de Rafaela": [
+      "Atl. Rafaela",
+      "Atletico Rafaela"
+    ],
+    "Avellino": [
+      "US Avellino",
+      "US Avellino 1912",
+      "Unione Sportiva Avellino 1912",
+      "AS Avellino",
+      "Associazione Sportiva Avellino 1912"
+    ],
+    "BFC Dynamo Berlin": [
+      "BFC Dynamo",
+      "Berliner FC Dynamo",
+      "Berlin"
+    ],
+    "BFC Preussen": [
+      "Berliner Fussballclub Preussen 1894"
+    ],
+    "BSC Hastedt": [
+      "Bremer Sportclub Hastedt"
+    ],
+    "BSG Chemie Leipzig": [
+      "Betriebssportgemeinschaft Chemie Leipzig"
+    ],
+    "BSV SW Rehden": [
+      "BSV Schwarz-Weiß Rehden",
+      "BSV Rehden",
+      "Ballsportverein Schwarz-Weiß Rehden"
+    ],
+    "BV De Graafschap": [
+      "Graafschap",
+      "De Graafschap",
+      "VBV De Graafschap",
+      "Vereniging Betaald Voetbal De Graafschap"
+    ],
+    "BW Lohne": [
+      "Blau-Weiß Lohne",
+      "TuS Blau-Weiß Lohne"
+    ],
+    "Ballyclare Comrades F.C.": [
+      "Ballyclare Comrades"
+    ],
+    "Ballymena United F.C.": [
+      "Ballymena United"
+    ],
+    "Bangor F.C.": [
+      "Bangor"
+    ],
+    "Barangay Ginebra": [
+      "Barangay Ginebra San Miguel"
+    ],
+    "Barcelona Atletic": [
+      "Barca B",
+      "Barcelona B"
+    ],
+    "Bari": [
+      "AS Bari",
+      "SSC Bari",
+      "Società Sportiva Calcio Bari",
+      "FC Bari 1908"
+    ],
+    "Barnsley FC": [
+      "Barnsley Football Club",
+      "Barnsley St. Peter's FC"
+    ],
+    "Barracas Central": [
+      "Club Atlético Barracas Central"
+    ],
+    "Bayer 04 Leverkusen": [
+      "Leverk.",
+      "Bayer",
+      "B. Leverkusen",
+      "Bay. Leverkusen",
+      "Turn- und Sportverein Bayer 04 Leverkusen"
+    ],
+    "Bayer Leverkusen": [
+      "Leverkusen"
+    ],
+    "Bayern Munich": [
+      "Bayern Munchen",
+      "Bayern",
+      "FC Bayern"
+    ],
+    "Beijing Institute of Technology FC": [
+      "Beijing Technology"
+    ],
+    "Belmont Swansea Utd": [
+      "Belmont Swansea United"
+    ],
+    "Bergantiños FC": [
+      "Bergantiños Fútbol Club"
+    ],
+    "Berwick Rangers": [
+      "Berwick"
+    ],
+    "Birmingham City FC": [
+      "Birmingham",
+      "Birmingham City Football Club",
+      "Small Heath FC"
+    ],
+    "Blackburn Rovers FC": [
+      "Blackburn",
+      "Blackburn Rovers Football Club"
+    ],
+    "Blackpool FC": [
+      "Blackpool Football Club"
+    ],
+    "Boavista FC": [
+      "Boavista Porto",
+      "Boavista Futebol Clube"
+    ],
+    "Boca Juniors": [
+      "CA Boca Juniors",
+      "CABJ",
+      "Club Atletico Boca Juniors"
+    ],
+    "Bohemians FC": [
+      "Bohemian FC"
+    ],
+    "Bologna FC": [
+      "Bologna FC 1909",
+      "Bologna Football Club 1909",
+      "Bologna Football Club"
+    ],
+    "Bolton Wanderers FC": [
+      "Bolton",
+      "Bolton Wanderers Football Club"
+    ],
+    "Bonner SC": [
+      "Bonner Sport-Club 01/04"
+    ],
+    "Bootle FC (1879-1893)": [
+      "Bootle"
+    ],
+    "Bor. Mönchengladbach": [
+      "M'gladbach",
+      "B. M'gladbach",
+      "Borussia M'gladbach",
+      "Bor. M'gladbach",
+      "VfL Borussia Mönchengladbach",
+      "Borussia Verein für Leibesübungen 1900 Mönchengladbach"
+    ],
+    "Borussia Dortmund": [
+      "Dortmund",
+      "BVB",
+      "B. Dortmund",
+      "Bor. Dortmund",
+      "BV 09 Borussia Dortmund",
+      "BV Borussia 09 Dortmund",
+      "BVB 09",
+      "Ballspielverein Borussia 1909 Dortmund"
+    ],
+    "Borussia Monchengladbach": [
+      "Monchengladbach",
+      "Gladbach"
+    ],
+    "Bosnia and Herzegovina": [
+      "Bosnia & Herzegovina"
+    ],
+    "Boston Celtics": [
+      "BOS",
+      "Celtics",
+      "Boston"
+    ],
+    "Bourg-en-Bresse 01": [
+      "Bourg Peronnas"
+    ],
+    "Bradford City AFC": [
+      "Bradford"
+    ],
+    "Bray Wanderers A.F.C.": [
+      "Bray Wanderers"
+    ],
+    "Brentford FC": [
+      "Brentford Football Club"
+    ],
+    "Brescia Calcio": [
+      "Brescia Calc."
+    ],
+    "Brighton & Hove Albion FC": [
+      "Brighton & Hove",
+      "Brighton & Hove Albion Football Club"
+    ],
+    "Brighton and Hove Albion": [
+      "Brighton"
+    ],
+    "Bristol City FC": [
+      "Bristol City Football Club"
+    ],
+    "Bristol Rovers FC": [
+      "Bristol Rvs",
+      "Bristol Rovers Football Club"
+    ],
+    "Brooklyn Nets": [
+      "BKN",
+      "Nets",
+      "Brooklyn"
+    ],
+    "Bulleen Lions": [
+      "Bulleen"
+    ],
+    "Burgos CF": [
+      "Burgos Club de Fútbol"
+    ],
+    "Burnley FC": [
+      "Burnley Football Club"
+    ],
+    "Burton Albion FC": [
+      "Burton",
+      "Burton Albion Football Club"
+    ],
+    "Burton Swifts FC (1871-1901)": [
+      "Burton Swifts"
+    ],
+    "Burton United FC (1901-1910)": [
+      "Burton United"
+    ],
+    "Burton Wanderers FC (1871-1901)": [
+      "Burton Wanderers"
+    ],
+    "CA Antoniano": [
+      "Atlético Antoniano"
+    ],
+    "CA Osasuna": [
+      "Osasuna",
+      "At. Osasuna",
+      "Club Atlético Osasuna"
+    ],
+    "CD Alcoyano": [
+      "Alcoyano"
+    ],
+    "CD Atlético Baleares": [
+      "Atlético Baleares",
+      "Club Deportivo Atlético Baleares"
+    ],
+    "CD Aves": [
+      "Aves",
+      "Desportivo Aves",
+      "CD das Aves",
+      "Desportivo das Aves"
+    ],
+    "CD Badajoz": [
+      "Badajoz"
+    ],
+    "CD Becerril": [
+      "Club Deportivo Becerril"
+    ],
+    "CD Calahorra": [
+      "Club Deportivo Calahorra"
+    ],
+    "CD Castellón": [
+      "Castellón",
+      "Club Deportivo Castellón"
+    ],
+    "CD Cova Piedade": [
+      "Cova da Piedade",
+      "Clube Desportivo Cova da Piedade"
+    ],
+    "CD Ebro": [
+      "Club Deportivo Ebro"
+    ],
+    "CD El Álamo": [
+      "Club Deportivo El Álamo"
+    ],
+    "CD Eldense": [
+      "Club Deportivo Eldense",
+      "Eldense"
+    ],
+    "CD Feirense": [
+      "Feirense",
+      "Clube Desportivo Feirense"
+    ],
+    "CD Guadalajara": [
+      "Guadalajara"
+    ],
+    "CD Leganés": [
+      "Leganés",
+      "Club Deportivo Leganés"
+    ],
+    "CD Logroñés": [
+      "Logroñés"
+    ],
+    "CD Lugo": [
+      "Lugo",
+      "Club Deportivo Lugo"
+    ],
+    "CD Mafra": [
+      "Mafra",
+      "Clube Desportivo Mafra"
+    ],
+    "CD Mirandés": [
+      "Mirandés",
+      "Club Deportivo Mirandés"
+    ],
+    "CD Nacional Madeira": [
+      "Nacional",
+      "CD Nacional",
+      "Nacional da Madeira",
+      "Clube Desportivo Nacional",
+      "Nacional Funchal"
+    ],
+    "CD Numancia": [
+      "Numancia",
+      "Club Deportivo Numancia de Soria",
+      "Numancia CD"
+    ],
+    "CD Ourense": [
+      "Ourense",
+      "Orense"
+    ],
+    "CD Pamplona": [
+      "Pamplona"
+    ],
+    "CD Peña Azagresa": [
+      "Club Deportivo Peña Azagresa"
+    ],
+    "CD Santa Clara": [
+      "Santa Clara",
+      "Clube Desportivo Santa Clara"
+    ],
+    "CD Tenerife": [
+      "Tenerife",
+      "Club Deportivo Tenerife",
+      "Teneriffa CD",
+      "CD Teneriffa"
+    ],
+    "CD Toledo": [
+      "Toledo"
+    ],
+    "CD Tondela": [
+      "Tondela",
+      "Clube Desportivo de Tondela"
+    ],
+    "CD Trofense": [
+      "Trofense",
+      "Clube Desportivo Trofense"
+    ],
+    "CD Universidad César Vallejo": [
+      "Universidad César Vallejo"
+    ],
+    "CE Sabadell": [
+      "Sabadell",
+      "Centre d'Esports Sabadell Futbol Club"
+    ],
+    "CF Badalona": [
+      "Club de Fútbol Badalona"
+    ],
+    "CF Estrela da Amadora": [
+      "Est Amadora",
+      "Estrela Amadora",
+      "CF Estrela",
+      "Club Football Estrela Amadora",
+      "Club Football Estrela da Amadora",
+      "Club Foot Estrela"
+    ],
+    "CF Extremadura (-2010)": [
+      "Extremadura"
+    ],
+    "CF Fuenlabrada": [
+      "Club de Fútbol Fuenlabrada"
+    ],
+    "CF Illueca": [
+      "Club de Fútbol Illueca"
+    ],
+    "CF Lorca Deportiva": [
+      "Club de Fútbol Lorca Deportiva"
+    ],
+    "CF Rayo Majadahonda": [
+      "Club de Fútbol Rayo Majadahonda",
+      "R. Majadahonda"
+    ],
+    "CF Reus": [
+      "Reus Deportiu",
+      "Club de Futbol Reus Deportiu"
+    ],
+    "CF Villanovense": [
+      "Club de Fútbol Villanovense"
+    ],
+    "CP Mérida": [
+      "Mérida"
+    ],
+    "CS Louhans-Cuiseaux": [
+      "Louhans-Cuis."
+    ],
+    "CS Marítimo": [
+      "Marítimo",
+      "Marítimo Funchal",
+      "CS Marítimo Madeira",
+      "Club Sport Marítimo"
+    ],
+    "CS Sedan-Ardennes": [
+      "Sedan",
+      "CS Sedan",
+      "Club Sportif Sedan Ardennes"
+    ],
+    "CU Fabril Barreiro": [
+      "Fabril",
+      "Fabril Barreiro",
+      "Fabril do Barreiro",
+      "GD Fabril",
+      "Grupo Desportivo Fabril",
+      "GD CUF Barreiro",
+      "CUF Barreiro",
+      "CUF do Barreiro"
+    ],
+    "Cagliari Calcio": [
+      "Cagliari Calc."
+    ],
+    "Calcio Foggia 1920": [
+      "Calcio Foggia 1920 SSD",
+      "US Foggia",
+      "Foggia"
+    ],
+    "Calcio Lecco": [
+      "Calcio Lecco 1912"
+    ],
+    "Calcio Padova": [
+      "Padua Calcio"
+    ],
+    "Cambridge United FC": [
+      "Cambridge",
+      "Cambridge Utd",
+      "Cambridge United Football Club"
+    ],
+    "Carlisle United FC": [
+      "Carlisle",
+      "Carlisle United Football Club"
+    ],
+    "Carpi": [
+      "Carpi FC 1909",
+      "Carpi Football Club 1909"
+    ],
+    "Carrarese Calcio": [
+      "Carrarese Calcio 1908"
+    ],
+    "Casa Pia": [
+      "Casa Pia Atlético",
+      "Casa Pia Atlético Clube"
+    ],
+    "Cañeros del Este": [
+      "Caneros"
+    ],
+    "Chamois Niortais FC": [
+      "Niort",
+      "Chamois Niortais Football Club",
+      "FC Chamois Niort"
+    ],
+    "Charlotte Hornets": [
+      "CHA",
+      "Hornets",
+      "Charlotte"
+    ],
+    "Charlton Athletic FC": [
+      "Charlton",
+      "Charlton Ath.",
+      "Charlton Athletic Football Club"
+    ],
+    "Chelsea FC": [
+      "Chelsea Football Club"
+    ],
+    "Cheltenham Town FC": [
+      "Cheltenham",
+      "Cheltenham Town Football Club"
+    ],
+    "Chemnitzer FC": [
+      "Chemnitz",
+      "FC Karl-Marx-Stadt"
+    ],
+    "Chesterfield FC": [
+      "Chesterfield Town FC"
+    ],
+    "Chicago Bulls": [
+      "CHI",
+      "Bulls",
+      "Chicago"
+    ],
+    "Chicago Sky": [
+      "Chicago Sky W"
+    ],
+    "Cittadella": [
+      "AS Cittadella",
+      "Associazione Sportiva Cittadella"
+    ],
+    "Clermont Foot 63": [
+      "Clermont",
+      "Clermont Foot",
+      "Clermont Foot Auvergne"
+    ],
+    "Cleveland Cavaliers": [
+      "CLE",
+      "Cavaliers",
+      "Cleveland",
+      "Cavs"
+    ],
+    "Club Athletico Paranaense": [
+      "Clube Atlético Paranaense"
+    ],
+    "Cobh Ramblers F.C.": [
+      "Cobh Ramblers"
+    ],
+    "Colchester United FC": [
+      "Colchester"
+    ],
+    "Colon de Santa Fe": [
+      "Colon Santa Fe"
+    ],
+    "Colón F.C.": [
+      "Colón FC"
+    ],
+    "Como 1907": [
+      "Como"
+    ],
+    "Comunicaciones F.C.": [
+      "Comunicaciones"
+    ],
+    "Connecticut Sun": [
+      "Connecticut Sun W"
+    ],
+    "Coritiba F.C.": [
+      "Coritiba",
+      "Coritiba Foot Ball Club"
+    ],
+    "Coventry City FC": [
+      "Coventry",
+      "Coventry City Football Club"
+    ],
+    "Crewe Alexandra FC": [
+      "Crewe",
+      "Crewe Alexandra Football Club"
+    ],
+    "Crystal Palace FC": [
+      "Palace",
+      "C. Palace",
+      "Crystal P.",
+      "Crystal Palace Football Club"
+    ],
+    "Cultural Leonesa": [
+      "Leonesa",
+      "Cultural y Deportiva Leonesa",
+      "CD Leonesa"
+    ],
+    "Czechia": [
+      "Czech Republic"
+    ],
+    "Cádiz CF": [
+      "Cádiz Club de Fútbol"
+    ],
+    "Córdoba CF": [
+      "Córdoba Club de Fútbol"
+    ],
+    "DJK Vilzing": [
+      "Vilzing",
+      "Deutsche Jugendkraft Vilzing"
+    ],
+    "DOS Utrecht": [
+      "VV DOS",
+      "Voetbalvereniging Door Oefening Sterk"
+    ],
+    "DR Congo": [
+      "D.R. Congo"
+    ],
+    "DWS Amsterdam": [
+      "Amsterdamsche Football Club Door Wilskracht Sterk",
+      "Door Wilskracht Sterk",
+      "AFC DWS"
+    ],
+    "Dagenham & Redbridge FC": [
+      "Dagenham & Red.",
+      "Dag and Red",
+      "Dagenham and Redbridge"
+    ],
+    "Dallas Mavericks": [
+      "DAL",
+      "Mavericks",
+      "Dallas",
+      "Mavs"
+    ],
+    "Dallas Wings": [
+      "Dallas Wings W"
+    ],
+    "Darwen FC (1870-2009)": [
+      "Darwen"
+    ],
+    "Dayton Dutch Lions": [
+      "DDL",
+      "Dayton",
+      "Dayton Dutch Lions Football Club",
+      "Dutch Lions"
+    ],
+    "Defensa y Justicia": [
+      "Club Social y Deportivo Defensa y Justicia"
+    ],
+    "Denver Nuggets": [
+      "DEN",
+      "Nuggets",
+      "Denver"
+    ],
+    "Deportes Concepción": [
+      "D. Concepcion"
+    ],
+    "Deportes La Serena": [
+      "La Serena"
+    ],
+    "Deportivo Alavés": [
+      "Alavés",
+      "CD Alavés"
+    ],
+    "Derby County FC": [
+      "Derby",
+      "Derby County Football Club"
+    ],
+    "Derry City F.C.": [
+      "Derry City"
+    ],
+    "Desportivo de Chaves": [
+      "Desp. Chaves"
+    ],
+    "Detroit Pistons": [
+      "DET",
+      "Pistons",
+      "Detroit"
+    ],
+    "Difaa El Jadida": [
+      "Difaa El Jadidi"
+    ],
+    "Dijon FCO": [
+      "Dijon",
+      "FCO Dijon",
+      "Dijon Football",
+      "Dijon Football Côte-d'Or"
+    ],
+    "Doncaster Rovers FC": [
+      "Doncaster",
+      "Doncaster Rovers Football Club"
+    ],
+    "Drogheda United F.C.": [
+      "Drogheda United"
+    ],
+    "Dundalk F.C.": [
+      "Dundalk"
+    ],
+    "Dynamo Dresden": [
+      "Dresden",
+      "Dyn. Dresden",
+      "Dynamo Dres.",
+      "SG Dynamo Dresden",
+      "Sportgemeinschaft Dynamo Dresden",
+      "1. FC Dynamo Dresden"
+    ],
+    "Dynamo Kyiv": [
+      "Dynamo Kiev",
+      "Dinamo Kiev"
+    ],
+    "EA Guingamp": [
+      "Guingamp",
+      "En Avant Guingamp",
+      "En Avant de Guingamp"
+    ],
+    "ES Troyes AC": [
+      "Troyes",
+      "ESTAC Troyes",
+      "Espérance Sportive Troyes Aube Champagne"
+    ],
+    "Ebbsfleet United FC": [
+      "Ebbsfleet",
+      "Gravesend"
+    ],
+    "Edgeworth Eagles FC": [
+      "Edgeworth E.",
+      "Edgeworth"
+    ],
+    "Eintracht Braunschweig": [
+      "Braunschweig",
+      "E. Braunschweig",
+      "Eintr. Braunschweig",
+      "TSV Eintracht Braunschweig",
+      "Braunschweiger Turn-und Sportverein Eintracht von 1895"
+    ],
+    "Eintracht Frankfurt": [
+      "Frankfurt",
+      "E. Frankfurt",
+      "Ein Frankfurt",
+      "Eint Frankfurt",
+      "Eintr. Frankfurt",
+      "SG Eintracht Frankfurt",
+      "Frankfurter SG Eintracht",
+      "Frankfurter Sportgemeinde Eintracht"
+    ],
+    "Eintracht Norderstedt": [
+      "E. Norderstedt",
+      "Eintr. Norderstedt"
+    ],
+    "Eintracht Trier": [
+      "Ein Trier"
+    ],
+    "El Palmar CF": [
+      "El Palmar Club de Fútbol-Estrella Grana",
+      "EG El Palmar CF"
+    ],
+    "Elche CF": [
+      "Elche Club de Fútbol"
+    ],
+    "Empoli FC": [
+      "Empoli Football Club"
+    ],
+    "Energie Cottbus": [
+      "Cottbus"
+    ],
+    "Estoril Praia": [
+      "Estoril",
+      "GD Estoril Praia",
+      "Grupo Desportivo Estoril Praia",
+      "GD Estoril"
+    ],
+    "Everton FC": [
+      "Everton Football Club"
+    ],
+    "Excelsior Maassluis": [
+      "Excel. Maassluis",
+      "VV Excelsior Maassluis"
+    ],
+    "Exeter City FC": [
+      "Exeter",
+      "Exeter City Football Club"
+    ],
+    "Extremadura UD": [
+      "Extremadura Unión Deportiva",
+      "UD Extremadura"
+    ],
+    "FC 08 Homburg": [
+      "Homburg",
+      "FC Homburg/Saar"
+    ],
+    "FC 08 Villingen": [
+      "Fußball-Club 1908 Villingen"
+    ],
+    "FC Alverca": [
+      "Alverca Futebol"
+    ],
+    "FC Amsterdam (1972-1982)": [
+      "Amsterdam"
+    ],
+    "FC Annecy": [
+      "Football Club d'Annecy"
+    ],
+    "FC Arouca": [
+      "Futebol Clube de Arouca"
+    ],
+    "FC Augsburg": [
+      "Fußball-Club Augsburg 1907"
+    ],
+    "FC Barcelona": [
+      "Fútbol Club Barcelona"
+    ],
+    "FC Barreirense": [
+      "Futebol Clube Barreirense"
+    ],
+    "FC Carl Zeiss Jena": [
+      "CZ Jena",
+      "SC Motor Jena",
+      "Jena"
+    ],
+    "FC Cartagena": [
+      "Fútbol Club Cartagena"
+    ],
+    "FC Chambly": [
+      "Football Club Chambly Oise",
+      "Football Club de Chambly Oise"
+    ],
+    "FC Crotone": [
+      "Federazione Calcistica Crotone",
+      "Football Club Crotone"
+    ],
+    "FC Den Bosch": [
+      "Football Club Den Bosch",
+      "BVV Den Bosch",
+      "FC Den Bosch/BVV"
+    ],
+    "FC Dordrecht": [
+      "Dordrecht '90"
+    ],
+    "FC Einheit Wernigerode": [
+      "Wernigerode",
+      "FC Einheit"
+    ],
+    "FC Eintracht Bamberg": [
+      "Bamberg",
+      "FC Eintracht Bamberg 2010"
+    ],
+    "FC Emmen": [
+      "FC Emmen VV",
+      "Football Club Emmen"
+    ],
+    "FC Erzgebirge Aue": [
+      "Aue",
+      "Erzg. Aue",
+      "Erzgeb. Aue",
+      "SC Wismut Karl-Marx-Stadt",
+      "Wismut Aue",
+      "Fußball-Club Erzgebirge Aue"
+    ],
+    "FC Famalicão": [
+      "Futebol Clube de Famalicão"
+    ],
+    "FC Groningen": [
+      "Football Club Groningen"
+    ],
+    "FC Halifax Town": [
+      "Halifax"
+    ],
+    "FC Ingolstadt 04": [
+      "Ingolstadt",
+      "Fußball Club Ingolstadt 04"
+    ],
+    "FC Internazionale Milano": [
+      "Football Club Internazionale Milano",
+      "Inter Mailand"
+    ],
+    "FC Libourne-Saint-Seurin": [
+      "Libourne"
+    ],
+    "FC Lorient": [
+      "Football Club Lorient-Bretagne Sud",
+      "Football Club Lorient"
+    ],
+    "FC Martigues": [
+      "Football Club de Martigues"
+    ],
+    "FC Mecklenburg Schwerin": [
+      "FC Eintracht Schwerin",
+      "PSV Schwerin",
+      "Polizei SV Schwerin"
+    ],
+    "FC Metz": [
+      "Football Club de Metz"
+    ],
+    "FC Nantes": [
+      "Football Club de Nantes",
+      "Football Club de Nantes Atlantique"
+    ],
+    "FC Oss": [
+      "TOP Oss",
+      "Tot Ons Plezier Oss"
+    ],
+    "FC Paços de Ferreira": [
+      "Paços",
+      "Paços Ferreira",
+      "Futebol Clube Paços de Ferreira"
+    ],
+    "FC Penafiel": [
+      "Futebol Clube de Penafiel"
+    ],
+    "FC Porto": [
+      "Futebol Clube do Porto"
+    ],
+    "FC Rot-Weiß Erfurt": [
+      "Erfurt",
+      "RW Erfurt"
+    ],
+    "FC Rouen": [
+      "FC Rouen 1899",
+      "Football Club de Rouen 1899"
+    ],
+    "FC Sachsen Leipzig (1990-2011)": [
+      "Sachsen"
+    ],
+    "FC Schalke 04": [
+      "Schalke",
+      "Fußball-Club Gelsenkirchen-Schalke 04"
+    ],
+    "FC Sochaux-Montbéliard": [
+      "Football Club Sochaux-Montbéliard",
+      "Football Club de Sochaux-Montbéliard",
+      "Sochaux"
+    ],
+    "FC St. Pauli": [
+      "FC Sankt Pauli",
+      "FC St. Pauli 1910",
+      "Fußball-Club Sankt Pauli von 1910"
+    ],
+    "FC Stahl Brandenburg": [
+      "BSV Brandenburg",
+      "BSV Stahl Brandenburg",
+      "Brandenburg"
+    ],
+    "FC Südtirol": [
+      "Alto Adige",
+      "Fußball Club Südtirol"
+    ],
+    "FC Teutonia 05": [
+      "FC Teutonia Ottensen",
+      "FC Teutonia Altona-Ottensen"
+    ],
+    "FC Twente": [
+      "Football Club Twente",
+      "Twente Enschede",
+      "Twente Ensch.",
+      "FC Twente '65"
+    ],
+    "FC Utrecht": [
+      "Football Club Utrecht"
+    ],
+    "FC Versailles": [
+      "Football Club de Versailles 78"
+    ],
+    "FC Viktoria 1889 Berlin": [
+      "Viktoria Berlin"
+    ],
+    "FC Viktoria Köln": [
+      "V. Köln",
+      "Vikt. Köln"
+    ],
+    "FC Vilaverdense": [
+      "Länk FC Vilaverdense"
+    ],
+    "FC Villefranche": [
+      "Football Club Villefranche Beaujolais",
+      "FC Villefranche Beaujolais",
+      "FCVB"
+    ],
+    "FC Vizela": [
+      "Futebol Clube de Vizela"
+    ],
+    "FC Volendam": [
+      "Football Club Volendam"
+    ],
+    "FCO Charleville": [
+      "Charleville"
+    ],
+    "FFC Victoria 91": [
+      "1. FC Frankfurt",
+      "1. FC Frankfurt (Oder)",
+      "FC Frankfurt Viktoria/Oder",
+      "FC Vorwärts Frankfurt"
+    ],
+    "FK Babrungas": [
+      "Babrungas Plungė",
+      "Kooperatininkas Plungė",
+      "Linų audiniai Plungė",
+      "Robotas Plungė",
+      "Spartakas Plungė"
+    ],
+    "FK Pirmasens": [
+      "FK 03 Pirmasens"
+    ],
+    "FK Smiltene/BJSS": [
+      "FK Smiltene"
+    ],
+    "FSV Frankfurt": [
+      "Frankfurt FSV",
+      "FSV Frankfurt 1899"
+    ],
+    "FSV Optik Rathenow": [
+      "Optik Rathenow"
+    ],
+    "FSV Zwickau": [
+      "Zwickau"
+    ],
+    "FT Braunschweig": [
+      "Freie Turnerschaft Braunschweig"
+    ],
+    "FV Engers 07": [
+      "FV Engers",
+      "Fußballverein Engers 07"
+    ],
+    "FV Illertissen": [
+      "Illertissen"
+    ],
+    "FV Ravensburg": [
+      "FV 1893 Ravensburg"
+    ],
+    "Farsley Celtic FC": [
+      "Farsley"
+    ],
+    "Feyenoord Rotterdam": [
+      "Feyenoord"
+    ],
+    "Finn Harps F.C.": [
+      "Finn Harps"
+    ],
+    "Fleetwood Town FC": [
+      "Fleetwood Town Football Club"
+    ],
+    "Fluminense F.C.": [
+      "Fluminense",
+      "Fluminense Football Club"
+    ],
+    "Forest Green Rovers FC": [
+      "Forest Green"
+    ],
+    "Fortuna Düsseldorf": [
+      "Düsseldorf",
+      "F. Düsseldorf",
+      "Fort. Düsseldorf",
+      "TSV Fortuna 95 Düsseldorf",
+      "Düsseldorfer Turn-und Sportverein Fortuna 1895"
+    ],
+    "Fortuna Köln": [
+      "F. Köln",
+      "Sportclub Fortuna Köln"
+    ],
+    "Fortuna Sittard": [
+      "F. Sittard",
+      "For. Sittard"
+    ],
+    "Fubon Braves": [
+      "Taipei Fubon Braves"
+    ],
+    "Fulham FC": [
+      "Fulham Football Club"
+    ],
+    "GD Chaves": [
+      "Chaves",
+      "Grupo Desportivo de Chaves"
+    ],
+    "GFC Ajaccio": [
+      "Ajaccio GFCO",
+      "Gazélec Ajaccio",
+      "Gazélec Football Club Ajaccio"
+    ],
+    "GOAL FC": [
+      "Grand Ouest Association Lyonnaise Football Club"
+    ],
+    "Gallipoli Football SSD": [
+      "Gallipoli",
+      "Gallipoli Football 1909 SSD"
+    ],
+    "Galway United F.C.": [
+      "Galway United"
+    ],
+    "Gareji": [
+      "Gareji Sagarejo"
+    ],
+    "Gefle IF": [
+      "Gefle Idrottsförening"
+    ],
+    "Genoa CFC": [
+      "Genoa Cricket and Football Club",
+      "FC Genua",
+      "CFC Genua 1893"
+    ],
+    "Germania Egestorf/Langreder": [
+      "1. FC Germania Egestorf/Langreder",
+      "1. Fußballclub Germania Egestorf/Langreder"
+    ],
+    "Getafe CF": [
+      "Getafe Club de Fútbol"
+    ],
+    "Giana Erminio": [
+      "AS Giana Erminio"
+    ],
+    "Gil Vicente FC": [
+      "Gil Vicente Futebol Clube"
+    ],
+    "Gillingham FC": [
+      "Gillingham Football Club"
+    ],
+    "Gimnàstic Tarragona": [
+      "Gimnàstic",
+      "Gimn. Tarragona"
+    ],
+    "Gimnástica Segoviana": [
+      "Segoviana",
+      "Gimnástica Segoviana Club de Fútbol"
+    ],
+    "Girona FC": [
+      "Girona Futbol Club"
+    ],
+    "Girondins de Bordeaux": [
+      "Bordeaux",
+      "Gir. Bordeaux",
+      "Girondins Bordeaux",
+      "Football Club des Girondins de Bordeaux"
+    ],
+    "Glentoran F.C.": [
+      "Glentoran"
+    ],
+    "Glossop North End AFC": [
+      "Glossop FC"
+    ],
+    "Go Ahead Eagles": [
+      "Go Ahead Eagles Deventer",
+      "Go A. Eagles"
+    ],
+    "Golden State Valkyries": [
+      "Golden State Valkyries W"
+    ],
+    "Golden State Warriors": [
+      "GSW",
+      "Warriors",
+      "Golden State",
+      "San Francisco Warriors"
+    ],
+    "Granada CF": [
+      "Granada Club de Fútbol"
+    ],
+    "Grays Athletic FC": [
+      "Grays"
+    ],
+    "Grazer AK": [
+      "AK Graz",
+      "AK格拉茨",
+      "GAK",
+      "GAK 1902",
+      "Grazer A.K.",
+      "Grazer AK 1902",
+      "Grazer AK FuÃŸball",
+      "Grazer Athletik-Klub",
+      "Grazer Athletiksport Klub",
+      "Liebherr GAK"
+    ],
+    "Greifswalder FC": [
+      "Greifswald"
+    ],
+    "Grenoble Foot 38": [
+      "Grenoble",
+      "Grenoble Foot"
+    ],
+    "Grimsby Town FC": [
+      "Grimsby"
+    ],
+    "Grindavik": [
+      "UMF Grindavik"
+    ],
+    "HFC Haarlem (1889-2010)": [
+      "Haarlemsche Football Club Haarlem",
+      "Haarlem FC"
+    ],
+    "Hallescher FC": [
+      "Halle",
+      "Hallescher FC Chemie"
+    ],
+    "Hamburger SV": [
+      "HSV",
+      "Hamburg",
+      "Hamburger Sport Verein"
+    ],
+    "Hammarby Fotboll": [
+      "Hammarby IF"
+    ],
+    "Hammarby Talang FF": [
+      "Hammarby TFF"
+    ],
+    "Hangzhou Linping Wuyue": [
+      "Hangzhou Linping"
+    ],
+    "Hannover 96": [
+      "Hannover",
+      "Hannover 1896",
+      "Hannoverscher Sportverein von 1896"
+    ],
+    "Hansa Rostock": [
+      "Rostock",
+      "Fußballclub Hansa Rostock",
+      "Hansa"
+    ],
+    "Harrogate Town AFC": [
+      "Harrogate",
+      "Harrogate Town Association Football Club"
+    ],
+    "Hartlepool United FC": [
+      "Hartlepool"
+    ],
+    "Havant & Waterlooville FC": [
+      "Havant & Waterlooville Football Club"
+    ],
+    "Hayes & Yeading United FC": [
+      "Hayes & Yeading"
+    ],
+    "Hellas Verona": [
+      "Verona",
+      "Hellas",
+      "Hellas Verona Football Club"
+    ],
+    "Helsingin Jalkapalloklubi": [
+      "HJK Helsinki"
+    ],
+    "Henan F.C.": [
+      "Henan Construction",
+      "Henan Jianye",
+      "Henan Jianye Football Club",
+      "Henan Jianye Z.J.",
+      "Henan Jianye Zuqiu Julebu",
+      "Henan Songshan Longmen F.C.",
+      "Henan Songshan Longmen Zuqiu Julebu",
+      "Henan Z.J.",
+      "Luoyang Longmen",
+      "Luoyang Longmen Z.J."
+    ],
+    "Henan Songshan Longmen": [
+      "Henan"
+    ],
+    "Heracles Almelo": [
+      "Heracles"
+    ],
+    "Hereford FC (2014-)": [
+      "Hereford"
+    ],
+    "Hereford United FC (1924-2014)": [
+      "Hereford United"
+    ],
+    "Hertha BSC": [
+      "Hertha",
+      "Hertha Berlin",
+      "Hertha BSC Berlin",
+      "Hertha Berliner Sport-Club"
+    ],
+    "Holstein Kiel": [
+      "Holst. Kiel",
+      "Kiel",
+      "Kieler Sportvereinigung Holstein von 1900"
+    ],
+    "Houston Rockets": [
+      "HOU",
+      "Rockets",
+      "Houston"
+    ],
+    "Huddersfield Town AFC": [
+      "Huddersfield",
+      "Huddersfield Town Association Football Club"
+    ],
+    "Hull City AFC": [
+      "Hull",
+      "Hull City Association Football Club"
+    ],
+    "Hércules CF": [
+      "Hércules de Alicante Club de Fútbol"
+    ],
+    "IF Brommapojkarna": [
+      "Idrottsföreningen  Brommapojkarna"
+    ],
+    "IF Elfsborg": [
+      "Idrottsföreningen Elfsborg"
+    ],
+    "IK Franke": [
+      "Franke"
+    ],
+    "Ikorodu City F.C.": [
+      "Ikorodu City"
+    ],
+    "Independiente Rivadavia": [
+      "Club Sportivo Independiente Rivadavia"
+    ],
+    "Indiana Fever": [
+      "Indiana Fever W"
+    ],
+    "Indiana Pacers": [
+      "IND",
+      "Pacers",
+      "Indiana"
+    ],
+    "Internazionale": [
+      "Inter",
+      "Inter Milan"
+    ],
+    "Ipswich Town FC": [
+      "Ipswich",
+      "Ipswich Town Football Club"
+    ],
+    "Jong AZ": [
+      "AZ B"
+    ],
+    "Jong Ajax": [
+      "Ajax B"
+    ],
+    "Jong PSV": [
+      "PSV B"
+    ],
+    "Juventus FC": [
+      "Juventus Football Club",
+      "Juventus Torino",
+      "Juventus Turin"
+    ],
+    "Jönköpings Södra IF": [
+      "Jonkoping"
+    ],
+    "KFC Uerdingen": [
+      "Uerdingen",
+      "Uerdingen 05",
+      "KFC Uerdingen 05",
+      "KSC Uerdingen 05",
+      "Bayer Uerdingen",
+      "Bayer 05 Uerdingen"
+    ],
+    "KSV Baunatal": [
+      "Kultur- und Sportverein Baunatal"
+    ],
+    "KSV Hessen Kassel": [
+      "Hessen Kassel"
+    ],
+    "Karlsruher SC": [
+      "KSC",
+      "Karlsruhe",
+      "Karlsruher Sport-Club 1894 Mühlburg-Phönix"
+    ],
+    "Kickers Offenbach": [
+      "Offenbach"
+    ],
+    "Kidderminster Harriers FC": [
+      "Kidderminster"
+    ],
+    "King's Lynn FC": [
+      "King's Lynn Town"
+    ],
+    "Kinondoni Municipal Council FC": [
+      "Kinondoni MC",
+      "KMC"
+    ],
+    "Knattspyrnufélagið Víkingur": [
+      "KF Berserkir",
+      "KF Víkingur",
+      "Knattspyrnufelagid Vikingur",
+      "Reikjaviko Víkingur",
+      "Vikingur",
+      "Vikingur Reykjavik"
+    ],
+    "Kolkheti 1913 Poti": [
+      "Kolkheti 1913"
+    ],
+    "LB Châteauroux": [
+      "Châteauroux",
+      "La Berrichonne de Châteauroux",
+      "La Berrichonne"
+    ],
+    "LR Vicenza Virtus": [
+      "Vicenza",
+      "Vicenza Virtus"
+    ],
+    "LTS Bremerhaven": [
+      "Leher Turnerschaft",
+      "Leher TS"
+    ],
+    "Labasa F.C.": [
+      "Labasa"
+    ],
+    "Lambton Jaffas FC": [
+      "Lambton J."
+    ],
+    "Landvetter": [
+      "Landvetter IS"
+    ],
+    "Las Vegas Aces": [
+      "Las Vegas Aces W"
+    ],
+    "Lautoka F.C.": [
+      "Lautoka"
+    ],
+    "Le Havre AC": [
+      "Havre AC",
+      "Le Havre Athletic Club",
+      "Le Havre Athletic Club Football"
+    ],
+    "Le Mans FC": [
+      "Le Mans Football Club",
+      "Le Mans UC 72"
+    ],
+    "Le Puy": [
+      "Le Puy Foot 43 Auvergne"
+    ],
+    "Leeds City FC (1904-1919)": [
+      "Leeds City"
+    ],
+    "Leeds United": [
+      "Leeds",
+      "Leeds United Association Football Club"
+    ],
+    "Legia": [
+      "Legia Warszawa"
+    ],
+    "Leicester City FC": [
+      "Leicester",
+      "Leicester City Football Club"
+    ],
+    "Leixões SC": [
+      "Leixões Sport Club"
+    ],
+    "Levante UD": [
+      "Levante",
+      "UD Levante",
+      "Levante Unión Deportiva"
+    ],
+    "Leyton Orient FC": [
+      "Leyton Orient Football Club",
+      "Clapton Orient FC"
+    ],
+    "Lidköpings FK": [
+      "Lidkoping"
+    ],
+    "Lille OSC": [
+      "Lille",
+      "LOSC",
+      "LOSC Lille",
+      "OSC Lille",
+      "Lille Olympique Sporting Club Lille Métropole"
+    ],
+    "Lincoln City FC": [
+      "Lincoln",
+      "Lincoln City Football Club"
+    ],
+    "Liverpool FC": [
+      "Liverpool Football Club"
+    ],
+    "Longford Town F.C.": [
+      "Longford Town"
+    ],
+    "Lorca FC (2003-2022)": [
+      "Lorca Fútbol Club",
+      "La Hoya Lorca CF",
+      "La Hoya Deportiva Club de Fútbol"
+    ],
+    "Los Angeles Clippers": [
+      "LAC",
+      "Clippers"
+    ],
+    "Los Angeles Lakers": [
+      "LAL",
+      "Lakers"
+    ],
+    "Los Angeles Sparks": [
+      "Los Angeles Sparks W"
+    ],
+    "Loughborough FC (1886-1900)": [
+      "Loughborough"
+    ],
+    "Luton Town FC": [
+      "Luton",
+      "Luton Town Football Club"
+    ],
+    "MC Fermana FC": [
+      "Fermana",
+      "Fermana Football Club",
+      "US Fermana"
+    ],
+    "MSV Duisburg": [
+      "Duisburg",
+      "Meidericher SV"
+    ],
+    "MTV Eintracht Celle": [
+      "Eintracht Celle",
+      "MTV Eintr. Celle",
+      "Männerturnverein Eintracht Celle"
+    ],
+    "MVV Maastricht": [
+      "MVV",
+      "Maatschappelijke Voetbal Vereniging Maastricht"
+    ],
+    "Macae Esporte RJ": [
+      "Macae"
+    ],
+    "Macclesfield Town FC": [
+      "Macclesfield"
+    ],
+    "Maghreb Fes": [
+      "Maghreb Fez"
+    ],
+    "Maidenhead United FC": [
+      "Maidenhead"
+    ],
+    "Maidstone United FC": [
+      "Maidstone"
+    ],
+    "Malmö FF": [
+      "Malmö Fotbollförening"
+    ],
+    "Manchester City": [
+      "Man City",
+      "Manchester C.",
+      "Manchester City Football Club",
+      "Ardwick FC"
+    ],
+    "Manchester United": [
+      "Man Utd",
+      "Man United",
+      "Manchester Utd",
+      "Manchester U.",
+      "Manchester United Football Club",
+      "Newton Heath FC"
+    ],
+    "Mansfield Town FC": [
+      "Mansfield"
+    ],
+    "Mantova SSD": [
+      "Mantova",
+      "Mantova 1911 SSD"
+    ],
+    "Marignane GCB": [
+      "Marignane Gignac Côte Bleue Football Club",
+      "Marignane Gignac CB",
+      "Marignane Gignac",
+      "Marignane",
+      "US Marignane"
+    ],
+    "Memphis Grizzlies": [
+      "MEM",
+      "Grizzlies",
+      "Memphis"
+    ],
+    "Meshakhte Tkibuli": [
+      "Meshakhte",
+      "Okriba Tkibuli"
+    ],
+    "Miami Heat": [
+      "MIA",
+      "Heat",
+      "Miami"
+    ],
+    "Middlesbrough FC": [
+      "Middlesboro",
+      "Middlesbrough Football Club"
+    ],
+    "Middlesbrough Ironopolis FC (1889-1894)": [
+      "Middlesbrough Ironopolis"
+    ],
+    "Millwall FC": [
+      "Millwall Football Club",
+      "Millwall Athletic FC"
+    ],
+    "Milton Keynes Dons FC": [
+      "MK Dons",
+      "Milton Keynes Dons Football Club"
+    ],
+    "Milwaukee Bucks": [
+      "MIL",
+      "Bucks",
+      "Milwaukee"
+    ],
+    "Minnesota Lynx": [
+      "Minnesota Lynx W"
+    ],
+    "Minnesota Timberwolves": [
+      "MIN",
+      "Timberwolves",
+      "Minnesota"
+    ],
+    "Modena FC": [
+      "Modena Football Club 2018"
+    ],
+    "Molde FK": [
+      "Molde Fotballklubb"
+    ],
+    "Monaco": [
+      "AS Monaco"
+    ],
+    "Montpellier HSC": [
+      "Montpellier",
+      "HSC Montpellier",
+      "Montpellier Hérault SC",
+      "Montpellier-Herault Sports Club",
+      "Montpellier-Hérault Sport Club"
+    ],
+    "Morecambe FC": [
+      "Morecambe Football Club"
+    ],
+    "Moreirense FC": [
+      "Moreirense Futebol Clube"
+    ],
+    "Málaga CF": [
+      "Málaga Club de Fútbol"
+    ],
+    "Mérida AD": [
+      "Mérida Asociación Deportiva"
+    ],
+    "NAC Breda": [
+      "NAC",
+      "NOAD ADVENDO Combinatie Breda"
+    ],
+    "NEC Nijmegen": [
+      "NEC",
+      "Nijmegen",
+      "Nijmegen Eendracht Combinatie"
+    ],
+    "Nasinu F.C.": [
+      "Nasinu"
+    ],
+    "Naval 1º de Maio": [
+      "Naval",
+      "Associação Naval 1º de Maio",
+      "Naval 1° de Maio"
+    ],
+    "Navua F.C.": [
+      "Navua"
+    ],
+    "New Brighton Tower FC (1898-1901)": [
+      "New Brighton",
+      "New Brighton Tower"
+    ],
+    "New England FC": [
+      "NEFC"
+    ],
+    "New Orleans Pelicans": [
+      "NOP",
+      "Pelicans",
+      "New Orleans"
+    ],
+    "New York Knicks": [
+      "NYK",
+      "Knicks",
+      "New York"
+    ],
+    "New York Liberty": [
+      "New York Liberty W"
+    ],
+    "Newcastle United": [
+      "Newcastle",
+      "Newcastle Utd.",
+      "Newcastle United Football Club"
+    ],
+    "North Ferriby United AFC": [
+      "North Ferriby"
+    ],
+    "Northampton Town FC": [
+      "Northampton",
+      "Northampton Town Football Club"
+    ],
+    "Northwich Victoria FC": [
+      "Northwich"
+    ],
+    "Norwich City FC": [
+      "Norwich",
+      "Norwich City Football Club"
+    ],
+    "Nottingham Forest": [
+      "Nottm Forest",
+      "Notts Forest",
+      "Nott'm Forest",
+      "Nott'ham Forest",
+      "Nottingham Forest Football Club"
+    ],
+    "Nuneaton Borough FC": [
+      "Nuneaton Town"
+    ],
+    "Nîmes Olympique": [
+      "Nîmes",
+      "Olympique Nîmes"
+    ],
+    "OGC Nice": [
+      "Nice",
+      "Olympique Gymnaste Club Nice Côte d'Azur",
+      "Olympique Club Gymnaste Club de Nice-Côte d'Azur",
+      "OGC Nizza"
+    ],
+    "Odishi 1919 Zugdidi": [
+      "Odishi 1919"
+    ],
+    "Oklahoma City Thunder": [
+      "OKC",
+      "Thunder",
+      "Oklahoma City"
+    ],
+    "Oldham Athletic AFC": [
+      "Oldham"
+    ],
+    "Olympique Lyonnais": [
+      "Lyon",
+      "Ol. Lyon",
+      "Olymp. Lyon",
+      "Olympique Lyon"
+    ],
+    "Olympique de Marseille": [
+      "Marseille",
+      "Ol. Marseille",
+      "Olymp. Marseille",
+      "Olympique Marseille"
+    ],
+    "Ontinyent 1931 CF": [
+      "Ontinyent 1931 Club de Futbol"
+    ],
+    "Ontinyent CF (1947-2019)": [
+      "Ontinyent Club de Fútbol"
+    ],
+    "Orlando Magic": [
+      "ORL",
+      "Magic",
+      "Orlando"
+    ],
+    "Os Belenenses": [
+      "Belenenses",
+      "Belenenses L.",
+      "Belenenses SAD",
+      "Os Belenenses Futebol",
+      "Os Belenenses - Sociedade Desportiva de Futebol SAD"
+    ],
+    "Oxford United FC": [
+      "Oxford",
+      "Oxford Utd",
+      "Oxford United Football Club"
+    ],
+    "PEC Zwolle": [
+      "Zwolle",
+      "Prins Hendrik Ende Desespereert Nimmer Combinatie Zwolle"
+    ],
+    "PSV Eindhoven": [
+      "PSV",
+      "Philips Sport Vereniging",
+      "Philips Sport Vereniging Eindhoven"
+    ],
+    "Paganese Calcio": [
+      "Paganese Calcio 1926"
+    ],
+    "Paksi FC": [
+      "Paks"
+    ],
+    "Palermo FC": [
+      "Palermo Football Club",
+      "US Palermo",
+      "US Città di Palermo",
+      "Unione Sportiva Città di Palermo"
+    ],
+    "Paris FC": [
+      "Paris FC 98",
+      "Paris Football Club"
+    ],
+    "Paris Saint-Germain": [
+      "PSG",
+      "Paris SG",
+      "Paris St. Germain",
+      "Paris S. Germain",
+      "Paris-Saint-Germain Football Club"
+    ],
+    "Parma Calcio": [
+      "Parma Football Club",
+      "Parma Calcio 1913"
+    ],
+    "Pau FC": [
+      "Pau Football Club"
+    ],
+    "Pau-Orthez": [
+      "Pau Lacq Orthez",
+      "Pau Orthez"
+    ],
+    "Paysandú F.C.": [
+      "Paysandú FC"
+    ],
+    "Pescara": [
+      "Delfino Pescara",
+      "Delfino Pescara 1936"
+    ],
+    "Peterborough United FC": [
+      "Peterboro",
+      "Peterborough",
+      "Peterborough Utd.",
+      "Peterborough United Football Club"
+    ],
+    "Philadelphia 76ers": [
+      "PHI",
+      "76ers",
+      "Philadelphia",
+      "Sixers"
+    ],
+    "Phoenix Mercury": [
+      "Phoenix Mercury W"
+    ],
+    "Phoenix Suns": [
+      "PHX",
+      "Suns",
+      "Phoenix"
+    ],
+    "Piacenza Calcio": [
+      "Piacenza Calcio 1919"
+    ],
+    "Plymouth Argyle FC": [
+      "Plymouth",
+      "Plymouth Argyle Football Club"
+    ],
+    "Polideportivo Ejido": [
+      "Poli Ejido"
+    ],
+    "Pontedera": [
+      "US Città di Pontedera"
+    ],
+    "Port Vale FC": [
+      "Port Vale Football Club",
+      "Burslem Port Vale FC"
+    ],
+    "Portimonense SC": [
+      "Portimonense Sporting Clube"
+    ],
+    "Portland Hearts of Pine": [
+      "Hearts of Pine"
+    ],
+    "Portland Trail Blazers": [
+      "POR",
+      "Trail Blazers",
+      "Portland",
+      "Blazers"
+    ],
+    "Portogruaro Calcio ASD": [
+      "Portogruaro"
+    ],
+    "Portsmouth FC": [
+      "Portsmouth Football Club"
+    ],
+    "Preston North End FC": [
+      "Preston",
+      "Preston North End Football Club"
+    ],
+    "Preußen Münster": [
+      "Münster",
+      "Pr. Münster",
+      "Preu. Münster",
+      "SC Preußen 06"
+    ],
+    "Pro Patria": [
+      "Aurora Pro Patria 1919"
+    ],
+    "Queens Park Rangers FC": [
+      "QPR",
+      "Queens Park R.",
+      "Queens Park Rangers Football Club"
+    ],
+    "Quick Boys": [
+      "KVV Quick Boys",
+      "Katwijkse Voetbal Vereniging Quick Boys"
+    ],
+    "RB Leipzig": [
+      "Rasenballsport Leipzig"
+    ],
+    "RBC Roosendaal": [
+      "Roosendaal"
+    ],
+    "RC Celta Vigo": [
+      "Celta",
+      "Celta Vigo",
+      "R.C. Celta",
+      "Real Club Celta Vigo",
+      "Real Club Celta de Vigo",
+      "Celta de Vigo",
+      "RC Celta de Vigo"
+    ],
+    "RC Lens": [
+      "Lens",
+      "Racing Club de Lens"
+    ],
+    "RC Strasbourg": [
+      "Strasbourg",
+      "Racing Strasbourg",
+      "RC Strasbourg Alsace",
+      "Racing Club de Strasbourg Alsace",
+      "Racing Straßburg"
+    ],
+    "RCD Espanyol": [
+      "Espanyol",
+      "Esp. Barcelona",
+      "Espan. Barcelona",
+      "Espanyol Barc.",
+      "Espanyol Barcelona",
+      "Real CD Espanyol",
+      "Real Club Deportivo Espanyol",
+      "Español",
+      "Real Club Deportivo Español",
+      "RCD Espanyol de Barcelona",
+      "Reial Club Deportiu Espanyol de Barcelona"
+    ],
+    "RCD La Coruña": [
+      "La Coruña",
+      "RC Deportivo La Coruña",
+      "RC Deportivo de La Coruña",
+      "Real Club Deportivo La Coruña",
+      "Deportivo",
+      "Deportivo La Coruña",
+      "Deportivo de La Coruña",
+      "Deportivo da Coruña",
+      "Dep. La Coruña"
+    ],
+    "RCD Mallorca": [
+      "Mallorca",
+      "Real CD Mallorca",
+      "Real Club Deportivo Mallorca",
+      "Real Mallorca"
+    ],
+    "RKC Waalwijk": [
+      "RKC",
+      "Waalwijk",
+      "Rooms Katholieke Combinatie Waalwijk"
+    ],
+    "RSV Meinerzhagen": [
+      "RSV Meinerzh.",
+      "Rasensportverein Meinerzhagen 1921"
+    ],
+    "Racing Besançon": [
+      "Besançon",
+      "Besançon RC"
+    ],
+    "Racing Club": [
+      "Racing Club Asociación Civil de Avellaneda"
+    ],
+    "Racing Club de France": [
+      "Racing Club de France Football",
+      "Racing Paris",
+      "RCF Paris"
+    ],
+    "Racing Ferrol": [
+      "Ferrol",
+      "Racing de Ferrol"
+    ],
+    "Rapid JC Heerlen (1954-1962)": [
+      "Rapid JC",
+      "Rapid Juliana Combinatie",
+      "Rapid"
+    ],
+    "Ravenna FC": [
+      "Ravenna FC 1913"
+    ],
+    "Rayo Vallecano": [
+      "Rayo",
+      "Vallecano",
+      "Rayo Vallecano de Madrid"
+    ],
+    "Reading FC": [
+      "Reading Football Club"
+    ],
+    "Real Betis": [
+      "Betis",
+      "Betis Sevilla",
+      "Real Betis Sevilla",
+      "Real Betis Balompié"
+    ],
+    "Real Jaén CF": [
+      "Jaén",
+      "Real Jaén Club de Fútbol"
+    ],
+    "Real Madrid": [
+      "Real M.",
+      "R. Madrid",
+      "Real Madrid Club de Fútbol"
+    ],
+    "Real Madrid Castilla": [
+      "Real Madrid B"
+    ],
+    "Real Murcia CF": [
+      "Murcia",
+      "Real Murcia Club de Fútbol"
+    ],
+    "Real Oviedo": [
+      "Oviedo"
+    ],
+    "Real Racing Santander": [
+      "Santander",
+      "Racing Santander",
+      "Real Racing Club de Santander",
+      "Real Racing Club"
+    ],
+    "Real Sociedad": [
+      "Sociedad",
+      "R. Sociedad",
+      "R. S. San Sebastián",
+      "S. Sebastián",
+      "Real Sociedad San Sebastián",
+      "Real Sociedad de Fútbol"
+    ],
+    "Real Sociedad B": [
+      "Sanse"
+    ],
+    "Real Valladolid CF": [
+      "Valladolid",
+      "R. Valladolid C.F.",
+      "Real Valladolid Club de Fútbol"
+    ],
+    "Real Zaragoza": [
+      "Zaragoza",
+      "Real Saragossa"
+    ],
+    "Real de Banjul F.C.": [
+      "Real Banjul",
+      "Real de Banjul",
+      "Real de Banjul Football Club"
+    ],
+    "Recreativo Huelva": [
+      "Recreativo",
+      "RC Recreativo de Huelva",
+      "Real Club Recreativo de Huelva"
+    ],
+    "Red Star FC": [
+      "Red Star 93",
+      "Red Star Football Club"
+    ],
+    "Reggina 1914": [
+      "Reggina Calcio"
+    ],
+    "Rewa F.C.": [
+      "Rewa"
+    ],
+    "Rimini FC SSD": [
+      "Rimini",
+      "Rimini FC 1912",
+      "Rimini FC 1912 SSD"
+    ],
+    "Rio Ave FC": [
+      "Rio Ave Futebol Clube"
+    ],
+    "Rochdale AFC": [
+      "Rochdale Association Football Club"
+    ],
+    "Roda JC Kerkrade": [
+      "Roda",
+      "Roda JC",
+      "Roda Kerkrade",
+      "Sportvereniging Roda Juliana Combinatie Kerkrade"
+    ],
+    "Rodez AF": [
+      "Rodez",
+      "Rodez Aveyron",
+      "Rodez Aveyron Football"
+    ],
+    "Rosenborg BK": [
+      "Rosenborg Ballklub"
+    ],
+    "Rot Weiss Ahlen": [
+      "Ahlen"
+    ],
+    "Rot-Weiss Essen": [
+      "Essen",
+      "RW Essen"
+    ],
+    "Rot-Weiß Oberhausen": [
+      "Oberhausen"
+    ],
+    "Rotherham County FC (1870-1925)": [
+      "Rotherham County"
+    ],
+    "Rotherham Town FC (1899-1925)": [
+      "Rotherham Town"
+    ],
+    "Rotherham United FC": [
+      "Rotherham",
+      "Rotherham United Football Club"
+    ],
+    "Rushden & Diamonds (1992-2011)": [
+      "Rushden",
+      "Rushden & D",
+      "Rushden & Diamonds FC",
+      "Rushden & Diamonds Football Club"
+    ],
+    "SAS Épinal": [
+      "Épinal",
+      "Stade Athletique Spinalien Épinal"
+    ],
+    "SBV Excelsior Rotterdam": [
+      "Excelsior",
+      "SBV Excelsior",
+      "Excel. Rotterdam",
+      "Excelsior Rotterdam",
+      "Stichting Betaald Voetbal Excelsior",
+      "Stichting Betaald Voetbal Excelsior Rotterdam"
+    ],
+    "SC Bastia": [
+      "Sporting Club de Bastia",
+      "Sporting Club Bastiais"
+    ],
+    "SC Braga": [
+      "Sp Braga",
+      "Sporting Braga",
+      "Sporting Clube de Braga"
+    ],
+    "SC Cambuur": [
+      "Cambuur Leeuwarden",
+      "Sportclub Cambuur",
+      "SCC",
+      "Sportclub Cambuur-Leeuwarden"
+    ],
+    "SC Campomaiorense": [
+      "Campomaior"
+    ],
+    "SC Covilhã": [
+      "Sp. Covilhã",
+      "Sporting Covilhã",
+      "Sporting da Covilhã",
+      "Sporting Clube da Covilhã"
+    ],
+    "SC Farense": [
+      "Sporting Farense",
+      "Sporting Clube Farense"
+    ],
+    "SC Freiburg": [
+      "Sport-Club Freiburg"
+    ],
+    "SC Hauenstein": [
+      "Sport-Club Hauenstein"
+    ],
+    "SC Heerenveen": [
+      "Sportclub Heerenveen"
+    ],
+    "SC Paderborn 07": [
+      "Paderborn",
+      "Sport-Club Paderborn 07"
+    ],
+    "SC Tasmania 1900 Berlin (-1973)": [
+      "Tasmania Berlin",
+      "Tasmania 1900 Berlin",
+      "SV Tasmania Berlin"
+    ],
+    "SC Telstar": [
+      "SC Stormvogels Telstar"
+    ],
+    "SC União Torreense": [
+      "SCU Torreense",
+      "Sport Clube União Torreense",
+      "Sport União Torreense"
+    ],
+    "SC Wiedenbrück": [
+      "SC Wiedenbrück 2000"
+    ],
+    "SD Amorebieta": [
+      "Amorebieta",
+      "Sociedad Deportiva Amorebieta"
+    ],
+    "SD Compostela": [
+      "Compostela"
+    ],
+    "SD Eibar": [
+      "Eibar",
+      "Sociedad Deportiva Eibar"
+    ],
+    "SD Huesca": [
+      "Huesca",
+      "Sociedad Deportiva Huesca"
+    ],
+    "SD Logroñés": [
+      "Sociedad Deportiva Logroñés"
+    ],
+    "SD Ponferradina": [
+      "Ponferradina",
+      "Sociedad Deportiva Ponferradina",
+      "Ponferradina SD"
+    ],
+    "SF Baumberg": [
+      "Sportfreunde Baumberg"
+    ],
+    "SF Lotte": [
+      "Sportfreunde Lotte",
+      "Lotte"
+    ],
+    "SF Siegen": [
+      "Siegen",
+      "Sportfreunde Siegen"
+    ],
+    "SG Großaspach": [
+      "Großaspach",
+      "Sonnenh. Großaspach",
+      "SG Sonnenhof Großaspach",
+      "Sportgemeinschaft Sonnenhof Großaspach"
+    ],
+    "SG Wattenscheid 09": [
+      "Wattenscheid",
+      "Wattenscheid 09"
+    ],
+    "SK Austria Klagenfurt": [
+      "Austria Klagenfurt"
+    ],
+    "SL Benfica": [
+      "Benfica",
+      "Benfica Lis.",
+      "Benfica Lisboa",
+      "Sport Lisboa e Benfica",
+      "Benfica Lissab",
+      "Benfica Lissabon"
+    ],
+    "SO Cholet": [
+      "Stade Olympique Choletais",
+      "Cholet"
+    ],
+    "SPAL Ferrara": [
+      "SPAL",
+      "SPAL 2013",
+      "SPAL 2013 Ferrara",
+      "Società Polisportiva Ars et Labor 2013"
+    ],
+    "SS Arezzo": [
+      "Arezzo",
+      "Società Sportiva Arezzo",
+      "Associazione Calcio Arezzo"
+    ],
+    "SS Fidelis Andria": [
+      "F. Andria",
+      "SS Fidelis Andria 1928"
+    ],
+    "SS Juve Stabia": [
+      "Juve Stabia"
+    ],
+    "SS Lazio": [
+      "Lazio",
+      "Lazio Roma",
+      "Società Sportiva Lazio",
+      "Lazio Rom"
+    ],
+    "SS Robur Siena": [
+      "Siena",
+      "Associazione Calcio Siena"
+    ],
+    "SSC Napoli": [
+      "Napoli",
+      "Società Sportiva Calcio Napoli",
+      "SSC Neapel"
+    ],
+    "SSD Latina Calcio": [
+      "Latina",
+      "SSD Latina Calcio 1932"
+    ],
+    "SSV Jahn Regensburg": [
+      "Regensburg",
+      "Jahn Regensburg",
+      "Jahn R'burg",
+      "Sport-und Schwimmverein Jahn 2000 Regensburg"
+    ],
+    "SSV Jeddeloh": [
+      "Spiel- und Sportverein Jeddeloh"
+    ],
+    "SSV Reutlingen 05": [
+      "Reutlingen",
+      "SSV Reutlingen"
+    ],
+    "SSV Ulm 1846": [
+      "Ulm",
+      "SSV Ulm",
+      "SSV Ulm 1846 Fußball"
+    ],
+    "SV Atlas Delmenhorst": [
+      "SV Atlas",
+      "Atlas Delmenhorst"
+    ],
+    "SV Babelsberg 03": [
+      "Babelsberg"
+    ],
+    "SV Darmstadt 98": [
+      "Darmstadt",
+      "Darmstadt 98",
+      "Sportverein Darmstadt 1898"
+    ],
+    "SV Elversberg": [
+      "Elversberg",
+      "Elversberg 07",
+      "SV 07 Elversberg",
+      "Sportvereinigung 07 Elversberg",
+      "SpVgg 07 Elversberg"
+    ],
+    "SV Heimstetten": [
+      "Heimstetten"
+    ],
+    "SV Linx": [
+      "SV Linx 1949"
+    ],
+    "SV Meppen": [
+      "Meppen"
+    ],
+    "SV Roßbach/Verscheid": [
+      "SV Roßbach"
+    ],
+    "SV SVV": [
+      "SVV Schiedam",
+      "Sportvereniging Schiedamse Voetbal Verenigingen"
+    ],
+    "SV Sandhausen": [
+      "Sandhausen",
+      "SV Sandhausen 1916",
+      "Sportverein 1916 Sandhausen"
+    ],
+    "SV Schalding-Heining": [
+      "Schald.-Hein.",
+      "Schalding-Heining"
+    ],
+    "SV Straelen": [
+      "SV 19 Straelen",
+      "Sportverein 19 Straelen"
+    ],
+    "SV Todesfelde": [
+      "Sportverein Todesfelde"
+    ],
+    "SV Waldhof Mannheim": [
+      "Wald. Mannheim",
+      "Waldh. Mannheim",
+      "Waldhof Mannheim",
+      "SV Waldhof",
+      "SV Waldhof Mannheim 07"
+    ],
+    "SV Wals-Grünau": [
+      "Wals-Grünau"
+    ],
+    "SV Wehen Wiesbaden": [
+      "Wehen",
+      "Wiesbaden",
+      "Weh. Wiesbaden",
+      "Wehen Wiesbaden",
+      "SV Wehen Wiesb.",
+      "Wehen Wiesb.",
+      "Sportverein Wehen Wiesbaden 26"
+    ],
+    "Sacramento Kings": [
+      "SAC",
+      "Kings",
+      "Sacramento"
+    ],
+    "Salernitana": [
+      "US Salernitana 1919",
+      "US Salernitana",
+      "Unione Sportiva Salernitana 1919",
+      "Salernitana Calcio 1919"
+    ],
+    "Salford City FC": [
+      "Salford"
+    ],
+    "Salisbury City FC (1947-2014)": [
+      "Salisbury",
+      "Salisbury City"
+    ],
+    "Sambenedettese": [
+      "SS Sambenedettese Calcio"
+    ],
+    "San Antonio Spurs": [
+      "SAS",
+      "San Antonio"
+    ],
     "San Martin de San Juan": [
       "San Martin T.",
       "San Martin S.J.",
       "CA San Martín (San Juan)"
     ],
-    "Sarpsborg 08 FF": ["Sarpsborg 08 Fotballforening"],
-    "Sheffield United": ["Sheffield Utd"],
-    "Shenavar Sazi Qeshm F.C.": ["Shenavarsazi Qeshm"],
-    "Shenzhen Peng City": ["Shenzhen Xinpengcheng"],
-    "Sporting CP": ["Sporting Lisbon", "Sporting"],
-    "St Patrick's Athletic F.C.": ["St Patrick's Athletic"],
-    "Strabane Athletic F.C.": ["Strabane Athletic"],
-    "Suva F.C.": ["Suva"],
-    "São Paulo FC": ["São Paulo Futebol Clube"],
-    "Tacuarembó F.C.": ["Tacuarembó"],
-    "Talleres de Córdoba": ["Club Atlético Talleres"],
-    "Tolka Rovers F.C.": ["Tolka Rovers"],
-    "Tottenham Hotspur": ["Tottenham", "Spurs"],
-    "Turkiye": ["Turkey"],
-    "Unión de Santa Fe": ["Club Atlético Unión"],
-    "Viking FK": ["Viking Fotballklubb"],
-    "West Ham United": ["West Ham"],
-    "Wolverhampton Wanderers": ["Wolves", "Wolverhampton"],
-    "Wolverhampton Wanderers Women": ["Wolves Women"]
+    "Sarpsborg 08 FF": [
+      "Sarpsborg 08 Fotballforening"
+    ],
+    "Scarborough Athletic FC": [
+      "Scarborough"
+    ],
+    "Scarborough FC (1879-2007)": [
+      "Scarborough Football Club"
+    ],
+    "Scunthorpe United FC": [
+      "Scunthorpe",
+      "Scunthorpe & Lindsey United FC"
+    ],
+    "Seattle Storm": [
+      "Seattle Storm W"
+    ],
+    "Serrano FC": [
+      "Serrano RJ"
+    ],
+    "Serrano Football Club": [
+      "Serrano FC (Petropolis)"
+    ],
+    "Sevilla FC": [
+      "Sevilla Fútbol Club"
+    ],
+    "Shanghai Port F.C.": [
+      "SIPG F.C.",
+      "SIPG FC",
+      "Shanghai Donghai",
+      "Shanghai Dongya F.C.",
+      "Shanghai Dongya FC",
+      "Shanghai Dongya Football Club",
+      "Shanghai Haigang F.C.",
+      "Shanghai International Port Group Football Club",
+      "Shanghai Port",
+      "Shanghai Port Football Club",
+      "Shanghai SIPG",
+      "Shanghai SIPG F.C.",
+      "Shanghai Shanggang Jituan Zuqiu Julebu"
+    ],
+    "Sheffield United": [
+      "Sheffield Utd",
+      "Sheff. United",
+      "Sheffield U.",
+      "Sheffield United Football Club"
+    ],
+    "Sheffield Wednesday FC": [
+      "Sheffield Wed",
+      "Sheffield Weds",
+      "Sheffield Wednes.",
+      "Sheff. Wednesday",
+      "The Wednesday FC",
+      "Sheffield Wednesday Football Club"
+    ],
+    "Shenavar Sazi Qeshm F.C.": [
+      "Shenavarsazi Qeshm"
+    ],
+    "Shenzhen Peng City": [
+      "Shenzhen Xinpengcheng"
+    ],
+    "Shrewsbury Town FC": [
+      "Shrewsbury",
+      "Shrewsbury Town Football Club"
+    ],
+    "Solihull Moors FC": [
+      "Solihull"
+    ],
+    "Southampton FC": [
+      "Southampton Football Club"
+    ],
+    "Southend United FC": [
+      "Southend"
+    ],
+    "SpVgg Ansbach": [
+      "Ansbach",
+      "SpVgg Ansbach 09",
+      "Spielvereinigung Ansbach 09"
+    ],
+    "SpVgg Bayreuth": [
+      "Bayreuth"
+    ],
+    "SpVgg Greuther Fürth": [
+      "Gr. Fürth",
+      "Greu. Fürth",
+      "Greuther Fürth",
+      "SpVgg Gr. Fürth",
+      "SpVgg Greuther Fürth 1903",
+      "Spielvereinigung Greuther Fürth"
+    ],
+    "SpVgg Hankofen-Hailing": [
+      "Spielvereinigung Hankofen-Hailing 1968",
+      "SpVgg Hankofen-H.",
+      "Hankofen"
+    ],
+    "SpVgg Unterhaching": [
+      "U'haching",
+      "Unterhaching"
+    ],
+    "Sparta Rotterdam": [
+      "Sparta",
+      "Sparta R'dam",
+      "Sp. Rotterdam"
+    ],
+    "Sporting CP": [
+      "Sporting Lisbon",
+      "Sporting",
+      "Sporting Lisboa",
+      "Sporting Clube de Portugal",
+      "Sp Lisbon",
+      "Sporting CP Lisbon",
+      "Sporting Liss.",
+      "Sporting Lissabon"
+    ],
+    "Sporting Gijón": [
+      "Sp Gijón",
+      "Real Sporting",
+      "Real Sporting de Gijón",
+      "Sporting de Gijón"
+    ],
+    "Sporting Toulon Var": [
+      "Toulon"
+    ],
+    "Sporting de Espinho": [
+      "Espinho",
+      "Sporting Clube de Espinho"
+    ],
+    "St Patrick's Athletic F.C.": [
+      "St Patrick's Athletic"
+    ],
+    "St. Albans City FC": [
+      "St. Albans"
+    ],
+    "Stade Brestois 29": [
+      "Brest",
+      "Stade Brest",
+      "Stade Brestois"
+    ],
+    "Stade Briochin": [
+      "St Brieuc"
+    ],
+    "Stade Lavallois": [
+      "Laval",
+      "Stade Lavallois Mayenne Football Club",
+      "Stade Lavallois-Mayenne FC",
+      "Stade Laval"
+    ],
+    "Stade Malherbe Caen": [
+      "Caen",
+      "SM Caen",
+      "Stade Malherbe de Caen",
+      "Stade Malherbe Caen-Calvados Basse-Normandie"
+    ],
+    "Stade Rennais FC": [
+      "Rennes",
+      "Stade Rennes",
+      "Stade Rennais Football Club",
+      "Stade Rennais FC 1901"
+    ],
+    "Stade de Reims": [
+      "Reims",
+      "Stade Reims",
+      "Stade de Reims Champagne"
+    ],
+    "Stevenage FC": [
+      "Stevenage Borough",
+      "Stevenage Football Club"
+    ],
+    "Stockport County FC": [
+      "Stockport"
+    ],
+    "Stoke City FC": [
+      "Stoke",
+      "Stoke City Football Club"
+    ],
+    "Stourbridge FC": [
+      "Stourbridge Football Club"
+    ],
+    "Strabane Athletic F.C.": [
+      "Strabane Athletic"
+    ],
+    "Stuttgarter Kickers": [
+      "Stutt. Kick.",
+      "Stuttgarter K",
+      "S'gart Kickers"
+    ],
+    "Sunderland AFC": [
+      "Sunderland Association Football Club"
+    ],
+    "Sutton United FC": [
+      "Sutton"
+    ],
+    "Suva F.C.": [
+      "Suva"
+    ],
+    "Swindon Town FC": [
+      "Swindon",
+      "Swindon Town Football Club"
+    ],
+    "São Paulo FC": [
+      "São Paulo Futebol Clube"
+    ],
+    "TSG 1899 Hoffenheim": [
+      "Hoffenheim",
+      "1899 Hoffenh.",
+      "1899 Hoffenheim",
+      "TSG Hoffenheim",
+      "Turn- und Sportgemeinschaft 1899 Hoffenheim"
+    ],
+    "TSG Balingen": [
+      "Balingen",
+      "TSG Balingen Fußball"
+    ],
+    "TSV 1860 München": [
+      "1860 München",
+      "TSV München 1860",
+      "Munich 1860",
+      "1860 Munich",
+      "TSV 1860 Munich"
+    ],
+    "TSV 1860 Rosenheim": [
+      "1860 Rosenheim"
+    ],
+    "TSV 1896 Rain": [
+      "TSV Rain",
+      "TSV Rain/Lech",
+      "TSV Rain am Lech"
+    ],
+    "TSV Aubstadt": [
+      "Aubstadt"
+    ],
+    "TSV Buchbach": [
+      "Buchbach"
+    ],
+    "TSV Schwaben Augsburg": [
+      "Schw. Augsburg",
+      "Schwaben Augsburg"
+    ],
+    "TSV Steinbach Haiger": [
+      "TSV Steinbach",
+      "TSV Steinb. Haiger",
+      "Turn- und Sportverein Steinbach 1921"
+    ],
+    "Tacuarembó F.C.": [
+      "Tacuarembó"
+    ],
+    "Talleres de Córdoba": [
+      "Club Atlético Talleres"
+    ],
+    "Tampere United": [
+      "Tampere Utd",
+      "TamU",
+      "TampU",
+      "Tampere United Oy",
+      "Tamperės Rànger",
+      "United Tampere"
+    ],
+    "Telford United FC (1872-2004)": [
+      "Telford United"
+    ],
+    "Tennis Borussia Berlin": [
+      "TB Berlin",
+      "TeBe Berlin"
+    ],
+    "Thames AFC (1928-1932)": [
+      "Thames"
+    ],
+    "Titanes del Distrito Nacional": [
+      "Titanes Del Licey"
+    ],
+    "Tolka Rovers F.C.": [
+      "Tolka Rovers"
+    ],
+    "Tolosa CF": [
+      "Tolosa Club de Fútbol"
+    ],
+    "Torino FC": [
+      "Torino Football Club",
+      "FC Turin"
+    ],
+    "Toronto Raptors": [
+      "TOR",
+      "Raptors",
+      "Toronto"
+    ],
+    "Torquay United FC": [
+      "Torquay"
+    ],
+    "Tottenham Hotspur": [
+      "Tottenham",
+      "Spurs",
+      "Tottenham H.",
+      "Tottenham Hotspur Football Club"
+    ],
+    "Toulouse FC": [
+      "Toulouse Football Club"
+    ],
+    "Tours FC": [
+      "Tours Football Club"
+    ],
+    "Tranmere Rovers FC": [
+      "Tranmere"
+    ],
+    "TuS Dassendorf": [
+      "Turn- und Sportgemeinschaft Dassendorf"
+    ],
+    "TuS Koblenz": [
+      "Koblenz",
+      "Turn- und Spielvereinigung Koblenz 1911"
+    ],
+    "Turkiye": [
+      "Turkey"
+    ],
+    "Türkgücü München": [
+      "Türkgücü"
+    ],
+    "UC Sampdoria": [
+      "Sampdoria",
+      "Samp. Genoa",
+      "Sampdoria Genoa",
+      "Unione Calcio Sampdoria",
+      "Samp. Genua",
+      "Sampdoria Genua"
+    ],
+    "UCAM Murcia": [
+      "Universidad Católica de Murcia Club de Fútbol"
+    ],
+    "UD Almería": [
+      "Almería",
+      "Unión Deportiva Almería"
+    ],
+    "UD Ibiza": [
+      "Ibiza",
+      "Unión Deportiva Ibiza"
+    ],
+    "UD Las Palmas": [
+      "Las Palmas",
+      "Unión Deportiva Las Palmas",
+      "Las Palmas UD"
+    ],
+    "UD Logroñés": [
+      "Unión Deportiva Logroñés"
+    ],
+    "UD Melilla": [
+      "Union Deportiva Melilla",
+      "Melilla UD"
+    ],
+    "UD Oliveirense": [
+      "Oliveirense",
+      "União Desportiva Oliveirense"
+    ],
+    "UD Salamanca": [
+      "Salamanca"
+    ],
+    "UD Socuéllamos": [
+      "Unión Deportiva Socuéllamos"
+    ],
+    "UD Vecindario": [
+      "Vecindario"
+    ],
+    "UD Vilafranquense (-2023)": [
+      "Vilafranquense",
+      "União Desportiva Vilafranquense"
+    ],
+    "UE Llagostera": [
+      "Llagostera"
+    ],
+    "UE Lleida (1939-2011)": [
+      "Lleida",
+      "Lerida",
+      "Unió Esportiva Lleida"
+    ],
+    "UE Sant Andreu": [
+      "Unió Esportiva Sant Andreu"
+    ],
+    "UM Escobedo": [
+      "Unión Montañesa Escobedo"
+    ],
+    "US Avranches": [
+      "L'Union Sportive Avranches Mont Saint Michel",
+      "Avranches"
+    ],
+    "US Boulogne": [
+      "Boulogne"
+    ],
+    "US Catanzaro": [
+      "Catanzaro",
+      "US Catanzaro 1929",
+      "Unione Sportiva Catanzaro 1929"
+    ],
+    "US Concarneau": [
+      "Union Sportive Concarnoise",
+      "Concarneau",
+      "US Union Concarnoise"
+    ],
+    "US Cremonese": [
+      "Cremonese",
+      "Unione Sportiva Cremonese"
+    ],
+    "US Créteil": [
+      "Créteil",
+      "US Créteil-Lusitanos",
+      "Union Sportive Créteil-Lusitanos"
+    ],
+    "US Lecce": [
+      "Lecce",
+      "Unione Sportiva Lecce"
+    ],
+    "US Orléans": [
+      "Orléans",
+      "Union sportive Orléans Loiret football",
+      "US Orléans 45"
+    ],
+    "US Pistoiese": [
+      "Pistoiese",
+      "US Pistoiese 1921"
+    ],
+    "US Quevilly-Rouen Métropole": [
+      "Quevilly Rouen",
+      "US Quevilly-Rouen",
+      "Union sportive Quevilly-Rouen Métropole"
+    ],
+    "US Sassuolo Calcio": [
+      "Sassuolo",
+      "Unione Sportiva Sassuolo Calcio"
+    ],
+    "US Triestina Calcio": [
+      "Triestina",
+      "US Triestina Calcio 1918"
+    ],
+    "USC Paloma Hamburg": [
+      "Uhlenhorster SC Paloma",
+      "Uhlenhorster Sport Club Paloma Hamburg"
+    ],
+    "USL Dunkerque": [
+      "Dunkerque",
+      "USLD",
+      "Union sportive du littoral de Dunkerque"
+    ],
+    "USV Hercules": [
+      "Utrechtse Sportvereniging Hercules",
+      "Hercules Utrecht"
+    ],
+    "Udinese Calcio": [
+      "Udinese Calc."
+    ],
+    "Union Fürstenwalde": [
+      "U. Fürstenwalde",
+      "FSV Union Fürstenwalde"
+    ],
+    "Union Mutilvera": [
+      "Unión Deportiva Mutilvera"
+    ],
+    "Unione Calcio Albinoleffe": [
+      "Albinoleffe",
+      "UC Albinoleffe"
+    ],
+    "Universidad Las Palmas": [
+      "U.Las Palmas"
+    ],
+    "União da Madeira": [
+      "Madeira",
+      "União Madeira"
+    ],
+    "União de Leiria": [
+      "Leiria",
+      "UD Leiria",
+      "União Desportiva de Leiria",
+      "União Leiria"
+    ],
+    "Unión de Santa Fe": [
+      "Club Atlético Unión"
+    ],
+    "Urbs Reggina": [
+      "Urbs Reggina 1914"
+    ],
+    "Utah Jazz": [
+      "UTA",
+      "Jazz",
+      "Utah"
+    ],
+    "VSG Altglienicke": [
+      "Volkssport Gemeinschaft Altglienicke"
+    ],
+    "VV IJsselmeervogels": [
+      "IJsselmeervogels",
+      "Voetbalvereniging IJsselmeervogels",
+      "VV IJsselmeervogel"
+    ],
+    "VVV Venlo": [
+      "VVV",
+      "Venlo",
+      "Venlose Voetbal Vereniging Venlo"
+    ],
+    "Valencia CF": [
+      "Valencia Club de Fútbol"
+    ],
+    "Valenciennes FC": [
+      "Valenciennes Football Club"
+    ],
+    "Valmiera FC": [
+      "BFK Valmiera",
+      "Gauja Valmiera",
+      "Valmiera Futbola Klubs",
+      "Valmiera Glass / VIA",
+      "Valmiera Glass FK/BSS"
+    ],
+    "Vannes OC": [
+      "Vannes"
+    ],
+    "Varese Calcio": [
+      "AS Varese 1910",
+      "Associazione Sportiva Varese 1910"
+    ],
+    "Varzim SC": [
+      "Varzim Sport Club"
+    ],
+    "Vasalunds IF": [
+      "Vasalund"
+    ],
+    "Venezia FC": [
+      "Venezia Football Club",
+      "FC Venedig",
+      "SSC Venezia",
+      "Società Sportiva Calcio Venezia",
+      "FBC Unione Venezia",
+      "Foot Ball Club Unione Venezia"
+    ],
+    "Vermont Green FC": [
+      "VGFC",
+      "Vermont Green Football Club"
+    ],
+    "VfB Borussia Neunkirchen": [
+      "Borussia Neunkirchen"
+    ],
+    "VfB Eichstätt": [
+      "Eichstätt"
+    ],
+    "VfB Germania Halberstadt": [
+      "Germania Halberstadt",
+      "Verein für Breitensport Germania Halberstadt"
+    ],
+    "VfB Leipzig (-2004)": [
+      "Leipzig"
+    ],
+    "VfB Lübeck": [
+      "Lübeck"
+    ],
+    "VfB Oldenburg": [
+      "Oldenburg"
+    ],
+    "VfB Stuttgart": [
+      "Stuttgart",
+      "Verein für Bewegungsspiele Stuttgart 1893"
+    ],
+    "VfL Bochum": [
+      "Bochum",
+      "VfL Bochum 1848",
+      "Verein für Leibesübungen Bochum 1848"
+    ],
+    "VfL Osnabrück": [
+      "Osnabrück",
+      "Verein für Leibesübungen von 1899 Osnabrück"
+    ],
+    "VfL Wolfsburg": [
+      "Wolfsburg",
+      "Verein für Leibesübungen Wolfsburg"
+    ],
+    "VfR Aalen": [
+      "Aalen"
+    ],
+    "VfR Mannheim": [
+      "Mannheim"
+    ],
+    "Vibonese Calcio": [
+      "US Vibonese Calcio",
+      "Unione Sportiva Vibonese Calcio"
+    ],
+    "Viking FK": [
+      "Viking Fotballklubb"
+    ],
+    "Viktoria Aschaffenburg": [
+      "Aschaffenburg"
+    ],
+    "Villarreal CF": [
+      "Villarreal Club de Fútbol",
+      "Villareal"
+    ],
+    "Virtus Lanciano": [
+      "ASD 1920 Lanciano Calcio"
+    ],
+    "Vitesse Arnhem": [
+      "Vitesse",
+      "SBV Vitesse",
+      "Stichting Betaald Voetbal Vitesse",
+      "Vitesse Arnheim"
+    ],
+    "Vitória de Guimarães": [
+      "Vitória",
+      "Guimarães",
+      "Vit. Guimarães",
+      "Vitória Guimarães",
+      "Vitória Sport Clube (de Guimarães)"
+    ],
+    "Vitória de Setúbal": [
+      "Setúbal",
+      "Vitória Setúbal"
+    ],
+    "Wacker Burghausen": [
+      "Burghausen"
+    ],
+    "Wacker Nordhausen": [
+      "FSV Wacker 90 Nordhausen"
+    ],
+    "Walsall FC": [
+      "Walsall Town Swifts FC"
+    ],
+    "Washington Mystics": [
+      "Washington Mystics W"
+    ],
+    "Washington Wizards": [
+      "WAS",
+      "Wizards",
+      "Washington"
+    ],
+    "Wasquehal Foot": [
+      "Wasquehal"
+    ],
+    "Watford FC": [
+      "Watford Football Club"
+    ],
+    "Wealdstone FC": [
+      "Wealdstone Football Club"
+    ],
+    "Welwalo Adigrat University FC": [
+      "Welwalo Adigrat"
+    ],
+    "Werder Bremen": [
+      "Bremen",
+      "SV Werder Bremen",
+      "Sport-Verein Werder von 1899 Bremen"
+    ],
+    "West Bromwich Albion FC": [
+      "West Brom",
+      "West Bromwich",
+      "Albion",
+      "West Bromwich Albion Football Club"
+    ],
+    "West Ham United": [
+      "West Ham",
+      "West Ham United Football Club"
+    ],
+    "Wigan Athletic FC": [
+      "Wigan",
+      "Wigan Athletic Football Club"
+    ],
+    "Wigan Borough FC (1920-1931)": [
+      "Wigan Borough"
+    ],
+    "Wolverhampton Wanderers": [
+      "Wolves",
+      "Wolverhampton",
+      "Wolverhampton Wand.",
+      "Wolverhampton Wanderers Football Club"
+    ],
+    "Wolverhampton Wanderers Women": [
+      "Wolves Women"
+    ],
+    "Wormatia Worms": [
+      "VfR Wormatia Worms",
+      "VfR Wormatia 08 Worms"
+    ],
+    "Wuppertaler SV": [
+      "Wuppertaler",
+      "Wuppertal"
+    ],
+    "Wycombe Wanderers FC": [
+      "Wycombe",
+      "Wycombe Wanderers Football Club"
+    ],
+    "Wydad Athletic Club": [
+      "WA Casablanca",
+      "WAC Casablanca",
+      "WAC de Casablanca",
+      "Widad Casablanca",
+      "Wydad AC",
+      "Wydad AC Casablanca",
+      "Wydad Athletic Casablanca",
+      "Wydad de Casablanca"
+    ],
+    "Würzburger Kickers": [
+      "Würzburger K.",
+      "Kick. Würzburg",
+      "Kickers Würzburg",
+      "Fußball-Club Würzburger Kickers",
+      "Würzburg"
+    ],
+    "Xerez CD": [
+      "Xerez",
+      "Deportivo Xerez"
+    ],
+    "Yaracuyanos FC": [
+      "Yaracuyanos Futbol Club"
+    ],
+    "Yeovil Town FC": [
+      "Yeovil"
+    ],
+    "York City FC": [
+      "York"
+    ],
+    "Zamora CF": [
+      "Zamora Club de Fútbol"
+    ],
+    "Écija Balompié": [
+      "Écija"
+    ],
+    "Évian TG FC": [
+      "Évian",
+      "Évian Thonon Gaillard",
+      "Évian Thonon Gaillard Football Club"
+    ]
   }
 }

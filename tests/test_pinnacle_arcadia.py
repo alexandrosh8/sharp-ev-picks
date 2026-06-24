@@ -551,7 +551,7 @@ async def test_client_exhausts_transient_retries_then_raises_arcadia_error(
     client = _make_client(handler, guest_key="SECRET-LOOKING-KEY")
     with pytest.raises(PinnacleArcadiaError) as excinfo:
         await client.fetch_matchups(33)
-    assert calls["n"] == 3  # stop_after_attempt(3): the status WAS retried
+    assert calls["n"] == 6  # stop_after_attempt(6): the status WAS retried
     msg = str(excinfo.value)
     assert str(transient_status) in msg  # status is reported (honest)
     assert "SECRET-LOOKING-KEY" not in msg
@@ -559,10 +559,12 @@ async def test_client_exhausts_transient_retries_then_raises_arcadia_error(
 
 
 @pytest.mark.usefixtures("_no_backoff_sleep")
-@pytest.mark.parametrize("permanent_status", [400, 401, 403, 404, 422])
+@pytest.mark.parametrize("permanent_status", [400, 401, 404, 422])
 async def test_client_does_not_retry_permanent_4xx(permanent_status: int) -> None:
     # A permanent 4xx is a real error, not a hiccup: it must NOT be retried
-    # (retrying burns budget for nothing) and must raise immediately.
+    # (retrying burns budget for nothing) and must raise immediately. 403 is the
+    # exception — a blocked proxy egress, where a DIFFERENT proxy works — so it
+    # rotates/retries (see test_client_retries_403_blocked_proxy_then_succeeds).
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -574,6 +576,47 @@ async def test_client_does_not_retry_permanent_4xx(permanent_status: int) -> Non
         await client.fetch_matchups(33)
     assert calls["n"] == 1  # exactly one call — no retry on a permanent 4xx
     msg = str(excinfo.value)
+    assert "SECRET-LOOKING-KEY" not in msg
+    assert "arcadia.pinnacle" not in msg
+
+
+@pytest.mark.usefixtures("_no_backoff_sleep")
+async def test_client_retries_403_blocked_proxy_then_succeeds() -> None:
+    # arcadia 403s a blocked/datacenter egress IP but serves a healthy proxy
+    # normally; _RoundRobinTransport advances per request, so a 403 must be
+    # RETRIED (rotating to the next proxy) — not turned into an immediate "no
+    # data this cycle". Two 403s, then a 200 -> success.
+    payload = [_tennis_matchup()]
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(403)
+        return httpx.Response(200, content=json.dumps(payload))
+
+    client = _make_client(handler)
+    rows = await client.fetch_matchups(SPORT_IDS["tennis"])
+    assert rows == payload
+    assert calls["n"] == 3  # two 403s rotated past; the third proxy won
+
+
+@pytest.mark.usefixtures("_no_backoff_sleep")
+async def test_client_exhausts_403_then_raises_arcadia_error() -> None:
+    # Every proxy blocked (persistent 403): after exhausting attempts it surfaces
+    # as the normal PinnacleArcadiaError — status only, never the URL or key.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(403)
+
+    client = _make_client(handler, guest_key="SECRET-LOOKING-KEY")
+    with pytest.raises(PinnacleArcadiaError) as excinfo:
+        await client.fetch_matchups(33)
+    assert calls["n"] == 6  # 403 WAS retried (rotated 6x), not an immediate failure
+    msg = str(excinfo.value)
+    assert "403" in msg
     assert "SECRET-LOOKING-KEY" not in msg
     assert "arcadia.pinnacle" not in msg
 

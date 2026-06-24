@@ -57,6 +57,17 @@ class ValuePolicy:
     # 2026-06-20: ~37% sharp coverage is structural; scope, don't fuzzy-match).
     # Stored as given; normalized at compare time (see is_major_league).
     major_leagues: tuple[str, ...] = ()
+    # When True, a PREMIUM candidate whose fair-value anchor is the soft
+    # CONSENSUS median (no genuine sharp book — Pinnacle or Betfair — priced
+    # the full market) is DEMOTED to the volume (shadow) tier: still persisted +
+    # CLV-tracked, never alerted, never reserving exposure. False = gate
+    # DISABLED (every anchor premium-eligible — current behavior, the
+    # non-breaking default). This is the season-proof, name-proof sibling of
+    # major_leagues: it stops obscure-league bleed (e.g. "GFA League") by DATA
+    # (no sharp anchor backed the price) rather than by league name, so it needs
+    # no per-season league curation. The anchor test is pure: see
+    # app/edge/value.is_sharp_anchored (consensus/blank => not sharp).
+    require_sharp_anchor: bool = False
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:

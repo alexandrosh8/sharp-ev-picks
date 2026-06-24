@@ -411,6 +411,65 @@ async def test_unknown_kickoff_upgrades_once_source_reports_it(session) -> None:
     assert row2.starts_at == kickoff
 
 
+async def test_get_or_create_event_real_time_not_clobbered_by_midnight(session) -> None:  # type: ignore[no-untyped-def]
+    # A fixture first priced with a REAL kickoff, then re-detected on a cycle that
+    # only knew the DATE (00:00:00 UTC), must KEEP the real time. The DB upsert is
+    # the second overwrite layer (after EventDirectory) and must apply the same
+    # precedence rule, else the residual-tail midnight clobbers a real time.
+    real = datetime(2026, 6, 25, 2, 0, tzinfo=UTC)
+    midnight = datetime(2026, 6, 25, 0, 0, tzinfo=UTC)
+    teams_real = EventTeams(home="P R Real", away="P R Date", starts_at=real)
+    teams_midnight = EventTeams(home="P R Real", away="P R Date", starts_at=midnight)
+    await persist_pick(session, make_pick("evt-prec-rt"), teams_real, "value-sharp-vs-soft", "pr1")
+    await persist_pick(
+        session, make_pick("evt-prec-rt"), teams_midnight, "value-sharp-vs-soft", "pr1"
+    )
+    row = await session.scalar(select(Event).where(Event.external_ref == "evt-prec-rt"))
+    assert row is not None
+    assert row.starts_at == real  # real time survived the later midnight upsert
+
+
+async def test_get_or_create_event_real_time_upgrades_stored_midnight(session) -> None:  # type: ignore[no-untyped-def]
+    # The reverse: first seen date-only (midnight), then a REAL time arrives — the
+    # real time must upgrade the stored midnight.
+    midnight = datetime(2026, 6, 26, 0, 0, tzinfo=UTC)
+    real = datetime(2026, 6, 26, 23, 0, tzinfo=UTC)
+    teams_midnight = EventTeams(home="Up A", away="Up B", starts_at=midnight)
+    teams_real = EventTeams(home="Up A", away="Up B", starts_at=real)
+    await persist_pick(
+        session, make_pick("evt-prec-up"), teams_midnight, "value-sharp-vs-soft", "pu1"
+    )
+    await persist_pick(session, make_pick("evt-prec-up"), teams_real, "value-sharp-vs-soft", "pu1")
+    row = await session.scalar(select(Event).where(Event.external_ref == "evt-prec-up"))
+    assert row is not None
+    assert row.starts_at == real  # midnight upgraded to the real time
+
+
+async def test_refresh_event_kickoffs_midnight_does_not_clobber_real(session) -> None:  # type: ignore[no-untyped-def]
+    # The per-cycle refresh must honour precedence too: a date-only midnight in
+    # the refresh map must NOT downgrade an event that already has a real time,
+    # but a real time DOES upgrade a stored midnight.
+    real = datetime(2026, 6, 27, 18, 30, tzinfo=UTC)
+    midnight = datetime(2026, 6, 27, 0, 0, tzinfo=UTC)
+    teams_real = EventTeams(home="Ref A", away="Ref B", starts_at=real)
+    await persist_pick(session, make_pick("evt-prec-ref"), teams_real, "value-sharp-vs-soft", "pf1")
+    # midnight refresh => NO change (real time protected)
+    assert await refresh_event_kickoffs(session, {"evt-prec-ref": midnight}) == 0
+    row = await session.scalar(select(Event).where(Event.external_ref == "evt-prec-ref"))
+    assert row is not None
+    assert row.starts_at == real
+
+    # a stored midnight event, refreshed with a real time => upgraded
+    teams_midnight = EventTeams(home="Ref C", away="Ref D", starts_at=midnight)
+    await persist_pick(
+        session, make_pick("evt-prec-ref2"), teams_midnight, "value-sharp-vs-soft", "pf2"
+    )
+    assert await refresh_event_kickoffs(session, {"evt-prec-ref2": real}) == 1
+    row2 = await session.scalar(select(Event).where(Event.external_ref == "evt-prec-ref2"))
+    assert row2 is not None
+    assert row2.starts_at == real
+
+
 async def test_latest_picks_payload_carries_event_fields(session) -> None:  # type: ignore[no-untyped-def]
     # The dashboard needs match label / league / kickoff — not bare event ids.
     kickoff = datetime(2026, 6, 11, 19, 0, tzinfo=UTC)
@@ -503,6 +562,47 @@ async def test_available_games_fallback_reads_current_warehouse_events(session) 
     assert row["first_captured_at"] == captured.isoformat()
     assert row["last_captured_at"] == captured.isoformat()
     assert row["updated_at"] == (captured + timedelta(seconds=20)).isoformat()
+
+
+async def test_available_games_excludes_finished_fixtures(session) -> None:  # type: ignore[no-untyped-def]
+    # GET /games must NOT show an already-FINISHED game as bettable: a fixture
+    # kicked off >3h30m ago is over, even if it still carries recent odds rows
+    # (the old query had no upper bound, so those leaked in). Live + upcoming stay.
+    now = datetime.now(tz=UTC)
+    captured = now - timedelta(minutes=10)  # recent odds (passes the OR clause)
+
+    async def _seed(ref: str, kickoff: datetime) -> None:
+        teams = EventTeams(
+            home=f"{ref} H", away=f"{ref} A", league="test-league-fin", starts_at=kickoff
+        )
+        await persist_pick(
+            session, make_pick(ref, league="test-league-fin"), teams, "value-sharp-vs-soft", "t-fin"
+        )
+        ev = await session.scalar(select(Event).where(Event.external_ref == ref))
+        assert ev is not None
+        session.add(
+            OddsSnapshot(
+                event_id=ev.id,
+                bookmaker="Pinnacle",
+                market="h2h",
+                selection="X",
+                decimal_odds=Decimal("2.0000"),
+                liquidity=None,
+                captured_at=captured,
+                ingested_at=captured,
+            )
+        )
+        await session.flush()
+
+    await _seed("evt-fin-over", now - timedelta(hours=5))  # finished -> excluded
+    await _seed("evt-fin-live", now - timedelta(hours=1))  # in-play  -> kept
+    await _seed("evt-fin-soon", now + timedelta(hours=2))  # upcoming -> kept
+
+    rows = await latest_available_games_with_events(session, limit=5000, now=now)
+    refs = {r["event_id"] for r in rows}
+    assert "evt-fin-over" not in refs  # finished game hidden
+    assert "evt-fin-live" in refs  # live fixture still visible
+    assert "evt-fin-soon" in refs  # upcoming visible
 
 
 async def test_latest_picks_tier_scope_protects_premium_window(session) -> None:  # type: ignore[no-untyped-def]

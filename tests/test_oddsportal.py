@@ -19,6 +19,59 @@ from app.ingestion.oddsportal import (
 )
 from app.schemas.base import Market
 
+
+def test_coerce_finished_status() -> None:
+    """isFinished / eventStageId==3 / 'Finished' => True; an in-play 2nd-half
+    (stage 13) carrying a populated PARTIAL score => False (must never settle);
+    no status fields => None (caller falls back to the conservative time-floor)."""
+    from app.ingestion.oddsportal import _coerce_finished
+
+    # explicit finished signals
+    assert _coerce_finished(True, None, None) is True
+    assert _coerce_finished(None, 3, "Finished") is True
+    assert _coerce_finished(None, None, "Finished") is True
+    # present-but-not-finished: scheduled, and (critically) IN-PLAY -> reject
+    assert _coerce_finished(False, 1, "Scheduled") is False
+    assert _coerce_finished(False, 13, "2nd Half") is False  # live partial score
+    # no status at all (obscure league / dehydrated page) -> None -> floor fallback
+    assert _coerce_finished(None, None, None) is None
+    assert _coerce_finished(None, None, "") is None
+
+
+def test_event_finished_fields_parses_status() -> None:
+    """Pull isFinished / eventStageId / eventStageName from the react-event-header
+    JSON; return {} when the header/JSON is absent (-> _coerce_finished None ->
+    time-floor fallback)."""
+    from app.ingestion.oddsportal import _event_finished_fields
+
+    finished = (
+        '<div id="react-event-header" data=\''
+        '{"eventBody": {"eventStageId": 3, "eventStageName": "Finished"},'
+        ' "eventData": {"isFinished": true}}'
+        "'></div>"
+    )
+    assert _event_finished_fields(finished) == {
+        "is_finished": True,
+        "event_stage_id": 3,
+        "event_stage_name": "Finished",
+    }
+
+    inplay = (
+        '<div id="react-event-header" data=\''
+        '{"eventBody": {"eventStageId": 13, "eventStageName": "2nd Half"},'
+        ' "eventData": {"isFinished": false}}'
+        "'></div>"
+    )
+    assert _event_finished_fields(inplay) == {
+        "is_finished": False,
+        "event_stage_id": 13,
+        "event_stage_name": "2nd Half",
+    }
+
+    assert _event_finished_fields("<div>no header here</div>") == {}
+    assert _event_finished_fields('<div id="react-event-header" data="not json"></div>') == {}
+
+
 # The exact config-default market lists (class defaults — no .env read):
 # every key must validate at loader construction and map to the expected
 # canonical market + outcome layout. Config drift breaks here, loudly.

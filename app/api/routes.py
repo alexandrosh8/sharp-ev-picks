@@ -14,7 +14,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
@@ -34,22 +33,18 @@ from app.api.auth import (
     sign_session,
 )
 from app.api.deps import get_session
+from app.backtesting.calibration import bet_band_reliability
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
-from app.ingestion.oddsmath_dropping import (
-    DEFAULT_PROVIDER,
-    INTERVALS,
-    PROVIDERS,
-    MatchDrop,
-    fetch_oddsmath_book,
-)
-from app.resolution.shadow import summarize_match_rate
+from app.resolution.shadow import summarize_anchor_coverage, summarize_match_rate
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.settlement.outcomes import pick_pnl, pick_roi
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import (
+    bet_band_observations,
     betfair_archive_capture_by_sport,
+    betfair_inline_capture_by_sport,
     create_dashboard_credentials,
     latest_available_games_with_events,
     latest_picks_with_events,
@@ -705,6 +700,12 @@ async def performance(
     report = await performance_report(session)
     rows = await live_evidence_rows(session)
     report["live_evidence"] = live_evidence_report(rows, ml_threshold=_ml_operating_point())
+    # P1-1 claimed-fair RELIABILITY MONITOR (report-only — NOT a release gate,
+    # NOT a recalibration haircut): does model_probability match the realized
+    # win-rate in the odds band actually bet? Surfaced beside ROI/CLV so a
+    # calibration drift is visible; its own insufficient-n honesty gate applies.
+    band_obs = await bet_band_observations(session)
+    report["calibration"] = bet_band_reliability(band_obs)
     return report
 
 
@@ -728,77 +729,30 @@ async def resolution_match_rate(
     # Per-sport upcoming capture for ALL arcadia sports (tennis + american_football
     # included), so the panel shows the archive captures every sport, not just the
     # pick sports that appear in the match rate above.
-    report["archive_capture"] = await pinnacle_archive_capture_by_sport(session)
-    # Betfair Exchange coverage alongside Pinnacle (exact-ref, expected sparse —
-    # liquid majors behind a UK/EU proxy only).
-    report["betfair_capture"] = await betfair_archive_capture_by_sport(session)
+    pinnacle_capture = await pinnacle_archive_capture_by_sport(session)
+    report["archive_capture"] = pinnacle_capture
+    # Betfair Exchange coverage alongside Pinnacle. Two distinct readings:
+    #   - archive (``betfair:`` namespace): the SEPARATE betfair_exchange capture
+    #     path, gated behind BETFAIR_EXCHANGE_ENABLED (default OFF) — kept for the
+    #     per-sport panel body but expected near-zero (it no longer receives
+    #     Betfair since the inline-bind, commit 882bb42);
+    #   - inline (canonical event): the REAL anchor availability that feeds picks —
+    #     of our scraped fixtures with soft odds, the share also carrying an inline
+    #     ``bookmaker='Betfair Exchange'`` row (OddsPortal bookie 44, JSON feed),
+    #     which the value engine recognises as sharp via SHARP_BOOKS name matching.
+    betfair_capture = await betfair_archive_capture_by_sport(session)
+    report["betfair_capture"] = betfair_capture
+    betfair_inline_capture = await betfair_inline_capture_by_sport(session)
+    report["betfair_inline_capture"] = betfair_inline_capture
+    # Scraped-weighted "Betfair X% · Pinnacle Y%" headline — the always-populated
+    # summary the dashboard's coverage-panel HEADER shows up front (replaces the
+    # bare "—"). Betfair uses the INLINE coverage (the real pick-feeding anchor),
+    # NOT the near-empty archive path; Pinnacle uses the strict-matcher rate.
+    report["coverage_summary"] = summarize_anchor_coverage(
+        betfair_capture=betfair_inline_capture,
+        pinnacle_capture=pinnacle_capture,
+    ).as_dict()
     return report
-
-
-# --- view-only external feed: oddsmath per-book dropping odds ----------------
-# Cached 5s — oddsmath itself refreshes ~5s, so the tab's 5s auto-refresh tracks
-# it; a manual Refresh passes ?fresh=1 to bypass the cache entirely. ATTRIBUTED
-# per-book data (a named bookmaker's per-outcome open->current), informational
-# ONLY: never an input to any pick, edge, stake, or CLV.
-_DROPPING_TTL = timedelta(seconds=5)
-_DROPPING_CACHE: dict[str, tuple[datetime, list[MatchDrop]]] = {}
-
-
-def _match_json(row: MatchDrop) -> dict[str, object]:
-    return {
-        "kickoff_utc": row.kickoff_utc.isoformat() if row.kickoff_utc else None,
-        "sport": row.sport,
-        "league": row.league,
-        "match": row.match,
-        "market": row.market,
-        "book": row.book,
-        "outcomes": [
-            {"label": o.label, "open": o.open, "current": o.current, "drop_pct": o.drop_pct}
-            for o in row.outcomes
-        ],
-    }
-
-
-@router.get("/dropping-odds", dependencies=[Depends(require_dashboard_auth)])
-async def dropping_odds(
-    provider_id: int = DEFAULT_PROVIDER, interval: int = 1440, fresh: bool = False
-) -> dict[str, object]:
-    """VIEW-ONLY external feed — oddsmath.com per-book dropping odds.
-
-    Mirrors oddsmath's page: one selected BOOKMAKER's per-outcome opening->current
-    move + drop% over a window. Shown for browsing; NEVER used for any pick, edge,
-    stake, or CLV. Cached 5s (auto-refresh); fresh=true (manual Refresh) bypasses
-    the cache. Fails soft. interval: 60=1h, 360=6h, 1440=24h."""
-    if provider_id not in PROVIDERS:
-        provider_id = DEFAULT_PROVIDER
-    key = f"{provider_id}:{interval}"
-    now = datetime.now(tz=UTC)
-    cached = _DROPPING_CACHE.get(key)
-    if not fresh and cached is not None and now - cached[0] < _DROPPING_TTL:
-        rows, fetched_at = cached[1], cached[0]
-    else:
-        async with httpx.AsyncClient() as client:
-            rows = await fetch_oddsmath_book(client, provider_id=provider_id, interval=interval)
-        if rows:
-            _DROPPING_CACHE[key] = (now, rows)
-            fetched_at = now
-        elif cached is not None:
-            rows, fetched_at = cached[1], cached[0]  # serve last-good on a transient miss
-        else:
-            fetched_at = now
-    return {
-        "source": "oddsmath.com",
-        "selected_provider": provider_id,
-        "providers": [
-            {"id": pid, "name": name}
-            for pid, name in sorted(PROVIDERS.items(), key=lambda kv: kv[1].lower())
-        ],
-        "intervals": [{"value": v, "label": lbl} for v, lbl in INTERVALS.items()],
-        "interval": interval,
-        "fetched_at": fetched_at.isoformat(),
-        "available": bool(rows),
-        "rows": [_match_json(r) for r in rows],
-    }
 
 
 @router.post("/events/{event_id}/result", dependencies=[Depends(require_dashboard_auth)])

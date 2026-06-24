@@ -1,6 +1,7 @@
 """Application entrypoint. The safety validator runs before anything else:
 importing settings with tampered safety flags aborts startup (ADR-0002)."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from app.api.auth import install_auth, set_active_credentials
 from app.api.routes import router
 from app.config import get_settings
 from app.database import create_engine, create_session_factory
+from app.ingestion.oddsportal import install_scrape_future_handler
 from app.risk.exposure import DailyExposureLedger
 from app.scheduler import build_scheduler, seed_exposure_ledger
 from app.storage.repositories import load_dashboard_credentials
@@ -35,6 +37,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()  # safety validator fires here, first
     logging.basicConfig(level=settings.log_level)
     _silence_url_logging()
+    # Retrieve + honestly log Playwright wait futures orphaned when a scrape tab
+    # closes on a DOM miss, instead of letting asyncio dump them as ERROR
+    # ("Future exception was never retrieved"). Real bugs still surface loudly.
+    install_scrape_future_handler(asyncio.get_running_loop())
 
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)

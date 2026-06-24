@@ -206,6 +206,39 @@ async def test_settlement_prefers_snapshot_close_when_coverage_good(session) -> 
     assert pick.closing_anchor_type == "pinnacle"
 
 
+async def test_snapshot_close_stamps_independence_when_close_book_differs_from_fill(  # type: ignore[no-untyped-def]
+    session,
+) -> None:
+    # P0-1/P0-3 WRITE side: a pick FILLED at a SOFT book whose close is anchored
+    # by a DIFFERENT (sharp) book is a GENUINE, independent close — the close was
+    # NOT priced by the pick's own fill book. close_independent_of_fill -> True.
+    pick = await seed_pick(session, "evt-snapclose-indep", bookmaker="SoftBook")
+    close = KICKOFF - timedelta(hours=1)
+    await seed_1x2_snaps(session, pick.event_id, "Pinnacle", PINNACLE_CLOSE, close)
+    await seed_1x2_snaps(session, pick.event_id, "SoftBook", SOFTBOOK_CLOSE, close)
+    ref = await event_ref_of(session, pick)
+
+    assert await finalize_closing_from_snapshots(session, pick, ref, KICKOFF, DevigMethod.SHIN)
+    assert pick.closing_anchor_type == "pinnacle"  # close anchored by a sharp book
+    assert pick.close_independent_of_fill is True  # Pinnacle close != SoftBook fill
+
+
+async def test_snapshot_close_flags_circular_close_anchored_by_fill_book(session) -> None:  # type: ignore[no-untyped-def]
+    # P0-1/P0-3 WRITE side, the CORE bug: a pick FILLED at Pinnacle whose close is
+    # ALSO anchored by Pinnacle is CIRCULAR — the pick's own book pricing its own
+    # close. Even though the anchor TYPE is "pinnacle" (sharp), it must be flagged
+    # NOT independent so the trusted sharp-CLV subset excludes it. This is the
+    # fake CLV that masked the -EV.
+    pick = await seed_pick(session, "evt-snapclose-circular", bookmaker="Pinnacle")
+    close = KICKOFF - timedelta(hours=1)
+    await seed_1x2_snaps(session, pick.event_id, "Pinnacle", PINNACLE_CLOSE, close)
+    ref = await event_ref_of(session, pick)
+
+    assert await finalize_closing_from_snapshots(session, pick, ref, KICKOFF, DevigMethod.SHIN)
+    assert pick.closing_anchor_type == "pinnacle"  # type alone would call it sharp
+    assert pick.close_independent_of_fill is False  # ...but it is CIRCULAR
+
+
 async def test_manual_event_settle_finalizes_snapshot_close(session) -> None:  # type: ignore[no-untyped-def]
     # audit #4: the MANUAL event-settle path must finalize the snapshot close too,
     # else a manually-settled pick never enters the sharp-CLV subset.

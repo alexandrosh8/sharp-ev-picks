@@ -190,6 +190,78 @@ async def test_major_league_gate_disabled_keeps_all_premium() -> None:
     assert LAST_POLL["soccer"]["picks"] == 1
 
 
+def consensus_market_snapshots(age_s: float = 30.0) -> list[OddsSnapshotIn]:
+    # Three SOFT books price the full 3-way; no Pinnacle/Betfair -> the market
+    # anchors on the consensus(median), i.e. NO genuine sharp book backed fair
+    # value. SoftA is generous enough on Home to clear the premium edge floor.
+    return [
+        snap("SoftA", "Home FC", 2.45, age_s),
+        snap("SoftA", "Draw", 3.30, age_s),
+        snap("SoftA", "Away FC", 3.10, age_s),
+        snap("SoftB", "Home FC", 2.50, age_s),
+        snap("SoftB", "Draw", 3.25, age_s),
+        snap("SoftB", "Away FC", 3.05, age_s),
+        snap("SoftC", "Home FC", 2.95, age_s),
+        snap("SoftC", "Draw", 3.20, age_s),
+        snap("SoftC", "Away FC", 2.95, age_s),
+    ]
+
+
+async def test_require_sharp_anchor_demotes_consensus_premium_to_no_alert() -> None:
+    # require_sharp_anchor=True: a PREMIUM candidate whose fair value came from
+    # the soft CONSENSUS median (no Pinnacle/Betfair anchor) is DEMOTED to the
+    # volume (shadow) tier — persisted + CLV-tracked, never alerted, no premium
+    # pick, no exposure. Stops obscure-league bleed by DATA (no sharp anchor),
+    # not by league name. The same slate alerts with the gate off (test below).
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(consensus_market_snapshots()),
+        league="GFA League",
+        value_policy=ValuePolicy(require_sharp_anchor=True),
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # consensus-anchored -> demoted -> never alerted
+    assert LAST_POLL["soccer"]["picks"] == 0  # n_premium == 0 (demoted to shadow)
+
+
+async def test_require_sharp_anchor_keeps_sharp_anchored_premium() -> None:
+    # require_sharp_anchor=True but the market is anchored on a NAMED SHARP book
+    # (Pinnacle in market_snapshots): the premium pick STAYS premium and alerts.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(market_snapshots()),  # Pinnacle anchors the market
+        league="GFA League",  # obscure league, but the gate is data-driven not name-driven
+        value_policy=ValuePolicy(require_sharp_anchor=True),
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1  # sharp anchor -> alerted premium pick
+    assert LAST_POLL["soccer"]["picks"] == 1
+
+
+async def test_require_sharp_anchor_disabled_keeps_consensus_premium() -> None:
+    # require_sharp_anchor defaults False = gate OFF: a consensus-anchored
+    # premium pick still alerts (current behavior, the non-breaking default).
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(consensus_market_snapshots()),
+        league="GFA League",
+        value_policy=ValuePolicy(),  # gate disabled (default)
+    )
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1  # consensus pick still alerted when gate off
+    assert LAST_POLL["soccer"]["picks"] == 1
+    assert all(p.anchor_type == "consensus" for p in picks)
+
+
 async def test_sharp_anchor_loader_injects_betfair_as_live_anchor() -> None:
     # A soft-only scrape (no Pinnacle/Betfair in the main table — the real
     # OddsPortal case) anchors on consensus(median). Injecting the captured free
@@ -374,7 +446,7 @@ async def test_value_pipeline_produces_pick_and_alert() -> None:
     assert pick.anchor_type == "pinnacle"  # live CLV stratification key
     assert pick.event == "Home FC vs Away FC"
     assert len(sink.sent) == 1
-    assert "you place any bet" in sink.sent[0].body  # informational footer
+    assert "you place any bet" not in sink.sent[0].body  # footer removed per operator request
     assert "value: Pinnacle fair" in pick.reason_summary
 
 
@@ -558,7 +630,8 @@ async def test_volume_tier_pick_persists_without_alert_or_exposure(
 ) -> None:
     """The shadow tier's contract: persisted (with the informational stake
     breakdown computed) but (a) NO alert dispatch and (b) NO exposure-ledger
-    reservation — it must never consume the cap premium picks need."""
+    reservation — it must never consume the cap premium picks need. (Volume
+    alerting was trialed then reverted 2026-06-23: live CLV ~0 showed no edge.)"""
     seen = patch_persist_recording(monkeypatch, ["inserted"])
 
     sink = RecordingSink()
@@ -572,7 +645,7 @@ async def test_volume_tier_pick_persists_without_alert_or_exposure(
 
     assert [p.tier for p in picks] == ["volume"]
     assert seen == [("Home FC", "volume")]
-    assert sink.sent == []  # (a) never alerted
+    assert sink.sent == []  # (a) shadow tier: never alerted (premium-only alerts)
     assert deps.ledger.used(day) == 0.0  # (b) never on the ledger
     assert picks[0].stake_breakdown.final > 0.0  # stake computed, informational
     from app.pipeline import LAST_POLL
@@ -617,10 +690,11 @@ async def test_volume_redetection_of_existing_key_stays_silent(
 async def test_volume_to_premium_upgrade_alerts_and_reserves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The upgrade transition: a key first persisted as volume later clears
-    the premium threshold -> the repository promotes the row ('upgraded')
-    and the pipeline treats it as a NEW premium pick — alert dispatched,
-    exposure reserved (the shadow row never held a reservation)."""
+    """The upgrade transition: a key first persisted as volume (tracked silently
+    — no alert, no exposure) later clears the premium threshold -> the repository
+    promotes the row ('upgraded') and the pipeline treats it as a NEW premium
+    pick — THIS is the alert moment (⭐ PREMIUM) and exposure is reserved (the
+    shadow row never held one)."""
     seen = patch_persist_recording(monkeypatch, ["inserted", "upgraded"])
 
     sink = RecordingSink()
@@ -632,8 +706,8 @@ async def test_volume_to_premium_upgrade_alerts_and_reserves(
     day = datetime.now(tz=UTC).date()
     first = await run_value_pipeline(deps, "soccer")
     assert [p.tier for p in first] == ["volume"]
-    assert sink.sent == []
-    assert deps.ledger.used(day) == 0.0
+    assert sink.sent == []  # cycle 1: volume tracked silently (not alerted)
+    assert deps.ledger.used(day) == 0.0  # ...and takes no exposure
 
     # cycle 2: the same candidate now clears premium (threshold change here;
     # a price move in production) — the volume row upgrades in place.
@@ -641,7 +715,8 @@ async def test_volume_to_premium_upgrade_alerts_and_reserves(
     second = await run_value_pipeline(deps, "soccer")
     assert [p.tier for p in second] == ["premium"]
     assert seen == [("Home FC", "volume"), ("Home FC", "premium")]
-    assert len(sink.sent) == 1  # the upgrade IS the alert moment
+    assert len(sink.sent) == 1  # the premium upgrade IS the alert moment
+    assert "⭐ PREMIUM" in sink.sent[0].title  # tagged premium
     assert deps.ledger.used(day) > 0.0  # exposure reserved on upgrade
 
 

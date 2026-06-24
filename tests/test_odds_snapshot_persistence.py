@@ -207,6 +207,68 @@ async def test_conflict_idempotency_same_key_and_captured_at(factory) -> None:  
     assert await _rows_for_event(factory, EVENT) == 1
 
 
+async def test_attach_only_skips_when_event_absent(factory) -> None:  # type: ignore[no-untyped-def]
+    """attach_only_to_existing=True must NEVER create the event: a ref with no
+    pre-existing Event row is SKIPPED this cycle (0 rows written, 0 events
+    created), not grafted from the snapshot's own team data. This is the
+    Betfair inline-binding safety contract — the capture may only ATTACH odds to
+    a canonical event the MAIN scrape already created, never mint a partial one.
+    """
+    ref = "evt-attach-absent-1"
+    teams = {ref: EventTeams(home="Attach Home FC", away="Attach Away FC")}
+    rows = [snap("Betfair Exchange", "Attach Home FC", 2.10, event=ref)]
+
+    written = await persist_odds_snapshots(
+        factory, rows, teams, "soccer", "test-league", attach_only_to_existing=True
+    )
+    assert written == 0
+    assert await _rows_for_event(factory, ref) == 0
+    # No event row was minted from the Betfair-only data.
+    async with factory() as session:
+        event_count = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == ref)
+        )
+    assert event_count == 0
+
+
+async def test_attach_only_attaches_to_existing_event(factory) -> None:  # type: ignore[no-untyped-def]
+    """attach_only_to_existing=True attaches odds to a canonical event that
+    ALREADY exists (created by a prior normal persist) — same external_ref, new
+    bookmaker rows land on it, and NO second event row is created."""
+    ref = "evt-attach-present-1"
+    teams = {ref: EventTeams(home="Attach Home FC", away="Attach Away FC")}
+
+    # The MAIN scrape creates the canonical event first (normal create path).
+    seed = [snap("SoftBook", "Attach Home FC", 2.30, event=ref)]
+    assert await persist_odds_snapshots(factory, seed, teams, "soccer", "test-league") == 1
+
+    # Betfair attaches inline under attach-only: its row lands on the SAME event.
+    betfair = [snap("Betfair Exchange", "Attach Home FC", 2.12, event=ref)]
+    written = await persist_odds_snapshots(
+        factory, betfair, teams, "soccer", "test-league", attach_only_to_existing=True
+    )
+    assert written == 1
+    assert await _rows_for_event(factory, ref) == 2  # soft + betfair on one event
+
+    async with factory() as session:
+        books = (
+            (
+                await session.execute(
+                    select(OddsSnapshot.bookmaker)
+                    .join(Event, OddsSnapshot.event_id == Event.id)
+                    .where(Event.external_ref == ref)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        event_count = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == ref)
+        )
+    assert set(books) == {"SoftBook", "Betfair Exchange"}
+    assert event_count == 1  # exactly ONE canonical event row
+
+
 async def test_persisted_row_values_and_line_qualified_market(factory) -> None:  # type: ignore[no-untyped-def]
     """Odds cross the boundary Decimal-via-string; captured_at is the scrape
     observation time (NOT now()); the market column stores the line-qualified

@@ -88,9 +88,18 @@ class PinnacleArcadiaError(Exception):
 
 # Transient upstream HTTP statuses worth one or two retries before giving up: a
 # rate-limit (429) or a momentary server-side hiccup (5xx). A permanent 4xx
-# (400/401/403/404/422 …) is a real error — retrying it only burns budget, so it
+# (400/401/404/422 …) is a real error — retrying it only burns budget, so it
 # is deliberately excluded and surfaces immediately as PinnacleArcadiaError.
 _TRANSIENT_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+# arcadia 403s requests from a blocked/datacenter egress IP but serves the SAME
+# request fine through a healthy proxy. The arcadia client rotates proxies
+# round-robin per request (build_arcadia_proxy_http_client), so a 403 is treated
+# as "this egress is blocked — rotate to the next proxy" and retried like a
+# transient status (this is NOT an anti-bot bypass: GET-only through the
+# already-configured proxy pool). After all attempts it still surfaces as
+# PinnacleArcadiaError(403), so a genuinely-blocked-everywhere fetch is honest.
+_PROXY_ROTATE_STATUSES: frozenset[int] = frozenset({403})
 
 
 class _TransientStatusError(Exception):
@@ -580,8 +589,13 @@ class PinnacleArcadiaClient:
         # "no data this cycle". Permanent 4xx is NEVER raised as transient here,
         # so it is never retried (it returns the Response and the caller's non-200
         # check raises PinnacleArcadiaError at once).
+        # 6 attempts (was 3): a 403 rotates to the NEXT proxy each request (round-
+        # robin), so with ~8 proxies in the pool 3 attempts only tried ~3 before
+        # declaring "no data" — daytime 403 spikes (more arcadia fetches) leaked
+        # transient blocks into the floor. 6 attempts exhausts more of the pool
+        # so a recoverable 403 actually recovers instead of becoming "no data".
         retry=retry_if_exception_type((httpx.TransportError, _TransientStatusError)),
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(6),
         wait=wait_exponential_jitter(initial=0.5, max=8.0),
         reraise=True,
     )
@@ -589,8 +603,12 @@ class PinnacleArcadiaClient:
         response = await self._client.get(
             f"{self._base_url}{path}", params=params, headers=self._headers(), timeout=20.0
         )
-        if response.status_code in _TRANSIENT_STATUSES:
-            # Raise to trigger the retry. Status code ONLY — never the URL/key.
+        if (
+            response.status_code in _TRANSIENT_STATUSES
+            or response.status_code in _PROXY_ROTATE_STATUSES
+        ):
+            # Raise to trigger the retry: a transient 429/5xx, or a 403 that
+            # rotates to the next proxy. Status code ONLY — never the URL/key.
             raise _TransientStatusError(response.status_code)
         return response
 

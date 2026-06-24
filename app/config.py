@@ -330,6 +330,16 @@ class Settings(BaseSettings):
     # .claude/memory/pitfalls.md 2026-06-20). Names normalized at compare time
     # (accents/case/spacing); curate from the per-league match-rate report.
     value_major_leagues: str = ""
+    # Require-sharp-anchor PREMIUM gate (default False = DISABLED, current
+    # behavior). When True, a premium candidate whose fair value came from the
+    # soft consensus(median) — i.e. NO genuine sharp book (Pinnacle or Betfair)
+    # priced the full market — is DEMOTED to the volume (shadow) tier: persisted
+    # + CLV-tracked, never alerted, never reserving exposure. The season-proof,
+    # name-proof sibling of VALUE_MAJOR_LEAGUES — it scopes premium by DATA (a
+    # sharp anchor actually backed the price) rather than by curated league name,
+    # so it stops obscure-league bleed (~37% sharp coverage is structural, see
+    # .claude/memory/pitfalls.md 2026-06-20) without any per-season list upkeep.
+    value_require_sharp_anchor: bool = False
 
     # --- Optional drawdown-constrained staking (default OFF) -----------------
     # Both set => Kelly multiplier = min(FRACTIONAL_KELLY, lambda*) where
@@ -472,6 +482,23 @@ class Settings(BaseSettings):
     # Browser locale, paired with the loader's forced UTC timezone for a
     # coherent human fingerprint (UTC = London -> en-GB).
     oddsportal_locale: str = "en-GB"
+    # SELECTABLE per-match odds transport for the OddsPortal source. OFF by
+    # default = the proven Playwright/OddsHarvester DOM scrape (unchanged). When
+    # true, OddsPortalLoader fetches each match's ODDS via the curl_cffi JSON
+    # feed (app/ingestion/oddsportal_json.py) — much faster + lighter. To make
+    # the savings REAL, the dated LISTING then runs with NO markets (match URLs +
+    # header team context only), so the expensive per-match Playwright odds
+    # extraction is NEVER paid; the per-match odds come ONLY from curl_cffi.
+    # There is NO Playwright odds fallback (operator instruction 2026-06-23): a
+    # per-match JSON failure (decrypt / HTTP / envelope / version-guard) is logged
+    # (type only) and the match is SKIPPED — a scrape gap, exactly like a benign
+    # DOM miss. A JSON-wide key/bundle rotation fails CLOSED with a LOUD WARNING
+    # (the version guard), never a wrong price. Numeric provider ids are mapped to
+    # canonical bookmaker NAMES (a GET-only, cached registry); an unknown id is
+    # skipped, never persisted numeric. Stays the Playwright DEFAULT until
+    # prod-verified; the finished-SCORE capture path (score_only) is unaffected
+    # (header-only read, not an odds feed). READ-ONLY GET-only either way.
+    oddsportal_use_json_feed: bool = False
     # Seconds between poll cycles. With max_instances=1 + coalesce, a value
     # below the cycle duration just runs cycles back-to-back — effective
     # freshness is one cycle length; the scrape itself is the floor. The
@@ -575,10 +602,17 @@ class Settings(BaseSettings):
     # there are deliberately no BETFAIR_* credential slots.
     betfair_exchange_enabled: bool = False
     # Backable £ liquidity floor: a BACK outcome whose displayed liquidity is
-    # below this is SKIPPED (thin markets give unreliable exchange prices). The
-    # default mirrors the user's 2026-06-19 live probe, where a major match's
-    # BACK liquidities were in the thousands of £. Floored at 0 (0 = no gate).
-    betfair_exchange_min_liquidity: float = Field(default=500.0, ge=0.0)
+    # below this is SKIPPED (only £0/dust markets give unusable exchange prices).
+    # The OLD 500.0 default was calibrated on a SINGLE major-match probe
+    # (2026-06-19) and silently dropped every obscure market — only 22
+    # betfair_soccer events were EVER captured. Live re-probe (2026-06-23) of the
+    # U20/lower-division/friendly pages the operator confirmed carry Betfair odds
+    # showed genuine small-market liquidity of £12-£23 per BACK outcome; that is
+    # normal for a small exchange market, not a closed one. The floor is lowered
+    # to admit those real prices while still gating £0 dust + the '0' empty-cell
+    # sentinel (which parses to <=1.0 and is dropped upstream regardless).
+    # Floored at 0 (0 = no gate).
+    betfair_exchange_min_liquidity: float = Field(default=10.0, ge=0.0)
     # csv of sport keys to capture. "soccer" (the 3-way 1X2 BACK row) and
     # "basketball" (the 2-way moneyline BACK row) are supported; the default
     # stays "soccer" (committed) but "soccer,basketball" works end-to-end. A
@@ -589,6 +623,24 @@ class Settings(BaseSettings):
     # interval just tracks repricings; near kickoff is what matters. The >=30s
     # floor blocks hammering-by-typo on a free scraped source.
     betfair_exchange_poll_interval_seconds: int = Field(default=300, ge=30)
+    # PER-CYCLE TARGET BOUND (CPU-aware, prod fix 2026-06-23). The capture now
+    # sources its match pages from the DB (recent upcoming soccer events with
+    # odds, not yet kicked off) instead of the last COMPLETED full scrape's
+    # event ids — decoupling it from poll_odds completion (one slow CPU-bound
+    # scrape held poll_odds's single slot, so last_fetch_event_ids stayed empty
+    # and the reader saw NO targets, capturing nothing — even £270k-liquidity
+    # majors). Each capture cycle opens at most this many match pages, so the
+    # reader can NEVER try all ~91 pages at once and worsen the CPU overload.
+    # Ordered never-captured-first then stalest-Betfair-capture, so a small bound
+    # ROTATES through the whole slate over successive cycles. Per-cycle page-load
+    # cost == min(this, eligible events). 20 pages / 300s ≈ one page every 15s —
+    # gentle on a CPU-bound box; raise only if the box has spare headroom.
+    betfair_exchange_max_targets_per_cycle: int = Field(default=20, ge=1, le=200)
+    # Only events kicking off within this many hours ahead are eligible targets
+    # (and only those NOT yet started). Bounds the candidate set to the
+    # actionable near slate — far-future fixtures carry thin/!absent exchange
+    # liquidity and would dilute the per-cycle budget. 72h spans a normal slate.
+    betfair_exchange_target_window_hours: int = Field(default=72, ge=1, le=336)
     # When true, the settlement-time snapshot close ALSO injects the captured
     # Betfair Exchange BACK close (EXACT match: the betfair event's external_ref
     # is deterministically "betfair:"+pick_ref, ADR-0015) so incremental CLV can
@@ -639,9 +691,20 @@ class Settings(BaseSettings):
     # when a full odds cycle is slow (the cactusbets.cloud prod gap: a 30-min+
     # odds cycle starved the hourly settle job and scores never landed). Each
     # finished link is scraped + committed individually under the per-link
-    # timeout below. Default 15 min; >=60s floor blocks hammering-by-typo on a
-    # free scraped source. PROD-SAFE WITH NO CONFIG.
-    results_scrape_interval_seconds: int = Field(default=900, ge=60)
+    # timeout below. Default 60s (was 15 min): paired with the explicit
+    # finished-status capture gate, a game becomes a candidate and is captured
+    # within ~1 cycle of FT. The >=60s floor blocks hammering-by-typo on a free
+    # scraped source. PROD-SAFE WITH NO CONFIG.
+    results_scrape_interval_seconds: int = Field(default=60, ge=60)
+    # Settlement cycle cadence (seconds). settle_results consumes scraped scores
+    # from the DB (cheap — no scrape) and settles open picks; it runs on this
+    # short interval (was an hourly cron) so a freshly-captured score settles
+    # within ~1 cycle instead of up to an hour. >=15s floor. PROD-SAFE.
+    settle_interval_seconds: int = Field(default=30, ge=15, le=3600)
+    # Runtime self-audit cadence (seconds). A cheap READ-ONLY DB job that WARNs/
+    # ERRORs on operational anomalies (awaiting-result backlog, stale odds) so
+    # the health monitor catches issues proactively. PROD-SAFE WITH NO CONFIG.
+    self_audit_interval_seconds: int = Field(default=600, ge=60)
     # Per-LINK match-page scrape timeout (seconds) for the finished-score pass.
     # One hung VPS proxy request must not stall the whole pass — each link runs
     # under its own asyncio.wait_for and a timeout drops just that link (retried
@@ -848,6 +911,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         odds_bands=parse_odds_bands(settings.value_odds_bands),
         min_books_by_market=parse_market_min_books(settings.value_min_books_per_market),
         major_leagues=parse_major_leagues(settings.value_major_leagues),
+        require_sharp_anchor=settings.value_require_sharp_anchor,
     )
 
 

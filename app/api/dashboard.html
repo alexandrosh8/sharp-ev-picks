@@ -665,6 +665,29 @@
         background: rgba(56, 189, 248, 0.12);
         color: var(--info);
       }
+      .b-warn {
+        background: rgba(240, 180, 41, 0.14);
+        color: var(--warn);
+      }
+      /* Sport cell with an optional "not validated" status line stacked under
+         the sport name (visibility-only sports — tennis, American football). */
+      .sportwrap {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 3px;
+      }
+      .sportwrap .badge {
+        margin-top: 1px;
+      }
+      .sportnote {
+        color: var(--warn);
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        line-height: 1.3;
+        white-space: normal;
+        max-width: 180px;
+      }
       tr.valuegone {
         opacity: 0.42;
         transition: opacity 0.2s var(--ease);
@@ -702,32 +725,6 @@
         );
         background-size: 200% 100%;
         animation: shimmer 1.2s linear infinite;
-      }
-      /* Brief highlight on a DROPPING row whose odds just changed on refresh. */
-      @keyframes dropflash {
-        from {
-          background: rgba(234, 179, 8, 0.22);
-        }
-        to {
-          background: transparent;
-        }
-      }
-      tr.drop-changed td {
-        animation: dropflash 1.4s ease-out;
-      }
-      /* DROPPING controls: bold, uppercase labels (the selects stay readable). */
-      #dropping-controls label {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-      }
-      #dropping-controls select {
-        font-weight: 400;
-        text-transform: none;
-        letter-spacing: normal;
       }
       @keyframes shimmer {
         to {
@@ -835,15 +832,46 @@
         font-style: italic;
       }
 
-      .games-head {
+      /* clean two-column panel header: title + one-line subtitle on the left,
+         the Show/Hide toggle pinned right. Replaces the old cramped
+         title·stamp·button flex row (operator: "cluttered/unclear"). */
+      .panel-head {
         display: flex;
         align-items: center;
-        gap: 12px;
-        margin: 18px 0 8px;
-        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 16px;
+        margin: 22px 0 8px;
+        padding-bottom: 9px;
+        border-bottom: 1px solid var(--line);
       }
-      .games-head .stamp {
-        margin-left: 0;
+      .panel-head-text {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+      .panel-head .section-toggle {
+        flex: none;
+      }
+      /* one-line status under the panel title (count / coverage headline) */
+      .panel-sub {
+        font-family: var(--mono);
+        color: var(--dim);
+        font-size: 11.5px;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .panel-sub.err {
+        color: var(--warn);
+      }
+      .panel-sub .muted {
+        color: var(--faint);
+      }
+      .panel-sub b {
+        color: var(--text);
+        font-weight: 700;
       }
       .gameswrap {
         margin-bottom: 4px;
@@ -1333,15 +1361,6 @@
           >
             RESULTS
           </button>
-          <button
-            type="button"
-            role="tab"
-            data-status="dropping"
-            aria-selected="false"
-            title="External oddsmath attributed per-book dropping odds — view only, not our picks"
-          >
-            DROPPING ⚡
-          </button>
         </div>
         <div class="toolbar-filters">
           <select id="f-tier" aria-label="Filter picks by tier">
@@ -1391,44 +1410,6 @@
           </tbody>
         </table>
       </div>
-      <!-- DROPPING ODDS — external oddsmath attributed feed, VIEW-ONLY.
-           Never a pick/edge/CLV input; rendered only when the DROPPING tab is open. -->
-      <div class="tablewrap" id="dropping-panel" hidden>
-        <div class="toolbar-filters" id="dropping-controls">
-          <label class="sub"
-            >Bookmaker
-            <select
-              id="drop-book"
-              aria-label="Dropping-odds bookmaker"
-            ></select>
-          </label>
-          <label class="sub"
-            >Window
-            <select
-              id="drop-interval"
-              aria-label="Dropping-odds window"
-            ></select>
-          </label>
-        </div>
-        <table id="dropping-table">
-          <thead>
-            <tr>
-              <th>Kickoff</th>
-              <th>League</th>
-              <th>Match</th>
-              <th>1</th>
-              <th>X</th>
-              <th>2</th>
-            </tr>
-          </thead>
-          <tbody id="dropping-rows">
-            <tr>
-              <td colspan="6"><div class="skelbar"></div></td>
-            </tr>
-          </tbody>
-        </table>
-        <div class="sub" id="dropping-stamp"></div>
-      </div>
       <!-- CLV scorecard — proof-of-edge ledger headline (CLOSED tab only) -->
       <div class="sub" id="clv-scorecard" style="display: none"></div>
 
@@ -1462,9 +1443,11 @@
           </table>
         </div>
 
-        <div class="games-head">
-          <div class="evtitle">Available games</div>
-          <span class="stamp" id="games-count">loading…</span>
+        <div class="panel-head">
+          <div class="panel-head-text">
+            <div class="evtitle">Available games</div>
+            <span class="panel-sub" id="games-count">loading…</span>
+          </div>
           <button
             id="toggle-games"
             class="section-toggle"
@@ -1514,9 +1497,11 @@
           </div>
         </div>
 
-        <div class="games-head">
-          <div class="evtitle">Sharp-anchor coverage (Pinnacle + Betfair)</div>
-          <span class="stamp" id="archive-count">—</span>
+        <div class="panel-head">
+          <div class="panel-head-text">
+            <div class="evtitle">Sharp-anchor coverage</div>
+            <span class="panel-sub" id="archive-count">loading…</span>
+          </div>
           <button
             id="toggle-archive"
             class="section-toggle"
@@ -1817,8 +1802,13 @@
         $("toggle-archive").setAttribute("aria-expanded", String(ARCHIVE_OPEN));
         $("toggle-archive").textContent = ARCHIVE_OPEN ? "Hide" : "Show";
         // Fetch only on first expand — the query scans picks + archive, so it
-        // stays off the 60s refresh loop.
-        if (ARCHIVE_OPEN && !ARCHIVE_LOADED && !ARCHIVE_LOADING) loadArchive();
+        // stays off the 60s refresh loop. If the eager headline fetch already
+        // cached the payload, render the per-sport table straight from cache
+        // instead of re-fetching.
+        if (ARCHIVE_OPEN) {
+          if (ARCHIVE_LOADED) renderArchive();
+          else if (!ARCHIVE_LOADING) loadArchive();
+        }
       }
 
       async function loadArchive() {
@@ -1853,13 +1843,70 @@
         }
       }
 
+      // Eager, lightweight: populate ONLY the panel-header coverage headline
+      // (Betfair/Pinnacle %) on first page load so it never sits on a bare "—"
+      // while the panel stays collapsed. Caches the same payload the full panel
+      // uses, so expanding does not re-fetch. Silent on failure — the header
+      // just shows "coverage unavailable", and expanding retries.
+      async function loadCoverageHeadline() {
+        if (ARCHIVE_LOADED || ARCHIVE_LOADING) {
+          if (ARCHIVE) setCoverageHeadline(ARCHIVE);
+          return;
+        }
+        ARCHIVE_LOADING = true;
+        try {
+          const res = await fetchWithTimeout("/resolution/match-rate?days=180");
+          if (res.status === 401) {
+            window.location.assign("/login");
+            return;
+          }
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          ARCHIVE = await res.json();
+          ARCHIVE_LOADED = true;
+          // Header always; the per-sport table only if the panel is open.
+          setCoverageHeadline(ARCHIVE);
+          if (ARCHIVE_OPEN) renderArchive();
+        } catch (err) {
+          $("archive-count").classList.add("err");
+          $("archive-count").textContent = "coverage unavailable";
+        } finally {
+          ARCHIVE_LOADING = false;
+        }
+      }
+
+      // The panel-header subtitle is the scraped-weighted "Betfair X% ·
+      // Pinnacle Y%" coverage headline (the always-populated proof the header
+      // showed a bare "—" for before). Falls back to the per-pick match rate
+      // only if the backend hasn't shipped coverage_summary yet.
+      function setCoverageHeadline(a) {
+        const el = $("archive-count");
+        el.classList.remove("err");
+        const cov = a && a.coverage_summary;
+        if (cov && typeof cov.headline === "string") {
+          el.textContent = cov.headline;
+          el.title =
+            "Of our upcoming scraped fixtures (next 7d), the share that also " +
+            "carry a captured Betfair Exchange back price (" +
+            (cov.betfair_captured || 0) +
+            "/" +
+            (cov.betfair_scraped || 0) +
+            ") and a strict-matched Pinnacle sharp close (" +
+            (cov.pinnacle_matched || 0) +
+            "/" +
+            (cov.pinnacle_scraped || 0) +
+            "). Expand for the per-sport breakdown.";
+          return;
+        }
+        const total = Number(a && a.total) || 0;
+        el.textContent = (a ? a.matched : 0) + " / " + total + " matched";
+        el.removeAttribute("title");
+      }
+
       function renderArchive() {
         const a = ARCHIVE;
         if (!a) return;
         const total = Number(a.total) || 0;
-        $("archive-count").classList.remove("err");
-        $("archive-count").textContent =
-          a.matched + " / " + total + " matched · " + ratePct(a.match_rate);
+        setCoverageHeadline(a);
         $("archive-purpose").textContent =
           "Strict cross-source match of picks (known kickoff, last 180d) to the " +
           "captured Pinnacle sharp-close archive — the readiness dial for the " +
@@ -2017,8 +2064,14 @@
           return;
         }
         $("games-count").classList.remove("err");
-        $("games-count").textContent =
-          rows.length + " shown / " + GAMES.length + " loaded";
+        // Clean count: "N games" when nothing is filtered out, else
+        // "N of M games · filtered" so the shown/loaded split reads in plain
+        // English (operator: the old "171 shown / 171 loaded" was unclear).
+        const filtered = rows.length !== GAMES.length;
+        const noun = GAMES.length === 1 ? "game" : "games";
+        $("games-count").textContent = filtered
+          ? rows.length + " of " + GAMES.length + " " + noun + " · filtered"
+          : GAMES.length + " " + noun;
         if (!rows.length) {
           const tr = document.createElement("tr");
           const sportSel = $("f-game-sport").value;
@@ -2042,19 +2095,27 @@
         rows.forEach((g) => {
           const tr = document.createElement("tr");
 
-          // 1 — Kickoff
+          // 1 — Kickoff (consistent with the picks table's cellKickoff: a real
+          // local time + countdown when known, a clean tooltipped "TBD" when the
+          // source has not reported a kickoff yet — never a bare "unknown").
           const ko = document.createElement("div");
           ko.className = "ko";
           const when = document.createElement("span");
-          if (g.starts_at) when.textContent = fmtLocal(g.starts_at);
-          else {
+          const kickoffKnown = g.starts_at != null;
+          if (kickoffKnown) {
+            when.textContent = fmtLocal(g.starts_at);
+          } else {
             when.textContent = "TBD";
             when.className = "tbd";
+            when.title =
+              "the odds source has not reported a kickoff time for this match yet";
           }
+          const cd = kickoffKnown
+            ? countdown(g.starts_at)
+            : { text: "time to be confirmed", soon: false };
           const rel = document.createElement("small");
-          rel.textContent = g.starts_at
-            ? countdown(g.starts_at).text
-            : "kickoff unknown";
+          rel.textContent = cd.text;
+          if (cd.soon) rel.className = "soon";
           ko.append(when, rel);
           td(tr, ko);
 
@@ -2082,24 +2143,33 @@
           // 3 — League
           td(tr, g.league || "—");
 
-          // 4 — Sport (+ optional UNVALIDATED badge, per-row boolean only)
-          const sportCell = td(
-            tr,
-            SPORT_LABELS[g.sport] || g.sport_label || g.sport,
-          );
-          // Driver is strictly the per-row flag; an ABSENT field (undefined)
-          // renders no badge, so nothing is mislabeled until the backend
-          // ships the validated/unvalidated signal. Accept either spelling:
-          // validated===false OR unvalidated===true.
+          // 4 — Sport (+ a clear "not validated" status for visibility-only
+          // sports, per-row boolean only). The driver is strictly the per-row
+          // flag; an ABSENT field (undefined) renders no status, so nothing is
+          // mislabeled until the backend ships the signal. Accept either
+          // spelling: validated===false OR unvalidated===true.
+          const sportWrap = document.createElement("div");
+          sportWrap.className = "sportwrap";
+          const sportName = document.createElement("span");
+          sportName.textContent = SPORT_LABELS[g.sport] || g.sport_label || g.sport;
+          sportWrap.appendChild(sportName);
           const isUnvalidated = g.validated === false || g.unvalidated === true;
           if (isUnvalidated) {
-            const b = badge("UNVALIDATED", "b-neutral");
-            b.style.marginLeft = "6px";
-            b.title =
-              "This sport has not cleared a held-out CLV backtest — shown " +
-              "for visibility only, not alerted as picks.";
-            sportCell.appendChild(b);
+            // Plain-language status (not a bare confusing word): a warn-toned
+            // chip + a one-line caption that says exactly what it means.
+            const b = badge("NOT VALIDATED", "b-warn");
+            const tip =
+              "This sport's model has not cleared a held-out CLV backtest — " +
+              "shown for information only. It is never alerted or sized as a pick.";
+            b.title = tip;
+            sportWrap.appendChild(b);
+            const note = document.createElement("small");
+            note.className = "sportnote";
+            note.textContent = "model not yet validated — informational only";
+            note.title = tip;
+            sportWrap.appendChild(note);
           }
+          td(tr, sportWrap);
 
           // 5 — Coverage (one signal; raw market keys + book count on hover)
           const mc = Number(g.market_count || 0);
@@ -2142,7 +2212,7 @@
         }
         const cd = kickoffKnown
           ? countdown(p.starts_at)
-          : { text: "kickoff unknown", soon: false };
+          : { text: "time to be confirmed", soon: false };
         const rel = document.createElement("small");
         rel.textContent = cd.text;
         if (cd.soon) rel.className = "soon";
@@ -2891,12 +2961,7 @@
 
       function render() {
         const tier = $("f-tier").value;
-        // On DROPPING the search box filters the external matches (not picks),
-        // so the pick counts ignore it there; on the picks tabs it applies.
-        const q =
-          STATUS_TAB === "dropping"
-            ? ""
-            : $("f-search").value.trim().toLowerCase();
+        const q = $("f-search").value.trim().toLowerCase();
         // RESULTS reuses the results-oriented (ex-SETTLED) column layout, so the
         // long-standing `settledView` flag now means "the results view".
         const settledView = STATUS_TAB === "results";
@@ -2945,15 +3010,9 @@
           "#status-tabs button[data-status]",
         )) {
           const k = b.dataset.status;
-          // Skip non-picks tabs (e.g. DROPPING) — they own their label and are
-          // not counted here; without this they'd be clobbered to "undefined".
-          if (!(k in TAB_LABELS)) continue;
+          if (!(k in TAB_LABELS)) continue; // defensive: only label known tabs
           b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
         }
-        // The tab COUNTS above stay live even while DROPPING is open (load()
-        // still runs every 60s); DROPPING has its own panel, so skip the rest —
-        // the picks-table draw below — only now.
-        if (STATUS_TAB === "dropping") return;
         // CLV scorecard — the proof-of-edge headline, shown on the CLOSED tab
         // only. Computed over every closed pick (in the tier/search scope) that
         // has a CLV row: how many beat the de-vigged close + the mean CLV.
@@ -3905,216 +3964,6 @@
           /* storage disabled — non-fatal */
         }
       }
-      // --- DROPPING ODDS (external oddsmath attributed feed, VIEW-ONLY) -------
-      // Rendered ONLY in its own tab. Attributed per-book moves, never an input
-      // to picks/edges/stakes/CLV. All external strings go through td()
-      // (textContent only, never raw-HTML assignment) so the untrusted feed
-      // cannot inject markup (dashboard-wide guardrail).
-      function droppingMessage(tbody, text) {
-        tbody.replaceChildren();
-        const tr = document.createElement("tr");
-        const cell = td(tr, text === null ? "" : text);
-        cell.colSpan = 6;
-        if (text === null) {
-          const bar = document.createElement("div");
-          bar.className = "skelbar";
-          cell.replaceChildren(bar);
-        }
-        tbody.appendChild(tr);
-      }
-      // Selected bookmaker + window (mirror oddsmath's own filters).
-      let DROPPING_PROVIDER = null; // from the first response's selected_provider
-      let DROPPING_INTERVAL = 1440;
-      let DROPPING_TIMER = null; // auto-refresh handle while the DROPPING tab is open
-      function fillDroppingSelectors(data) {
-        const bookSel = $("drop-book");
-        if (bookSel && !bookSel.options.length && data.providers) {
-          for (const p of data.providers) {
-            const opt = document.createElement("option");
-            opt.value = String(p.id);
-            opt.textContent = p.name;
-            bookSel.appendChild(opt);
-          }
-          if (data.selected_provider != null)
-            bookSel.value = String(data.selected_provider);
-          bookSel.addEventListener("change", () => {
-            DROPPING_PROVIDER = Number(bookSel.value);
-            loadDropping(true);
-          });
-        }
-        const intSel = $("drop-interval");
-        if (intSel && !intSel.options.length && data.intervals) {
-          for (const it of data.intervals) {
-            const opt = document.createElement("option");
-            opt.value = String(it.value);
-            opt.textContent = it.label;
-            intSel.appendChild(opt);
-          }
-          if (data.interval != null) intSel.value = String(data.interval);
-          intSel.addEventListener("change", () => {
-            DROPPING_INTERVAL = Number(intSel.value);
-            loadDropping(true);
-          });
-        }
-      }
-      async function loadDropping(force) {
-        const tbody = $("dropping-rows");
-        const stamp = $("dropping-stamp");
-        if (DROPPING_ROWS.size === 0) droppingMessage(tbody, null); // skeleton only before first data
-        try {
-          const qs = new URLSearchParams({
-            interval: String(DROPPING_INTERVAL),
-          });
-          if (DROPPING_PROVIDER != null)
-            qs.set("provider_id", String(DROPPING_PROVIDER));
-          if (force) qs.set("fresh", "1"); // manual Refresh -> bypass the 5s cache
-          const res = await fetchWithTimeout("/dropping-odds?" + qs.toString());
-          // Same auth handling as the picks tabs: an expired session -> login.
-          if (res.status === 401) {
-            window.location.assign("/login");
-            return;
-          }
-          renderDropping(await res.json());
-        } catch (e) {
-          droppingMessage(tbody, "Dropping-odds feed unavailable.");
-          if (stamp) stamp.textContent = "";
-        }
-      }
-      // One outcome cell: opening (faded) -> current (bold) + drop% colored like
-      // oddsmath — big drop RED, smaller drop YELLOW, a rise muted. textContent
-      // only (no raw-HTML assignment).
-      function outcomeCell(tr, o) {
-        const cell = document.createElement("td");
-        if (!o || (o.open == null && o.current == null)) {
-          cell.textContent = "—";
-          tr.appendChild(cell);
-          return;
-        }
-        if (o.open != null) {
-          const op = document.createElement("span");
-          op.textContent = String(o.open);
-          op.style.opacity = "0.5";
-          cell.append(op, document.createTextNode(" → "));
-        }
-        const cur = document.createElement("span");
-        cur.style.fontWeight = "700";
-        cur.textContent = o.current == null ? "—" : String(o.current);
-        cell.appendChild(cur);
-        if (o.drop_pct != null) {
-          const pct = document.createElement("span");
-          pct.textContent = " " + o.drop_pct.toFixed(1) + "%";
-          pct.style.fontSize = "11px";
-          pct.style.fontWeight = "700";
-          pct.style.color =
-            o.drop_pct <= -20
-              ? "#f4525f" // big drop -> red
-              : o.drop_pct < 0
-                ? "#eab308" // smaller drop -> yellow
-                : "var(--muted, #888)"; // rose
-          cell.appendChild(pct);
-        }
-        tr.appendChild(cell);
-      }
-      // Build one match row's cells (Kickoff | League | Match | 1 | X | 2).
-      function renderDroppingRow(tr, r) {
-        tr.replaceChildren();
-        td(tr, r.kickoff_utc ? fmtLocal(r.kickoff_utc) : "");
-        const parts = (r.league || "").split(" · ");
-        td(tr, parts.length > 1 ? parts.slice(1).join(" · ") : r.league || "");
-        td(tr, r.match || "");
-        const byLabel = {};
-        for (const o of r.outcomes || []) byLabel[o.label] = o;
-        for (const lbl of ["1", "X", "2"]) outcomeCell(tr, byLabel[lbl]);
-      }
-      function dropSig(r) {
-        // Flash a row ONLY when a CURRENT (live) odd actually moves — not when the
-        // opening reference drifts or drop% recomputes below the shown decimal
-        // (those changed the old signature, flashing rows that looked unchanged).
-        return (r.outcomes || [])
-          .map((o) => o.label + ":" + (o.current == null ? "" : o.current))
-          .join("|");
-      }
-      // Keyed diff: a refresh updates ONLY the matches whose odds changed (those
-      // rows briefly flash) — the rest stay put, so the table never blanks on a tick.
-      const DROPPING_ROWS = new Map(); // key -> { tr, sig }
-      let DROPPING_DATA = null; // last response, for re-filtering on search
-      function renderDropping(data) {
-        const stamp = $("dropping-stamp");
-        if (data) {
-          DROPPING_DATA = data;
-          if (DROPPING_PROVIDER == null && data.selected_provider != null)
-            DROPPING_PROVIDER = data.selected_provider;
-          fillDroppingSelectors(data);
-        }
-        const tbody = $("dropping-rows");
-        let rows = (data && data.rows) || [];
-        // Search filters the matches on THIS tab (team / league text).
-        const q = ($("f-search").value || "").trim().toLowerCase();
-        if (q)
-          rows = rows.filter((r) =>
-            (r.match + " " + r.league).toLowerCase().includes(q),
-          );
-        if (!data || !data.available || rows.length === 0) {
-          DROPPING_ROWS.clear();
-          droppingMessage(
-            tbody,
-            q
-              ? "No matches for that search."
-              : "No dropping odds for this book/window right now.",
-          );
-        } else {
-          if (DROPPING_ROWS.size === 0) tbody.replaceChildren(); // clear skeleton once
-          const seen = new Set();
-          for (const r of rows) {
-            const key = (r.match || "") + "|" + (r.league || "");
-            seen.add(key);
-            const sig = dropSig(r);
-            const existing = DROPPING_ROWS.get(key);
-            if (existing) {
-              if (existing.sig !== sig) {
-                renderDroppingRow(existing.tr, r);
-                existing.sig = sig;
-                existing.tr.classList.remove("drop-changed");
-                void existing.tr.offsetWidth; // restart the flash
-                existing.tr.classList.add("drop-changed");
-                // Drop the class once the flash finishes, so the periodic
-                // reorder (which re-inserts every row) can't restart the
-                // animation on a row that hasn't changed since.
-                const changed = existing.tr;
-                setTimeout(
-                  () => changed.classList.remove("drop-changed"),
-                  1500,
-                );
-              }
-            } else {
-              const tr = document.createElement("tr");
-              renderDroppingRow(tr, r);
-              tbody.appendChild(tr);
-              DROPPING_ROWS.set(key, { tr, sig });
-            }
-          }
-          for (const [key, v] of DROPPING_ROWS) {
-            if (!seen.has(key)) {
-              v.tr.remove();
-              DROPPING_ROWS.delete(key);
-            }
-          }
-          // Keep the biggest-drop order without recreating rows (move only).
-          for (const r of rows) {
-            const v = DROPPING_ROWS.get(
-              (r.match || "") + "|" + (r.league || ""),
-            );
-            if (v) tbody.appendChild(v.tr);
-          }
-        }
-        if (stamp)
-          stamp.textContent =
-            data && data.fetched_at
-              ? (data.source || "external") +
-                " · fetched " +
-                new Date(data.fetched_at).toLocaleTimeString()
-              : "";
-      }
       function setStatusTab(tab) {
         STATUS_TAB = tab;
         document
@@ -4123,27 +3972,6 @@
             b.setAttribute("aria-selected", String(b.dataset.status === tab));
           });
         rememberView("pt_tab", tab);
-        // The DROPPING tab swaps the picks table for the external panel.
-        const dropping = tab === "dropping";
-        const picksWrap = $("picks-wrap");
-        const dropPanel = $("dropping-panel");
-        if (picksWrap) picksWrap.hidden = dropping;
-        if (dropPanel) dropPanel.hidden = !dropping;
-        // Tier is picks-only — gray it out on DROPPING. Search DOES work on
-        // DROPPING (filters the matches), so it stays enabled everywhere.
-        const tierEl = $("f-tier");
-        if (tierEl) tierEl.disabled = dropping;
-        if (DROPPING_TIMER) {
-          clearInterval(DROPPING_TIMER);
-          DROPPING_TIMER = null;
-        }
-        if (dropping) {
-          loadDropping();
-          // oddsmath refreshes ~5s; track it (server-cached 5s, so most ticks are
-          // served from cache — one upstream fetch per 5s per book).
-          DROPPING_TIMER = setInterval(loadDropping, 5000);
-          return;
-        }
         render();
       }
       document
@@ -4157,10 +3985,7 @@
       });
       $("f-search").addEventListener("input", () => {
         rememberView("pt_search", $("f-search").value);
-        // On DROPPING, search filters the external matches (re-render the last
-        // payload); on the picks tabs it filters the picks table.
-        if (STATUS_TAB === "dropping") renderDropping(DROPPING_DATA);
-        else render();
+        render();
       });
       // Restore the saved view BEFORE the first render (validate against known
       // values so a stale key can never blank the table).
@@ -4178,7 +4003,7 @@
         const savedSortDir = localStorage.getItem("pt_sortdir");
         if (["asc", "desc"].includes(savedSortDir)) SORT_DIR = savedSortDir;
         const savedTab = localStorage.getItem("pt_tab");
-        if (["live", "unverified", "results", "dropping"].includes(savedTab))
+        if (["live", "unverified", "results"].includes(savedTab))
           setStatusTab(savedTab);
       } catch (e) {
         /* storage unavailable — defaults stand */
@@ -4192,7 +4017,6 @@
       $("f-game-sport").addEventListener("change", renderGames);
       $("f-game-search").addEventListener("input", renderGames);
       $("refresh").addEventListener("click", async () => {
-        // Refresh whatever tab is showing — the DROPPING tab has its own feed.
         // Visible feedback so it's obvious it fired (picks rarely change between
         // refreshes, which made it look dead on the picks tabs).
         const btn = $("refresh");
@@ -4200,10 +4024,9 @@
         btn.disabled = true;
         btn.textContent = "Refreshing…";
         try {
-          const work = STATUS_TAB === "dropping" ? loadDropping(true) : load();
           // keep "Refreshing…" visible for a beat even on a cache hit, so it's
           // obvious the click did something on every tab.
-          await Promise.all([work, new Promise((r) => setTimeout(r, 450))]);
+          await Promise.all([load(), new Promise((r) => setTimeout(r, 450))]);
         } finally {
           btn.disabled = false;
           btn.textContent = orig;
@@ -4269,6 +4092,10 @@
         }
       })();
       load();
+      // Populate the sharp-anchor coverage headline once, up front, so the
+      // panel header shows real Betfair/Pinnacle % instead of a bare dash even
+      // while collapsed. Off the 60s loop — coverage moves on the slate cadence.
+      loadCoverageHeadline();
       setInterval(load, 60000);
     </script>
   </body>

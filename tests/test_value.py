@@ -301,6 +301,78 @@ def test_anchor_type_for_categorizes_every_anchor() -> None:
     assert anchor_type_for("Smarkets") == "sharp"
 
 
+def test_is_sharp_anchored_only_named_sharps_are_sharp() -> None:
+    # The require-sharp-anchor gate's data test: a pick anchored on the soft
+    # CONSENSUS median (no Pinnacle/Betfair priced the full market) is NOT
+    # sharp-anchored; a named sharp anchor (Pinnacle/Betfair/Smarkets) is.
+    from app.edge.value import CONSENSUS_ANCHOR, is_sharp_anchored
+
+    assert is_sharp_anchored(CONSENSUS_ANCHOR) is False
+    assert is_sharp_anchored("") is False  # blank/unknown anchor is not sharp
+    assert is_sharp_anchored("Pinnacle") is True
+    assert is_sharp_anchored("pinnacle sports") is True
+    assert is_sharp_anchored("Betfair Exchange") is True
+    assert is_sharp_anchored("Smarkets") is True
+
+
+def test_no_sharp_anchor_means_no_premium_invariant() -> None:
+    # P0-2 INVARIANT (regression pin): the require-sharp-anchor premium gate
+    # (app/pipeline.py:841-848) demotes to the volume/shadow tier EXACTLY when
+    # `require_sharp_anchor and not is_sharp_anchored(anchor_book)`. A future
+    # refactor of the anchor selector that re-opens the consensus-as-fair path
+    # (routes a soft consensus into a "sharp-looking" anchor, or flips the
+    # predicate) MUST trip here. Phrased as the tier outcome the pipeline
+    # computes, so it is pinned at the predicate the gate consumes.
+    from app.edge.value import (
+        CONSENSUS_ANCHOR,
+        anchor_type_for,
+        is_sharp_anchored,
+    )
+
+    def tier_of(anchor_book: str, *, require_sharp_anchor: bool) -> str:
+        # The pipeline's premium tier starts every candidate at "premium" and
+        # the gate demotes to "volume" (shadow: persisted + CLV-tracked, never
+        # alerts, never reserves exposure). This mirrors pipeline.py exactly.
+        if require_sharp_anchor and not is_sharp_anchored(anchor_book):
+            return "volume"
+        return "premium"
+
+    # A consensus-anchored candidate is DEMOTED to volume (shadow) — never
+    # alerts, never reserves exposure — under the live gate.
+    assert tier_of(CONSENSUS_ANCHOR, require_sharp_anchor=True) == "volume"
+    # ...and the predicate the gate consumes treats consensus / blank as NOT sharp.
+    assert is_sharp_anchored(CONSENSUS_ANCHOR) is False
+    assert is_sharp_anchored("") is False
+    # the persisted CREATION-anchor tag for the consensus path is "consensus"
+    # (never "pinnacle"/"sharp"), so by_anchor stratification cannot mislabel it.
+    assert anchor_type_for(CONSENSUS_ANCHOR) == "consensus"
+    # A genuinely sharp-anchored candidate STAYS premium with the gate on.
+    assert tier_of("Pinnacle", require_sharp_anchor=True) == "premium"
+    assert tier_of("Betfair Exchange", require_sharp_anchor=True) == "premium"
+    assert is_sharp_anchored("Pinnacle") is True
+    # gate OFF (the non-breaking default): consensus is NOT demoted.
+    assert tier_of(CONSENSUS_ANCHOR, require_sharp_anchor=False) == "premium"
+
+
+def test_close_is_independent_of_fill_detects_circular_self_priced_close() -> None:
+    # P0-1/P0-3: a close anchored by the pick's OWN fill book is CIRCULAR (the
+    # book pricing its own close, closing == fill, |clv_log|~0) and must read as
+    # NOT independent. A different sharp book, or the >=3-book consensus median,
+    # is independent of the fill by construction. Normalization is case-folding.
+    from app.edge.value import CONSENSUS_ANCHOR, close_is_independent_of_fill
+
+    # circular: same book on both sides (any casing) -> not independent
+    assert close_is_independent_of_fill("Pinnacle", "Pinnacle") is False
+    assert close_is_independent_of_fill("Pinnacle", "pinnacle") is False
+    # genuine: a DIFFERENT sharp book anchored the close
+    assert close_is_independent_of_fill("Pinnacle", "Bet365") is True
+    assert close_is_independent_of_fill("Betfair Exchange", "Pinnacle") is True
+    # consensus median spans >=3 books -> independent of any single fill book
+    assert close_is_independent_of_fill(CONSENSUS_ANCHOR, "Pinnacle") is True
+    # blank/unknown close anchor is not a self-priced close
+    assert close_is_independent_of_fill("", "Pinnacle") is True
+
+
 def test_consensus_anchor_dedups_casing_variant_books() -> None:
     # audit #5: two raw keys that normalize to the same book ('BookA' + 'booka')
     # must count ONCE in the per-selection median. 'home' deduped median of

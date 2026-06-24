@@ -221,6 +221,19 @@ def test_scrape_nav_timeout_default_raises_the_upstream_15s_floor() -> None:
     assert make_settings().scrape_nav_timeout_ms > 15000
 
 
+def test_oddsportal_use_json_feed_defaults_off() -> None:
+    # The curl_cffi JSON feed is SELECTABLE and OFF by default — the proven
+    # Playwright/OddsHarvester path stays the default until prod-verified. When
+    # the flag is later flipped, there is NO Playwright odds fallback: a per-match
+    # JSON failure is a scrape gap (operator 2026-06-23).
+    assert make_settings().oddsportal_use_json_feed is False
+
+
+def test_oddsportal_use_json_feed_enables_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ODDSPORTAL_USE_JSON_FEED", "true")
+    assert Settings(_env_file=None).oddsportal_use_json_feed is True
+
+
 def test_out_of_range_pacing_knob_via_env_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ODDSPORTAL_CONCURRENCY", "0")
     with pytest.raises(ValidationError):
@@ -256,6 +269,16 @@ def test_volume_floor_above_premium_is_fatal() -> None:
 def test_equal_tier_floors_disable_volume_cleanly() -> None:
     s = make_settings(value_volume_min_edge=0.03, value_min_edge=0.03)
     assert s.value_volume_min_edge == s.value_min_edge  # valid: tier off
+
+
+def test_betfair_exchange_min_liquidity_default_admits_obscure_markets() -> None:
+    # REGRESSION (2026-06-23): the old £500 floor (a single major-match probe)
+    # silently dropped every obscure Betfair market (live liquidity £12-£23) ->
+    # only 22 betfair_soccer events ever captured. The default must stay low
+    # enough to admit real small-exchange markets while still gating £0 dust.
+    s = make_settings()
+    assert s.betfair_exchange_min_liquidity == 10.0
+    assert s.betfair_exchange_min_liquidity < 14.0  # the thinnest live obscure £
 
 
 def test_all_leagues_with_wide_market_list_is_fatal() -> None:

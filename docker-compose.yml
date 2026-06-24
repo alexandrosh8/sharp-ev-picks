@@ -129,7 +129,13 @@ services:
     # Chromium (scrape concurrency 3, 20-40 min cycles) is memory-hungry; cap
     # it so a leak can never OOM a shared OpenClaw VPS. init: true reaps
     # zombie Chromium helper processes after browser crashes.
-    mem_limit: 2g
+    # 3g (was 2g): at 2g the Python app (~1.5g) + 3 concurrent heavy match-page
+    # Chromium tabs peaked AT the cgroup cap and the kernel OOM-killed a renderer
+    # ("Target crashed", oom_kill=3). Host has ~12g free; 3g gives headroom.
+    # shm_size 1g is belt-and-suspenders (Docker launch already sets
+    # --disable-dev-shm-usage, but this protects the non-Docker arg path too).
+    mem_limit: 3g
+    shm_size: "1gb"
     cpus: 2
     init: true
     restart: unless-stopped

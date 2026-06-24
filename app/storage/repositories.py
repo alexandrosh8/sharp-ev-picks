@@ -8,6 +8,7 @@ re-poll of the same market state never duplicates rows.
 
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
@@ -19,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.ingestion.base import EventTeams
+from app.ingestion.base import EventTeams, prefer_kickoff
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
@@ -39,10 +40,139 @@ from app.storage.models import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from app.backtesting.calibration import BetBandObservation
     from app.backtesting.live_evidence import SettledPickRow
     from app.resolution.shadow import BetfairCoverageOutcome, ShadowOutcome
 
 logger = logging.getLogger(__name__)
+
+
+#: Bookmaker name the Betfair Exchange capture persists under (mirrors
+#: app.ingestion.betfair_exchange.BOOKMAKER). Kept as a local literal so this
+#: read-only query module never imports the ingestion layer.
+_BETFAIR_BOOKMAKER = "Betfair Exchange"
+
+
+@dataclass(frozen=True)
+class BetfairTarget:
+    """One canonical soccer event the Betfair Exchange capture should read this
+    cycle: its OddsPortal match URL (the event identity throughout the platform)
+    plus the team/league/kickoff context the reader needs to persist the row.
+
+    Sourced from the DB (recent upcoming events that already have odds), NOT from
+    the last completed full scrape — so the capture is decoupled from poll_odds
+    completion (the prod wedge: one slow CPU-bound scrape held poll_odds's single
+    slot, so last_fetch_event_ids stayed empty and the reader saw no targets)."""
+
+    external_ref: str  # the OddsPortal match URL (== Event.external_ref)
+    home: str
+    away: str
+    league: str
+    starts_at: datetime | None
+
+
+async def select_betfair_targets(
+    session_factory: "async_sessionmaker",
+    *,
+    sport: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=3),
+    limit: int = 20,
+) -> list[BetfairTarget]:
+    """Bounded, rotating list of canonical ``sport`` events for the Betfair
+    Exchange capture to read THIS cycle — read-only (a single SELECT).
+
+    DECOUPLING (prod fix): targets come from the warehouse, not from the loader's
+    ``last_fetch_event_ids`` (populated only when a poll_odds full scrape
+    COMPLETES). On a CPU-bound box poll_odds skips every slot, so that map stayed
+    empty and the capture got nothing — even £270k-liquidity majors. Sourcing
+    from the DB means a still-open, already-priced event is a target regardless of
+    whether the current scrape finished.
+
+    Eligibility — an event qualifies when it:
+      * is in ``sport`` (the canonical namespace, e.g. "soccer"),
+      * has a navigable OddsPortal URL ref (``http...``; synthetic
+        "home|away|date" ids are skipped — the reader can't open them),
+      * has a KNOWN kickoff strictly in the future and at most ``window`` ahead
+        (NULL kickoff / already-started events are skipped: the pre-match Betfair
+        BACK row is gone and re-reading wastes the scarce per-cycle budget),
+      * already has at least one NON-Betfair odds snapshot (the main scrape
+        priced it — so it is a real, liquid fixture, not a Betfair-only shell).
+
+    BOUND + ROTATION (CPU-aware): ordered never-captured-first, then
+    longest-since-last-Betfair-capture (stalest first), then soonest kickoff,
+    then ref for determinism — and capped at ``limit``. A small ``limit`` over
+    successive cycles sweeps the whole slate (each cycle the freshly-captured
+    events fall to the back), so the capture NEVER opens all ~91 match pages at
+    once. The per-cycle page-load cost is therefore exactly ``min(limit, eligible)``.
+    """
+    now = now or datetime.now(tz=UTC)
+    horizon = now + window
+    home_t = aliased(Team)
+    away_t = aliased(Team)
+    # Latest Betfair Exchange capture time for this event (NULL = never): the
+    # rotation key. Correlated MAX over the SAME canonical event row (Betfair
+    # binds inline onto it, bookmaker="Betfair Exchange").
+    last_betfair = (
+        select(func.max(OddsSnapshot.captured_at))
+        .where(
+            OddsSnapshot.event_id == Event.id,
+            OddsSnapshot.bookmaker == _BETFAIR_BOOKMAKER,
+        )
+        .scalar_subquery()
+    )
+    # The event must have been priced by the MAIN scrape (a non-Betfair snapshot
+    # exists) — otherwise it is not a real liquid fixture to read.
+    has_real_odds = (
+        select(OddsSnapshot.id)
+        .where(
+            OddsSnapshot.event_id == Event.id,
+            OddsSnapshot.bookmaker != _BETFAIR_BOOKMAKER,
+        )
+        .exists()
+    )
+    stmt = (
+        select(
+            Event.external_ref,
+            home_t.name,
+            away_t.name,
+            League.name,
+            Event.starts_at,
+        )
+        .select_from(Event)
+        .join(Sport, Event.sport_id == Sport.id)
+        .join(League, Event.league_id == League.id)
+        .join(home_t, Event.home_team_id == home_t.id)
+        .join(away_t, Event.away_team_id == away_t.id)
+        .where(
+            Sport.key == sport,
+            Event.external_ref.like("http%"),
+            Event.starts_at.is_not(None),
+            Event.starts_at > now,
+            Event.starts_at <= horizon,
+            has_real_odds,
+        )
+        # never-captured first (NULLS FIRST), then stalest capture, then soonest
+        # kickoff, then ref — a total, deterministic rotation order.
+        .order_by(
+            last_betfair.asc().nulls_first(),
+            Event.starts_at.asc(),
+            Event.external_ref.asc(),
+        )
+        .limit(limit)
+    )
+    async with session_factory() as session:
+        rows = (await session.execute(stmt)).all()
+    return [
+        BetfairTarget(
+            external_ref=ref,
+            home=home,
+            away=away,
+            league=league,
+            starts_at=starts_at,
+        )
+        for ref, home, away, league, starts_at in rows
+    ]
 
 
 # Race-safe get-or-create (audit #11): a concurrent inserter may create the same
@@ -119,10 +249,16 @@ async def _get_or_create_event(
     result and corrupt settlement + ROI (review 2026-06-21)."""
     existing = await session.scalar(select(Event).where(Event.external_ref == external_ref))
     if existing is not None:
-        # Earlier rows may be NULL (or carry a legacy placeholder); a real
-        # kickoff from the source upgrades them to the true start.
-        if starts_at is not None and existing.starts_at != starts_at:
-            existing.starts_at = starts_at
+        # Earlier rows may be NULL (or carry a legacy placeholder); a real kickoff
+        # from the source upgrades them. Apply the SAME precedence rule as the
+        # in-memory EventDirectory (app.ingestion.base.prefer_kickoff): a real time
+        # always wins, but a date-only midnight (00:00:00 UTC sentinel) or a None
+        # must NEVER overwrite an already-stored REAL time. Without this, the
+        # residual-tail midnight (OddsPortal's date-only basketball header) clobbers
+        # a real time captured on an earlier cycle (root cause 2026-06-24).
+        target = prefer_kickoff(existing.starts_at, starts_at)
+        if target != existing.starts_at:
+            existing.starts_at = target
             await session.flush()
         return existing.id
     await session.execute(
@@ -384,6 +520,12 @@ async def latest_available_games_with_events(
     as_of = now or datetime.now(tz=UTC)
     event_cutoff = as_of - timedelta(hours=12)
     recent_odds_cutoff = as_of - timedelta(hours=24)
+    # Hide already-FINISHED games: a fixture whose kickoff is more than this long
+    # ago is over and must not render as bettable in GET /games (the old query had
+    # NO upper bound, so kicked-off events with recent odds leaked in). A NULL
+    # kickoff (TBD) is kept — it has no finish to be past. 3h30m covers a full
+    # match incl. stoppage/extra-time/penalties so a live fixture is never hidden.
+    in_play_grace = as_of - timedelta(hours=3, minutes=30)
 
     home = aliased(Team)
     away = aliased(Team)
@@ -419,7 +561,10 @@ async def latest_available_games_with_events(
         .join(home, Event.home_team_id == home.id)
         .join(away, Event.away_team_id == away.id)
         .outerjoin(OddsSnapshot, OddsSnapshot.event_id == Event.id)
-        .where((Event.starts_at >= event_cutoff) | (OddsSnapshot.ingested_at >= recent_odds_cutoff))
+        .where(
+            (Event.starts_at >= event_cutoff) | (OddsSnapshot.ingested_at >= recent_odds_cutoff),
+            (Event.starts_at.is_(None)) | (Event.starts_at > in_play_grace),
+        )
         .group_by(
             Sport.key,
             Sport.name,
@@ -522,7 +667,10 @@ async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, date
         .all()
     )
     for event in rows:
-        target = kickoffs[event.external_ref]
+        # Precedence (prefer_kickoff): a real time upgrades a stored midnight/NULL,
+        # but a date-only midnight in the refresh map must NOT downgrade an event
+        # that already has a REAL time — same rule as the upsert + EventDirectory.
+        target = prefer_kickoff(event.starts_at, kickoffs[event.external_ref])
         if event.starts_at != target:
             event.starts_at = target
             changed += 1
@@ -536,6 +684,14 @@ async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, date
 # anchor_type_for (pinnacle / sharp); kept local to avoid a heavy import here.
 _SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
 
+# P2-1 HEADLINE min-n: below this many settled picks the headline roi /
+# beat_close_rate / stake-weighted CLV are NOISE (a 10-pick -8.7% reads as
+# signal), so they are SUPPRESSED at the source and flagged. Mirrors the
+# per-stratum MIN_STRATUM_N honesty gate in app/backtesting/live_evidence.py —
+# the headline had no such guard. The trusted sharp subset is gated on its OWN
+# n (n_sharp_close), which is naturally thinner than n_settled.
+MIN_HEADLINE_N = 50
+
 
 def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     """Aggregate (outcome, pnl, stake, clv_log, beat_close, closing_odds,
@@ -544,10 +700,18 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
 
     A TRUSTED sharp-close subset (``sharp_*``) is reported ALONGSIDE the blended
     headline: a close counts only when it is snapshot-sourced (closing_odds NOT
-    NULL — not a poll-time revalidation fallback) AND anchored by a named sharp
+    NULL — not a poll-time revalidation fallback), anchored by a named sharp
     book (closing_anchor_type in pinnacle/sharp — not a soft-book consensus
-    median). Those are the closes whose CLV the platform can stand behind; the
+    median), AND independent of the fill (close_independent_of_fill is not False —
+    the close was NOT anchored by the pick's own fill book; a self-priced close
+    is CIRCULAR fake CLV, closing == fill, |clv_log|~0, and is what masked the
+    -EV). Those are the closes whose CLV the platform can stand behind; the
     blended ``stake_weighted_clv_log`` still mixes every close in for continuity.
+
+    Each row is (outcome, pnl, stake, clv_log, beat_close, closing_odds,
+    closing_anchor, close_independent). ``close_independent`` is None when the
+    column is feature-detected absent (pre-column rows) — treated as "unknown,
+    NOT circular" so historical sharp closes keep their status.
     """
     counts = {"won": 0, "lost": 0, "void": 0, "push": 0, "half_won": 0, "half_lost": 0}
     total_staked = Decimal("0")
@@ -558,7 +722,17 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     sharp_clv_weighted = Decimal("0")
     sharp_clv_stake = Decimal("0")
     sharp_beat_known = sharp_beat_true = n_sharp = 0
-    for outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor in rows:
+    sharp_all_independent = True  # invariant: no circular close in the sharp subset
+    for (
+        outcome,
+        pnl,
+        stake,
+        clv_log,
+        beat_close,
+        closing_odds,
+        closing_anchor,
+        close_independent,
+    ) in rows:
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
@@ -573,26 +747,58 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             closing_odds is not None
             and closing_anchor in _SHARP_CLOSE_ANCHORS
             and clv_log is not None
+            # INDEPENDENCE guard (P0-1/P0-3): a close anchored by the pick's OWN
+            # fill book is CIRCULAR (closing == fill, |clv_log|~0) — fake CLV that
+            # masked the -EV. Only a definite False excludes; None (pre-column /
+            # unknown) is NOT treated as circular, preserving historical rows.
+            and close_independent is not False
         ):
-            # Genuine sharp snapshot close with a measured CLV — the trusted subset.
+            # Genuine, INDEPENDENT sharp snapshot close with a measured CLV — the
+            # trusted subset.
             n_sharp += 1
             sharp_clv_weighted += stake * clv_log
             sharp_clv_stake += stake
+            sharp_all_independent = sharp_all_independent and close_independent is not False
             if beat_close is not None:
                 sharp_beat_known += 1
                 sharp_beat_true += int(beat_close)
+    # Defense-in-depth: the gate above already excludes circular closes, so by
+    # construction every row in the sharp subset is independent of its fill book
+    # (closing_anchor != fill_book). Assert it so a future refactor of the gate
+    # that re-admits a self-priced close trips here instead of silently faking CLV.
+    assert sharp_all_independent, "sharp-close subset contains a circular (self-priced) close"
+    # P2-1 HEADLINE min-n suppression: below MIN_HEADLINE_N settled picks the
+    # blended roi / beat_close_rate / stake-weighted CLV are noise (a 10-pick
+    # -8.7% reads as signal), so they are NULLED at the source and flagged
+    # roi_status="insufficient" — no /performance consumer can read a headline
+    # point estimate off a sub-floor sample. n / counts / totals survive so the
+    # dashboard can render the "n too small" state. The trusted sharp subset is
+    # gated independently on its OWN n (n_sharp_close).
+    n_settled = len(rows)
+    headline_ok = n_settled >= MIN_HEADLINE_N
+    sharp_ok = n_sharp >= MIN_HEADLINE_N
     return {
-        "n_settled": len(rows),
+        "n_settled": n_settled,
         **counts,
         "total_staked": str(total_staked),
         "total_pnl": str(total_pnl),
-        "roi": _ratio(total_pnl, total_staked),
-        "stake_weighted_clv_log": _ratio(clv_weighted, clv_stake),
-        "beat_close_rate": _ratio(Decimal(beat_true), Decimal(beat_known)),
-        # TRUSTED subset — genuine sharp snapshot closes only (see docstring).
+        "roi": _ratio(total_pnl, total_staked) if headline_ok else None,
+        "roi_status": "ok" if headline_ok else "insufficient",
+        "stake_weighted_clv_log": _ratio(clv_weighted, clv_stake) if headline_ok else None,
+        "beat_close_rate": (
+            _ratio(Decimal(beat_true), Decimal(beat_known)) if headline_ok else None
+        ),
+        "min_headline_n": MIN_HEADLINE_N,
+        # TRUSTED subset — genuine sharp snapshot closes only (see docstring) —
+        # gated on its own n (n_sharp_close), naturally thinner than n_settled.
         "n_sharp_close": n_sharp,
-        "sharp_stake_weighted_clv_log": _ratio(sharp_clv_weighted, sharp_clv_stake),
-        "sharp_beat_close_rate": _ratio(Decimal(sharp_beat_true), Decimal(sharp_beat_known)),
+        "sharp_status": "ok" if sharp_ok else "insufficient",
+        "sharp_stake_weighted_clv_log": (
+            _ratio(sharp_clv_weighted, sharp_clv_stake) if sharp_ok else None
+        ),
+        "sharp_beat_close_rate": (
+            _ratio(Decimal(sharp_beat_true), Decimal(sharp_beat_known)) if sharp_ok else None
+        ),
     }
 
 
@@ -613,6 +819,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     # live_evidence_rows): until the ORM attr lands, the close anchor is None and
     # the sharp-close subset is simply empty (n_sharp_close == 0).
     close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
+    indep_attr = getattr(Pick, "close_independent_of_fill", None)
     select_cols: list[Any] = [
         ResultTracking.outcome,  # 0
         ResultTracking.pnl,  # 1
@@ -622,10 +829,13 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         Pick.tier,  # 5 — split key, not passed to _aggregate_settled
         Pick.closing_odds,  # 6 — snapshot-close marker
     ]
-    close_anchor_idx = None
+    close_anchor_idx = indep_idx = None
     if close_anchor_attr is not None:
         close_anchor_idx = len(select_cols)
         select_cols.append(close_anchor_attr)  # 7
+    if indep_attr is not None:
+        indep_idx = len(select_cols)
+        select_cols.append(indep_attr)  # 8 — INDEPENDENCE provenance (P0-1/P0-3)
     rows = (
         await session.execute(select(*select_cols).join(Pick, ResultTracking.pick_id == Pick.id))
     ).all()
@@ -639,13 +849,17 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     }
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
-        # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor)
+        # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
+        #  close_independent) — close_independent is None when feature-detected
+        # absent (pre-column), which the sharp gate treats as "unknown, NOT
+        # circular".
         out: list[tuple[Any, ...]] = []
         for r in rows:
             if r[5] != tier_name:
                 continue
             closing_anchor = r[close_anchor_idx] if close_anchor_idx is not None else None
-            out.append((r[0], r[1], r[2], r[3], r[4], r[6], closing_anchor))
+            close_independent = r[indep_idx] if indep_idx is not None else None
+            out.append((r[0], r[1], r[2], r[3], r[4], r[6], closing_anchor, close_independent))
         return out
 
     premium = _aggregate_settled(_tier_rows("premium"))
@@ -680,6 +894,7 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
 
     anchor_attr = getattr(Pick, "anchor_type", None)
     close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
+    indep_attr = getattr(Pick, "close_independent_of_fill", None)
     columns = [
         Pick.tier,  # 0
         Pick.value_filter_score,  # 1
@@ -689,16 +904,20 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
         ResultTracking.pnl,  # 5
         Pick.closing_odds,  # 6 — snapshot-close marker (NON-NULL = a true close)
     ]
-    # closing_anchor_type is FEATURE-DETECTED like anchor_type (same migration
-    # contract): until the ORM attr lands, every row's close anchor is None and
-    # the close-anchor grouping / sharp-close subset are simply empty.
-    anchor_idx = close_anchor_idx = None
+    # closing_anchor_type / close_independent_of_fill are FEATURE-DETECTED like
+    # anchor_type (same migration contract): until the ORM attr lands, every
+    # row's value is None and the close-anchor grouping / sharp-close subset are
+    # simply empty (or, for independence, "unknown" — never treated as circular).
+    anchor_idx = close_anchor_idx = indep_idx = None
     if anchor_attr is not None:
         anchor_idx = len(columns)
         columns.append(anchor_attr)
     if close_anchor_attr is not None:
         close_anchor_idx = len(columns)
         columns.append(close_anchor_attr)
+    if indep_attr is not None:
+        indep_idx = len(columns)
+        columns.append(indep_attr)
     rows = (
         await session.execute(select(*columns).join(Pick, ResultTracking.pick_id == Pick.id))
     ).all()
@@ -715,8 +934,49 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             # closing_odds NON-NULL marks a genuine snapshot close (not a
             # poll-time revalidation fallback) — the SOURCE half of "trusted".
             has_snapshot_close=row[6] is not None,
+            # INDEPENDENCE half (P0-1/P0-3): False = circular self-priced close
+            # (excluded from sharp subset); None = unknown (pre-column, NOT
+            # treated as circular).
+            close_independent_of_fill=row[indep_idx] if indep_idx is not None else None,
         )
         for row in rows
+    ]
+
+
+async def bet_band_observations(session: AsyncSession) -> list["BetBandObservation"]:
+    """Settled, BINARY-outcome PREMIUM picks reduced to plain-float observations
+    for the claimed-fair reliability monitor (P1-1, app/backtesting/calibration.
+    bet_band_reliability) — the DB read half of GET /performance "calibration".
+
+    Maps each pick to (claimed_fair=model_probability — the probability the
+    strategy claimed at bet time, won=outcome=='won', fill_odds=decimal_odds —
+    the price actually taken). Only binary settlements (won/lost) carry a
+    calibration label; push/void/half_* are excluded (no win/lose outcome).
+    Scoped to the PREMIUM tier so the monitor judges the ACTUALLY-ALERTED
+    strategy, matching the headline's premium scope. Pure floats out — the
+    odds-band scoping and ECE math stay in the pure calibration module.
+    """
+    from app.backtesting.calibration import BetBandObservation
+
+    rows = (
+        await session.execute(
+            select(
+                Pick.model_probability,
+                ResultTracking.outcome,
+                Pick.decimal_odds,
+            )
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .where(ResultTracking.outcome.in_(("won", "lost")))
+            .where(Pick.tier == "premium")
+        )
+    ).all()
+    return [
+        BetBandObservation(
+            claimed_fair=float(model_probability),
+            won=(outcome == "won"),
+            fill_odds=float(decimal_odds),
+        )
+        for model_probability, outcome, decimal_odds in rows
     ]
 
 
@@ -762,6 +1022,8 @@ async def persist_odds_snapshots(
     teams_by_event: Mapping[str, EventTeams],
     sport: str,
     default_league: str,
+    *,
+    attach_only_to_existing: bool = False,
 ) -> int:
     """Append price observations into odds_snapshots (the backtest /
     line-movement / CLV dataset). Returns the number of NEW rows written.
@@ -774,6 +1036,16 @@ async def persist_odds_snapshots(
     (event, bookmaker, market, selection, captured_at) via ON CONFLICT DO
     NOTHING. Odds cross the boundary Decimal-via-string; captured_at is the
     provider-reported observation time, never now().
+
+    ATTACH-ONLY mode (``attach_only_to_existing=True``): persist ONLY for
+    external_refs whose Event row ALREADY exists; refs with no event are
+    skipped this cycle (logged as a count, never an error) and attach next
+    cycle once the canonical event lands. This is the Betfair inline-binding
+    safety contract (ADR-0015): the Betfair capture rides the MAIN scrape's
+    canonical event and must NEVER MINT one from its own partial data
+    (creating an event from Betfair-only metadata could set wrong/partial
+    fields and break settlement). The normal create path (default False) is
+    unchanged for the main scrape + the pinnacle arcadia archive.
 
     Failure isolation: each event resolves and inserts inside its OWN
     SAVEPOINT — one poisoned event (e.g. an external_ref longer than its
@@ -796,6 +1068,33 @@ async def persist_odds_snapshots(
     written = 0
     failed_events = 0
     async with session_factory() as session:
+        if attach_only_to_existing:
+            # ATTACH-ONLY: keep ONLY refs whose Event already exists. The
+            # remainder are not errors — they are fixtures the main scrape has
+            # not persisted YET (the capture runs in the gap before the next
+            # main poll); they attach on a later cycle. One pre-query (a single
+            # IN on the globally-unique external_ref), not a per-event create.
+            present = set(
+                (
+                    await session.execute(
+                        select(Event.external_ref).where(Event.external_ref.in_(list(by_event)))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            skipped = len(by_event) - len(present)
+            by_event = {ref: snaps for ref, snaps in by_event.items() if ref in present}
+            if skipped:
+                logger.info(
+                    "odds snapshot attach-only (%s): %d/%d events not yet created "
+                    "by the main scrape — skipped this cycle, will attach next",
+                    sport,
+                    skipped,
+                    skipped + len(by_event),
+                )
+            if not by_event:
+                return 0
         sport_id = await _get_or_create_sport(session, sport, sport.title())
         for external_ref, event_snapshots in by_event.items():
             teams = teams_by_event[external_ref]
@@ -960,11 +1259,36 @@ async def resolve_pinnacle_close_snaps(
     from app.resolution import (
         EventCandidate,
         default_aliases,
-        match_event,
+        distinguishing_markers,
+        match_event_hardened,
         normalize_name,
         oddsportal_slug_names,
     )
     from app.resolution.tennis_names import canonical_tennis_name
+
+    # GO-LIVE (shadow-validated, commit 1d697cd: 61.3% match-rate, 0 false merges
+    # across 62 audited): the live Pinnacle anchor matcher is now the precision-
+    # hardened cross-source matcher, NOT the exact-only match_event. It keeps every
+    # cardinal-sin guard (marker veto, disambiguating-token blocklist, ambiguity
+    # reject, degenerate-pair reject) and adds the two-tier Jaro-Winkler + token-
+    # sort recall tier that the shadow harness measured. Cross-source league
+    # taxonomies do NOT share a vocabulary here (OddsPortal league vs the per-
+    # namespace pinnacle_<sport> key), so league is passed incomparable (None on
+    # both sides) — exactly as the shadow harness effectively does; the matcher
+    # never rejects on absent league metadata.
+    #
+    # WRONG-GAME FIX (2026-06-24, live audit Gigantes/Cangrejeros): the
+    # candidate-FETCH window stays the wide (+/-(max_day_drift+1)-day) span the DB
+    # query bounds to — so ambiguity detection sees EVERY same-teams leg of a
+    # series — but the matcher's ACCEPT gate is the tight default
+    # (``_ACCEPT_MINUTE_DRIFT`` = 6h) it carries internally. The go-live flip wrongly
+    # passed this +/-2-DAY span as ``max_minute_drift`` AND let it gate acceptance,
+    # so a same-teams BSN rematch 48h earlier (home/away swapped, matched via the
+    # slug) was accepted as the close — fake CLV. We now keep the wide fetch window
+    # for context but let acceptance default to the tight bound: a same-teams fixture
+    # two days apart is a DIFFERENT game and is REJECTED, while a few hours of
+    # cross-source timezone/rounding noise on the SAME game still matches.
+    minute_drift = (max_day_drift + 1) * 24 * 60
 
     # audit #7: tennis is a two-player, UNORDERED fixture whose OddsPortal name
     # ("Surname I.") differs from arcadia's ("Firstname Surname"). Match it the
@@ -1007,34 +1331,45 @@ async def resolve_pinnacle_close_snaps(
     aliases = default_aliases()
     qhome = canonical_tennis_name(home) if is_tennis else home
     qaway = canonical_tennis_name(away) if is_tennis else away
-    matched = match_event(
+    matched = match_event_hardened(
         qhome,
         qaway,
         kickoff,
         candidates,
         aliases=aliases,
-        max_day_drift=max_day_drift,
         ordered=not is_tennis,
+        league=None,  # cross-source league taxonomies are incomparable here
+        candidate_leagues=None,
+        max_minute_drift=minute_drift,
     )
     if matched is None:
-        # Fallback: OddsPortal's URL slug is a cleaner match key than the scraped
-        # display name (it drops the women-league "W" suffix + sponsor tails) — so
-        # retry with it. Still STRICT + unique-candidate, so it cannot attach a
-        # wrong close (the cardinal sin); it only recovers fixtures the display
-        # name spelled differently (live basketball match rate 36% -> 41%).
+        # Fallback: OddsPortal's URL slug recovers fixtures the scraped display
+        # name spelled differently (sponsor tails, abbreviations; live basketball
+        # match rate 36% -> 41%). BUT the slug also DROPS women/youth/reserve
+        # markers ("W"/"U20"/"II") the display name carries — matching on the
+        # marker-less slug would conflate a women's/youth pick with the men's/
+        # senior fixture and attach ITS Pinnacle close (a WRONG-GAME CLV defect:
+        # the men's "Brasiliense v Sobradinho" close onto a "... U20" pick). So
+        # use the slug only when it RETAINS every distinguishing marker the
+        # display name has; otherwise the recovery is unsafe and we skip it.
         slug = oddsportal_slug_names(pick_external_ref)
         if slug is not None:
             sh = canonical_tennis_name(slug[0]) if is_tennis else slug[0]
             sa = canonical_tennis_name(slug[1]) if is_tennis else slug[1]
-            matched = match_event(
-                sh,
-                sa,
-                kickoff,
-                candidates,
-                aliases=aliases,
-                max_day_drift=max_day_drift,
-                ordered=not is_tennis,
-            )
+            display_markers = distinguishing_markers(home) | distinguishing_markers(away)
+            slug_markers = distinguishing_markers(sh) | distinguishing_markers(sa)
+            if display_markers <= slug_markers:
+                matched = match_event_hardened(
+                    sh,
+                    sa,
+                    kickoff,
+                    candidates,
+                    aliases=aliases,
+                    ordered=not is_tennis,
+                    league=None,  # cross-source league taxonomies are incomparable here
+                    candidate_leagues=None,
+                    max_minute_drift=minute_drift,
+                )
     if matched is None:
         return []
     # tennis: require a shared normalized token between the pick and the matched
@@ -1100,6 +1435,7 @@ async def shadow_match_rate_outcomes(
         EventCandidate,
         default_aliases,
         match_event,
+        match_event_hardened,
         oddsportal_slug_names,
     )
     from app.resolution.shadow import ShadowOutcome, arcadia_base_sport
@@ -1144,12 +1480,14 @@ async def shadow_match_rate_outcomes(
     for pinnacle_key, picks in by_namespace.items():
         kickoffs = [p[5] for p in picks]
         arc_home, arc_away = aliased(Team), aliased(Team)
+        arc_league = aliased(League)
         arc_rows = (
             await session.execute(
-                select(arc_home.name, arc_away.name, Event.starts_at)
+                select(arc_home.name, arc_away.name, Event.starts_at, arc_league.key)
                 .join(Sport, Event.sport_id == Sport.id)
                 .join(arc_home, Event.home_team_id == arc_home.id)
                 .join(arc_away, Event.away_team_id == arc_away.id)
+                .join(arc_league, Event.league_id == arc_league.id, isouter=True)
                 .where(
                     Sport.key == pinnacle_key,
                     Event.starts_at.is_not(None),
@@ -1160,8 +1498,13 @@ async def shadow_match_rate_outcomes(
         ).all()
         archive = [
             EventCandidate(ref=str(i), home=h, away=a, kickoff=ko)
-            for i, (h, a, ko) in enumerate(arc_rows)
+            for i, (h, a, ko, _lg) in enumerate(arc_rows)
         ]
+        # ref -> league for the hardened matcher's STAGE-0 league block. The
+        # pinnacle archive namespace stores a single per-namespace league key
+        # (pinnacle_<sport>), so cross-league agreement is usually a no-op today,
+        # but the map keeps the block honest if/when leagues are populated.
+        archive_leagues = {str(i): lg for i, (_h, _a, _ko, lg) in enumerate(arc_rows) if lg}
         for pick_id, sport_key, league_key, home, away, kickoff, ext_ref in picks:
             # Same day window the matcher uses internally — count first so a
             # no-coverage pick is distinguishable from a strict-rejection.
@@ -1184,6 +1527,23 @@ async def shadow_match_rate_outcomes(
                         aliases=aliases,
                         max_day_drift=max_day_drift,
                     )
+            if matched_ev is None:
+                # SHADOW-only precision-hardened fallback (B): two-tier Jaro-Winkler
+                # on marker-stripped base names, league + UTC-minute block, marker
+                # veto, disambiguating-token blocklist, ambiguity reject. This path
+                # is NEVER on the live anchor loader (which stays exact-only via
+                # resolve_pinnacle_close_snaps) — it lifts the MEASURED match rate
+                # so the alias/blocking gap can be closed before any live flip.
+                matched_ev = match_event_hardened(
+                    home,
+                    away,
+                    kickoff,
+                    in_window,
+                    aliases=aliases,
+                    ordered=sport_key != "tennis",
+                    league=league_key,
+                    candidate_leagues=archive_leagues,
+                )
             matched = matched_ev is not None
             outcomes.append(
                 ShadowOutcome(
@@ -1202,6 +1562,14 @@ async def shadow_match_rate_outcomes(
 # sport (so "basketball_nba" -> "basketball"); any unmapped sport falls back to
 # the 3-way width (the conservative widest-market requirement).
 _BETFAIR_FULL_MARKET_ROWS: dict[str, int] = {"soccer": 3, "basketball": 2}
+
+# The MONEYLINE market KEY as it lands in ``odds_snapshots.market`` per sport —
+# the OddsHarvester key string the ingestion persists (NOT the canonical
+# ``Market.H2H`` enum value "h2h"): soccer 1X2 is stored as "1x2", basketball
+# moneyline as "home_away" (app.ingestion.oddsportal._MARKET_KEYS). This is the
+# market the value engine anchors a pick on, so it is the market whose inline
+# Betfair Exchange row signals a USABLE sharp anchor.
+_MONEYLINE_MARKET_KEY: dict[str, str] = {"soccer": "1x2", "basketball": "home_away"}
 
 
 def _betfair_full_market_rows(sport_key: str) -> int:
@@ -1327,6 +1695,77 @@ async def betfair_archive_capture_by_sport(
                 )
             ) or 0
         out.append({"sport": base, "scraped": len(our_refs), "captured": int(captured)})
+    return out
+
+
+async def betfair_inline_capture_by_sport(
+    session: AsyncSession,
+    *,
+    horizon_days: int = 7,
+    now: datetime | None = None,
+) -> list[dict[str, object]]:
+    """Per-sport REAL Betfair-Exchange anchor availability — the number that feeds
+    picks. Of OUR upcoming scraped fixtures that carry SOFT odds, how many ALSO
+    carry an INLINE ``bookmaker='Betfair Exchange'`` MONEYLINE row on the SAME
+    canonical event (the JSON-feed bind, OddsPortal bookie 44).
+
+    "Moneyline" is the market a pick actually anchors on: soccer 1X2 (stored
+    ``market='1x2'``), basketball moneyline (``market='home_away'``) — the
+    OddsHarvester key strings the ingestion persists, NOT the canonical
+    ``Market.H2H`` enum value "h2h". An inline Betfair Exchange row in THAT market
+    means the value engine can anchor the pick on the sharp exchange: ``edge.value``
+    recognises "Betfair Exchange" as sharp via ``SHARP_BOOKS`` name matching during
+    ``derive_value_bets`` — no archive lookup, no ``CLV_USE_BETFAIR_EXCHANGE`` flag.
+    It is the correct denominator/numerator for the dashboard's sharp-anchor
+    headline.
+
+    DELIBERATELY NOT the separate ``betfair:``-namespaced archive capture
+    (``betfair_archive_capture_by_sport``): that path is gated behind
+    ``BETFAIR_EXCHANGE_ENABLED`` (default OFF) and captures very few events, so it
+    massively undercounts the inline availability that actually anchors picks.
+
+    Output shape mirrors ``betfair_archive_capture_by_sport``
+    (``{"sport", "scraped", "captured"}``) so the pure
+    ``shadow.summarize_anchor_coverage`` math is unchanged. Read-only diagnostic —
+    attaches no close, changes no pick. ``now`` is injectable for tests."""
+    now = now if now is not None else datetime.now(tz=UTC)
+    until = now + timedelta(days=horizon_days)
+    out: list[dict[str, object]] = []
+    for base in ("soccer", "basketball"):
+        moneyline_key = _MONEYLINE_MARKET_KEY[base]
+        # OUR upcoming canonical fixtures carrying SOFT odds (any snapshot at all):
+        # a scraped market exists for the event. EXISTS keeps it one row per event.
+        soft_event_ids = (
+            (
+                await session.execute(
+                    select(Event.id)
+                    .join(Sport, Event.sport_id == Sport.id)
+                    .where(
+                        Sport.key == base,
+                        Event.starts_at.is_not(None),
+                        Event.starts_at >= now,
+                        Event.starts_at <= until,
+                        select(OddsSnapshot.id)
+                        .where(OddsSnapshot.event_id == Event.id)
+                        .exists(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        captured = 0
+        if soft_event_ids:
+            captured = (
+                await session.scalar(
+                    select(func.count(func.distinct(OddsSnapshot.event_id))).where(
+                        OddsSnapshot.event_id.in_(soft_event_ids),
+                        func.lower(OddsSnapshot.bookmaker) == _BETFAIR_BOOKMAKER.lower(),
+                        OddsSnapshot.market == moneyline_key,
+                    )
+                )
+            ) or 0
+        out.append({"sport": base, "scraped": len(soft_event_ids), "captured": int(captured)})
     return out
 
 

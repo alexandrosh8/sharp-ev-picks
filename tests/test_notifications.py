@@ -66,6 +66,26 @@ def make_pick() -> PickOut:
     )
 
 
+def test_pick_alert_tags_premium_tier() -> None:
+    alert = build_pick_alert(make_pick())  # default tier="premium"
+    assert "⭐ PREMIUM" in alert.title
+    assert "⭐ PREMIUM" in alert.body
+
+
+def test_pick_alert_tags_volume_tier() -> None:
+    alert = build_pick_alert(make_pick().model_copy(update={"tier": "volume"}))
+    assert "🔵 VOLUME" in alert.title
+    assert "🔵 VOLUME" in alert.body
+
+
+def test_pick_alert_dedupe_key_differs_by_tier() -> None:
+    # A volume alert must NOT suppress a later premium UPGRADE alert at the same
+    # market+odds: the dedupe key includes the tier so the two are distinct.
+    premium = make_pick()  # tier="premium"
+    volume = make_pick().model_copy(update={"tier": "volume"})
+    assert build_pick_alert(premium).dedupe_key != build_pick_alert(volume).dedupe_key
+
+
 async def test_duplicate_alert_suppressed() -> None:
     sink = RecordingSink()
     dispatcher = AlertDispatcher([sink], InMemoryIdempotencyStore())
@@ -193,9 +213,9 @@ async def test_redis_idempotency_ttl_keeps_unchanged_odds_quiet_for_seven_days()
     assert await redis.ttl("alert:dedupe:key-custom") == 3600
 
 
-def test_pick_alert_contains_required_fields_and_reminder() -> None:
+def test_pick_alert_contains_required_fields_without_footer() -> None:
     alert = build_pick_alert(make_pick())
-    assert ALERT_FOOTER in alert.body  # compact informational / manual-betting footer
+    assert ALERT_FOOTER not in alert.body  # footer removed per operator request
     for fragment in (
         "Alpha FC vs Beta United",
         "Alpha FC @ 2.10 · bookie_one",
@@ -262,3 +282,56 @@ def test_pick_alert_omits_still_ev_line_when_no_price_retains_edge() -> None:
     pick = make_pick().model_copy(update={"model_probability": 0.02})
     alert = build_pick_alert(pick, value_min_edge=0.03)
     assert "Value holds to" not in alert.body
+
+
+def make_value_pick() -> PickOut:
+    """A VALUE-strategy pick (real example: Grazer AK or Draw @ 1.83 · 10bet).
+
+    Value-path field semantics differ from the model path: model_probability
+    carries the devigged SHARP fair prob (the TRUE fair, 0.748 -> 1.34) and
+    fair_probability carries the OFFERED odds' implied prob (1/1.83 = 0.546).
+    The displayed "🎯 Fair" line must show the sharp fair ODDS (1.34), never
+    the offered odds (1.83) nor the bare probability (0.748).
+    """
+    return make_pick().model_copy(
+        update={
+            "selection": "Grazer AK or Draw",
+            "bookmaker": "10bet",
+            "decimal_odds": 1.83,
+            "model_probability": 0.748,  # sharp fair prob -> fair odds 1.34
+            "fair_probability": 0.546,  # offered odds' implied prob (1/1.83)
+            "edge": 0.201,
+            "ev": 0.368,
+            "anchor_type": "sharp",
+            "reason_summary": "value: Betfair Exchange fair 1.34 vs 10bet 1.83",
+        }
+    )
+
+
+def test_value_pick_alert_headline_shows_sharp_fair_odds_not_prob_or_offered() -> None:
+    # Value-path bug: the headline "🎯 Fair" line must render the SHARP fair
+    # ODDS (1/model_probability = 1/0.748 = 1.34), apples-to-apples with the
+    # offered odds — NOT the fair probability (0.748) and NOT the offered odds
+    # (1.83, which 1/fair_probability would wrongly produce).
+    alert = build_pick_alert(make_value_pick(), value_min_edge=0.03)
+    assert "🎯 Fair 1.34 (Sharp) → 1.83 beats it" in alert.body
+    # never the probability, never "Fair == offered" nonsense
+    assert "Fair 0.74" not in alert.body
+    assert "Fair 0.75" not in alert.body
+    assert "Fair 1.83" not in alert.body
+
+
+def test_value_pick_reason_line_shows_fair_odds_apples_to_apples() -> None:
+    # The reason line must compare like with like: fair ODDS vs offered ODDS,
+    # not the fair PROBABILITY (0.748) next to the offered ODDS (1.83).
+    alert = build_pick_alert(make_value_pick(), value_min_edge=0.03)
+    assert "value: Betfair Exchange fair 1.34 vs 10bet 1.83" in alert.body
+    assert "fair 0.748" not in alert.body
+
+
+def test_model_pick_fair_line_unchanged() -> None:
+    # The MODEL path (value_min_edge=None) keeps fair_probability as the TRUE
+    # devigged market fair, so its "Fair" line stays 1/0.50 = 2.00. The value
+    # fix must not perturb it.
+    alert = build_pick_alert(make_pick())
+    assert "🎯 Fair 2.00 → 2.10 beats it" in alert.body

@@ -99,7 +99,7 @@ async def test_pipeline_produces_pick_and_alert() -> None:
     assert pick.ev > 0.01
     assert pick.recommended_stake_fraction <= 0.02
     assert len(sink.sent) == 1
-    assert "you place any bet" in sink.sent[0].body  # informational footer
+    assert "you place any bet" not in sink.sent[0].body  # footer removed per operator request
 
 
 async def test_model_pipeline_alert_key_includes_strategy_identity() -> None:

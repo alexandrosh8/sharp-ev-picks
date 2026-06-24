@@ -32,9 +32,10 @@ read-only page loads only.
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -368,6 +369,13 @@ class BetfairExchangeReader:
     optional read-only proxy, mirroring oddsportal.py's launch fingerprint.
     """
 
+    # A proxy slot that raises (e.g. TimeoutError) is skipped for this many
+    # subsequent reads before being retried, so a chronically-slow slot is not
+    # re-probed — burning a full nav timeout — on every cycle. Failover is
+    # unchanged and stays loud (the per-slot WARNING still fires); this only
+    # reorders which healthy slot is tried first.
+    _SLOT_COOLDOWN_READS = 8
+
     def __init__(
         self,
         *,
@@ -384,6 +392,9 @@ class BetfairExchangeReader:
         self._min_liquidity = min_liquidity
         self._proxy_pool = tuple(proxy_pool)
         self._proxy_cursor = 0
+        # Proxy slot index -> reads remaining before it is retried after a
+        # failure. Empty == all slots eligible. Read-only bookkeeping only.
+        self._slot_cooldown: dict[int, int] = {}
         self._page_loader = page_loader
         self._headless = headless
         self._locale = locale
@@ -466,20 +477,38 @@ class BetfairExchangeReader:
         pool = self._proxy_pool or (None,)
         n = len(pool)
         last_exc: Exception | None = None
-        for attempt in range(n):
-            proxy = pool[(self._proxy_cursor + attempt) % n] if self._proxy_pool else None
+        # Tick cooldowns down once per read, then try healthy slots first and
+        # any still-cooling slot only as a last resort — we never refuse to
+        # read, we just stop burning a nav timeout on a known-slow slot.
+        if self._proxy_pool:
+            for slot in list(self._slot_cooldown):
+                self._slot_cooldown[slot] -= 1
+                if self._slot_cooldown[slot] <= 0:
+                    del self._slot_cooldown[slot]
+        rotation = [(self._proxy_cursor + offset) % n for offset in range(n)]
+        if self._proxy_pool:
+            order = [s for s in rotation if s not in self._slot_cooldown] + [
+                s for s in rotation if s in self._slot_cooldown
+            ]
+        else:
+            order = rotation
+        for slot in order:
+            proxy = pool[slot] if self._proxy_pool else None
             try:
                 tokens = await self._load_tokens(url, proxy)
             except Exception as exc:  # network / anti-bot / timeout
                 last_exc = exc
+                if self._proxy_pool:
+                    self._slot_cooldown[slot] = self._SLOT_COOLDOWN_READS
                 logger.warning(
                     "betfair exchange read via proxy slot %d failed (%s); trying next",
-                    (self._proxy_cursor + attempt) % n if self._proxy_pool else -1,
+                    slot if self._proxy_pool else -1,
                     type(exc).__name__,
                 )
                 continue
             if self._proxy_pool:
-                self._proxy_cursor = (self._proxy_cursor + attempt + 1) % n
+                self._slot_cooldown.pop(slot, None)  # recovered -> clear cooldown
+                self._proxy_cursor = (slot + 1) % n
             if not tokens:
                 return []  # no Betfair Exchange row (expected on thin matches)
             cells = _pair_tokens(tokens)
@@ -535,14 +564,19 @@ class BetfairExchangeCapture:
         reader: BetfairExchangeReader | None,
         session_factory: async_sessionmaker | None,
         *,
-        targets_fn: Callable[[str], Sequence[MatchTarget]],
+        targets_fn: Callable[[str], Sequence[MatchTarget] | Awaitable[Sequence[MatchTarget]]],
         sports: Sequence[str],
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         """``targets_fn(sport)`` yields the match pages to read this cycle for a
         sport key (e.g. open/upcoming football fixtures with their links). It is
         injected so this module never owns the listing/scheduling policy — the
-        composition root supplies it (and tests supply a static list)."""
+        composition root supplies it (and tests supply a static list).
+
+        It may be SYNC (returns the sequence) or ASYNC (returns an awaitable of
+        it): the production root sources targets from the DB (an async query),
+        while tests inject a plain ``lambda sport: [...]``. ``capture_once``
+        awaits the result only when it is awaitable, so both shapes work."""
         self._reader = reader
         self._session_factory = session_factory
         self._targets_fn = targets_fn
@@ -593,7 +627,10 @@ class BetfairExchangeCapture:
             # "0 of N targets" (read N pages, none Betfair-liquid / all closed).
             targets = 0
             events_with_quotes = 0
-            for target in self._targets_fn(sport):
+            target_list = self._targets_fn(sport)
+            if inspect.isawaitable(target_list):
+                target_list = await target_list
+            for target in target_list:
                 targets += 1
                 try:
                     quotes = await self._reader.read_back_quotes(target.url, outcomes=outcomes)
@@ -607,11 +644,17 @@ class BetfairExchangeCapture:
                 if not quotes:
                     continue  # no row / all outcomes below the liquidity floor
                 events_with_quotes += 1
-                # Namespace the persisted external_ref so this Betfair row can
-                # NEVER graft onto a live event sharing the same match URL
-                # (events are keyed by external_ref ALONE). target.url stays
-                # raw for the page fetch above.
-                event_ref = _namespace_event_ref(target.event_id)
+                # INLINE BINDING (ADR-0015 v2): persist under the CANONICAL
+                # external_ref (target.event_id == the OddsPortal match URL, the
+                # same ref the main scrape's soft-book rows use), so the Betfair
+                # row becomes just another bookmaker on the canonical event — no
+                # cross-source matching needed for any Betfair-priced game. The
+                # attach-only persist below guarantees this can ONLY attach to a
+                # canonical event the main scrape already created; it never mints
+                # a (partial) event from Betfair data, so a same-URL graft is
+                # safe BY CONSTRUCTION (the event identity + metadata are the
+                # main scrape's, not ours).
+                event_ref = target.event_id
                 snapshots = back_quotes_to_snapshots(event_ref, quotes, target.teams, now=now)
                 event_fresh = self._select_fresh(sport, event_ref, snapshots)
                 if event_fresh:
@@ -639,13 +682,19 @@ class BetfairExchangeCapture:
                             events_with_quotes,
                         )
                 continue
-            namespace = f"betfair_{sport}"
+            # INLINE BINDING (ADR-0015 v2): persist under the CANONICAL sport
+            # ("soccer"/"basketball") with attach_only_to_existing=True, so the
+            # Betfair rows ATTACH to the canonical event the main scrape already
+            # created and NEVER mint one from Betfair-only data. A fixture whose
+            # canonical event has not landed yet is skipped THIS cycle (counted +
+            # logged by persist_odds_snapshots) and attaches on a later one.
             rows = await persist_odds_snapshots(
                 self._session_factory,
                 fresh,
                 teams_by_event,
-                sport=namespace,
-                default_league=namespace,
+                sport=sport,
+                default_league=sport,
+                attach_only_to_existing=True,
             )
             written[sport] = rows
             if rows:

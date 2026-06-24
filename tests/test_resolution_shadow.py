@@ -11,6 +11,7 @@ from app.resolution.shadow import (
     GroupRate,
     ShadowOutcome,
     arcadia_base_sport,
+    summarize_anchor_coverage,
     summarize_betfair_coverage,
     summarize_match_rate,
 )
@@ -202,3 +203,70 @@ def test_betfair_coverage_event_by_sport_distinguishes_structural_zero() -> None
         "with_event": 0,
         "event_rate": 0.0,
     } in event_by_sport_dict
+
+
+# --- anchor-coverage headline (the dashboard's "Betfair X% · Pinnacle Y%") ----
+# Pure aggregation of the per-sport capture lists (scraped vs captured for
+# Betfair, scraped vs matched for Pinnacle) into a single always-populated
+# headline. This is what the "Sharp-anchor coverage" panel header shows BEFORE
+# the operator expands the lazy panel — replacing the bare "—".
+
+
+def test_anchor_coverage_aggregates_scraped_weighted_rates() -> None:
+    # Live truth shape: Betfair renders on liquid majors (~61% of scraped
+    # soccer), Pinnacle archive strict-matches very few (~1%).
+    betfair = [
+        {"sport": "soccer", "scraped": 100, "captured": 61},
+        {"sport": "basketball", "scraped": 0, "captured": 0},
+    ]
+    pinnacle = [
+        {"sport": "soccer", "scraped": 100, "matched": 1},
+        {"sport": "tennis", "scraped": 6, "matched": 0},
+    ]
+    c = summarize_anchor_coverage(betfair_capture=betfair, pinnacle_capture=pinnacle)
+    assert c.betfair_scraped == 100
+    assert c.betfair_captured == 61
+    assert c.betfair_rate == pytest.approx(0.61)
+    # Pinnacle scraped sums ACROSS sports (soccer 100 + tennis 6 = 106), matched 1.
+    assert c.pinnacle_scraped == 106
+    assert c.pinnacle_matched == 1
+    assert c.pinnacle_rate == pytest.approx(1 / 106)
+    headline = c.headline()
+    assert headline == "Betfair 61% · Pinnacle 1%"
+
+
+def test_anchor_coverage_empty_is_zero_not_dash() -> None:
+    # No capture rows at all -> 0%, never None/"—": an honest structural zero,
+    # not "unknown". The dashboard must never fall back to a bare dash.
+    c = summarize_anchor_coverage(betfair_capture=[], pinnacle_capture=[])
+    assert c.betfair_rate is None
+    assert c.pinnacle_rate is None
+    assert c.headline() == "Betfair n/a · Pinnacle n/a"
+
+
+def test_anchor_coverage_as_dict_shape() -> None:
+    d = summarize_anchor_coverage(
+        betfair_capture=[{"sport": "soccer", "scraped": 50, "captured": 25}],
+        pinnacle_capture=[{"sport": "soccer", "scraped": 50, "matched": 5}],
+    ).as_dict()
+    assert d == {
+        "betfair_scraped": 50,
+        "betfair_captured": 25,
+        "betfair_rate": pytest.approx(0.5),
+        "pinnacle_scraped": 50,
+        "pinnacle_matched": 5,
+        "pinnacle_rate": pytest.approx(0.1),
+        "headline": "Betfair 50% · Pinnacle 10%",
+    }
+
+
+def test_anchor_coverage_tolerates_missing_keys() -> None:
+    # Repo rows are dicts; a missing/None numeric must coerce to 0, never raise.
+    c = summarize_anchor_coverage(
+        betfair_capture=[{"sport": "soccer"}],  # no scraped/captured keys
+        pinnacle_capture=[{"sport": "soccer", "scraped": None, "matched": None}],
+    )
+    assert c.betfair_scraped == 0
+    assert c.betfair_rate is None
+    assert c.pinnacle_scraped == 0
+    assert c.headline() == "Betfair n/a · Pinnacle n/a"

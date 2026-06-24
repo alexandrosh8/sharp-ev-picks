@@ -27,6 +27,7 @@ def row(
     anchor: str | None = None,
     closing_anchor: str | None = None,
     has_snapshot: bool = False,
+    close_independent: bool | None = True,
 ) -> SettledPickRow:
     return SettledPickRow(
         tier=tier,
@@ -38,6 +39,7 @@ def row(
         anchor_type=anchor,
         closing_anchor_type=closing_anchor,
         has_snapshot_close=has_snapshot,
+        close_independent_of_fill=close_independent,
     )
 
 
@@ -63,6 +65,38 @@ def test_sharp_close_stratum_is_zero_when_no_trusted_closes() -> None:
     sc = live_evidence_report(rows, ml_threshold=None, min_n=1)["sharp_close"]
     assert sc["n"] == 0
     assert sc["sufficient"] is False
+
+
+def test_sharp_close_excludes_circular_close_anchored_by_fill_book() -> None:
+    """P0-1/P0-3 independence guard: a 'sharp' close whose anchor book IS the
+    fill book is CIRCULAR (the pick's own book pricing its own close,
+    closing == fill, |clv_log|~0) and must NOT count as genuine CLV — it is
+    what masked the -EV. A named-sharp snapshot close that is NOT independent
+    of the fill is excluded from the sharp subset; only independent ones enter,
+    so closing_anchor != fill_book holds across the whole sharp_close subset."""
+    rows = [
+        # circular: fill book == close anchor book -> excluded despite being a
+        # named sharp snapshot close with a (fake, ~0) clv.
+        row(clv=0.001, closing_anchor="pinnacle", has_snapshot=True, close_independent=False),
+        # genuine: a DIFFERENT sharp book priced the close -> trusted.
+        row(clv=0.04, closing_anchor="pinnacle", has_snapshot=True, close_independent=True),
+    ]
+    sc = live_evidence_report(rows, ml_threshold=None, min_n=1)["sharp_close"]
+    assert sc["n"] == 1  # only the independent close survives
+    assert sc["stake_weighted_clv_log"] == pytest.approx(0.04)
+    # The invariant the guard guarantees: every row in the sharp subset is
+    # independent of its fill book (no circular close contaminates the subset).
+    assert all(r.close_independent_of_fill is not False for r in rows if r.sharp_close)
+
+
+def test_sharp_close_independence_unknown_does_not_exclude() -> None:
+    """Feature-detection contract: a pre-column row carries
+    close_independent_of_fill=None (unknown). Unknown is NOT treated as
+    circular — only a definite False (proven circular) excludes — so historical
+    sharp snapshot closes keep their existing trusted status."""
+    rows = [row(clv=0.03, closing_anchor="sharp", has_snapshot=True, close_independent=None)]
+    sc = live_evidence_report(rows, ml_threshold=None, min_n=1)["sharp_close"]
+    assert sc["n"] == 1
 
 
 def test_by_close_anchor_groups_on_the_close_anchor_not_creation() -> None:
