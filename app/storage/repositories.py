@@ -1450,6 +1450,14 @@ async def shadow_match_rate_outcomes(
 # the 3-way width (the conservative widest-market requirement).
 _BETFAIR_FULL_MARKET_ROWS: dict[str, int] = {"soccer": 3, "basketball": 2}
 
+# The MONEYLINE market KEY as it lands in ``odds_snapshots.market`` per sport —
+# the OddsHarvester key string the ingestion persists (NOT the canonical
+# ``Market.H2H`` enum value "h2h"): soccer 1X2 is stored as "1x2", basketball
+# moneyline as "home_away" (app.ingestion.oddsportal._MARKET_KEYS). This is the
+# market the value engine anchors a pick on, so it is the market whose inline
+# Betfair Exchange row signals a USABLE sharp anchor.
+_MONEYLINE_MARKET_KEY: dict[str, str] = {"soccer": "1x2", "basketball": "home_away"}
+
 
 def _betfair_full_market_rows(sport_key: str) -> int:
     from app.resolution.shadow import arcadia_base_sport
@@ -1574,6 +1582,77 @@ async def betfair_archive_capture_by_sport(
                 )
             ) or 0
         out.append({"sport": base, "scraped": len(our_refs), "captured": int(captured)})
+    return out
+
+
+async def betfair_inline_capture_by_sport(
+    session: AsyncSession,
+    *,
+    horizon_days: int = 7,
+    now: datetime | None = None,
+) -> list[dict[str, object]]:
+    """Per-sport REAL Betfair-Exchange anchor availability — the number that feeds
+    picks. Of OUR upcoming scraped fixtures that carry SOFT odds, how many ALSO
+    carry an INLINE ``bookmaker='Betfair Exchange'`` MONEYLINE row on the SAME
+    canonical event (the JSON-feed bind, OddsPortal bookie 44).
+
+    "Moneyline" is the market a pick actually anchors on: soccer 1X2 (stored
+    ``market='1x2'``), basketball moneyline (``market='home_away'``) — the
+    OddsHarvester key strings the ingestion persists, NOT the canonical
+    ``Market.H2H`` enum value "h2h". An inline Betfair Exchange row in THAT market
+    means the value engine can anchor the pick on the sharp exchange: ``edge.value``
+    recognises "Betfair Exchange" as sharp via ``SHARP_BOOKS`` name matching during
+    ``derive_value_bets`` — no archive lookup, no ``CLV_USE_BETFAIR_EXCHANGE`` flag.
+    It is the correct denominator/numerator for the dashboard's sharp-anchor
+    headline.
+
+    DELIBERATELY NOT the separate ``betfair:``-namespaced archive capture
+    (``betfair_archive_capture_by_sport``): that path is gated behind
+    ``BETFAIR_EXCHANGE_ENABLED`` (default OFF) and captures very few events, so it
+    massively undercounts the inline availability that actually anchors picks.
+
+    Output shape mirrors ``betfair_archive_capture_by_sport``
+    (``{"sport", "scraped", "captured"}``) so the pure
+    ``shadow.summarize_anchor_coverage`` math is unchanged. Read-only diagnostic —
+    attaches no close, changes no pick. ``now`` is injectable for tests."""
+    now = now if now is not None else datetime.now(tz=UTC)
+    until = now + timedelta(days=horizon_days)
+    out: list[dict[str, object]] = []
+    for base in ("soccer", "basketball"):
+        moneyline_key = _MONEYLINE_MARKET_KEY[base]
+        # OUR upcoming canonical fixtures carrying SOFT odds (any snapshot at all):
+        # a scraped market exists for the event. EXISTS keeps it one row per event.
+        soft_event_ids = (
+            (
+                await session.execute(
+                    select(Event.id)
+                    .join(Sport, Event.sport_id == Sport.id)
+                    .where(
+                        Sport.key == base,
+                        Event.starts_at.is_not(None),
+                        Event.starts_at >= now,
+                        Event.starts_at <= until,
+                        select(OddsSnapshot.id)
+                        .where(OddsSnapshot.event_id == Event.id)
+                        .exists(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        captured = 0
+        if soft_event_ids:
+            captured = (
+                await session.scalar(
+                    select(func.count(func.distinct(OddsSnapshot.event_id))).where(
+                        OddsSnapshot.event_id.in_(soft_event_ids),
+                        func.lower(OddsSnapshot.bookmaker) == _BETFAIR_BOOKMAKER.lower(),
+                        OddsSnapshot.market == moneyline_key,
+                    )
+                )
+            ) or 0
+        out.append({"sport": base, "scraped": len(soft_event_ids), "captured": int(captured)})
     return out
 
 

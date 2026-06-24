@@ -42,6 +42,7 @@ from app.settlement.outcomes import pick_pnl, pick_roi
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import (
     betfair_archive_capture_by_sport,
+    betfair_inline_capture_by_sport,
     create_dashboard_credentials,
     latest_available_games_with_events,
     latest_picks_with_events,
@@ -722,15 +723,25 @@ async def resolution_match_rate(
     # pick sports that appear in the match rate above.
     pinnacle_capture = await pinnacle_archive_capture_by_sport(session)
     report["archive_capture"] = pinnacle_capture
-    # Betfair Exchange coverage alongside Pinnacle (exact-ref, expected sparse —
-    # liquid majors behind a UK/EU proxy only).
+    # Betfair Exchange coverage alongside Pinnacle. Two distinct readings:
+    #   - archive (``betfair:`` namespace): the SEPARATE betfair_exchange capture
+    #     path, gated behind BETFAIR_EXCHANGE_ENABLED (default OFF) — kept for the
+    #     per-sport panel body but expected near-zero (it no longer receives
+    #     Betfair since the inline-bind, commit 882bb42);
+    #   - inline (canonical event): the REAL anchor availability that feeds picks —
+    #     of our scraped fixtures with soft odds, the share also carrying an inline
+    #     ``bookmaker='Betfair Exchange'`` row (OddsPortal bookie 44, JSON feed),
+    #     which the value engine recognises as sharp via SHARP_BOOKS name matching.
     betfair_capture = await betfair_archive_capture_by_sport(session)
     report["betfair_capture"] = betfair_capture
+    betfair_inline_capture = await betfair_inline_capture_by_sport(session)
+    report["betfair_inline_capture"] = betfair_inline_capture
     # Scraped-weighted "Betfair X% · Pinnacle Y%" headline — the always-populated
     # summary the dashboard's coverage-panel HEADER shows up front (replaces the
-    # bare "—"), aggregated from the two per-sport capture lists above.
+    # bare "—"). Betfair uses the INLINE coverage (the real pick-feeding anchor),
+    # NOT the near-empty archive path; Pinnacle uses the strict-matcher rate.
     report["coverage_summary"] = summarize_anchor_coverage(
-        betfair_capture=betfair_capture,
+        betfair_capture=betfair_inline_capture,
         pinnacle_capture=pinnacle_capture,
     ).as_dict()
     return report

@@ -398,14 +398,25 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
         ]
 
     async def fake_betfair_capture(session, **_kw):  # type: ignore[no-untyped-def]
+        # Near-empty archive path (separate betfair: namespace, default OFF) — it
+        # feeds the per-sport panel body, NOT the headline anymore.
         return [
-            {"sport": "soccer", "scraped": 149, "captured": 46},
+            {"sport": "soccer", "scraped": 149, "captured": 4},
+            {"sport": "basketball", "scraped": 64, "captured": 0},
+        ]
+
+    async def fake_betfair_inline_capture(session, **_kw):  # type: ignore[no-untyped-def]
+        # The REAL pick-feeding anchor: inline Betfair Exchange rows on the
+        # canonical event (~66% of scraped soccer fixtures with soft odds).
+        return [
+            {"sport": "soccer", "scraped": 149, "captured": 99},
             {"sport": "basketball", "scraped": 64, "captured": 0},
         ]
 
     monkeypatch.setattr(routes, "shadow_match_rate_outcomes", fake_outcomes)
     monkeypatch.setattr(routes, "pinnacle_archive_capture_by_sport", fake_capture)
     monkeypatch.setattr(routes, "betfair_archive_capture_by_sport", fake_betfair_capture)
+    monkeypatch.setattr(routes, "betfair_inline_capture_by_sport", fake_betfair_inline_capture)
     body = TestClient(make_app()).get("/resolution/match-rate").json()
     assert body["total"] == 3
     assert body["matched"] == 1
@@ -426,18 +437,26 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     # panel can show coverage instead of an empty cell.
     assert cap["tennis"]["matched"] == 5
     assert cap["american_football"]["scraped"] == 0
+    # The headline's Betfair number now comes from the INLINE coverage (the real
+    # pick-feeding anchor: Betfair Exchange bound onto the canonical event), NOT
+    # the near-empty archive path. The per-sport panel body keeps the archive
+    # numbers so a structural-vs-thin-slate read stays available.
+    bf_panel = {row["sport"]: row for row in body["betfair_capture"]}
+    assert bf_panel["soccer"]["captured"] == 4  # archive path stays near-empty
+    bf_inline = {row["sport"]: row for row in body["betfair_inline_capture"]}
+    assert bf_inline["soccer"]["captured"] == 99  # inline canonical-event coverage
     # coverage_summary is the always-populated headline the panel shows BEFORE
-    # the operator expands it (replaces the bare "—"). Betfair = sum(captured)/
-    # sum(scraped) = 46/(149+64)=46/213; Pinnacle = sum(matched)/sum(scraped) =
-    # (0+20+50+5)/(0+64+149+6)=75/219.
+    # the operator expands it (replaces the bare "—"). Betfair = sum(INLINE
+    # captured)/sum(scraped) = 99/(149+64)=99/213; Pinnacle = sum(matched)/
+    # sum(scraped) = (0+20+50+5)/(0+64+149+6)=75/219.
     cov = body["coverage_summary"]
-    assert cov["betfair_captured"] == 46
+    assert cov["betfair_captured"] == 99
     assert cov["betfair_scraped"] == 213
-    assert cov["betfair_rate"] == pytest.approx(46 / 213)
+    assert cov["betfair_rate"] == pytest.approx(99 / 213)
     assert cov["pinnacle_matched"] == 75
     assert cov["pinnacle_scraped"] == 219
     assert cov["pinnacle_rate"] == pytest.approx(75 / 219)
-    assert cov["headline"] == "Betfair 22% · Pinnacle 34%"
+    assert cov["headline"] == "Betfair 46% · Pinnacle 34%"
 
 
 def test_dashboard_html_is_not_browser_cached() -> None:

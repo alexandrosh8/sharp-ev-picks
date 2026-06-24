@@ -245,8 +245,14 @@ def summarize_betfair_coverage(
 # "Betfair X% · Pinnacle Y%" string so the header carries real numbers up front.
 #
 #   Betfair rate = sum(captured) / sum(scraped)  — of our upcoming scraped
-#                  fixtures, the share that also carry a captured Betfair
-#                  Exchange archive event;
+#                  fixtures (with soft odds), the share that ALSO carry an INLINE
+#                  Betfair Exchange price on the canonical event (the real
+#                  pick-feeding sharp anchor: Betfair binds onto the canonical
+#                  event via the OddsPortal JSON feed and edge.value recognises it
+#                  as sharp by name). The route MUST feed this from the inline
+#                  coverage repo (betfair_inline_capture_by_sport), NOT the
+#                  separate near-empty "betfair:"-namespaced archive capture —
+#                  that archive path undercounts the real availability ~20x.
 #   Pinnacle rate = sum(matched) / sum(scraped)  — of our upcoming scraped
 #                  fixtures, the share that strict-match a captured Pinnacle
 #                  close.

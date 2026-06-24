@@ -943,13 +943,14 @@ async def test_capture_does_not_create_event_when_canonical_absent(factory) -> N
         assert snaps == 0
 
 
-async def test_capture_does_not_graft_onto_live_event_with_same_url(factory) -> None:  # type: ignore[no-untyped-def]
-    # Regression for the isolation breach the review caught: a live soccer event
-    # and the Betfair capture share the SAME OddsPortal match URL. Events are
-    # keyed by external_ref ALONE (globally unique, not sport-scoped), so without
-    # the "betfair:" namespace the capture would REUSE the soccer event row and
-    # its "Betfair Exchange" sharp BACK price would leak into that event closing
-    # CLV anchor. This pins true event-level isolation.
+async def test_capture_binds_betfair_inline_onto_the_canonical_event(factory) -> None:  # type: ignore[no-untyped-def]
+    # INLINE-BIND contract (commit 882bb42): Betfair BACK odds are read from the
+    # SAME OddsPortal match page as the soft books, so the capture binds them onto
+    # the CANONICAL event (external_ref == the match URL) as just another
+    # bookmaker — dropping the legacy "betfair:" prefix / betfair_<sport>
+    # namespace. NO cross-source matching, NO wrong-game risk: same-URL IS the same
+    # fixture. (This supersedes the old isolation test, which asserted a separate
+    # "betfair:" event; that pre-inline-bind contract was deliberately abandoned.)
     url = f"https://op/betfair-collision-{uuid4()}"
     teams = EventTeams(home="Real Madrid", away="Al Hilal", league="Club WC")
 
@@ -977,7 +978,7 @@ async def test_capture_does_not_graft_onto_live_event_with_same_url(factory) -> 
     written = await capture.capture_once()
     assert written["soccer"] == 3
     async with factory() as session:
-        soccer_books = (
+        canonical_books = (
             (
                 await session.execute(
                     select(OddsSnapshot.bookmaker)
@@ -988,21 +989,17 @@ async def test_capture_does_not_graft_onto_live_event_with_same_url(factory) -> 
             .scalars()
             .all()
         )
-        assert set(soccer_books) == {"bet365"}
-        assert BOOKMAKER not in soccer_books
-        bf_books = (
-            (
-                await session.execute(
-                    select(OddsSnapshot.bookmaker)
-                    .join(Event, Event.id == OddsSnapshot.event_id)
-                    .where(Event.external_ref == f"betfair:{url}")
-                )
-            )
-            .scalars()
-            .all()
+        # Betfair binds INLINE onto the canonical event alongside the soft book.
+        assert set(canonical_books) == {"bet365", BOOKMAKER}
+        assert sum(1 for b in canonical_books if b == BOOKMAKER) == 3  # full 1X2 BACK
+        # No legacy "betfair:"-namespaced event is minted anymore.
+        legacy_snaps = await session.scalar(
+            select(func.count())
+            .select_from(OddsSnapshot)
+            .join(Event, Event.id == OddsSnapshot.event_id)
+            .where(Event.external_ref == f"betfair:{url}")
         )
-        assert set(bf_books) == {BOOKMAKER}
-        assert len(bf_books) == 3
+        assert legacy_snaps == 0
         live_event_count = await session.scalar(
             select(func.count()).select_from(Event).where(Event.external_ref == url)
         )
@@ -1010,7 +1007,7 @@ async def test_capture_does_not_graft_onto_live_event_with_same_url(factory) -> 
             select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
         )
         assert live_event_count == 1
-        assert betfair_event_count == 1
+        assert betfair_event_count == 0  # inline-bound, no separate event
 
 
 async def test_db_tests_leave_no_committed_pollution() -> None:
@@ -1029,8 +1026,21 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
         await probe_engine.dispose()
         pytest.skip("compose Postgres not reachable on :5433")
 
+    # INLINE-BIND (882bb42): the capture attaches ONLY to an existing canonical
+    # event, so seed it first; Betfair then binds inline onto ``url`` (no separate
+    # "betfair:" event). Isolation is still what we pin: rows written inside the
+    # rolled-back transaction must NOT survive into a fresh connection.
     url = f"https://op/betfair-leak-{uuid4()}"
-    betfair_ref = f"betfair:{url}"
+    teams = EventTeams(home="Real Madrid", away="Al Hilal", league="Club WC")
+    soft = OddsSnapshotIn(
+        event_id=url,
+        bookmaker="bet365",
+        market=Market.H2H,
+        selection="Real Madrid",
+        decimal_odds=2.0,
+        captured_at=NOW,
+        ingested_at=NOW,
+    )
     reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
 
     inner_engine = create_async_engine(DB_URL)
@@ -1039,6 +1049,9 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
             trans = await conn.begin()
             maker = async_sessionmaker(
                 bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+            )
+            await persist_odds_snapshots(
+                maker, [soft], {url: teams}, sport="soccer", default_league="Club WC"
             )
             capture = BetfairExchangeCapture(
                 reader,
@@ -1050,9 +1063,12 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
             assert (await capture.capture_once())["soccer"] == 3
             async with maker() as session:
                 seen = await session.scalar(
-                    select(func.count()).select_from(Event).where(Event.external_ref == betfair_ref)
+                    select(func.count())
+                    .select_from(OddsSnapshot)
+                    .join(Event, Event.id == OddsSnapshot.event_id)
+                    .where(Event.external_ref == url, OddsSnapshot.bookmaker == BOOKMAKER)
                 )
-                assert seen == 1  # visible inside the transaction
+                assert seen == 3  # inline Betfair rows visible inside the transaction
             await trans.rollback()  # teardown: discard everything
     finally:
         await inner_engine.dispose()
@@ -1061,13 +1077,13 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
     try:
         async with async_sessionmaker(probe_engine, expire_on_commit=False)() as session:
             leftover_events = await session.scalar(
-                select(func.count()).select_from(Event).where(Event.external_ref == betfair_ref)
+                select(func.count()).select_from(Event).where(Event.external_ref == url)
             )
             leftover_snaps = await session.scalar(
                 select(func.count())
                 .select_from(OddsSnapshot)
                 .join(Event, Event.id == OddsSnapshot.event_id)
-                .where(Event.external_ref == betfair_ref)
+                .where(Event.external_ref == url)
             )
             assert leftover_events == 0
             assert leftover_snaps == 0

@@ -7,6 +7,7 @@ pick's event_id + selection vocabulary. These tests prove the happy path
 ambiguous -> [], out-of-window -> []). No live network.
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -21,6 +22,7 @@ from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.repositories import (
     _betfair_full_market_rows,
     betfair_exchange_coverage_outcomes,
+    betfair_inline_capture_by_sport,
     persist_odds_snapshots,
     persist_pick,
     pinnacle_archive_capture_by_sport,
@@ -600,6 +602,152 @@ async def test_archive_capture_close_match_coverage_per_sport(factory) -> None: 
         matched, scraped = row["matched"], row["scraped"]
         assert isinstance(matched, int) and isinstance(scraped, int)
         assert matched <= scraped
+
+
+# Per-sport MONEYLINE market KEY as stored in odds_snapshots.market (the
+# OddsHarvester key, NOT the canonical "h2h" enum value): soccer 1X2 -> "1x2",
+# basketball moneyline -> "home_away". Mirrors repositories._MONEYLINE_MARKET_KEY.
+_MONEYLINE_KEY = {"soccer": "1x2", "basketball": "home_away"}
+
+
+def _soft_snap_at(
+    bookmaker: str,
+    selection: str,
+    odds: float,
+    event: str,
+    captured: datetime,
+    *,
+    market_detail: str | None = None,
+) -> OddsSnapshotIn:
+    """One H2H snapshot under an ARBITRARY bookmaker (so we can seed a soft book
+    and an inline 'Betfair Exchange' row on the SAME canonical event).
+    ``market_detail`` sets the stored ``odds_snapshots.market`` key (e.g. the
+    moneyline '1x2'/'home_away', or a non-moneyline submarket like
+    'over_under_2_5') — what the inline-coverage repo filters on."""
+    return OddsSnapshotIn(
+        event_id=event,
+        bookmaker=bookmaker,
+        market=Market.H2H,
+        market_detail=market_detail,
+        selection=selection,
+        decimal_odds=odds,
+        captured_at=captured,
+        ingested_at=captured,
+    )
+
+
+async def _seed_canonical_with_books(  # type: ignore[no-untyped-def]
+    factory,
+    ref: str,
+    home: str,
+    away: str,
+    kickoff: datetime,
+    sport_key: str,
+    *,
+    bookmakers: Sequence[str],
+    betfair_market_detail: str | None = None,
+) -> None:
+    """Seed ONE canonical event with a full MONEYLINE market under EACH named
+    bookmaker (stored under the sport's moneyline key, e.g. '1x2'), so the
+    inline-coverage repo sees a real soft slate that may or may not carry an inline
+    'Betfair Exchange' row. ``betfair_market_detail`` overrides the market the
+    Betfair rows are stored under (to prove a Betfair price in a NON-moneyline
+    market — e.g. 'over_under_2_5' — is NOT counted as a usable anchor)."""
+    captured = kickoff - timedelta(hours=2)
+    moneyline = _MONEYLINE_KEY[sport_key]
+    sels = (("Home", 2.0), ("Draw", 3.4), ("Away", 3.6))
+    snaps: list[OddsSnapshotIn] = []
+    for bm in bookmakers:
+        # Betfair defaults to the moneyline key (a usable anchor) unless the caller
+        # overrides it to a non-moneyline market; every soft book stays moneyline.
+        detail = (
+            (betfair_market_detail or moneyline) if bm == "Betfair Exchange" else moneyline
+        )
+        snaps.extend(
+            _soft_snap_at(bm, sel, o, ref, captured, market_detail=detail) for sel, o in sels
+        )
+    teams = {ref: EventTeams(home=home, away=away, league=f"{sport_key}-cov", starts_at=kickoff)}
+    await persist_odds_snapshots(factory, snaps, teams, sport_key, f"{sport_key}-cov")
+
+
+async def test_betfair_inline_capture_counts_canonical_event_betfair_row(factory) -> None:  # type: ignore[no-untyped-def]
+    """betfair_inline_capture_by_sport reports, per sport, the REAL anchor
+    availability that feeds picks: of OUR upcoming scraped fixtures carrying soft
+    odds, how many ALSO carry an inline ``bookmaker='Betfair Exchange'`` MONEYLINE
+    row (soccer '1x2', basketball 'home_away') on the SAME canonical event (the
+    JSON-feed bind, bookie 44) — NOT the separate ``betfair:`` archive capture.
+
+    A fixed far-future ``now`` windows [now, now+7d] onto only these fixtures."""
+    now = datetime(2027, 7, 1, 12, 0, tzinfo=UTC)
+    ko = now + timedelta(days=1)
+
+    # soccer fixture WITH an inline Betfair Exchange moneyline row -> captured
+    await _seed_canonical_with_books(
+        factory, "inl-soc-bf", "Alpha", "Beta", ko, "soccer",
+        bookmakers=["bet365", "Betfair Exchange"],
+    )
+    # soccer fixture with ONLY soft odds, no Betfair -> scraped++ only
+    await _seed_canonical_with_books(
+        factory, "inl-soc-nobf", "Gamma", "Delta", ko, "soccer",
+        bookmakers=["bet365", "Unibet"],
+    )
+    # soccer fixture whose ONLY Betfair price is in a NON-moneyline market
+    # (over/under): NOT a usable anchor -> scraped++ but NOT captured. This is the
+    # exact live case the panel must not over-count (Betfair on O/U but not 1X2).
+    await _seed_canonical_with_books(
+        factory, "inl-soc-ou", "Iota", "Kappa", ko, "soccer",
+        bookmakers=["bet365", "Betfair Exchange"],
+        betfair_market_detail="over_under_2_5",
+    )
+    # basketball fixture, soft only, no Betfair -> structural 0 (Betfair renders
+    # for liquid soccer majors only)
+    await _seed_canonical_with_books(
+        factory, "inl-bball", "Lakers", "Celtics", ko, "basketball",
+        bookmakers=["bet365"],
+    )
+
+    async with factory() as session:
+        rows = {r["sport"]: r for r in await betfair_inline_capture_by_sport(session, now=now)}
+
+    assert rows["soccer"]["scraped"] == 3
+    assert rows["soccer"]["captured"] == 1  # only inl-soc-bf has an inline Betfair MONEYLINE row
+    assert rows["basketball"]["scraped"] == 1
+    assert rows["basketball"]["captured"] == 0  # structural 0: no inline Betfair on basketball
+    # invariant: captured can never exceed the soft-odds scraped denominator
+    for row in rows.values():
+        captured, scraped = row["captured"], row["scraped"]
+        assert isinstance(captured, int) and isinstance(scraped, int)
+        assert captured <= scraped
+
+
+async def test_betfair_inline_capture_ignores_namespaced_archive_event(factory) -> None:  # type: ignore[no-untyped-def]
+    """The inline metric must NOT count a separate ``betfair:``-namespaced archive
+    event (the old, mostly-empty capture path). A canonical fixture with soft odds
+    but whose ONLY Betfair price lives on the ``betfair:``-prefixed event is
+    counted as scraped-but-NOT-captured by the inline metric."""
+    now = datetime(2027, 8, 1, 12, 0, tzinfo=UTC)
+    ko = now + timedelta(days=1)
+
+    await _seed_canonical_with_books(
+        factory, "arc-soc", "Alpha", "Beta", ko, "soccer", bookmakers=["bet365"]
+    )
+    # the Betfair price exists ONLY on the namespaced archive event, not inline
+    teams = {
+        "betfair:arc-soc": EventTeams(
+            home="Alpha", away="Beta", league="betfair_soccer", starts_at=ko
+        )
+    }
+    arc_snaps = [
+        _soft_snap_at("Betfair Exchange", sel, o, "betfair:arc-soc", ko - timedelta(hours=2))
+        for sel, o in (("Home", 2.2), ("Draw", 3.4), ("Away", 3.3))
+    ]
+    await persist_odds_snapshots(factory, arc_snaps, teams, "betfair_soccer", "betfair_soccer")
+
+    async with factory() as session:
+        rows = {r["sport"]: r for r in await betfair_inline_capture_by_sport(session, now=now)}
+
+    assert rows["soccer"]["scraped"] == 1
+    assert rows["soccer"]["captured"] == 0  # archive-only Betfair must NOT count as inline
 
 
 # --- Betfair Exchange coverage (EXACT match -> presence/absence) ---------------
