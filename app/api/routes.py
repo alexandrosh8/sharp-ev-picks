@@ -35,7 +35,7 @@ from app.api.auth import (
 from app.api.deps import get_session
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
-from app.resolution.shadow import summarize_match_rate
+from app.resolution.shadow import summarize_anchor_coverage, summarize_match_rate
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.settlement.outcomes import pick_pnl, pick_roi
@@ -720,10 +720,19 @@ async def resolution_match_rate(
     # Per-sport upcoming capture for ALL arcadia sports (tennis + american_football
     # included), so the panel shows the archive captures every sport, not just the
     # pick sports that appear in the match rate above.
-    report["archive_capture"] = await pinnacle_archive_capture_by_sport(session)
+    pinnacle_capture = await pinnacle_archive_capture_by_sport(session)
+    report["archive_capture"] = pinnacle_capture
     # Betfair Exchange coverage alongside Pinnacle (exact-ref, expected sparse —
     # liquid majors behind a UK/EU proxy only).
-    report["betfair_capture"] = await betfair_archive_capture_by_sport(session)
+    betfair_capture = await betfair_archive_capture_by_sport(session)
+    report["betfair_capture"] = betfair_capture
+    # Scraped-weighted "Betfair X% · Pinnacle Y%" headline — the always-populated
+    # summary the dashboard's coverage-panel HEADER shows up front (replaces the
+    # bare "—"), aggregated from the two per-sport capture lists above.
+    report["coverage_summary"] = summarize_anchor_coverage(
+        betfair_capture=betfair_capture,
+        pinnacle_capture=pinnacle_capture,
+    ).as_dict()
     return report
 
 

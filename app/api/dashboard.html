@@ -665,6 +665,29 @@
         background: rgba(56, 189, 248, 0.12);
         color: var(--info);
       }
+      .b-warn {
+        background: rgba(240, 180, 41, 0.14);
+        color: var(--warn);
+      }
+      /* Sport cell with an optional "not validated" status line stacked under
+         the sport name (visibility-only sports — tennis, American football). */
+      .sportwrap {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 3px;
+      }
+      .sportwrap .badge {
+        margin-top: 1px;
+      }
+      .sportnote {
+        color: var(--warn);
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        line-height: 1.3;
+        white-space: normal;
+        max-width: 180px;
+      }
       tr.valuegone {
         opacity: 0.42;
         transition: opacity 0.2s var(--ease);
@@ -809,15 +832,46 @@
         font-style: italic;
       }
 
-      .games-head {
+      /* clean two-column panel header: title + one-line subtitle on the left,
+         the Show/Hide toggle pinned right. Replaces the old cramped
+         title·stamp·button flex row (operator: "cluttered/unclear"). */
+      .panel-head {
         display: flex;
         align-items: center;
-        gap: 12px;
-        margin: 18px 0 8px;
-        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 16px;
+        margin: 22px 0 8px;
+        padding-bottom: 9px;
+        border-bottom: 1px solid var(--line);
       }
-      .games-head .stamp {
-        margin-left: 0;
+      .panel-head-text {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+      .panel-head .section-toggle {
+        flex: none;
+      }
+      /* one-line status under the panel title (count / coverage headline) */
+      .panel-sub {
+        font-family: var(--mono);
+        color: var(--dim);
+        font-size: 11.5px;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .panel-sub.err {
+        color: var(--warn);
+      }
+      .panel-sub .muted {
+        color: var(--faint);
+      }
+      .panel-sub b {
+        color: var(--text);
+        font-weight: 700;
       }
       .gameswrap {
         margin-bottom: 4px;
@@ -1389,9 +1443,11 @@
           </table>
         </div>
 
-        <div class="games-head">
-          <div class="evtitle">Available games</div>
-          <span class="stamp" id="games-count">loading…</span>
+        <div class="panel-head">
+          <div class="panel-head-text">
+            <div class="evtitle">Available games</div>
+            <span class="panel-sub" id="games-count">loading…</span>
+          </div>
           <button
             id="toggle-games"
             class="section-toggle"
@@ -1441,9 +1497,11 @@
           </div>
         </div>
 
-        <div class="games-head">
-          <div class="evtitle">Sharp-anchor coverage (Pinnacle + Betfair)</div>
-          <span class="stamp" id="archive-count">—</span>
+        <div class="panel-head">
+          <div class="panel-head-text">
+            <div class="evtitle">Sharp-anchor coverage</div>
+            <span class="panel-sub" id="archive-count">loading…</span>
+          </div>
           <button
             id="toggle-archive"
             class="section-toggle"
@@ -1744,8 +1802,13 @@
         $("toggle-archive").setAttribute("aria-expanded", String(ARCHIVE_OPEN));
         $("toggle-archive").textContent = ARCHIVE_OPEN ? "Hide" : "Show";
         // Fetch only on first expand — the query scans picks + archive, so it
-        // stays off the 60s refresh loop.
-        if (ARCHIVE_OPEN && !ARCHIVE_LOADED && !ARCHIVE_LOADING) loadArchive();
+        // stays off the 60s refresh loop. If the eager headline fetch already
+        // cached the payload, render the per-sport table straight from cache
+        // instead of re-fetching.
+        if (ARCHIVE_OPEN) {
+          if (ARCHIVE_LOADED) renderArchive();
+          else if (!ARCHIVE_LOADING) loadArchive();
+        }
       }
 
       async function loadArchive() {
@@ -1780,13 +1843,70 @@
         }
       }
 
+      // Eager, lightweight: populate ONLY the panel-header coverage headline
+      // (Betfair/Pinnacle %) on first page load so it never sits on a bare "—"
+      // while the panel stays collapsed. Caches the same payload the full panel
+      // uses, so expanding does not re-fetch. Silent on failure — the header
+      // just shows "coverage unavailable", and expanding retries.
+      async function loadCoverageHeadline() {
+        if (ARCHIVE_LOADED || ARCHIVE_LOADING) {
+          if (ARCHIVE) setCoverageHeadline(ARCHIVE);
+          return;
+        }
+        ARCHIVE_LOADING = true;
+        try {
+          const res = await fetchWithTimeout("/resolution/match-rate?days=180");
+          if (res.status === 401) {
+            window.location.assign("/login");
+            return;
+          }
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          ARCHIVE = await res.json();
+          ARCHIVE_LOADED = true;
+          // Header always; the per-sport table only if the panel is open.
+          setCoverageHeadline(ARCHIVE);
+          if (ARCHIVE_OPEN) renderArchive();
+        } catch (err) {
+          $("archive-count").classList.add("err");
+          $("archive-count").textContent = "coverage unavailable";
+        } finally {
+          ARCHIVE_LOADING = false;
+        }
+      }
+
+      // The panel-header subtitle is the scraped-weighted "Betfair X% ·
+      // Pinnacle Y%" coverage headline (the always-populated proof the header
+      // showed a bare "—" for before). Falls back to the per-pick match rate
+      // only if the backend hasn't shipped coverage_summary yet.
+      function setCoverageHeadline(a) {
+        const el = $("archive-count");
+        el.classList.remove("err");
+        const cov = a && a.coverage_summary;
+        if (cov && typeof cov.headline === "string") {
+          el.textContent = cov.headline;
+          el.title =
+            "Of our upcoming scraped fixtures (next 7d), the share that also " +
+            "carry a captured Betfair Exchange back price (" +
+            (cov.betfair_captured || 0) +
+            "/" +
+            (cov.betfair_scraped || 0) +
+            ") and a strict-matched Pinnacle sharp close (" +
+            (cov.pinnacle_matched || 0) +
+            "/" +
+            (cov.pinnacle_scraped || 0) +
+            "). Expand for the per-sport breakdown.";
+          return;
+        }
+        const total = Number(a && a.total) || 0;
+        el.textContent = (a ? a.matched : 0) + " / " + total + " matched";
+        el.removeAttribute("title");
+      }
+
       function renderArchive() {
         const a = ARCHIVE;
         if (!a) return;
         const total = Number(a.total) || 0;
-        $("archive-count").classList.remove("err");
-        $("archive-count").textContent =
-          a.matched + " / " + total + " matched · " + ratePct(a.match_rate);
+        setCoverageHeadline(a);
         $("archive-purpose").textContent =
           "Strict cross-source match of picks (known kickoff, last 180d) to the " +
           "captured Pinnacle sharp-close archive — the readiness dial for the " +
@@ -1944,8 +2064,14 @@
           return;
         }
         $("games-count").classList.remove("err");
-        $("games-count").textContent =
-          rows.length + " shown / " + GAMES.length + " loaded";
+        // Clean count: "N games" when nothing is filtered out, else
+        // "N of M games · filtered" so the shown/loaded split reads in plain
+        // English (operator: the old "171 shown / 171 loaded" was unclear).
+        const filtered = rows.length !== GAMES.length;
+        const noun = GAMES.length === 1 ? "game" : "games";
+        $("games-count").textContent = filtered
+          ? rows.length + " of " + GAMES.length + " " + noun + " · filtered"
+          : GAMES.length + " " + noun;
         if (!rows.length) {
           const tr = document.createElement("tr");
           const sportSel = $("f-game-sport").value;
@@ -1969,19 +2095,27 @@
         rows.forEach((g) => {
           const tr = document.createElement("tr");
 
-          // 1 — Kickoff
+          // 1 — Kickoff (consistent with the picks table's cellKickoff: a real
+          // local time + countdown when known, a clean tooltipped "TBD" when the
+          // source has not reported a kickoff yet — never a bare "unknown").
           const ko = document.createElement("div");
           ko.className = "ko";
           const when = document.createElement("span");
-          if (g.starts_at) when.textContent = fmtLocal(g.starts_at);
-          else {
+          const kickoffKnown = g.starts_at != null;
+          if (kickoffKnown) {
+            when.textContent = fmtLocal(g.starts_at);
+          } else {
             when.textContent = "TBD";
             when.className = "tbd";
+            when.title =
+              "the odds source has not reported a kickoff time for this match yet";
           }
+          const cd = kickoffKnown
+            ? countdown(g.starts_at)
+            : { text: "time to be confirmed", soon: false };
           const rel = document.createElement("small");
-          rel.textContent = g.starts_at
-            ? countdown(g.starts_at).text
-            : "kickoff unknown";
+          rel.textContent = cd.text;
+          if (cd.soon) rel.className = "soon";
           ko.append(when, rel);
           td(tr, ko);
 
@@ -2009,24 +2143,33 @@
           // 3 — League
           td(tr, g.league || "—");
 
-          // 4 — Sport (+ optional UNVALIDATED badge, per-row boolean only)
-          const sportCell = td(
-            tr,
-            SPORT_LABELS[g.sport] || g.sport_label || g.sport,
-          );
-          // Driver is strictly the per-row flag; an ABSENT field (undefined)
-          // renders no badge, so nothing is mislabeled until the backend
-          // ships the validated/unvalidated signal. Accept either spelling:
-          // validated===false OR unvalidated===true.
+          // 4 — Sport (+ a clear "not validated" status for visibility-only
+          // sports, per-row boolean only). The driver is strictly the per-row
+          // flag; an ABSENT field (undefined) renders no status, so nothing is
+          // mislabeled until the backend ships the signal. Accept either
+          // spelling: validated===false OR unvalidated===true.
+          const sportWrap = document.createElement("div");
+          sportWrap.className = "sportwrap";
+          const sportName = document.createElement("span");
+          sportName.textContent = SPORT_LABELS[g.sport] || g.sport_label || g.sport;
+          sportWrap.appendChild(sportName);
           const isUnvalidated = g.validated === false || g.unvalidated === true;
           if (isUnvalidated) {
-            const b = badge("UNVALIDATED", "b-neutral");
-            b.style.marginLeft = "6px";
-            b.title =
-              "This sport has not cleared a held-out CLV backtest — shown " +
-              "for visibility only, not alerted as picks.";
-            sportCell.appendChild(b);
+            // Plain-language status (not a bare confusing word): a warn-toned
+            // chip + a one-line caption that says exactly what it means.
+            const b = badge("NOT VALIDATED", "b-warn");
+            const tip =
+              "This sport's model has not cleared a held-out CLV backtest — " +
+              "shown for information only. It is never alerted or sized as a pick.";
+            b.title = tip;
+            sportWrap.appendChild(b);
+            const note = document.createElement("small");
+            note.className = "sportnote";
+            note.textContent = "model not yet validated — informational only";
+            note.title = tip;
+            sportWrap.appendChild(note);
           }
+          td(tr, sportWrap);
 
           // 5 — Coverage (one signal; raw market keys + book count on hover)
           const mc = Number(g.market_count || 0);
@@ -2069,7 +2212,7 @@
         }
         const cd = kickoffKnown
           ? countdown(p.starts_at)
-          : { text: "kickoff unknown", soon: false };
+          : { text: "time to be confirmed", soon: false };
         const rel = document.createElement("small");
         rel.textContent = cd.text;
         if (cd.soon) rel.className = "soon";
@@ -3949,6 +4092,10 @@
         }
       })();
       load();
+      // Populate the sharp-anchor coverage headline once, up front, so the
+      // panel header shows real Betfair/Pinnacle % instead of a bare dash even
+      // while collapsed. Off the 60s loop — coverage moves on the slate cadence.
+      loadCoverageHeadline();
       setInterval(load, 60000);
     </script>
   </body>

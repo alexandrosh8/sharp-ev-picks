@@ -426,6 +426,18 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     # panel can show coverage instead of an empty cell.
     assert cap["tennis"]["matched"] == 5
     assert cap["american_football"]["scraped"] == 0
+    # coverage_summary is the always-populated headline the panel shows BEFORE
+    # the operator expands it (replaces the bare "—"). Betfair = sum(captured)/
+    # sum(scraped) = 46/(149+64)=46/213; Pinnacle = sum(matched)/sum(scraped) =
+    # (0+20+50+5)/(0+64+149+6)=75/219.
+    cov = body["coverage_summary"]
+    assert cov["betfair_captured"] == 46
+    assert cov["betfair_scraped"] == 213
+    assert cov["betfair_rate"] == pytest.approx(46 / 213)
+    assert cov["pinnacle_matched"] == 75
+    assert cov["pinnacle_scraped"] == 219
+    assert cov["pinnacle_rate"] == pytest.approx(75 / 219)
+    assert cov["headline"] == "Betfair 22% · Pinnacle 34%"
 
 
 def test_dashboard_html_is_not_browser_cached() -> None:
@@ -472,6 +484,50 @@ def test_dashboard_has_archive_coverage_panel() -> None:
     assert 'id="archive-panel"' in text
     assert 'id="toggle-archive"' in text
     assert "/resolution/match-rate" in text
+
+
+def test_dashboard_surfaces_coverage_headline_eagerly() -> None:
+    """The sharp-anchor coverage panel HEADER shows the real Betfair/Pinnacle %
+    up front (the operator saw a bare '—'). The headline comes from the backend
+    coverage_summary and is populated on initial load, BEFORE the lazy panel is
+    expanded — so the dashboard reads coverage_summary and calls the eager
+    loader at boot."""
+    text = TestClient(make_app()).get("/").text
+    # eager headline loader exists and is invoked at boot (not only on expand)
+    assert "function loadCoverageHeadline" in text
+    assert "loadCoverageHeadline();" in text
+    # the header reads the backend's coverage_summary.headline
+    assert "coverage_summary" in text
+    assert "function setCoverageHeadline" in text
+    # the clean two-column panel header layout replaces the old games-head row
+    assert 'class="panel-head"' in text
+    assert 'class="panel-sub"' in text
+    assert "games-head" not in text  # old cluttered layout fully removed
+    assert "innerHTML" not in text  # untrusted strings stay on textContent
+
+
+def test_dashboard_surfaces_unvalidated_sport_in_plain_language() -> None:
+    """Visibility-only sports (tennis, American football) show a clear,
+    plain-language 'not validated — informational only' status in the games
+    table, not a bare confusing 'UNVALIDATED' word."""
+    text = TestClient(make_app()).get("/").text
+    assert "NOT VALIDATED" in text
+    assert "model not yet validated — informational only" in text
+    # the per-row flag still drives it (validated===false OR unvalidated===true)
+    assert "g.validated === false || g.unvalidated === true" in text
+
+
+def test_dashboard_renders_known_kickoff_and_clean_tbd() -> None:
+    """Kickoff renders a real local time when starts_at is present, and a clean
+    tooltipped 'TBD' (never a bare 'kickoff unknown') when it is null — in BOTH
+    the picks table and the games table."""
+    text = TestClient(make_app()).get("/").text
+    # known kickoff -> real local time via fmtLocal; TBD branch is tooltipped
+    assert "fmtLocal(g.starts_at)" in text
+    assert "the odds source has not reported a kickoff time" in text
+    # the bare confusing "kickoff unknown" copy is gone everywhere
+    assert "kickoff unknown" not in text
+    assert "time to be confirmed" in text
 
 
 def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:

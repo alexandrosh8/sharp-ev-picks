@@ -19,7 +19,7 @@ module only aggregates, so it stays inside the project's pure-math boundary
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 # Sport keys whose ``pinnacle_<sport>`` archive namespace IS the key itself;
@@ -234,4 +234,100 @@ def summarize_betfair_coverage(
         by_sport=by_sport,
         by_league=by_league,
         event_by_sport=event_by_sport,
+    )
+
+
+# --- sharp-anchor coverage headline ------------------------------------------
+# The "Sharp-anchor coverage (Pinnacle + Betfair)" panel showed a bare "—"
+# because its only number came from the lazy panel body (fetched on first
+# expand). This headline summarises the SAME per-sport capture lists the panel
+# already serves — scraped-weighted across sports — into one always-populated
+# "Betfair X% · Pinnacle Y%" string so the header carries real numbers up front.
+#
+#   Betfair rate = sum(captured) / sum(scraped)  — of our upcoming scraped
+#                  fixtures, the share that also carry a captured Betfair
+#                  Exchange archive event;
+#   Pinnacle rate = sum(matched) / sum(scraped)  — of our upcoming scraped
+#                  fixtures, the share that strict-match a captured Pinnacle
+#                  close.
+#
+# Both rates are ``None`` only when nothing was scraped at all (rendered "n/a",
+# never a misleading 0%).
+
+
+def _sum_field(rows: Sequence[Mapping[str, object]], field: str) -> int:
+    """Sum an integer ``field`` across capture rows, coercing missing/None/blank
+    to 0 (repo rows are dicts; a thin window can omit a sport entirely)."""
+    total = 0
+    for row in rows:
+        value = row.get(field)
+        if not isinstance(value, int | float | str):
+            continue  # None / unexpected type -> treat as 0
+        try:
+            total += int(value)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+@dataclass(frozen=True)
+class AnchorCoverage:
+    """Scraped-weighted Betfair + Pinnacle coverage headline for the dashboard.
+
+    ``*_scraped`` are the denominators (our upcoming scraped fixtures, summed
+    across sports); ``betfair_captured`` / ``pinnacle_matched`` the numerators.
+    Rates are ``None`` only when nothing was scraped (no false 0%)."""
+
+    betfair_scraped: int
+    betfair_captured: int
+    pinnacle_scraped: int
+    pinnacle_matched: int
+
+    @property
+    def betfair_rate(self) -> float | None:
+        return self.betfair_captured / self.betfair_scraped if self.betfair_scraped else None
+
+    @property
+    def pinnacle_rate(self) -> float | None:
+        return self.pinnacle_matched / self.pinnacle_scraped if self.pinnacle_scraped else None
+
+    @staticmethod
+    def _label(rate: float | None) -> str:
+        return "n/a" if rate is None else f"{round(rate * 100)}%"
+
+    def headline(self) -> str:
+        """One-line "Betfair X% · Pinnacle Y%" — the panel-header summary."""
+        return (
+            f"Betfair {self._label(self.betfair_rate)} · Pinnacle {self._label(self.pinnacle_rate)}"
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "betfair_scraped": self.betfair_scraped,
+            "betfair_captured": self.betfair_captured,
+            "betfair_rate": self.betfair_rate,
+            "pinnacle_scraped": self.pinnacle_scraped,
+            "pinnacle_matched": self.pinnacle_matched,
+            "pinnacle_rate": self.pinnacle_rate,
+            "headline": self.headline(),
+        }
+
+
+def summarize_anchor_coverage(
+    *,
+    betfair_capture: Sequence[Mapping[str, object]],
+    pinnacle_capture: Sequence[Mapping[str, object]],
+) -> AnchorCoverage:
+    """Aggregate the per-sport capture lists into the dashboard's scraped-weighted
+    sharp-anchor coverage headline. Pure: numbers in, numbers out — no DB/IO.
+
+    ``betfair_capture`` rows carry ``scraped``/``captured``; ``pinnacle_capture``
+    rows carry ``scraped``/``matched`` (the shapes
+    ``repositories.betfair_archive_capture_by_sport`` /
+    ``pinnacle_archive_capture_by_sport`` already return)."""
+    return AnchorCoverage(
+        betfair_scraped=_sum_field(betfair_capture, "scraped"),
+        betfair_captured=_sum_field(betfair_capture, "captured"),
+        pinnacle_scraped=_sum_field(pinnacle_capture, "scraped"),
+        pinnacle_matched=_sum_field(pinnacle_capture, "matched"),
     )
