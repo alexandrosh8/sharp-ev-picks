@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -350,6 +350,18 @@ async def _settle_one(
     if inserted.scalar_one_or_none() is None:
         return False  # already settled by a concurrent/manual path
     pick.status = "settled"
+    # Issue 2 (2026-06-24): Event.status was only ever the 'scheduled' server
+    # default — nothing transitioned it, so a finished, settled game stayed
+    # 'scheduled' forever. A pick settling from a REAL final score is the
+    # canonical "event is over" signal, so flip the event here (idempotent, gated
+    # to a real-score settle — the VOID paths deliberately leave status alone, an
+    # abandoned/TBD pick is not a finished game). Lifecycle-only column; no logic
+    # reads it, so this cannot affect settlement/edge math.
+    await session.execute(
+        update(Event)
+        .where(Event.id == pick.event_id, Event.status != "finished")
+        .values(status="finished")
+    )
     logger.info(
         "settled pick %d: %s %s -> %s (%d-%d)",
         pick.id,

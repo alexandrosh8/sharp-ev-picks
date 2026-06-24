@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.ingestion.base import EventTeams
+from app.ingestion.base import EventTeams, prefer_kickoff
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
@@ -248,10 +248,16 @@ async def _get_or_create_event(
     result and corrupt settlement + ROI (review 2026-06-21)."""
     existing = await session.scalar(select(Event).where(Event.external_ref == external_ref))
     if existing is not None:
-        # Earlier rows may be NULL (or carry a legacy placeholder); a real
-        # kickoff from the source upgrades them to the true start.
-        if starts_at is not None and existing.starts_at != starts_at:
-            existing.starts_at = starts_at
+        # Earlier rows may be NULL (or carry a legacy placeholder); a real kickoff
+        # from the source upgrades them. Apply the SAME precedence rule as the
+        # in-memory EventDirectory (app.ingestion.base.prefer_kickoff): a real time
+        # always wins, but a date-only midnight (00:00:00 UTC sentinel) or a None
+        # must NEVER overwrite an already-stored REAL time. Without this, the
+        # residual-tail midnight (OddsPortal's date-only basketball header) clobbers
+        # a real time captured on an earlier cycle (root cause 2026-06-24).
+        target = prefer_kickoff(existing.starts_at, starts_at)
+        if target != existing.starts_at:
+            existing.starts_at = target
             await session.flush()
         return existing.id
     await session.execute(
@@ -660,7 +666,10 @@ async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, date
         .all()
     )
     for event in rows:
-        target = kickoffs[event.external_ref]
+        # Precedence (prefer_kickoff): a real time upgrades a stored midnight/NULL,
+        # but a date-only midnight in the refresh map must NOT downgrade an event
+        # that already has a REAL time — same rule as the upsert + EventDirectory.
+        target = prefer_kickoff(event.starts_at, kickoffs[event.external_ref])
         if event.starts_at != target:
             event.starts_at = target
             changed += 1

@@ -409,6 +409,12 @@ async def revalidate_offwindow_picks(
     return await revalidate_open_picks(session_factory, snapshots, devig_method)
 
 
+#: Terminal Event.status once a final score is captured. Event.status was
+#: previously only ever the 'scheduled' server-default (no code transitioned it),
+#: so finished, settled games stayed 'scheduled' forever (Issue 2, 2026-06-24).
+#: The finished-gated score capture is the one place that KNOWS a game is over, so
+#: it owns the transition. Lifecycle-only (no logic reads it), so this is safe.
+_FINISHED_STATUS = "finished"
 #: How far back to re-scrape finished, still-open picks for their final score.
 #: Wide enough that a slow VPS which missed a score for several days still
 #: recovers it — the old 3-day window stranded older picks on "awaiting result"
@@ -502,6 +508,9 @@ async def _scrape_one_finished_score(
     if teams.finished is None and not past_full_floor:
         return 0
     async with session_factory() as session:
+        # 1) Write the final score (guarded: never clobber a recorded score) AND
+        #    transition the event to its terminal status in the SAME statement, so
+        #    a freshly-captured finished game is both scored and marked 'finished'.
         res = await session.execute(
             update(Event)
             .where(
@@ -511,11 +520,29 @@ async def _scrape_one_finished_score(
             .values(
                 scraped_home_score=teams.home_score,
                 scraped_away_score=teams.away_score,
+                status=_FINISHED_STATUS,
             )
+        )
+        # 2) HEAL the status of an already-scored event still stuck at 'scheduled'
+        #    (the pre-fix backlog: Event.status was never transitioned, so finished,
+        #    settled games kept the 'scheduled' default). Idempotent + finished-gated
+        #    (we only reach here when the page reports finished / past the floor), and
+        #    it never touches the score, so it can't corrupt settlement. This is the
+        #    score-write's no-op sibling for rows whose score landed before the fix.
+        await session.execute(
+            update(Event)
+            .where(
+                Event.external_ref == ref,
+                Event.status != _FINISHED_STATUS,
+            )
+            .values(status=_FINISHED_STATUS)
         )
         # Commit PER LINK: an already-scraped finished score must survive a
         # later link hanging/raising or the cycle's time budget running out.
         await session.commit()
+    # The return is the SCORE-write signal (1 when a new final score landed), kept
+    # distinct from the status heal so the caller's per-cycle "written" tally still
+    # counts newly-captured scores, not status backfills.
     return res.rowcount or 0
 
 

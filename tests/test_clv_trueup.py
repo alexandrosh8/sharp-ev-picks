@@ -325,6 +325,65 @@ async def test_capture_finished_scores_writes_score_for_settlement(factory) -> N
         assert ev.scraped_away_score == 1
 
 
+async def test_capture_finished_scores_transitions_event_status(factory) -> None:  # type: ignore[no-untyped-def]
+    # Issue 2 (independent of the kickoff fix): Event.status was set ONLY by the
+    # 'scheduled' server-default and NEVER transitioned — a finished, settled game
+    # stayed 'scheduled' forever. The finished-gated, never-clobbering score capture
+    # must ALSO flip Event.status to a terminal 'finished' so the row reflects reality.
+    from app.clv_trueup import capture_finished_scores
+    from app.ingestion.base import EventDirectory
+    from app.storage.models import Event
+
+    event_id = "https://www.oddsportal.com/basketball/h2h/gigantes-vs-cangrejeros/ST1/"
+    async with factory() as session:
+        await session.execute(
+            sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+        )
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Gigantes", away="Cangrejeros", starts_at=NOW - timedelta(hours=5)),
+            "value-sharp-vs-soft",
+            "st-test",
+        )
+        await session.commit()
+        ev = await session.scalar(select(Event).where(Event.external_ref == event_id))
+        assert ev is not None
+        assert ev.status == "scheduled"  # baseline: never transitioned before the fix
+
+    directory = EventDirectory()
+
+    class ResultLoader(FakeLoader):
+        async def fetch_match_odds(self, sport_key, match_links, markets=None, **_: object):  # type: ignore[no-untyped-def]
+            for ref in match_links:
+                directory.register(
+                    ref,
+                    EventTeams(
+                        home="Gigantes",
+                        away="Cangrejeros",
+                        home_score=95,
+                        away_score=96,
+                        finished=True,
+                    ),
+                )
+            return []
+
+    # make_pick (above) registers the event under the "soccer" sport, so the
+    # capture is routed with sport_key="soccer". The status-transition behaviour
+    # under test is sport-agnostic (the score-capture UPDATE is the same code for
+    # every sport); the bug surfaced on basketball only because those leagues lack
+    # a free results feed, so the score-scrape path is their only settlement route.
+    written = await capture_finished_scores(
+        ResultLoader([]), factory, directory, "soccer", now=NOW
+    )
+    assert written == 1
+    async with factory() as session:
+        ev = await session.scalar(select(Event).where(Event.external_ref == event_id))
+        assert ev is not None
+        assert ev.scraped_home_score == 95
+        assert ev.status == "finished"  # the score capture transitioned the status
+
+
 async def test_capture_finished_true_captures_below_old_floor(factory) -> None:  # type: ignore[no-untyped-def]
     # OddsPortal explicitly marks the game Finished -> capture immediately, even
     # 110 min past kickoff (BELOW the old 3h30m soccer floor): fast settle.

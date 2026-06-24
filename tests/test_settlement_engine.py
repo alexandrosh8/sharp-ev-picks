@@ -118,6 +118,28 @@ async def test_settles_past_pick_with_result_row(session) -> None:  # type: igno
     assert row.settled_at == NOW
 
 
+async def test_settled_event_status_transitions_to_finished(session) -> None:  # type: ignore[no-untyped-def]
+    # Issue 2: Event.status was never transitioned, so a finished, settled game
+    # stayed 'scheduled'. Settling a pick from a real final score (_settle_one)
+    # is the canonical "event is over" trigger and must flip Event.status to
+    # 'finished'. (A VOID — abandoned/TBD — is NOT finished and stays put.)
+    pick = await seed_pick(session, "evt-status-finished")
+    ev_before = await session.scalar(
+        select(Event).where(Event.external_ref == "evt-status-finished")
+    )
+    assert ev_before is not None
+    assert ev_before.status == "scheduled"  # baseline before settlement
+
+    assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 1
+    await session.refresh(pick)
+    assert pick.status == "settled"
+    ev_after = await session.scalar(
+        select(Event).where(Event.external_ref == "evt-status-finished")
+    )
+    assert ev_after is not None
+    assert ev_after.status == "finished"  # settling the pick marked the event over
+
+
 async def test_settlement_is_idempotent(session) -> None:  # type: ignore[no-untyped-def]
     pick = await seed_pick(session, "evt-settle-2")
     assert await settle_open_picks(session, book_with_score(), NOW) == 1
