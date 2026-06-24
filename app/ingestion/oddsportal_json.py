@@ -48,11 +48,12 @@ import gzip
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 
 from app.ingestion.base import EventDirectory, EventTeams
 from app.ingestion.oddsportal import (
@@ -209,6 +210,160 @@ def decrypt_feed_body(body: str) -> dict[str, Any]:
     return payload
 
 
+# --- Bookmaker ID -> NAME registry ------------------------------------------
+# The decrypted feed keys odds PURELY by numeric provider IDs ("707", "263",
+# ...). Every downstream consumer (sharp-anchor classification in
+# app/edge/value.py, the consensus median, CLV close-line capture, devig
+# grouping, the persistence dedup key) keys on bookmaker NAMES exactly as the
+# Playwright path emits them ("Pinnacle", "Betfair Exchange", "bet365"). So the
+# numeric IDs MUST be translated to those canonical names before a snapshot is
+# emitted; an UNKNOWN id is SKIPPED (a scrape gap), NEVER persisted as a numeric
+# bookmaker (that silently disables the whole value engine — review 2026-06-23).
+#
+# OddsPortal exposes the registry as a static-ish JS bundle that assigns
+#   var bookmakersData = { "<id>": { ..., "WebName": "<display name>" }, ... };
+# served from a TIMESTAMP-versioned asset /res/x/bookies-<ts1>-<ts2>.js. The
+# filename rotates (so it can't be hardcoded — it is read from a page's HTML),
+# but the id->name MAPPING is append-only and safe to cache (research
+# 2026-06-23, cross-checked vs borewicz/oddsportal + the live bundle). The
+# `WebName` field carries the exact display spelling our pipeline matches on
+# (e.g. lowercase "bet365"); we read it verbatim, never normalise or guess.
+
+# bookmakersData={...} up to the closing brace before the next `;var`/`;` —
+# tolerant of the minified bundle layout (the blob is a single JSON object).
+_BOOKMAKERS_DATA_RE = re.compile(r"bookmakersData\s*=\s*(\{.*?\})\s*;", re.DOTALL)
+# The versioned bundle URL as referenced in page HTML (absolute or root-relative).
+_BOOKIES_BUNDLE_RE = re.compile(r"""['"]([^'"]*?/res/[^'"]*?bookies-[^'"]+?\.js)['"]""")
+
+
+def parse_bookmaker_registry(bundle_js: str) -> dict[str, str]:
+    """Parse OddsPortal's `bookmakersData` JS blob into ``{id: WebName}``.
+
+    PURE function: extracts the ``bookmakersData={...}`` object literal and reads
+    each entry's ``WebName`` (the exact display name the Playwright path renders).
+    Entries without a usable ``WebName`` are dropped. Returns ``{}`` when the blob
+    is absent/unparseable — the caller then has NO map, so the feed parse emits
+    NO rows (a loud scrape gap), never a numeric bookmaker.
+    """
+    match = _BOOKMAKERS_DATA_RE.search(bundle_js)
+    if match is None:
+        return {}
+    try:
+        data = json.loads(match.group(1))
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for raw_id, entry in data.items():
+        if not isinstance(entry, Mapping):
+            continue
+        name = entry.get("WebName")
+        if isinstance(name, str) and name.strip():
+            out[str(raw_id)] = name.strip()
+    return out
+
+
+class BookmakerRegistry:
+    """GET-only, cached resolver of the bookmaker ID->NAME map.
+
+    A single instance is shared across the loader's per-match scrapes: the first
+    `resolve` reads the versioned bundle URL out of a page's HTML, GETs that
+    bundle, and builds ``{id: WebName}``; subsequent calls return the cached map
+    (the registry is static-ish — appended to, never reassigned). Both calls are
+    GETs of public assets (READ-ONLY market-data safety rule). On any failure the
+    map is ``{}`` — the feed parse then yields no rows (a visible scrape gap),
+    never a guessed or numeric bookmaker.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[str, str] | None = None
+
+    @property
+    def cached(self) -> Mapping[str, str] | None:
+        """The cached map (None until the first successful resolve)."""
+        return self._cache
+
+    async def resolve(self, session: _AsyncHTTPSession, *, page_url: str) -> dict[str, str]:
+        """Return ``{id: WebName}``, fetching+caching it once (GET-only).
+
+        Reads the ``/res/x/bookies-*.js`` URL from `page_url`'s HTML, GETs that
+        bundle, and parses it. Caches the FIRST result (even ``{}`` is cached so a
+        transient miss isn't re-fetched every match within a cycle; a fresh
+        instance per cycle re-resolves). Never raises — a failed GET / missing
+        bundle / unparseable blob yields ``{}``."""
+        if self._cache is not None:
+            return self._cache
+        self._cache = await self._fetch(session, page_url)
+        return self._cache
+
+    async def resolve_from_html(
+        self, session: _AsyncHTTPSession, html: str, *, base_url: str
+    ) -> dict[str, str]:
+        """`resolve` variant that reuses an ALREADY-FETCHED page's HTML.
+
+        The per-match scrape already GETs the match page, and that HTML carries
+        the ``bookies-*.js`` reference — so we skip the page GET and fetch only
+        the (cached) bundle. Same caching + fail-soft (``{}``) contract as
+        `resolve`. `base_url` resolves a root-relative bundle path to absolute."""
+        if self._cache is not None:
+            return self._cache
+        self._cache = await self._fetch_bundle_from_html(session, html, base_url)
+        return self._cache
+
+    async def _fetch(self, session: _AsyncHTTPSession, page_url: str) -> dict[str, str]:
+        try:
+            page = await session.get(page_url, impersonate=_IMPERSONATE)
+        except Exception as exc:  # network / TLS / timeout -> no map (scrape gap)
+            logger.warning(
+                "oddsportal bookmaker registry page GET failed (%s) — no id->name map",
+                type(exc).__name__,
+            )
+            return {}
+        if getattr(page, "status_code", 0) != 200:
+            logger.warning(
+                "oddsportal bookmaker registry page returned status %s — no id->name map",
+                getattr(page, "status_code", "?"),
+            )
+            return {}
+        return await self._fetch_bundle_from_html(session, page.text, page_url)
+
+    async def _fetch_bundle_from_html(
+        self, session: _AsyncHTTPSession, html: str, base_url: str
+    ) -> dict[str, str]:
+        bundle_match = _BOOKIES_BUNDLE_RE.search(html)
+        if bundle_match is None:
+            logger.warning(
+                "oddsportal bookmaker registry: no bookies-*.js bundle URL in page — "
+                "no id->name map (the page layout may have changed)"
+            )
+            return {}
+        bundle_url = urljoin(base_url, bundle_match.group(1))
+        try:
+            bundle = await session.get(bundle_url, impersonate=_IMPERSONATE)
+        except Exception as exc:  # network / TLS / timeout -> no map (scrape gap)
+            logger.warning(
+                "oddsportal bookmaker bundle GET failed (%s) — no id->name map",
+                type(exc).__name__,
+            )
+            return {}
+        if getattr(bundle, "status_code", 0) != 200:
+            logger.warning(
+                "oddsportal bookmaker bundle returned status %s — no id->name map",
+                getattr(bundle, "status_code", "?"),
+            )
+            return {}
+        registry = parse_bookmaker_registry(bundle.text)
+        if not registry:
+            logger.warning(
+                "oddsportal bookmaker registry parsed EMPTY from the bundle — "
+                "no id->name map; feed rows will be a scrape gap until it resolves"
+            )
+        else:
+            logger.info("oddsportal bookmaker registry resolved: %d books", len(registry))
+        return registry
+
+
 # --- Feed-market -> OddsHarvester-market-key mapping -------------------------
 # Each entry maps an OddsHarvester market key (the vocabulary the rest of the
 # app speaks) to (feed_market_key, {outcome_index: odds_label}). The odds_label
@@ -284,6 +439,21 @@ def _outcome_at(outcomes: Any, index: str) -> Any:
     return None
 
 
+def _feed_captured_at(payload: Mapping[str, Any], now: datetime) -> datetime:
+    """The feed's provider observation time (``d.time-base``, epoch seconds, UTC)
+    as the snapshot `captured_at` — the JSON analog of the Playwright path's
+    ``scraped_date`` (oddsportal._convert_match). Falls back to ``now`` when the
+    feed omits/garbles it, exactly like the Playwright ``_parse_ts(...) or now``.
+    Always tz-aware UTC (a naive datetime is a bug)."""
+    raw = (payload.get("d") or {}).get("time-base")
+    if raw is None:
+        return now
+    try:
+        return datetime.fromtimestamp(float(raw), tz=UTC)
+    except (ValueError, OverflowError, OSError, TypeError):
+        return now
+
+
 def parse_feed_payload(
     payload: Mapping[str, Any],
     *,
@@ -295,6 +465,7 @@ def parse_feed_payload(
     markets: Sequence[str],
     directory: EventDirectory,
     now: datetime,
+    bookmakers: Mapping[str, str],
     home_score: int | None = None,
     away_score: int | None = None,
     finished: bool | None = None,
@@ -307,6 +478,16 @@ def parse_feed_payload(
     selection) with parseable decimal odds > 1.0. Duplicate bookmaker rows
     within a market are dropped (devig protection). `market_detail` carries the
     raw OddsHarvester market key so distinct lines never collapse in devig.
+
+    `bookmakers` maps the feed's numeric provider IDs to canonical bookmaker
+    NAMES (the exact spellings the Playwright path emits, e.g. "Pinnacle",
+    "Betfair Exchange", "bet365"). An id NOT in the map is SKIPPED — never
+    persisted as a numeric bookmaker (that silently breaks the value engine's
+    sharp/soft classification, CLV join, and devig grouping). An empty map => no
+    rows (a visible scrape gap), never numeric bookmakers.
+
+    `captured_at` is the feed's provider observation time (``d.time-base``),
+    matching the Playwright path's ``scraped_date`` semantics (FIX 3).
     """
     home = home.strip()
     away = away.strip()
@@ -330,6 +511,7 @@ def parse_feed_payload(
     if not isinstance(back, Mapping):
         return []
 
+    captured_at = _feed_captured_at(payload, now)
     snapshots: list[OddsSnapshotIn] = []
     for market_key in markets:
         spec = _FEED_MARKETS.get(market_key)
@@ -349,7 +531,15 @@ def parse_feed_payload(
 
         seen_books: set[str] = set()
         for bookie_id, outcomes in odds_by_bookie.items():
-            bookmaker = str(bookie_id) or "unknown"
+            # Translate the numeric feed id to the canonical book NAME. An
+            # UNKNOWN id is a scrape gap — SKIP it, NEVER emit a numeric
+            # bookmaker (it would silently disable sharp/soft classification,
+            # fork CLV history, and corrupt devig grouping — review 2026-06-23).
+            bookmaker = bookmakers.get(str(bookie_id))
+            if not bookmaker:
+                continue
+            # Dedup on the resolved NAME (two ids could map to one book; the
+            # Playwright path dedups on name too).
             if bookmaker in seen_books:
                 continue
             seen_books.add(bookmaker)
@@ -367,7 +557,7 @@ def parse_feed_payload(
                         market=market,
                         selection=selection,
                         decimal_odds=odds,
-                        captured_at=now,
+                        captured_at=captured_at,
                         ingested_at=now,
                         market_detail=market_key,
                     )
@@ -541,6 +731,7 @@ async def fetch_match_feed(
     directory: EventDirectory,
     now: datetime,
     session: _AsyncHTTPSession,
+    bookmakers: Mapping[str, str],
     geo: str = "GB",
     lang: str = "en",
 ) -> list[OddsSnapshotIn]:
@@ -553,6 +744,9 @@ async def fetch_match_feed(
     path. A non-200, an off-window envelope, or a decrypt failure is treated as
     a scrape gap (no rows for that market), NEVER a hard error — matching the
     Playwright path's tolerance of missing sub-markets.
+
+    `bookmakers` is the numeric-id -> canonical-NAME map applied in
+    `parse_feed_payload`; an unknown id is skipped, never emitted numeric.
 
     This function only ever calls ``session.get`` — it is structurally incapable
     of POST/PUT/DELETE, honouring the READ-ONLY market-data safety rule.
@@ -615,6 +809,20 @@ async def fetch_match_feed(
                 exc,
             )
             continue
+        except RuntimeError as exc:
+            # The version-guard fail-closed signal (_verify_key_fingerprint): the
+            # static KDF constants DRIFTED — a half-applied bundle rotation or an
+            # edited constant. With NO Playwright fallback this would otherwise
+            # silently empty the JSON-wide slate, so surface it LOUDLY at WARNING
+            # naming the bundle (it is NOT a ValueError, so it would otherwise
+            # escape to the loader's quiet INFO catch). Fail-closed: no rows.
+            logger.warning(
+                "oddsportal feed KEY/BUNDLE ROTATION (version guard) for market %s — "
+                "JSON feed fail-closed, scrape gap until constants re-verified: %s",
+                market_key,
+                exc,
+            )
+            continue
         except ValueError as exc:  # off-window / empty match -> benign gap
             logger.info(
                 "oddsportal feed decrypt skipped for market %s (%s)",
@@ -633,6 +841,7 @@ async def fetch_match_feed(
                 markets=(market_key,),
                 directory=directory,
                 now=now,
+                bookmakers=bookmakers,
                 home_score=token.home_score,
                 away_score=token.away_score,
                 finished=token.finished,
@@ -648,6 +857,7 @@ async def scrape_match_odds(
     directory: EventDirectory,
     now: datetime,
     session: _AsyncHTTPSession,
+    registry: BookmakerRegistry | None = None,
     geo: str = "GB",
     lang: str = "en",
 ) -> list[OddsSnapshotIn]:
@@ -658,12 +868,20 @@ async def scrape_match_odds(
       2. `extract_bootstrap_tokens` -> eventId / sportId / teams / kickoff /
          finished-status + the per-market feed URLs built in pure Python
          (`build_feed_urls`; the 32-hex segment is cosmetic / server-ignored).
-      3. `fetch_match_feed` GETs + decrypts + parses each market's encrypted
-         `.dat` into `OddsSnapshotIn` rows matching the Playwright contract.
+      3. Resolve the bookmaker id->NAME map (cached on `registry`) from the SAME
+         match-page HTML — one extra GET of the static bundle, once per cycle.
+      4. `fetch_match_feed` GETs + decrypts + parses each market's encrypted
+         `.dat` into `OddsSnapshotIn` rows matching the Playwright contract,
+         translating numeric ids to canonical NAMES (unknown id -> skip).
 
     A missing/unparseable bootstrap header or a non-200 HTML page is a scrape
     gap (returns no rows, never crashes), exactly like a Playwright nav gap.
-    This is the slow-DOM-render path collapsed to ~5 small GETs per match.
+    This is the slow-DOM-render path collapsed to ~5-6 small GETs per match.
+
+    `registry` is a shared `BookmakerRegistry` (the caller reuses one per cycle so
+    the bundle is fetched once); when None a throwaway instance resolves it from
+    this match's HTML. A failure to resolve names yields an EMPTY map, so the feed
+    parse emits a scrape gap rather than numeric bookmakers.
 
     Only ever calls ``session.get`` — structurally GET-only (READ-ONLY safety).
     """
@@ -682,8 +900,9 @@ async def scrape_match_odds(
             getattr(resp, "status_code", "?"),
         )
         return []
+    html = resp.text
     try:
-        token = extract_bootstrap_tokens(resp.text, markets=markets)
+        token = extract_bootstrap_tokens(html, markets=markets)
     except ValueError as exc:  # bootstrap header absent / unparseable -> gap
         logger.info(
             "oddsportal bootstrap parse skipped (%s) for %s",
@@ -691,6 +910,11 @@ async def scrape_match_odds(
             normalize_match_link(match_url),
         )
         return []
+    # Resolve numeric-id -> canonical book NAME (cached on the shared registry).
+    # Read the bundle URL from THIS page's HTML to avoid a second page GET; the
+    # bundle itself is the only extra GET, and it's cached across the cycle.
+    registry = registry or BookmakerRegistry()
+    bookmakers = await registry.resolve_from_html(session, html, base_url=match_url)
     # The match page IS the feed Referer.
     token = replace(token, referer=match_url)
     return await fetch_match_feed(
@@ -700,6 +924,7 @@ async def scrape_match_odds(
         directory=directory,
         now=now,
         session=session,
+        bookmakers=bookmakers,
         geo=geo,
         lang=lang,
     )

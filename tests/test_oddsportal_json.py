@@ -30,6 +30,7 @@ from app.ingestion.oddsportal_json import (
     decrypt_feed_body,
     extract_bootstrap_tokens,
     fetch_match_feed,
+    parse_bookmaker_registry,
     parse_feed_payload,
     scrape_match_odds,
 )
@@ -40,6 +41,7 @@ _FEED = _FIX / "oddsportal_feed_KhgvzGjJ.dat"
 _FEED_GZIP = _FIX / "oddsportal_feed_KhgvzGjJ_gzip.dat"
 _DECRYPTED = _FIX / "oddsportal_feed_KhgvzGjJ.decrypted.json"
 _MATCH_PAGE = _FIX / "oddsportal_match_page_KhgvzGjJ.html"
+_BOOKIES_BUNDLE = _FIX / "oddsportal_bookies_bundle.js"
 
 # The navigable OddsPortal match URL IS the event identity across the platform.
 EVENT_URL = (
@@ -47,6 +49,20 @@ EVENT_URL = (
 )
 NOW = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
 MARKETS = ("1x2", "over_under_2_5", "btts", "double_chance")
+
+# The feed keys odds by numeric provider IDs; the parser MUST translate them to
+# canonical bookmaker NAMES (the exact spellings the Playwright path emits) — so
+# every assertion below keys on the NAME, never the id. Built from the bundle
+# fixture so the parse path matches the live id->WebName mapping.
+REGISTRY = parse_bookmaker_registry(_BOOKIES_BUNDLE.read_text())
+# Sanity: the pipeline-critical canonical spellings are present and exact.
+assert REGISTRY["707"] == "Pinnacle"
+assert REGISTRY["44"] == "Betfair Exchange"
+assert REGISTRY["16"] == "bet365"
+
+# The feed's d.time-base (provider observation time) is the snapshot captured_at
+# (FIX 3), NOT `now` — epoch 1750000000 == 2025-06-15T15:06:40Z.
+FEED_CAPTURED_AT = datetime(2025, 6, 15, 15, 6, 40, tzinfo=UTC)
 
 
 def _decrypted_ref() -> dict:
@@ -84,23 +100,28 @@ def test_parse_feed_yields_playwright_identical_snapshots() -> None:
         markets=MARKETS,
         directory=directory,
         now=NOW,
+        bookmakers=REGISTRY,
     )
 
     # Every row carries the navigable match URL as event_id, the raw market key
-    # as market_detail, and decimal odds > 1.0.
+    # as market_detail, decimal odds > 1.0, a NON-numeric bookmaker NAME, and the
+    # feed's provider observation time as captured_at (FIX 3).
     assert snaps, "expected snapshots from the feed"
     for s in snaps:
         assert s.event_id == EVENT_URL
         assert s.decimal_odds > 1.0
         assert s.market_detail in MARKETS
         assert s.ingested_at == NOW
+        assert s.captured_at == FEED_CAPTURED_AT  # feed time-base, not now()
+        assert not s.bookmaker.isdigit()  # NAME, never a numeric feed id
 
-    # --- 1x2 (H2H): home/Draw/away with the verified bookie prices. ---
+    # --- 1x2 (H2H): home/Draw/away with the verified bookie prices, keyed by
+    # the canonical NAME (Pinnacle = id 707, Betfair Exchange = id 44). ---
     h2h = {(s.bookmaker, s.selection): s.decimal_odds for s in snaps if s.market_detail == "1x2"}
-    assert h2h[("707", "England")] == 1.15
-    assert h2h[("707", "Draw")] == 7.5
-    assert h2h[("707", "Ghana")] == 15.0
-    assert h2h[("44", "England")] == 1.20
+    assert h2h[("Pinnacle", "England")] == 1.15
+    assert h2h[("Pinnacle", "Draw")] == 7.5
+    assert h2h[("Pinnacle", "Ghana")] == 15.0
+    assert h2h[("Betfair Exchange", "England")] == 1.20
     assert all(s.market is Market.H2H for s in snaps if s.market_detail == "1x2")
     # six bookies x three outcomes
     assert len(h2h) == 18
@@ -111,15 +132,15 @@ def test_parse_feed_yields_playwright_identical_snapshots() -> None:
         for s in snaps
         if s.market_detail == "over_under_2_5"
     }
-    assert ou[("707", "Over 2.5")] == 1.90
-    assert ou[("707", "Under 2.5")] == 1.90
-    assert ou[("263", "Under 2.5")] == 1.85
+    assert ou[("Pinnacle", "Over 2.5")] == 1.90
+    assert ou[("Pinnacle", "Under 2.5")] == 1.90
+    assert ou[("Marathonbet", "Under 2.5")] == 1.85  # id 263
     assert all(s.market is Market.TOTALS for s in snaps if s.market_detail == "over_under_2_5")
 
     # --- btts (BTTS): Yes/No. ---
     btts = {(s.bookmaker, s.selection): s.decimal_odds for s in snaps if s.market_detail == "btts"}
-    assert btts[("707", "BTTS Yes")] == 2.10
-    assert btts[("707", "BTTS No")] == 1.70
+    assert btts[("Pinnacle", "BTTS Yes")] == 2.10
+    assert btts[("Pinnacle", "BTTS No")] == 1.70
     assert all(s.market is Market.BTTS for s in snaps if s.market_detail == "btts")
 
     # --- double_chance (DOUBLE_CHANCE): 1X / 12 / X2 readable names. ---
@@ -128,9 +149,9 @@ def test_parse_feed_yields_playwright_identical_snapshots() -> None:
         for s in snaps
         if s.market_detail == "double_chance"
     }
-    assert dc[("707", "England or Draw")] == 1.04
-    assert dc[("707", "England or Ghana")] == 1.02
-    assert dc[("707", "Draw or Ghana")] == 3.40
+    assert dc[("Pinnacle", "England or Draw")] == 1.04
+    assert dc[("Pinnacle", "England or Ghana")] == 1.02
+    assert dc[("Pinnacle", "Draw or Ghana")] == 3.40
     assert all(
         s.market is Market.DOUBLE_CHANCE for s in snaps if s.market_detail == "double_chance"
     )
@@ -161,15 +182,18 @@ def test_parse_feed_dedups_bookmaker_rows_per_market() -> None:
         markets=("1x2",),
         directory=EventDirectory(),
         now=NOW,
+        bookmakers=REGISTRY,
     )
     keys = [(s.bookmaker, s.selection) for s in snaps]
     assert len(keys) == len(set(keys)), "duplicate bookmaker rows leaked"
 
 
 def test_parse_feed_skips_unparseable_and_sub_1_odds() -> None:
-    """Odds <= 1.0 or non-numeric are dropped (decimal-odds invariant)."""
+    """Odds <= 1.0 or non-numeric are dropped (decimal-odds invariant). Uses a
+    KNOWN bookie id (16 -> bet365) with all-invalid odds, so the drop is the
+    odds filter — not the unknown-id skip — and bet365 contributes no rows."""
     payload = decrypt_feed_body(_FEED.read_text())
-    payload["d"]["oddsdata"]["back"]["E-1-2-0-0-0"]["odds"]["999"] = {
+    payload["d"]["oddsdata"]["back"]["E-1-2-0-0-0"]["odds"]["16"] = {
         "0": 1.0,  # exactly 1.0 -> rejected
         "1": "n/a",  # non-numeric -> rejected
         "2": 0.5,  # < 1.0 -> rejected
@@ -184,8 +208,11 @@ def test_parse_feed_skips_unparseable_and_sub_1_odds() -> None:
         markets=("1x2",),
         directory=EventDirectory(),
         now=NOW,
+        bookmakers=REGISTRY,
     )
-    assert all(s.bookmaker != "999" for s in snaps)
+    # bet365 (id 16) had only invalid odds -> no rows; no numeric id ever leaks.
+    assert all(s.bookmaker != "bet365" for s in snaps)
+    assert not any(s.bookmaker.isdigit() for s in snaps)
 
 
 def test_extract_bootstrap_tokens_from_match_page_html() -> None:
@@ -257,6 +284,7 @@ async def test_fetch_match_feed_is_get_only_and_yields_snapshots() -> None:
         directory=directory,
         now=NOW,
         session=session,
+        bookmakers=REGISTRY,
     )
 
     # GET-only: the fake records the method implicitly (only .get exists).
@@ -264,8 +292,8 @@ async def test_fetch_match_feed_is_get_only_and_yields_snapshots() -> None:
     assert all("match-event/" in url or EVENT_URL in url for url, _ in session.requests)
 
     h2h = {(s.bookmaker, s.selection): s.decimal_odds for s in snaps}
-    assert h2h[("707", "England")] == 1.15
-    assert h2h[("707", "Draw")] == 7.5
+    assert h2h[("Pinnacle", "England")] == 1.15  # id 707 -> canonical NAME
+    assert h2h[("Pinnacle", "Draw")] == 7.5
     assert all(s.event_id == EVENT_URL for s in snaps)
     assert directory.lookup(EVENT_URL) is not None
 
@@ -296,6 +324,7 @@ async def test_fetch_match_feed_treats_off_window_envelope_as_no_odds() -> None:
         directory=directory,
         now=NOW,
         session=session,
+        bookmakers=REGISTRY,
     )
     assert snaps == []
     assert directory.lookup(EVENT_URL) is not None  # event still registered
@@ -320,8 +349,52 @@ async def test_fetch_match_feed_handles_non_200_gracefully() -> None:
         directory=EventDirectory(),
         now=NOW,
         session=session,
+        bookmakers=REGISTRY,
     )
     assert snaps == []
+
+
+async def test_fetch_match_feed_logs_loud_rotation_alert_on_constant_drift(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With NO Playwright fallback, a JSON-wide failure must be LOUD. The
+    version-guard RuntimeError (KDF-constant drift / a half-applied bundle
+    rotation) is the highest-signal failure — it must surface at WARNING naming
+    the bundle, NOT be swallowed quietly. fetch_match_feed catches it, keeps the
+    scrape a gap (fail-closed), and logs the rotation alert."""
+    import logging
+
+    import app.ingestion.oddsportal_json as mod
+
+    # Drift the KDF constants so decrypt_feed_body's _verify_key_fingerprint
+    # raises the RuntimeError on a real (well-formed) feed body.
+    monkeypatch.setattr(mod, "_KDF_PASSPHRASE", "tampered-passphrase")
+    token = FeedToken(
+        event_id="KhgvzGjJ",
+        sport_id=1,
+        feed_urls={"1x2": "https://www.oddsportal.com/match-event/x.dat"},
+        home="England",
+        away="Ghana",
+        league="International Friendly",
+        starts_at=NOW,
+    )
+    session = _FakeSession({"match-event/": _FakeResponse(text=_FEED.read_text())})
+    with caplog.at_level(logging.WARNING, logger="app.ingestion.oddsportal_json"):
+        snaps = await fetch_match_feed(
+            EVENT_URL,
+            token=token,
+            markets=("1x2",),
+            directory=EventDirectory(),
+            now=NOW,
+            session=session,
+            bookmakers=REGISTRY,
+        )
+    assert snaps == []  # fail-closed: never a wrong price
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "a constant-drift/rotation failure must log at WARNING (no fallback now)"
+    assert any(
+        "rotation" in r.getMessage().lower() or "drift" in r.getMessage().lower() for r in warnings
+    ), "the rotation alert must name the bundle-rotation / key-drift cause"
 
 
 def test_pytest_imported_marker() -> None:
@@ -396,18 +469,19 @@ def test_parse_feed_reads_list_form_two_way_odds() -> None:
         markets=("over_under_2_5", "btts"),
         directory=EventDirectory(),
         now=NOW,
+        bookmakers=REGISTRY,
     )
     ou = {
         (s.bookmaker, s.selection): s.decimal_odds
         for s in snaps
         if s.market_detail == "over_under_2_5"
     }
-    assert ou[("707", "Over 2.5")] == 1.90
-    assert ou[("707", "Under 2.5")] == 1.90
-    assert ou[("263", "Under 2.5")] == 1.85
+    assert ou[("Pinnacle", "Over 2.5")] == 1.90  # id 707
+    assert ou[("Pinnacle", "Under 2.5")] == 1.90
+    assert ou[("Marathonbet", "Under 2.5")] == 1.85  # id 263
     btts = {(s.bookmaker, s.selection): s.decimal_odds for s in snaps if s.market_detail == "btts"}
-    assert btts[("707", "BTTS Yes")] == 2.10
-    assert btts[("707", "BTTS No")] == 1.70
+    assert btts[("Pinnacle", "BTTS Yes")] == 2.10
+    assert btts[("Pinnacle", "BTTS No")] == 1.70
 
 
 def test_feed_market_map_uses_live_verified_keys() -> None:
@@ -465,9 +539,11 @@ def test_off_window_envelope_raises_feed_off_window() -> None:
 
 async def test_scrape_match_odds_end_to_end_pure_python() -> None:
     """The full flow with NO browser: GET match HTML -> bootstrap + build feed
-    URLs in pure Python -> GET + decrypt + parse every market's feed. All GET."""
+    URLs in pure Python -> resolve the bookmaker id->NAME bundle -> GET + decrypt
+    + parse every market's feed. All GET; every bookmaker is a canonical NAME."""
     html = _MATCH_PAGE.read_text()
     feed = _FEED.read_text()
+    bundle = _BOOKIES_BUNDLE.read_text()
 
     class _Sess:
         def __init__(self) -> None:
@@ -477,6 +553,8 @@ async def test_scrape_match_odds_end_to_end_pure_python() -> None:
             self.requests.append(url)
             if "match-event/" in url:
                 return _FakeResponse(text=feed)
+            if "bookies-" in url:  # the static bookmaker-registry bundle
+                return _FakeResponse(text=bundle)
             return _FakeResponse(text=html)  # the match page
 
     session = _Sess()
@@ -488,13 +566,19 @@ async def test_scrape_match_odds_end_to_end_pure_python() -> None:
         now=NOW,
         session=session,
     )
-    # 1 HTML GET + 4 feed GETs = 5 page-loads (vs Playwright's full DOM render).
-    assert len(session.requests) == 5
+    # 1 HTML + 1 bookmaker-bundle + 4 feed GETs = 6 small page-loads (vs
+    # Playwright's full per-match DOM render of every market tab).
+    assert len(session.requests) == 6
+    assert sum("bookies-" in u for u in session.requests) == 1
     by_market: dict[str, int] = {}
     for s in snaps:
         assert s.market_detail is not None
+        assert not s.bookmaker.isdigit()  # canonical NAME, never a numeric id
         by_market[s.market_detail] = by_market.get(s.market_detail, 0) + 1
     assert by_market == {"1x2": 18, "over_under_2_5": 6, "btts": 4, "double_chance": 6}
+    # canonical names resolved (id 707 -> Pinnacle, 44 -> Betfair Exchange).
+    assert any(s.bookmaker == "Pinnacle" for s in snaps)
+    assert any(s.bookmaker == "Betfair Exchange" for s in snaps)
     # event identity is the navigable match URL; teams registered.
     assert all(s.event_id == EVENT_URL for s in snaps)
     assert directory.lookup(EVENT_URL) is not None

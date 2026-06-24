@@ -20,6 +20,7 @@ dependencies = [
     "tenacity>=8.3",
     "curl-cffi>=0.15.0",
     "cryptography>=49.0.0",
+    "beautifulsoup4>=4.12",
 ]
 
 # Proven third-party engines used DIRECTLY (ADR-0011, user direction

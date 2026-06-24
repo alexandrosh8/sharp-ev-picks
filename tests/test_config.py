@@ -221,6 +221,19 @@ def test_scrape_nav_timeout_default_raises_the_upstream_15s_floor() -> None:
     assert make_settings().scrape_nav_timeout_ms > 15000
 
 
+def test_oddsportal_use_json_feed_defaults_off() -> None:
+    # The curl_cffi JSON feed is SELECTABLE and OFF by default — the proven
+    # Playwright/OddsHarvester path stays the default until prod-verified. When
+    # the flag is later flipped, there is NO Playwright odds fallback: a per-match
+    # JSON failure is a scrape gap (operator 2026-06-23).
+    assert make_settings().oddsportal_use_json_feed is False
+
+
+def test_oddsportal_use_json_feed_enables_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ODDSPORTAL_USE_JSON_FEED", "true")
+    assert Settings(_env_file=None).oddsportal_use_json_feed is True
+
+
 def test_out_of_range_pacing_knob_via_env_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ODDSPORTAL_CONCURRENCY", "0")
     with pytest.raises(ValidationError):

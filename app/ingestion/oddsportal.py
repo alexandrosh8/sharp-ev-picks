@@ -10,17 +10,25 @@ The oddsharvester import is lazy so the default (extras-free) install and CI
 profile keep working; install with `uv sync --extra backfill`.
 """
 
+from __future__ import annotations
+
 import asyncio
 import importlib.metadata
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.ingestion.base import EventDirectory, EventTeams, ScraperProxy
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
+
+if TYPE_CHECKING:
+    # Imported under TYPE_CHECKING only — app.ingestion.oddsportal_json imports
+    # canonical vocabulary FROM this module, so a top-level import here would be
+    # circular. Constructed via a lazy import inside the methods that need it.
+    from app.ingestion.oddsportal_json import BookmakerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +71,12 @@ def install_scrape_future_handler(loop: asyncio.AbstractEventLoop) -> None:
 
 
 ScrapeFn = Callable[..., Awaitable[Any]]
+# Per-match JSON-feed scrape: (match_url, *, markets, directory, now, proxy, ...)
+# -> list[OddsSnapshotIn]. The default (`_default_json_scrape`) drives the
+# curl_cffi path in app/ingestion/oddsportal_json.py; tests inject a fake so no
+# network / curl_cffi import is needed. SELECTABLE + OFF by default — the proven
+# Playwright path stays the per-match FALLBACK (never removed).
+JsonScrapeFn = Callable[..., Awaitable[list[OddsSnapshotIn]]]
 
 # OddsPortal forks a fixture's URL once it goes live: the SAME match page is
 # also listed under an '/inplay-odds' path segment (identical trailing
@@ -636,6 +650,71 @@ async def _default_scrape(**kwargs: Any) -> Any:
     return await run_scraper(command=CommandEnum.UPCOMING_MATCHES, **kwargs)
 
 
+async def _default_json_scrape(
+    match_url: str,
+    *,
+    markets: Sequence[str],
+    directory: EventDirectory,
+    now: datetime,
+    proxy: ScraperProxy | None = None,
+    registry: BookmakerRegistry | None = None,
+    geo: str = "GB",
+    lang: str = "en",
+) -> list[OddsSnapshotIn]:
+    """Drive the curl_cffi JSON-feed path for ONE match (lazy curl_cffi import).
+
+    GET-only: opens a short-lived browser-TLS-impersonating ``AsyncSession``
+    (optionally through one rotating scrape proxy, creds via the session's proxy
+    field — never embedded in a logged URL) and hands it to
+    `oddsportal_json.scrape_match_odds`, which fetches + decrypts + parses the
+    feed into `OddsSnapshotIn` rows matching the Playwright contract, translating
+    numeric provider ids to canonical book NAMES via the shared `registry`
+    (resolved once per cycle, GET-only; unknown id -> skip). The curl_cffi session
+    only exposes ``.get`` to that function — structurally incapable of
+    POST/PUT/DELETE (READ-ONLY market-data safety rule). Any failure propagates
+    to the caller, which SKIPS this match (a scrape gap — no Playwright
+    fallback, operator instruction 2026-06-23)."""
+    from curl_cffi.requests import AsyncSession
+
+    from app.ingestion.oddsportal_json import scrape_match_odds
+
+    session_kwargs: dict[str, Any] = {}
+    if proxy is not None and proxy.url:
+        # curl_cffi takes credentials inline in the proxy URL; build it here at
+        # the call boundary (never logged) from the separated ScraperProxy
+        # fields, mirroring the Playwright path's separate-creds handling.
+        inline = _proxy_with_creds(proxy)
+        session_kwargs["proxies"] = {"https": inline, "http": inline}
+
+    async with AsyncSession(**session_kwargs) as session:
+        return await scrape_match_odds(
+            match_url,
+            markets=markets,
+            directory=directory,
+            now=now,
+            session=session,
+            registry=registry,
+            geo=geo,
+            lang=lang,
+        )
+
+
+def _proxy_with_creds(proxy: ScraperProxy) -> str:
+    """Inline ``scheme://user:pass@host:port`` for curl_cffi (it has no separate
+    creds field like Playwright). Built only at the request boundary and NEVER
+    logged — the loader's INFO logs are index-only, so creds can't leak."""
+    if not proxy.username:
+        return proxy.url
+    scheme, _, rest = proxy.url.partition("://")
+    if not rest:
+        return proxy.url
+    from urllib.parse import quote
+
+    user = quote(proxy.username, safe="")
+    pwd = quote(proxy.password, safe="")
+    return f"{scheme}://{user}:{pwd}@{rest}"
+
+
 # Cap the proxy failover sweep: an empty/blocked slate retries at most this many
 # proxies (not the whole pool), so a genuinely-empty sport/date can't burn all 15
 # proxies and starve the rest of the scrape cycle.
@@ -662,6 +741,8 @@ class OddsPortalLoader:
         proxy_pool: Sequence[ScraperProxy] = (),
         nav_timeout_ms: int | None = None,
         cycle_timeout_seconds: float | None = None,
+        use_json_feed: bool = False,
+        json_scrape_fn: JsonScrapeFn | None = None,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -735,9 +816,107 @@ class OddsPortalLoader:
         # default for in-process callers/tests; the scheduler injects a value
         # from Settings, so prod is always bounded).
         self._cycle_timeout_seconds = cycle_timeout_seconds
+        # SELECTABLE odds source (OFF by default — the proven Playwright path
+        # stays the default until prod-verified). When on, the per-match ODDS
+        # fetch uses the curl_cffi JSON feed (app/ingestion/oddsportal_json.py)
+        # ONLY; the dated LISTING then runs with NO markets (match URLs + team
+        # context only), so the per-match Playwright odds extraction is never paid
+        # (real CPU savings). There is NO Playwright odds fallback (operator
+        # 2026-06-23): a per-match JSON failure is logged (type only) and the
+        # match is SKIPPED — a scrape gap, like a benign DOM miss. A key/bundle
+        # rotation fails CLOSED with a loud WARNING (never a wrong price).
+        self._use_json_feed = use_json_feed
+        self._json_scrape = json_scrape_fn or _default_json_scrape
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
+
+    def _new_registry(self) -> BookmakerRegistry | None:
+        """A fresh per-cycle bookmaker id->NAME registry when the JSON feed is on
+        (None otherwise). Shared across one cycle's per-match scrapes so the
+        static bundle is GET-fetched once and cached; a new instance per cycle
+        picks up a rotated bundle next cycle. Lazy import avoids the
+        oddsportal_json<->oddsportal circular import at module load."""
+        if not self._use_json_feed:
+            return None
+        from app.ingestion.oddsportal_json import BookmakerRegistry
+
+        return BookmakerRegistry()
+
+    def _next_proxy(self) -> ScraperProxy | None:
+        """One rotating proxy for a JSON per-match fetch (advances the cursor),
+        or None when the pool is empty (direct host IP). Mirrors the Playwright
+        failover rotation so both paths share the pool fairly; creds stay in the
+        ScraperProxy fields and are only inlined at the request boundary."""
+        pool = self._proxy_pool
+        if not pool:
+            return None
+        proxy = pool[self._proxy_cursor % len(pool)]
+        self._proxy_cursor = (self._proxy_cursor + 1) % len(pool)
+        return proxy
+
+    async def _json_odds_for_url(
+        self,
+        match_url: str,
+        now: datetime,
+        markets: Sequence[str],
+        registry: BookmakerRegistry | None = None,
+    ) -> list[OddsSnapshotIn] | None:
+        """Fetch ONE match URL's odds via the curl_cffi JSON feed.
+
+        Returns the JSON `OddsSnapshotIn` rows on success, or ``None`` to signal
+        the caller to SKIP this match (NO Playwright fallback — operator 2026-06-23).
+        None is returned when the URL isn't scrapeable (synthetic id), the JSON
+        scrape raises (decrypt / version-guard / HTTP / envelope), OR it yields
+        zero snapshots — each a scrape gap, exactly like a benign Playwright DOM
+        miss. The JSON path derives team context from the match-page HTML itself,
+        so only the URL is needed; it registers the SAME `EventTeams` the
+        Playwright path would, keeping the directory/`last_fetch_event_ids`
+        contract identical. `registry` is the shared per-cycle bookmaker
+        id->NAME resolver (fetched once per cycle, GET-only)."""
+        # Synthetic ids (no scrapeable URL) can't be JSON-fetched — skip them
+        # (no Playwright fallback); they carry no real match page.
+        if not match_url.startswith("http"):
+            return None
+        try:
+            snaps = await self._json_scrape(
+                match_url,
+                markets=markets,
+                directory=self._directory,
+                now=now,
+                proxy=self._next_proxy(),
+                registry=registry,
+            )
+        except Exception as exc:  # decrypt / HTTP / TLS / envelope -> scrape gap
+            logger.info(
+                "oddsportal JSON feed failed for a match (%s) — skipping it "
+                "(scrape gap, no fallback)",
+                type(exc).__name__,
+            )
+            return None
+        if not snaps:
+            # Off-window / empty feed / unresolved registry -> scrape gap (skip).
+            return None
+        return snaps
+
+    async def _json_odds_for_match(
+        self,
+        match: dict[str, Any],
+        now: datetime,
+        markets: Sequence[str],
+        registry: BookmakerRegistry | None = None,
+    ) -> list[OddsSnapshotIn] | None:
+        """`_json_odds_for_url` for a LISTED match dict (fetch_odds path).
+
+        Resolves the scrapeable match URL from the listing dict and delegates; a
+        synthetic-id / teamless match returns ``None`` (the match is skipped — no
+        Playwright fallback)."""
+        home = str(match.get("home_team") or "").strip()
+        away = str(match.get("away_team") or "").strip()
+        if not home or not away:
+            return None
+        match_url = str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
+        return await self._json_odds_for_url(match_url, now, markets, registry)
 
     async def _scrape_bounded(self, **kwargs: Any) -> Any:
         """`_scrape_with_failover` under the per-cycle watchdog.
@@ -821,6 +1000,19 @@ class OddsPortalLoader:
         else:
             dates = [self._date]
 
+        # SAVINGS INVARIANT (FIX 2, 2026-06-23): when the JSON feed is on, the
+        # per-match ODDS come ONLY from curl_cffi, so the dated LISTING must run
+        # with NO markets — OddsHarvester then collects match URLs + header team
+        # context per match but SKIPS the expensive per-market tab navigation /
+        # Over-Under scroll / odds extraction (the bulk of the Playwright cost;
+        # see oddsharvester base_scraper `_scrape_match_data`, which only scrapes
+        # markets `if markets:`). Requesting the full market list here would pay
+        # the entire Playwright odds cost AND the JSON cost — zero net savings,
+        # which defeats the migration. With the flag OFF the Playwright path IS
+        # the odds source, so it keeps the full configured market list.
+        listing_markets: list[str] = (
+            [] if self._use_json_feed else list(self._markets_for(sport_key))
+        )
         matches: list[dict[str, Any]] = []
         seen_links: set[str] = set()
         for scrape_date in dates:
@@ -830,7 +1022,7 @@ class OddsPortalLoader:
                 sport=sport,
                 date=scrape_date,
                 leagues=scrape_leagues,
-                markets=list(self._markets_for(sport_key)),
+                markets=listing_markets,
                 headless=self._headless,
                 max_pages=self._max_pages,  # historic-only upstream; no-op here
                 # CRITICAL: oddsportal embeds timestamps shifted to the
@@ -856,6 +1048,11 @@ class OddsPortalLoader:
 
         snapshots: list[OddsSnapshotIn] = []
         event_ids: list[str] = []
+        markets_for_sport = self._markets_for(sport_key)
+        # One shared bookmaker id->NAME registry per cycle: the static bundle is
+        # GET-fetched once and cached across every per-match JSON scrape (only
+        # constructed when the JSON feed is on).
+        registry = self._new_registry()
         for match in matches:
             home = str(match.get("home_team") or "").strip()
             away = str(match.get("away_team") or "").strip()
@@ -868,7 +1065,24 @@ class OddsPortalLoader:
                         )
                     )
                 )
-            snapshots.extend(self._convert_match(match, now, self._markets_for(sport_key)))
+            # SELECTABLE source: when the JSON feed is on, the per-match ODDS
+            # come ONLY from the curl_cffi feed — there is NO Playwright odds
+            # fallback (operator instruction 2026-06-23). A per-match JSON
+            # failure/empty is logged (type only, in _json_odds_for_url) and the
+            # match is SKIPPED — a scrape gap, exactly like a benign Playwright
+            # DOM miss. The listing pass ran markets=[] (no per-match Playwright
+            # odds), so there is no fallback data to use and none is paid for.
+            # With the flag OFF the Playwright market dict from the listing is the
+            # odds source (_convert_match). Event registration is identical (the
+            # JSON scrape reads team context from the match-page HTML).
+            if self._use_json_feed:
+                match_snaps = await self._json_odds_for_match(
+                    match, now, markets_for_sport, registry
+                )
+                if match_snaps is not None:
+                    snapshots.extend(match_snaps)
+            else:
+                snapshots.extend(self._convert_match(match, now, markets_for_sport))
         self.last_fetch_matches[sport_key] = len(matches)
         self.last_fetch_event_ids[sport_key] = tuple(dict.fromkeys(event_ids))
         # Per-market counts make scrape gaps visible: OddsPortal market-tab
@@ -969,6 +1183,34 @@ class OddsPortalLoader:
                 if trimmed:
                     requested = trimmed
         now = datetime.now(tz=UTC)
+        snapshots: list[OddsSnapshotIn] = []
+        # SELECTABLE source on the off-window odds path: the per-match ODDS come
+        # ONLY from the curl_cffi JSON feed when the flag is on — there is NO
+        # Playwright odds fallback (operator instruction 2026-06-23). A link the
+        # feed can't serve is a scrape gap: logged (type only) and SKIPPED, never
+        # recovered via a Playwright odds scrape. This path therefore RETURNS
+        # here without ever invoking the (expensive) Playwright market extraction.
+        # score_only is the finished-SCORE capture (zero markets, header-only):
+        # the JSON feed is for ODDS, so score_only STAYS the cheap, well-tuned
+        # Playwright header read — never the odds feed (handled below).
+        if self._use_json_feed and not score_only and requested:
+            registry = self._new_registry()
+            for link in links:
+                # The JSON path derives team context from the match-page HTML
+                # itself, so only the URL is needed; a None result (failure /
+                # empty) means SKIP this link (no Playwright fallback).
+                match_snaps = await self._json_odds_for_url(link, now, requested, registry)
+                if match_snaps:
+                    snapshots.extend(match_snaps)
+            logger.info(
+                "oddsportal %s match-link revalidation (JSON feed): %d links x %d markets "
+                "-> %d snapshots (no-fallback: unserved links are scrape gaps)",
+                sport_key,
+                len(links),
+                len(requested),
+                len(snapshots),
+            )
+            return snapshots
         # Same per-cycle watchdog as fetch_odds: one hung match-page extraction
         # (Over/Under wedge) must not stall the off-window / finished-score pass.
         result = await self._scrape_bounded(
@@ -981,7 +1223,6 @@ class OddsPortalLoader:
             concurrency_tasks=self._concurrency_tasks,
             request_delay=self._request_delay,
         )
-        snapshots: list[OddsSnapshotIn] = []
         for match in getattr(result, "success", None) or []:
             snapshots.extend(self._convert_match(match, now, requested))
         logger.info(

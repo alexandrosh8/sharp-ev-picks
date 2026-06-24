@@ -482,6 +482,23 @@ class Settings(BaseSettings):
     # Browser locale, paired with the loader's forced UTC timezone for a
     # coherent human fingerprint (UTC = London -> en-GB).
     oddsportal_locale: str = "en-GB"
+    # SELECTABLE per-match odds transport for the OddsPortal source. OFF by
+    # default = the proven Playwright/OddsHarvester DOM scrape (unchanged). When
+    # true, OddsPortalLoader fetches each match's ODDS via the curl_cffi JSON
+    # feed (app/ingestion/oddsportal_json.py) — much faster + lighter. To make
+    # the savings REAL, the dated LISTING then runs with NO markets (match URLs +
+    # header team context only), so the expensive per-match Playwright odds
+    # extraction is NEVER paid; the per-match odds come ONLY from curl_cffi.
+    # There is NO Playwright odds fallback (operator instruction 2026-06-23): a
+    # per-match JSON failure (decrypt / HTTP / envelope / version-guard) is logged
+    # (type only) and the match is SKIPPED — a scrape gap, exactly like a benign
+    # DOM miss. A JSON-wide key/bundle rotation fails CLOSED with a LOUD WARNING
+    # (the version guard), never a wrong price. Numeric provider ids are mapped to
+    # canonical bookmaker NAMES (a GET-only, cached registry); an unknown id is
+    # skipped, never persisted numeric. Stays the Playwright DEFAULT until
+    # prod-verified; the finished-SCORE capture path (score_only) is unaffected
+    # (header-only read, not an odds feed). READ-ONLY GET-only either way.
+    oddsportal_use_json_feed: bool = False
     # Seconds between poll cycles. With max_instances=1 + coalesce, a value
     # below the cycle duration just runs cycles back-to-back — effective
     # freshness is one cycle length; the scrape itself is the floor. The

@@ -964,3 +964,46 @@ coverage accrues.
   Pinnacle = free live sharp anchor for NBA going forward (EuroLeague/WNBA/NBL arcadia
   coverage = verify in-app, not researchable). NO free historical Pinnacle open+close
   for any basketball league (unchanged gate). See research output for full brief.
+
+- **OddsPortal lighter-scrape (non-Playwright) repo eval (2026-06-23):** Goal was
+  a proven repo/technique to replace OddsHarvester full-Chromium render with a
+  curl_cffi/httpx -> fb.oddsportal.com .dat JSON-feed client. VERDICT: no repo
+  reliably solves the CURRENT feed. The exact feed+token technique is implemented
+  only by **jckkrr/Unlayering_Oddsportal** (2023, unlicensed, reference-only) and
+  **borewicz/oddsportal** (2016, unlicensed, reference-only) — both on the OLD
+  PLAINTEXT feed. OddsPortal changed the feed ~late-2024 to
+  /feed/match-event/...dat returning base64+AES-256-CBC (PBKDF2-HMAC-SHA256, 1000
+  iters; password+salt in app.js). The only public working decrypt is SO #79241543
+  (CC-BY-SA, not a repo). Token (xhash) is NOT computed — it is scraped from the
+  match-page PageEvent(...) script and urllib.unquote'd (rotates ~minutes, re-derive
+  per match). All actively-maintained 2026 repos are browser-based: OddsHarvester
+  (Playwright, our current), Mg30 (Playwright/Node), djibril-marega (Playwright),
+  gingeleski/BeatTheBookie/pretrehr (Selenium). SAFETY FLAG: AinaRazafinjato/value-
+  bets-scraper stores ODDPORTAL_USERNAME/PASSWORD — do NOT copy. DECISION: build our
+  own client (curl_cffi + Referer + x-requested-with), learn from jckkrr/borewicz +
+  the SO AES recipe; keep Playwright fallback. Brittleness moves to app.js password
+  rotation, not removed. Full brief: docs/research/oddsportal-lightweight-scrape-2026-06-23.md
+
+- **OddsPortal JSON-feed cut-over hardening — NO Playwright fallback (2026-06-24):**
+  Supersedes the "keep Playwright fallback" note above for the ODDS path (operator
+  instruction). With `oddsportal_use_json_feed=true`: (1) per-match odds come ONLY
+  from curl_cffi; the dated LISTING runs with `markets=[]`, so OddsHarvester does
+  NOT do the per-match Playwright odds extraction (`_scrape_match_data` only scrapes
+  markets `if markets:`) — the CPU savings are REAL, not cancelled by a paid-for
+  fallback. (2) A per-match JSON failure/empty LOGS (type only) + SKIPS the match (a
+  scrape gap, like a benign DOM miss) — no `_convert_match` fallback. (3) A
+  key/bundle rotation fails CLOSED with a LOUD WARNING in `fetch_match_feed` (the
+  RuntimeError version guard is caught + logged, not swallowed at INFO), since a
+  JSON-wide failure is now invisible without a fallback. (4) BLOCKER fix: the feed
+  keys odds by NUMERIC provider IDs; they are mapped to canonical bookmaker NAMES
+  via a GET-only, per-cycle-cached registry parsed from OddsPortal's `bookmakersData`
+  JS bundle (`/res/x/bookies-*.js`, `WebName` field; URL read from page HTML, map is
+  static-ish). An UNKNOWN id is SKIPPED, NEVER persisted numeric (a numeric bookmaker
+  silently breaks sharp/soft classification, CLV join, devig grouping — value.py
+  SHARP_BOOKS keys on names like "Pinnacle"/"Betfair Exchange"/"bet365"). NOTE: the
+  exact id->name spellings for high IDs (707/263/841/44) are read live from WebName,
+  not hardcoded (21 is Betfred, NOT Betfair — do not guess). (5) captured_at now
+  sources the feed `d.time-base` (provider observation time), matching the Playwright
+  `scraped_date` semantics. score_only (finished-score) stays Playwright header-only.
+  Still OFF by default; READ-ONLY GET-only. Files: app/ingestion/oddsportal_json.py,
+  app/ingestion/oddsportal.py, app/config.py, app/scheduler.py.

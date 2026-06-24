@@ -265,6 +265,11 @@ def build_scheduler(
             # never make poll_odds run forever (and so starve settle_results) —
             # each scrape pass is bounded and cancelled on timeout (prod fix).
             cycle_timeout_seconds=settings.scrape_cycle_timeout_seconds,
+            # SELECTABLE curl_cffi JSON-feed per-match odds (OFF by default). When
+            # on, the listing runs markets=[] (no per-match Playwright odds) and a
+            # per-match JSON failure is a scrape gap — NO Playwright odds fallback
+            # (operator 2026-06-23). See config.py.
+            use_json_feed=settings.oddsportal_use_json_feed,
         )
         league_label = settings.oddsportal_football_leagues
 

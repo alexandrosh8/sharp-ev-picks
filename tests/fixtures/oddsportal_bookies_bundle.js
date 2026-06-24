@@ -1,0 +1,1 @@
+var preamble=1;var bookmakersData={"707":{"Name":"pinnacle","WebName":"Pinnacle","WebUrl":"/pinnacle"},"263":{"Name":"marathonbet","WebName":"Marathonbet"},"841":{"Name":"1xbet","WebName":"1xBet"},"44":{"Name":"betfair-exchange","WebName":"Betfair Exchange"},"21":{"Name":"william-hill","WebName":"William Hill"},"16":{"Name":"bet365","WebName":"bet365"}};var trailer={};
