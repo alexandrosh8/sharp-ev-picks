@@ -703,32 +703,6 @@
         background-size: 200% 100%;
         animation: shimmer 1.2s linear infinite;
       }
-      /* Brief highlight on a DROPPING row whose odds just changed on refresh. */
-      @keyframes dropflash {
-        from {
-          background: rgba(234, 179, 8, 0.22);
-        }
-        to {
-          background: transparent;
-        }
-      }
-      tr.drop-changed td {
-        animation: dropflash 1.4s ease-out;
-      }
-      /* DROPPING controls: bold, uppercase labels (the selects stay readable). */
-      #dropping-controls label {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-      }
-      #dropping-controls select {
-        font-weight: 400;
-        text-transform: none;
-        letter-spacing: normal;
-      }
       @keyframes shimmer {
         to {
           background-position: -200% 0;
@@ -1333,15 +1307,6 @@
           >
             RESULTS
           </button>
-          <button
-            type="button"
-            role="tab"
-            data-status="dropping"
-            aria-selected="false"
-            title="External oddsmath attributed per-book dropping odds — view only, not our picks"
-          >
-            DROPPING ⚡
-          </button>
         </div>
         <div class="toolbar-filters">
           <select id="f-tier" aria-label="Filter picks by tier">
@@ -1390,44 +1355,6 @@
             </tr>
           </tbody>
         </table>
-      </div>
-      <!-- DROPPING ODDS — external oddsmath attributed feed, VIEW-ONLY.
-           Never a pick/edge/CLV input; rendered only when the DROPPING tab is open. -->
-      <div class="tablewrap" id="dropping-panel" hidden>
-        <div class="toolbar-filters" id="dropping-controls">
-          <label class="sub"
-            >Bookmaker
-            <select
-              id="drop-book"
-              aria-label="Dropping-odds bookmaker"
-            ></select>
-          </label>
-          <label class="sub"
-            >Window
-            <select
-              id="drop-interval"
-              aria-label="Dropping-odds window"
-            ></select>
-          </label>
-        </div>
-        <table id="dropping-table">
-          <thead>
-            <tr>
-              <th>Kickoff</th>
-              <th>League</th>
-              <th>Match</th>
-              <th>1</th>
-              <th>X</th>
-              <th>2</th>
-            </tr>
-          </thead>
-          <tbody id="dropping-rows">
-            <tr>
-              <td colspan="6"><div class="skelbar"></div></td>
-            </tr>
-          </tbody>
-        </table>
-        <div class="sub" id="dropping-stamp"></div>
       </div>
       <!-- CLV scorecard — proof-of-edge ledger headline (CLOSED tab only) -->
       <div class="sub" id="clv-scorecard" style="display: none"></div>
@@ -2891,12 +2818,7 @@
 
       function render() {
         const tier = $("f-tier").value;
-        // On DROPPING the search box filters the external matches (not picks),
-        // so the pick counts ignore it there; on the picks tabs it applies.
-        const q =
-          STATUS_TAB === "dropping"
-            ? ""
-            : $("f-search").value.trim().toLowerCase();
+        const q = $("f-search").value.trim().toLowerCase();
         // RESULTS reuses the results-oriented (ex-SETTLED) column layout, so the
         // long-standing `settledView` flag now means "the results view".
         const settledView = STATUS_TAB === "results";
@@ -2945,15 +2867,9 @@
           "#status-tabs button[data-status]",
         )) {
           const k = b.dataset.status;
-          // Skip non-picks tabs (e.g. DROPPING) — they own their label and are
-          // not counted here; without this they'd be clobbered to "undefined".
-          if (!(k in TAB_LABELS)) continue;
+          if (!(k in TAB_LABELS)) continue; // defensive: only label known tabs
           b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
         }
-        // The tab COUNTS above stay live even while DROPPING is open (load()
-        // still runs every 60s); DROPPING has its own panel, so skip the rest —
-        // the picks-table draw below — only now.
-        if (STATUS_TAB === "dropping") return;
         // CLV scorecard — the proof-of-edge headline, shown on the CLOSED tab
         // only. Computed over every closed pick (in the tier/search scope) that
         // has a CLV row: how many beat the de-vigged close + the mean CLV.
@@ -3905,216 +3821,6 @@
           /* storage disabled — non-fatal */
         }
       }
-      // --- DROPPING ODDS (external oddsmath attributed feed, VIEW-ONLY) -------
-      // Rendered ONLY in its own tab. Attributed per-book moves, never an input
-      // to picks/edges/stakes/CLV. All external strings go through td()
-      // (textContent only, never raw-HTML assignment) so the untrusted feed
-      // cannot inject markup (dashboard-wide guardrail).
-      function droppingMessage(tbody, text) {
-        tbody.replaceChildren();
-        const tr = document.createElement("tr");
-        const cell = td(tr, text === null ? "" : text);
-        cell.colSpan = 6;
-        if (text === null) {
-          const bar = document.createElement("div");
-          bar.className = "skelbar";
-          cell.replaceChildren(bar);
-        }
-        tbody.appendChild(tr);
-      }
-      // Selected bookmaker + window (mirror oddsmath's own filters).
-      let DROPPING_PROVIDER = null; // from the first response's selected_provider
-      let DROPPING_INTERVAL = 1440;
-      let DROPPING_TIMER = null; // auto-refresh handle while the DROPPING tab is open
-      function fillDroppingSelectors(data) {
-        const bookSel = $("drop-book");
-        if (bookSel && !bookSel.options.length && data.providers) {
-          for (const p of data.providers) {
-            const opt = document.createElement("option");
-            opt.value = String(p.id);
-            opt.textContent = p.name;
-            bookSel.appendChild(opt);
-          }
-          if (data.selected_provider != null)
-            bookSel.value = String(data.selected_provider);
-          bookSel.addEventListener("change", () => {
-            DROPPING_PROVIDER = Number(bookSel.value);
-            loadDropping(true);
-          });
-        }
-        const intSel = $("drop-interval");
-        if (intSel && !intSel.options.length && data.intervals) {
-          for (const it of data.intervals) {
-            const opt = document.createElement("option");
-            opt.value = String(it.value);
-            opt.textContent = it.label;
-            intSel.appendChild(opt);
-          }
-          if (data.interval != null) intSel.value = String(data.interval);
-          intSel.addEventListener("change", () => {
-            DROPPING_INTERVAL = Number(intSel.value);
-            loadDropping(true);
-          });
-        }
-      }
-      async function loadDropping(force) {
-        const tbody = $("dropping-rows");
-        const stamp = $("dropping-stamp");
-        if (DROPPING_ROWS.size === 0) droppingMessage(tbody, null); // skeleton only before first data
-        try {
-          const qs = new URLSearchParams({
-            interval: String(DROPPING_INTERVAL),
-          });
-          if (DROPPING_PROVIDER != null)
-            qs.set("provider_id", String(DROPPING_PROVIDER));
-          if (force) qs.set("fresh", "1"); // manual Refresh -> bypass the 5s cache
-          const res = await fetchWithTimeout("/dropping-odds?" + qs.toString());
-          // Same auth handling as the picks tabs: an expired session -> login.
-          if (res.status === 401) {
-            window.location.assign("/login");
-            return;
-          }
-          renderDropping(await res.json());
-        } catch (e) {
-          droppingMessage(tbody, "Dropping-odds feed unavailable.");
-          if (stamp) stamp.textContent = "";
-        }
-      }
-      // One outcome cell: opening (faded) -> current (bold) + drop% colored like
-      // oddsmath — big drop RED, smaller drop YELLOW, a rise muted. textContent
-      // only (no raw-HTML assignment).
-      function outcomeCell(tr, o) {
-        const cell = document.createElement("td");
-        if (!o || (o.open == null && o.current == null)) {
-          cell.textContent = "—";
-          tr.appendChild(cell);
-          return;
-        }
-        if (o.open != null) {
-          const op = document.createElement("span");
-          op.textContent = String(o.open);
-          op.style.opacity = "0.5";
-          cell.append(op, document.createTextNode(" → "));
-        }
-        const cur = document.createElement("span");
-        cur.style.fontWeight = "700";
-        cur.textContent = o.current == null ? "—" : String(o.current);
-        cell.appendChild(cur);
-        if (o.drop_pct != null) {
-          const pct = document.createElement("span");
-          pct.textContent = " " + o.drop_pct.toFixed(1) + "%";
-          pct.style.fontSize = "11px";
-          pct.style.fontWeight = "700";
-          pct.style.color =
-            o.drop_pct <= -20
-              ? "#f4525f" // big drop -> red
-              : o.drop_pct < 0
-                ? "#eab308" // smaller drop -> yellow
-                : "var(--muted, #888)"; // rose
-          cell.appendChild(pct);
-        }
-        tr.appendChild(cell);
-      }
-      // Build one match row's cells (Kickoff | League | Match | 1 | X | 2).
-      function renderDroppingRow(tr, r) {
-        tr.replaceChildren();
-        td(tr, r.kickoff_utc ? fmtLocal(r.kickoff_utc) : "");
-        const parts = (r.league || "").split(" · ");
-        td(tr, parts.length > 1 ? parts.slice(1).join(" · ") : r.league || "");
-        td(tr, r.match || "");
-        const byLabel = {};
-        for (const o of r.outcomes || []) byLabel[o.label] = o;
-        for (const lbl of ["1", "X", "2"]) outcomeCell(tr, byLabel[lbl]);
-      }
-      function dropSig(r) {
-        // Flash a row ONLY when a CURRENT (live) odd actually moves — not when the
-        // opening reference drifts or drop% recomputes below the shown decimal
-        // (those changed the old signature, flashing rows that looked unchanged).
-        return (r.outcomes || [])
-          .map((o) => o.label + ":" + (o.current == null ? "" : o.current))
-          .join("|");
-      }
-      // Keyed diff: a refresh updates ONLY the matches whose odds changed (those
-      // rows briefly flash) — the rest stay put, so the table never blanks on a tick.
-      const DROPPING_ROWS = new Map(); // key -> { tr, sig }
-      let DROPPING_DATA = null; // last response, for re-filtering on search
-      function renderDropping(data) {
-        const stamp = $("dropping-stamp");
-        if (data) {
-          DROPPING_DATA = data;
-          if (DROPPING_PROVIDER == null && data.selected_provider != null)
-            DROPPING_PROVIDER = data.selected_provider;
-          fillDroppingSelectors(data);
-        }
-        const tbody = $("dropping-rows");
-        let rows = (data && data.rows) || [];
-        // Search filters the matches on THIS tab (team / league text).
-        const q = ($("f-search").value || "").trim().toLowerCase();
-        if (q)
-          rows = rows.filter((r) =>
-            (r.match + " " + r.league).toLowerCase().includes(q),
-          );
-        if (!data || !data.available || rows.length === 0) {
-          DROPPING_ROWS.clear();
-          droppingMessage(
-            tbody,
-            q
-              ? "No matches for that search."
-              : "No dropping odds for this book/window right now.",
-          );
-        } else {
-          if (DROPPING_ROWS.size === 0) tbody.replaceChildren(); // clear skeleton once
-          const seen = new Set();
-          for (const r of rows) {
-            const key = (r.match || "") + "|" + (r.league || "");
-            seen.add(key);
-            const sig = dropSig(r);
-            const existing = DROPPING_ROWS.get(key);
-            if (existing) {
-              if (existing.sig !== sig) {
-                renderDroppingRow(existing.tr, r);
-                existing.sig = sig;
-                existing.tr.classList.remove("drop-changed");
-                void existing.tr.offsetWidth; // restart the flash
-                existing.tr.classList.add("drop-changed");
-                // Drop the class once the flash finishes, so the periodic
-                // reorder (which re-inserts every row) can't restart the
-                // animation on a row that hasn't changed since.
-                const changed = existing.tr;
-                setTimeout(
-                  () => changed.classList.remove("drop-changed"),
-                  1500,
-                );
-              }
-            } else {
-              const tr = document.createElement("tr");
-              renderDroppingRow(tr, r);
-              tbody.appendChild(tr);
-              DROPPING_ROWS.set(key, { tr, sig });
-            }
-          }
-          for (const [key, v] of DROPPING_ROWS) {
-            if (!seen.has(key)) {
-              v.tr.remove();
-              DROPPING_ROWS.delete(key);
-            }
-          }
-          // Keep the biggest-drop order without recreating rows (move only).
-          for (const r of rows) {
-            const v = DROPPING_ROWS.get(
-              (r.match || "") + "|" + (r.league || ""),
-            );
-            if (v) tbody.appendChild(v.tr);
-          }
-        }
-        if (stamp)
-          stamp.textContent =
-            data && data.fetched_at
-              ? (data.source || "external") +
-                " · fetched " +
-                new Date(data.fetched_at).toLocaleTimeString()
-              : "";
-      }
       function setStatusTab(tab) {
         STATUS_TAB = tab;
         document
@@ -4123,27 +3829,6 @@
             b.setAttribute("aria-selected", String(b.dataset.status === tab));
           });
         rememberView("pt_tab", tab);
-        // The DROPPING tab swaps the picks table for the external panel.
-        const dropping = tab === "dropping";
-        const picksWrap = $("picks-wrap");
-        const dropPanel = $("dropping-panel");
-        if (picksWrap) picksWrap.hidden = dropping;
-        if (dropPanel) dropPanel.hidden = !dropping;
-        // Tier is picks-only — gray it out on DROPPING. Search DOES work on
-        // DROPPING (filters the matches), so it stays enabled everywhere.
-        const tierEl = $("f-tier");
-        if (tierEl) tierEl.disabled = dropping;
-        if (DROPPING_TIMER) {
-          clearInterval(DROPPING_TIMER);
-          DROPPING_TIMER = null;
-        }
-        if (dropping) {
-          loadDropping();
-          // oddsmath refreshes ~5s; track it (server-cached 5s, so most ticks are
-          // served from cache — one upstream fetch per 5s per book).
-          DROPPING_TIMER = setInterval(loadDropping, 5000);
-          return;
-        }
         render();
       }
       document
@@ -4157,10 +3842,7 @@
       });
       $("f-search").addEventListener("input", () => {
         rememberView("pt_search", $("f-search").value);
-        // On DROPPING, search filters the external matches (re-render the last
-        // payload); on the picks tabs it filters the picks table.
-        if (STATUS_TAB === "dropping") renderDropping(DROPPING_DATA);
-        else render();
+        render();
       });
       // Restore the saved view BEFORE the first render (validate against known
       // values so a stale key can never blank the table).
@@ -4178,7 +3860,7 @@
         const savedSortDir = localStorage.getItem("pt_sortdir");
         if (["asc", "desc"].includes(savedSortDir)) SORT_DIR = savedSortDir;
         const savedTab = localStorage.getItem("pt_tab");
-        if (["live", "unverified", "results", "dropping"].includes(savedTab))
+        if (["live", "unverified", "results"].includes(savedTab))
           setStatusTab(savedTab);
       } catch (e) {
         /* storage unavailable — defaults stand */
@@ -4192,7 +3874,6 @@
       $("f-game-sport").addEventListener("change", renderGames);
       $("f-game-search").addEventListener("input", renderGames);
       $("refresh").addEventListener("click", async () => {
-        // Refresh whatever tab is showing — the DROPPING tab has its own feed.
         // Visible feedback so it's obvious it fired (picks rarely change between
         // refreshes, which made it look dead on the picks tabs).
         const btn = $("refresh");
@@ -4200,10 +3881,9 @@
         btn.disabled = true;
         btn.textContent = "Refreshing…";
         try {
-          const work = STATUS_TAB === "dropping" ? loadDropping(true) : load();
           // keep "Refreshing…" visible for a beat even on a cache hit, so it's
           // obvious the click did something on every tab.
-          await Promise.all([work, new Promise((r) => setTimeout(r, 450))]);
+          await Promise.all([load(), new Promise((r) => setTimeout(r, 450))]);
         } finally {
           btn.disabled = false;
           btn.textContent = orig;

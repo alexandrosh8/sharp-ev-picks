@@ -189,7 +189,7 @@ open http://localhost:8000/                       # the picks dashboard
 - [x] Settlement engine — soccer auto-settles from free results feeds; NBA/EuroLeague settle manually; the dashboard SETTLED view shows the final **Score** + result + P&amp;L + CLV, and the manual settle prompt **pre-fills** the scraped final score when available.
 - [x] Sharp anchors — free Pinnacle ARCADIA close (forward-captured) + optional isolated Betfair Exchange BACK-odds capture (off-by-default).
 - [x] Multisport visibility — Tennis (ATP/WTA) + American football (NFL/NCAA/CFL) as visibility-only feeds (scraped, shown `UNVALIDATED`, no picks); per-sport CLV-readiness probe; tennis surname-initial name reconciliation + CC0 cross-source alias seed for soccer coverage.
-- [x] Dashboard "PICKS TERMINAL" — proof-led redesign (desktop + mobile, 1–5★ confidence, clickable sorting, segmented LIVE / UNVERIFIED / RESULTS tabs, first-run `/setup` admin password stored hashed), plus a **view-only DROPPING tab** (external betmonitor consensus-average steam, read-only — informational, never a pick/edge/CLV input).
+- [x] Dashboard "PICKS TERMINAL" — proof-led redesign (desktop + mobile, 1–5★ confidence, clickable sorting, segmented LIVE / UNVERIFIED / RESULTS tabs, first-run `/setup` admin password stored hashed).
 - [x] Rotating scrape proxies — optional `SCRAPER_PROXY_POOL` (rotation + capped failover, off by default) widening soft-book coverage (~18 UK books vs ~5 from a region-restricted IP). Read-only; creds in `.env` only.
 - [ ] Next: bankroll tracking (phase 6) + a validated NBA model (phase 5).
 
