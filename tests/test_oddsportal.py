@@ -737,8 +737,14 @@ async def test_fetch_match_odds_score_only_overrides_market_fallback() -> None:
     assert teams.home == "Alpha FC"
 
 
+# Bare wildcard family keys carry NO line — the JSON feed enumerates every
+# half-line — so they map to a market family but have ZERO direct selections here.
+_WILDCARD_KEYS = {"over_under_games", "asian_handicap_games"}
+
+
 def _expected_market_and_outcomes(key: str) -> tuple[Market, int]:
-    """Doctrine layout per market family: 2-way vs 3-way full outcome sets."""
+    """Doctrine layout per market family: 2-way vs 3-way full outcome sets;
+    a wildcard family key maps to a market but has no direct (line-less) outcomes."""
     exact = {
         "1x2": (Market.H2H, 3),
         "home_away": (Market.H2H, 2),
@@ -748,6 +754,8 @@ def _expected_market_and_outcomes(key: str) -> tuple[Market, int]:
     }
     if key in exact:
         return exact[key]
+    if key in _WILDCARD_KEYS:
+        return (Market.TOTALS if key.startswith("over_under_") else Market.SPREADS), 0
     if key.startswith("over_under_"):
         return Market.TOTALS, 2
     if key.startswith("european_handicap_"):
@@ -768,14 +776,16 @@ def test_every_configured_default_market_key_validates_and_maps(key: str) -> Non
     assert len(selections) == n_outcomes
     assert len({label for label, _ in selections}) == n_outcomes
     assert len({sel for _, sel in selections}) == n_outcomes
-    if key.startswith(("over_under_", "asian_handicap_", "european_handicap_")):
+    if key not in _WILDCARD_KEYS and key.startswith(
+        ("over_under_", "asian_handicap_", "european_handicap_")
+    ):
         line = _line_from_key(key)
         assert line is not None
         # Every line-bearing selection embeds its line, so distinct lines of
         # one family can never collide in (event, market, selection) keys
         # (picks dedupe/supersede/revalidation all key on selection).
         assert all(f"{abs(line):g}" in sel for _, sel in selections)
-    if key.startswith("asian_handicap"):
+    if key not in _WILDCARD_KEYS and key.startswith("asian_handicap"):
         line = _line_from_key(key)
         assert line is not None
         assert abs(line % 1.0) == 0.5  # half-line: no push outcome

@@ -184,3 +184,71 @@ def test_extract_bootstrap_builds_dynamic_feed_urls() -> None:
     )
     assert "1-3-EVENTID1-3-1-" in tok.feed_urls["home_away"]
     assert "1-3-EVENTID1-2-1-" in tok.feed_urls["over_under_games_220_5"]
+
+
+# --- wildcard markets: fetch EVERY half-line of a betType in one feed --------
+# basketball needs the FULL totals + handicap ladder (the value strategy shops
+# every line), not a fixed few — and one betType-2/5 feed body carries them all.
+
+
+def _multi(back_blocks: dict) -> dict:
+    """Decrypted-feed payload with several back keys (one bookie each)."""
+    return {"d": {"oddsdata": {"back": {k: {"odds": {BOOKIE: v}} for k, v in back_blocks.items()}}}}
+
+
+def test_over_under_games_wildcard_emits_all_half_lines_excluding_integers() -> None:
+    snaps = _parse(
+        _multi(
+            {
+                "E-2-1-0-171-0": [1.65, 2.1],  # integer line -> PUSH risk -> excluded
+                "E-2-1-0-171.5-0": [1.70, 2.00],  # half -> kept
+                "E-2-1-0-172.5-0": [1.83, 1.85],  # half -> kept
+            }
+        ),
+        market="over_under_games",
+        home="Lakers",
+        away="Celtics",
+        default_bet_id=3,
+        default_scope_id=1,
+    )
+    assert {s.market_detail for s in snaps} == {"over_under_games_171_5", "over_under_games_172_5"}
+    got = {(s.selection, s.decimal_odds, s.market) for s in snaps}
+    assert ("Over 171.5", 1.70, Market.TOTALS) in got
+    assert ("Under 172.5", 1.85, Market.TOTALS) in got
+
+
+def test_asian_handicap_games_wildcard_emits_signed_half_lines() -> None:
+    snaps = _parse(
+        _multi(
+            {
+                "E-5-1-0--3.5-0": {"0": 1.73, "1": 1.90},  # home -3.5 / away +3.5
+                "E-5-1-0--1.5-0": {"0": 1.69, "1": 1.96},
+                "E-5-1-0--3-0": {"0": 1.50, "1": 2.50},  # integer handicap -> PUSH -> excluded
+            }
+        ),
+        market="asian_handicap_games",
+        home="Lakers",
+        away="Celtics",
+        default_bet_id=3,
+        default_scope_id=1,
+    )
+    assert {s.market_detail for s in snaps} == {
+        "asian_handicap_games_-3_5",
+        "asian_handicap_games_-1_5",
+    }
+    got = {(s.selection, s.decimal_odds, s.market, s.market_detail) for s in snaps}
+    assert ("Lakers -3.5", 1.73, Market.SPREADS, "asian_handicap_games_-3_5") in got  # idx0=home
+    assert ("Celtics +3.5", 1.90, Market.SPREADS, "asian_handicap_games_-3_5") in got  # idx1=away
+
+
+def test_wildcard_build_feed_url_points_to_bettype_2_and_5() -> None:
+    ou = build_feed_url(3, "EVT", "over_under_games", default_bet_id=3, default_scope_id=1)
+    ah = build_feed_url(3, "EVT", "asian_handicap_games", default_bet_id=3, default_scope_id=1)
+    assert ou is not None and "1-3-EVT-2-1-" in ou
+    assert ah is not None and "1-3-EVT-5-1-" in ah
+
+
+def test_validate_markets_accepts_wildcard_families() -> None:
+    from app.ingestion.oddsportal import _validate_markets
+
+    _validate_markets(["home_away", "over_under_games", "asian_handicap_games"])  # must not raise

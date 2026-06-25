@@ -173,11 +173,21 @@ def _fmt_line(line: float) -> str:
     return f"{line:+g}"
 
 
+# Bare wildcard family keys (JSON feed): each means "emit EVERY half-line of this
+# betType". They carry no line, so the per-line half-line checks below don't apply
+# — the JSON enumerator (oddsportal_json) drops integer/quarter lines as it reads
+# the feed. `_market_for_key` already classifies them (over_under_ -> TOTALS,
+# asian_handicap_ -> SPREADS), so they pass the unknown-market check too.
+_WILDCARD_MARKET_KEYS = frozenset({"over_under_games", "asian_handicap_games"})
+
+
 def _validate_markets(markets: Sequence[str]) -> None:
     unknown = [m for m in markets if _market_for_key(m) is None]
     if unknown:
         raise ValueError(f"unsupported oddsportal markets: {unknown}")
     for m in markets:
+        if m in _WILDCARD_MARKET_KEYS:
+            continue
         if m.startswith("asian_handicap"):
             line = _line_from_key(m)
             if line is None or abs(line % 1.0) != 0.5:

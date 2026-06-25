@@ -382,15 +382,14 @@ class Settings(BaseSettings):
     oddsportal_football_markets: str = "1x2,over_under_2_5,btts,double_chance"
     # Basketball (club competitions only — OddsHarvester maps no national-team
     # events like EuroBasket). With leagues="all" the budget validator caps
-    # markets at 4 keys; this set is moneyline + the liquid NBA/Euroleague
-    # totals band (220.5-230.5) and matches the reference deployment. SCOPE
-    # the leagues in .env to widen. FULL upstream sets are 161 OU tabs
-    # (BasketballOverUnderMarket: 100_5..260_5, every half point) and 52 AH
-    # tabs (BasketballAsianHandicapMarket: -25_5..+25_5, all half-lines) —
-    # scraping them all only adds cycle time on tabs OddsPortal rarely prices.
-    oddsportal_basketball_markets: str = (
-        "home_away,over_under_games_220_5,over_under_games_225_5,over_under_games_230_5"
-    )
+    # markets at 4 keys. On the JSON feed (ODDSPORTAL_USE_JSON_FEED) the
+    # over_under_games / asian_handicap_games WILDCARDS each fetch EVERY priced
+    # half-line of their betType in ONE GET (the whole ladder rides one feed body
+    # — no per-line render cost), so the value engine can shop any line and a
+    # game's totals are captured whatever its scoring band (a fixed 220.5-230.5
+    # set missed every WNBA/college ~165 game). moneyline + all totals + all
+    # handicaps = 3 keys, under the cap. SCOPE the leagues in .env to widen.
+    oddsportal_basketball_markets: str = "home_away,over_under_games,asian_handicap_games"
     # Default "all" = worldwide basketball daily page; off-season (NBA and
     # Euroleague both done) simply yields no events. Matches the reference
     # deployment. Empty leagues = basketball polling off.

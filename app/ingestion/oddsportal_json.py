@@ -48,6 +48,7 @@ import gzip
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -386,16 +387,35 @@ _OVER_UNDER_GAMES_PREFIX = "over_under_games_"
 # 2-way totals; feed idx 0=over, 1=under (same upstream labels as soccer OU).
 _OVER_UNDER_GAMES_LABELS: Mapping[str, str] = {"0": "odds_over", "1": "odds_under"}
 
+# WILDCARD market families: a bare family key (no line) means "emit EVERY HALF-LINE
+# present in this betType's feed body" — one GET captures the whole ladder, which
+# a line-shopping value strategy needs (the edge can sit on ANY line, and a fixed
+# few lines miss most games entirely — e.g. NBA-scale 220.5 never matches a WNBA
+# ~165 total). The line is read from each feed key's 5th segment (SIGNED for
+# handicap). betType binds to the event scope (defaultScopeId) at resolve time;
+# feed_key is unused (parse_feed_payload enumerates). Integer/quarter lines are
+# dropped during enumeration — only ±0.5 half-lines devig cleanly (no PUSH).
+_WILDCARD_FAMILIES: dict[str, tuple[int, Mapping[str, str]]] = {
+    # points totals -> betType 2, 2-way list [over, under].
+    "over_under_games": (2, _OVER_UNDER_GAMES_LABELS),
+    # asian handicap (points spread) -> betType 5, 2-way; idx 0=home, 1=away
+    # (live-verified 2026-06-25: the home handicap lengthens as the line steepens).
+    "asian_handicap_games": (5, {"0": "handicap_team_1", "1": "handicap_team_2"}),
+}
+
 
 @dataclass(frozen=True)
 class _ResolvedFeedMarket:
     """A market resolved to its feed coordinates: the betType/scope to GET, the
-    decrypted-feed key to read, and the outcome-index -> OddsHarvester label map."""
+    decrypted-feed key to read (empty for a wildcard family), the outcome-index ->
+    OddsHarvester label map, and — for a wildcard — the market-key prefix used to
+    build a per-line market_detail as each line is enumerated from the feed."""
 
     bet_type: int
     scope: int
     feed_key: str
     index_to_label: Mapping[str, str]
+    wildcard_prefix: str | None = None
 
 
 def _resolve_feed_market(
@@ -405,9 +425,11 @@ def _resolve_feed_market(
 
     Static soccer markets keep their pinned betType/scope (the proven path,
     unchanged, independent of the bootstrap defaults). The basketball/tennis
-    money line and basketball points totals are bound to the event's OWN
+    money line and basketball totals/handicap are bound to the event's OWN
     bootstrap defaults — so a missing default (or an unsupported market) yields
-    None and the caller skips it, NEVER a guessed/numeric market."""
+    None and the caller skips it, NEVER a guessed/numeric market. A bare wildcard
+    family key (over_under_games / asian_handicap_games) resolves to its betType
+    with an empty feed_key — parse_feed_payload enumerates every half-line."""
     spec = _FEED_MARKETS.get(market_key)
     if spec is not None:  # static soccer market — pinned betType/scope
         bet_type, scope = _FEED_URL_PARAMS[market_key]
@@ -422,7 +444,15 @@ def _resolve_feed_market(
             f"E-{default_bet_id}-{default_scope_id}-0-0-0",
             labels,
         )
-    if market_key.startswith(_OVER_UNDER_GAMES_PREFIX):  # basketball points totals
+    wildcard = _WILDCARD_FAMILIES.get(market_key)
+    if wildcard is not None:  # all-half-lines family, enumerated from the feed
+        if not default_scope_id:
+            return None
+        bet_type, wlabels = wildcard
+        return _ResolvedFeedMarket(
+            bet_type, default_scope_id, "", wlabels, wildcard_prefix=market_key
+        )
+    if market_key.startswith(_OVER_UNDER_GAMES_PREFIX):  # explicit single totals line
         if not default_scope_id:
             return None
         line = _line_from_key(market_key)
@@ -539,55 +569,107 @@ def parse_feed_payload(
         resolved = _resolve_feed_market(
             market_key, default_bet_id=default_bet_id, default_scope_id=default_scope_id
         )
-        market = _market_for_key(market_key)
-        if resolved is None or market is None:
+        if resolved is None:
             # Market not wired into the feed path, or its bootstrap defaults are
             # missing — silently skipped so a mixed market list still yields the
             # supported families.
             continue
-        block = back.get(resolved.feed_key)
-        if not isinstance(block, Mapping):
-            continue
-        odds_by_bookie = block.get("odds")
-        if not isinstance(odds_by_bookie, Mapping):
-            continue
-        # OddsHarvester odds-label -> readable selection name (canonical).
-        label_to_selection = dict(_selections(market_key, home, away))
-
-        seen_books: set[str] = set()
-        for bookie_id, outcomes in odds_by_bookie.items():
-            # Translate the numeric feed id to the canonical book NAME. An
-            # UNKNOWN id is a scrape gap — SKIP it, NEVER emit a numeric
-            # bookmaker (it would silently disable sharp/soft classification,
-            # fork CLV history, and corrupt devig grouping — review 2026-06-23).
-            bookmaker = bookmakers.get(str(bookie_id))
-            if not bookmaker:
-                continue
-            # Dedup on the resolved NAME (two ids could map to one book; the
-            # Playwright path dedups on name too).
-            if bookmaker in seen_books:
-                continue
-            seen_books.add(bookmaker)
-            for index, label in resolved.index_to_label.items():
-                selection = label_to_selection.get(label)
-                if selection is None:
-                    continue
-                odds = _parse_odds(_outcome_at(outcomes, index))
-                if odds is None:
-                    continue
-                snapshots.append(
-                    OddsSnapshotIn(
-                        event_id=event_id,
-                        bookmaker=bookmaker,
-                        market=market,
-                        selection=selection,
-                        decimal_odds=odds,
-                        captured_at=captured_at,
-                        ingested_at=now,
-                        market_detail=market_key,
-                    )
+        if resolved.wildcard_prefix is None:
+            market = _market_for_key(market_key)
+            if market is not None:
+                _emit_block(
+                    snapshots,
+                    back.get(resolved.feed_key),
+                    market_key=market_key,
+                    market=market,
+                    index_to_label=resolved.index_to_label,
+                    home=home,
+                    away=away,
+                    bookmakers=bookmakers,
+                    event_id=event_id,
+                    captured_at=captured_at,
+                    now=now,
                 )
+            continue
+        # WILDCARD family: emit EVERY half-line present in the betType's feed body.
+        # The line rides each key's 5th segment (SIGNED for handicap). Integer /
+        # quarter lines are dropped — only ±0.5 half-lines devig cleanly (no PUSH).
+        line_re = re.compile(rf"^E-{resolved.bet_type}-{resolved.scope}-\d+-(-?\d+(?:\.\d+)?)-\d+$")
+        for feed_key, block in back.items():
+            m = line_re.match(feed_key)
+            if m is None or abs(float(m.group(1)) % 1.0) != 0.5:
+                continue
+            detail = f"{resolved.wildcard_prefix}_{m.group(1).replace('.', '_')}"
+            market = _market_for_key(detail)
+            if market is None:
+                continue
+            _emit_block(
+                snapshots,
+                block,
+                market_key=detail,
+                market=market,
+                index_to_label=resolved.index_to_label,
+                home=home,
+                away=away,
+                bookmakers=bookmakers,
+                event_id=event_id,
+                captured_at=captured_at,
+                now=now,
+            )
     return snapshots
+
+
+def _emit_block(
+    snapshots: list[OddsSnapshotIn],
+    block: Any,
+    *,
+    market_key: str,
+    market: Any,
+    index_to_label: Mapping[str, str],
+    home: str,
+    away: str,
+    bookmakers: Mapping[str, str],
+    event_id: str,
+    captured_at: datetime,
+    now: datetime,
+) -> None:
+    """Append one (market, line)'s rows from a decrypted ``back[...]`` block.
+
+    `market_key` is the FULL OddsHarvester key carried into market_detail so
+    distinct lines never collapse in devig. An UNKNOWN bookie id is skipped (never
+    emitted numeric); duplicate bookmaker rows within the block are dropped (devig
+    protection — the Playwright path dedups on name too)."""
+    if not isinstance(block, Mapping):
+        return
+    odds_by_bookie = block.get("odds")
+    if not isinstance(odds_by_bookie, Mapping):
+        return
+    label_to_selection = dict(_selections(market_key, home, away))
+    seen_books: set[str] = set()
+    for bookie_id, outcomes in odds_by_bookie.items():
+        bookmaker = bookmakers.get(str(bookie_id))
+        if not bookmaker or bookmaker in seen_books:
+            continue
+        seen_books.add(bookmaker)
+        for index, label in index_to_label.items():
+            selection = label_to_selection.get(label)
+            if selection is None:
+                continue
+            odds = _parse_odds(_outcome_at(outcomes, index))
+            if odds is None:
+                continue
+            snapshots.append(
+                OddsSnapshotIn(
+                    event_id=event_id,
+                    bookmaker=bookmaker,
+                    market=market,
+                    selection=selection,
+                    decimal_odds=odds,
+                    captured_at=captured_at,
+                    ingested_at=now,
+                    market_detail=market_key,
+                )
+            )
 
 
 # ---------------------------------------------------------------------------
