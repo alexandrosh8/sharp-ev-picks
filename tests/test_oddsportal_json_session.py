@@ -238,6 +238,30 @@ async def test_all_markets_missing_is_not_a_partial_market_gap() -> None:
     assert outcome.complete
 
 
+async def test_wildcard_family_covered_by_its_expanded_line_keys() -> None:
+    """A wildcard market family (over_under_games / asian_handicap_games) emits
+    rows under EXPANDED line keys (over_under_games_171_5, ...), never the bare
+    family key. The completeness gate must treat the family as COVERED when any
+    of its lines produced rows — not flag it as a wholly-missing market (the
+    false-INCOMPLETE regression seen live on basketball, 2026-06-25)."""
+
+    async def scrape(url: str) -> list[OddsSnapshotIn]:
+        return [
+            _row(detail="home_away"),
+            _row(detail="over_under_games_171_5"),
+            _row(detail="over_under_games_172_5"),
+            _row(detail="asian_handicap_games_-3_5"),
+        ]
+
+    outcome = await run_cycle(
+        ["u1"],
+        scrape,
+        markets=["home_away", "over_under_games", "asian_handicap_games"],
+    )
+    assert outcome.complete, outcome.reason
+    assert outcome.reason == ""
+
+
 # --- F1 / F5 knobs ----------------------------------------------------------
 
 

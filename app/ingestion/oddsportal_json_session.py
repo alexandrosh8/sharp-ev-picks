@@ -332,6 +332,19 @@ def _count_per_market(snapshots: Sequence[OddsSnapshotIn]) -> dict[str, int]:
     return counts
 
 
+def _market_covered(market: str, per_market: Mapping[str, int]) -> bool:
+    """Did this configured market produce any rows? A WILDCARD family
+    (over_under_games / asian_handicap_games) emits rows under EXPANDED line keys
+    (``<family>_<line>``, e.g. over_under_games_171_5), never the bare family key,
+    so it counts as covered when ANY of its lines has rows. An explicit single-line
+    key (over_under_games_220_5) still needs its own exact match — the prefix probe
+    can't match it (nothing is keyed ``..._220_5_<x>``), so strictness is kept."""
+    if per_market.get(market, 0) > 0:
+        return True
+    prefix = market + "_"
+    return any(key.startswith(prefix) and count > 0 for key, count in per_market.items())
+
+
 def _evaluate_completeness(
     *,
     snapshots: Sequence[OddsSnapshotIn],
@@ -364,7 +377,7 @@ def _evaluate_completeness(
         # broke (its feed key/layout, a rotation) — degrade, don't silently skew.
         if require_market_coverage and rows > 0:
             market_list = list(markets)
-            missing = [m for m in market_list if per_market.get(m, 0) == 0]
+            missing = [m for m in market_list if not _market_covered(m, per_market)]
             if missing and len(missing) != len(market_list):
                 return False, f"expected markets returned 0 rows: {missing}"
         return True, ""
