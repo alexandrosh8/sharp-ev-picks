@@ -786,6 +786,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             anchor_book,
             min_edge=scan_min_edge,
             min_odds=deps.value_min_odds,
+            max_edge=deps.value_policy.max_edge,
         )
         for v in value_bets:
             cap = captured.get((v.selection, v.best_book))

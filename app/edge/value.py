@@ -201,6 +201,7 @@ def find_value_bets(
     *,
     min_edge: float = 0.01,
     min_odds: float = 1.30,
+    max_edge: float = math.inf,
     max_overround: float = 0.12,
     devig_method: DevigMethod = DevigMethod.POWER,
     sharp_books: Sequence[str] = SHARP_BOOKS,
@@ -223,7 +224,9 @@ def find_value_bets(
     if anchored is None:
         return []
     anchor_book, fair_by_sel = anchored
-    return _scan_against_fair(prices, fair_by_sel, anchor_book, min_edge, min_odds, commissions)
+    return _scan_against_fair(
+        prices, fair_by_sel, anchor_book, min_edge, min_odds, commissions, max_edge=max_edge
+    )
 
 
 def double_chance_fair(
@@ -253,12 +256,15 @@ def find_value_bets_with_fair(
     *,
     min_edge: float = 0.01,
     min_odds: float = 1.30,
+    max_edge: float = math.inf,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
 ) -> list[ValueBet]:
     """Value scan against EXTERNALLY-derived fair probabilities (e.g. double
     chance derived from the 1X2 anchor via `double_chance_fair`). Selections
     without a derived fair probability are skipped."""
-    return _scan_against_fair(prices, fair_by_sel, anchor_book, min_edge, min_odds, commissions)
+    return _scan_against_fair(
+        prices, fair_by_sel, anchor_book, min_edge, min_odds, commissions, max_edge=max_edge
+    )
 
 
 def _scan_against_fair(
@@ -268,6 +274,7 @@ def _scan_against_fair(
     min_edge: float,
     min_odds: float,
     commissions: Mapping[str, float],
+    max_edge: float = math.inf,
 ) -> list[ValueBet]:
     out: list[ValueBet] = []
     for sel in prices:
@@ -287,7 +294,10 @@ def _scan_against_fair(
             continue
         implied = 1.0 / eff
         edge = fair_p - implied
-        if edge < min_edge:
+        # Reject below the floor AND above the ceiling: an edge above max_edge is
+        # a DATA ERROR (a mislabeled/garbage anchor — e.g. the 1X2 Draw<->away
+        # swap), never real value on a liquid market, so it must never mint/alert.
+        if edge < min_edge or edge > max_edge:
             continue
         ev = fair_p * (eff - 1.0) - (1.0 - fair_p)
         out.append(

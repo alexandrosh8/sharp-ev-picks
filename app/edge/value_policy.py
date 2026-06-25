@@ -20,6 +20,7 @@ the same keys the dashboard's per-market counters use), then the market
 family (``str(Market)``, e.g. "h2h", "totals"). Most specific wins.
 """
 
+import math
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -68,6 +69,11 @@ class ValuePolicy:
     # no per-season league curation. The anchor test is pure: see
     # app/edge/value.is_sharp_anchored (consensus/blank => not sharp).
     require_sharp_anchor: bool = False
+    # Upper sanity bound on edge: a value above this is a DATA ERROR (a corrupted
+    # or mislabeled anchor — e.g. a swapped 1X2 feed), never real value on a
+    # liquid market, so the value scan rejects it (a feed defect can't mint a
+    # phantom +EV pick). Default math.inf = OFF; set from Settings.value_max_edge.
+    max_edge: float = math.inf
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:

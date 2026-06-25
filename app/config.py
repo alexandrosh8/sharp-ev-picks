@@ -233,6 +233,11 @@ class Settings(BaseSettings):
     # VALUE_MIN_EDGE=0.015 (v2 holdout n=379, CLV +0.019).
     pick_strategy: str = "value"
     value_min_edge: float = 0.03
+    # Upper sanity ceiling on edge (data-error guard). A value edge above this on
+    # a liquid market is a corrupted/mislabeled anchor (e.g. a swapped 1X2 feed),
+    # never real value — the value scan rejects it so a feed defect can't mint a
+    # phantom +EV pick. Must stay > value_min_edge. Soccer-appropriate at 0.20.
+    value_max_edge: float = Field(default=0.20, gt=0.0)
     # Volume tier (informational shadow tier): candidates whose edge clears
     # this floor but NOT value_min_edge are persisted with tier='volume' —
     # no alert, no daily-exposure reservation — purely to accumulate live
@@ -832,6 +837,10 @@ class Settings(BaseSettings):
                 "VALUE_VOLUME_MIN_EDGE must be <= VALUE_MIN_EDGE "
                 "(set them equal to disable the volume tier)."
             )
+        if self.value_max_edge <= self.value_min_edge:
+            raise ValueError(
+                "VALUE_MAX_EDGE must be > VALUE_MIN_EDGE (it is the data-error ceiling)."
+            )
         return self
 
     @model_validator(mode="after")
@@ -911,6 +920,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         min_books_by_market=parse_market_min_books(settings.value_min_books_per_market),
         major_leagues=parse_major_leagues(settings.value_major_leagues),
         require_sharp_anchor=settings.value_require_sharp_anchor,
+        max_edge=settings.value_max_edge,
     )
 
 

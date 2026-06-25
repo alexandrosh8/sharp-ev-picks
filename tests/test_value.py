@@ -153,6 +153,22 @@ def test_min_odds_floor_gates_on_effective_not_raw_for_exchanges() -> None:
     assert any(b.best_book == "SoftBook" for b in bets)  # eff 1.31 >= 1.30
 
 
+def test_max_edge_cap_rejects_implausible_data_error_edges() -> None:
+    # fair(home)=0.80 vs a soft book offering 2.50 => edge 0.80 - 0.40 = +0.40
+    # (40%): impossible value on a liquid market, the signature of a corrupted
+    # anchor (the live 1X2-swap data error). Default (no cap) admits it; a 0.20
+    # cap drops it as a data error so a feed defect can never mint a phantom pick.
+    fair = {"home": 0.80, "away": 0.20}
+    prices = {"home": {"Pinnacle": 2.50, "SoftBook": 2.50}, "away": {"Pinnacle": 5.0}}
+    uncapped = find_value_bets_with_fair(prices, fair, "Pinnacle", min_edge=0.01, min_odds=1.30)
+    assert any(b.selection == "home" and b.edge > 0.20 for b in uncapped)
+    capped = find_value_bets_with_fair(
+        prices, fair, "Pinnacle", min_edge=0.01, min_odds=1.30, max_edge=0.20
+    )
+    assert all(b.edge <= 0.20 for b in capped)
+    assert not any(b.selection == "home" for b in capped)
+
+
 # --- structural guards --------------------------------------------------------
 
 

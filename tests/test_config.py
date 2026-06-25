@@ -353,7 +353,9 @@ def test_premium_adjustment_knobs_default_to_current_behavior() -> None:
     assert s.value_min_books_per_market == ""
     assert s.stake_max_drawdown is None
     assert s.stake_max_drawdown_probability is None
-    assert value_policy(s) == ValuePolicy()
+    # The premium-adjustment knobs stay no-op; the only non-empty default is the
+    # max_edge data-error ceiling — a default-ON safety guard, not a tunable knob.
+    assert value_policy(s) == ValuePolicy(max_edge=0.20)
     stakes = stake_policy(s)
     assert stakes.max_drawdown is None
     assert stakes.max_drawdown_probability is None
