@@ -23,12 +23,7 @@ def is_date_only_midnight(value: datetime | None) -> bool:
     None (truly TBD) is NOT midnight — it is handled by the caller's own guard."""
     if value is None:
         return False
-    return (
-        value.hour == 0
-        and value.minute == 0
-        and value.second == 0
-        and value.microsecond == 0
-    )
+    return value.hour == 0 and value.minute == 0 and value.second == 0 and value.microsecond == 0
 
 
 def prefer_kickoff(existing: datetime | None, incoming: datetime | None) -> datetime | None:

@@ -459,6 +459,70 @@ async def test_fetch_match_feed_logs_loud_rotation_alert_on_constant_drift(
     ), "the rotation alert must name the bundle-rotation / key-drift cause"
 
 
+async def test_fetch_match_feed_dedupes_shared_feed_url_across_markets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several over_under_games_<line> markets resolve to the SAME betType-2 feed
+    URL (the line rides the decrypted body, not the URL). fetch_match_feed must
+    GET that shared URL ONCE and parse every line from the single payload — not
+    one GET per line — so adding basketball totals doesn't bloat the cycle and
+    push soccer candidates past the odds-age freshness window."""
+    import app.ingestion.oddsportal_json as oj
+
+    ou_url = "https://www.oddsportal.com/match-event/1-3-EVT-2-1-aaaaaaaa.dat"
+    ml_url = "https://www.oddsportal.com/match-event/1-3-EVT-3-1-bbbbbbbb.dat"
+    token = FeedToken(
+        event_id="EVT",
+        sport_id=3,
+        feed_urls={
+            "over_under_games_220_5": ou_url,
+            "over_under_games_225_5": ou_url,  # SAME url as 220_5 (line is in the body)
+            "home_away": ml_url,
+        },
+        default_bet_id=3,
+        default_scope_id=1,
+        home="Lakers",
+        away="Celtics",
+    )
+
+    def fake_decrypt(text: str) -> dict:
+        if text == "OU":
+            return {
+                "d": {
+                    "oddsdata": {
+                        "back": {
+                            "E-2-1-0-220.5-0": {"odds": {"707": [1.9, 1.95]}},
+                            "E-2-1-0-225.5-0": {"odds": {"707": [2.0, 1.85]}},
+                        }
+                    }
+                }
+            }
+        return {"d": {"oddsdata": {"back": {"E-3-1-0-0-0": {"odds": {"707": [1.35, 2.9]}}}}}}
+
+    monkeypatch.setattr(oj, "decrypt_feed_body", fake_decrypt)
+    session = _FakeSession({ou_url: _FakeResponse(text="OU"), ml_url: _FakeResponse(text="ML")})
+
+    snaps = await fetch_match_feed(
+        EVENT_URL,
+        token=token,
+        markets=("over_under_games_220_5", "over_under_games_225_5", "home_away"),
+        directory=EventDirectory(),
+        now=NOW,
+        session=session,
+        bookmakers=REGISTRY,
+    )
+
+    # The shared OU url was fetched ONCE despite two markets riding it.
+    assert sum(1 for url, _ in session.requests if url == ou_url) == 1
+    assert sum(1 for url, _ in session.requests if url == ml_url) == 1
+    # ...and both lines + the money line were parsed from the deduped payloads.
+    got = {(s.selection, s.market_detail) for s in snaps}
+    assert ("Over 220.5", "over_under_games_220_5") in got
+    assert ("Under 225.5", "over_under_games_225_5") in got
+    assert ("Lakers", "home_away") in got
+    assert ("Celtics", "home_away") in got
+
+
 def test_pytest_imported_marker() -> None:
     """`pytest` import is used (async markers); keep the linter honest."""
     assert pytest is not None

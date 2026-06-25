@@ -373,9 +373,7 @@ async def test_capture_finished_scores_transitions_event_status(factory) -> None
     # under test is sport-agnostic (the score-capture UPDATE is the same code for
     # every sport); the bug surfaced on basketball only because those leagues lack
     # a free results feed, so the score-scrape path is their only settlement route.
-    written = await capture_finished_scores(
-        ResultLoader([]), factory, directory, "soccer", now=NOW
-    )
+    written = await capture_finished_scores(ResultLoader([]), factory, directory, "soccer", now=NOW)
     assert written == 1
     async with factory() as session:
         ev = await session.scalar(select(Event).where(Event.external_ref == event_id))

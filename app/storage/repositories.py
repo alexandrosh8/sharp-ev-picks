@@ -1745,9 +1745,7 @@ async def betfair_inline_capture_by_sport(
                         Event.starts_at.is_not(None),
                         Event.starts_at >= now,
                         Event.starts_at <= until,
-                        select(OddsSnapshot.id)
-                        .where(OddsSnapshot.event_id == Event.id)
-                        .exists(),
+                        select(OddsSnapshot.id).where(OddsSnapshot.event_id == Event.id).exists(),
                     )
                 )
             )

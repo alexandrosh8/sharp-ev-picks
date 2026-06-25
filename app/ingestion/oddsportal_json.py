@@ -58,6 +58,7 @@ from urllib.parse import unquote
 from app.ingestion.base import EventDirectory, EventTeams
 from app.ingestion.oddsportal import (
     _coerce_finished,
+    _line_from_key,
     _market_for_key,
     _parse_odds,
     _parse_score,
@@ -364,6 +365,78 @@ _FEED_MARKETS: dict[str, _FeedMarketSpec] = {
 SUPPORTED_FEED_MARKETS: tuple[str, ...] = tuple(_FEED_MARKETS)
 
 
+# --- Dynamic (metadata-driven) markets: basketball / tennis -----------------
+# The headline money line (basketball `home_away`, tennis `match_winner`) and
+# basketball points totals (`over_under_games_<line>`) are NOT statically keyed
+# like the four soccer markets: their feed betType/scope come from the EVENT's
+# own bootstrap (`defaultBetId` / `defaultScopeId`), live-verified 2026-06-25
+# across pre-match + finished events (basketball 3/1 incl. OT; tennis 3/2).
+# Binding to the site's own per-event declaration is rotation-proof and
+# sport-agnostic — no hardcoded per-sport betType table that silently breaks on
+# an id renumber, and no guessing (a missing default => scrape gap).
+#
+# 2-way money line; feed outcome index 0=home, 1=away. The odds-label VALUES are
+# exactly what `_selections()` keys on, so readable names + the Market enum come
+# from the canonical adapter — no parallel vocabulary lives here.
+_DYNAMIC_HEADLINE_LABELS: dict[str, Mapping[str, str]] = {
+    "home_away": {"0": "1", "1": "2"},  # basketball moneyline
+    "match_winner": {"0": "player_1", "1": "player_2"},  # tennis 2-way ML
+}
+_OVER_UNDER_GAMES_PREFIX = "over_under_games_"
+# 2-way totals; feed idx 0=over, 1=under (same upstream labels as soccer OU).
+_OVER_UNDER_GAMES_LABELS: Mapping[str, str] = {"0": "odds_over", "1": "odds_under"}
+
+
+@dataclass(frozen=True)
+class _ResolvedFeedMarket:
+    """A market resolved to its feed coordinates: the betType/scope to GET, the
+    decrypted-feed key to read, and the outcome-index -> OddsHarvester label map."""
+
+    bet_type: int
+    scope: int
+    feed_key: str
+    index_to_label: Mapping[str, str]
+
+
+def _resolve_feed_market(
+    market_key: str, *, default_bet_id: int = 0, default_scope_id: int = 0
+) -> _ResolvedFeedMarket | None:
+    """Resolve one market key to its feed coordinates, or None (a scrape gap).
+
+    Static soccer markets keep their pinned betType/scope (the proven path,
+    unchanged, independent of the bootstrap defaults). The basketball/tennis
+    money line and basketball points totals are bound to the event's OWN
+    bootstrap defaults — so a missing default (or an unsupported market) yields
+    None and the caller skips it, NEVER a guessed/numeric market."""
+    spec = _FEED_MARKETS.get(market_key)
+    if spec is not None:  # static soccer market — pinned betType/scope
+        bet_type, scope = _FEED_URL_PARAMS[market_key]
+        return _ResolvedFeedMarket(bet_type, scope, spec.feed_key, spec.index_to_label)
+    labels = _DYNAMIC_HEADLINE_LABELS.get(market_key)
+    if labels is not None:  # 2-way headline money line, bound to the defaults
+        if not default_bet_id or not default_scope_id:
+            return None
+        return _ResolvedFeedMarket(
+            default_bet_id,
+            default_scope_id,
+            f"E-{default_bet_id}-{default_scope_id}-0-0-0",
+            labels,
+        )
+    if market_key.startswith(_OVER_UNDER_GAMES_PREFIX):  # basketball points totals
+        if not default_scope_id:
+            return None
+        line = _line_from_key(market_key)
+        if line is None:
+            return None
+        return _ResolvedFeedMarket(
+            2,
+            default_scope_id,
+            f"E-2-{default_scope_id}-0-{line:g}-0",
+            _OVER_UNDER_GAMES_LABELS,
+        )
+    return None
+
+
 def _outcome_at(outcomes: Any, index: str) -> Any:
     """Read one outcome odds from a bookie block, tolerant of BOTH feed shapes.
 
@@ -416,6 +489,8 @@ def parse_feed_payload(
     home_score: int | None = None,
     away_score: int | None = None,
     finished: bool | None = None,
+    default_bet_id: int = 0,
+    default_scope_id: int = 0,
 ) -> list[OddsSnapshotIn]:
     """Adapt a decrypted feed payload into `OddsSnapshotIn` rows.
 
@@ -461,13 +536,16 @@ def parse_feed_payload(
     captured_at = _feed_captured_at(payload, now)
     snapshots: list[OddsSnapshotIn] = []
     for market_key in markets:
-        spec = _FEED_MARKETS.get(market_key)
+        resolved = _resolve_feed_market(
+            market_key, default_bet_id=default_bet_id, default_scope_id=default_scope_id
+        )
         market = _market_for_key(market_key)
-        if spec is None or market is None:
-            # Market not (yet) wired into the feed path — silently skipped so a
-            # mixed market list still yields the supported families.
+        if resolved is None or market is None:
+            # Market not wired into the feed path, or its bootstrap defaults are
+            # missing — silently skipped so a mixed market list still yields the
+            # supported families.
             continue
-        block = back.get(spec.feed_key)
+        block = back.get(resolved.feed_key)
         if not isinstance(block, Mapping):
             continue
         odds_by_bookie = block.get("odds")
@@ -490,7 +568,7 @@ def parse_feed_payload(
             if bookmaker in seen_books:
                 continue
             seen_books.add(bookmaker)
-            for index, label in spec.index_to_label.items():
+            for index, label in resolved.index_to_label.items():
                 selection = label_to_selection.get(label)
                 if selection is None:
                     continue
@@ -548,7 +626,13 @@ _FEED_URL_PARAMS: dict[str, tuple[int, int]] = {
 }
 
 
-def build_feed_url(sport_id: int, event_id: str, market_key: str) -> str | None:
+def build_feed_url(
+    sport_id: int,
+    event_id: str,
+    market_key: str,
+    default_bet_id: int = 0,
+    default_scope_id: int = 0,
+) -> str | None:
     """Build the encrypted-feed URL for one (event, market) in PURE PYTHON.
 
     OddsPortal routes the feed on the ``1-{sportId}-{eventId}-{betType}-{scope}``
@@ -560,22 +644,34 @@ def build_feed_url(sport_id: int, event_id: str, market_key: str) -> str | None:
     Returns None for a market with no known (betType, scope) — the caller skips
     it (scrape gap), never crashes.
     """
-    params = _FEED_URL_PARAMS.get(market_key)
-    if params is None or not event_id:
+    resolved = _resolve_feed_market(
+        market_key, default_bet_id=default_bet_id, default_scope_id=default_scope_id
+    )
+    if resolved is None or not event_id:
         return None
-    bet_type, scope = params
     # Stable input -> stable hash for the same (event, market). The exact bytes
     # do not matter to the server; determinism matters to us (caching, logs).
     digest = hashlib.md5(
-        f"{sport_id}-{event_id}-{bet_type}-{scope}".encode(), usedforsecurity=False
+        f"{sport_id}-{event_id}-{resolved.bet_type}-{resolved.scope}".encode(),
+        usedforsecurity=False,
     ).hexdigest()
     path = _FEED_PATH_TEMPLATE.format(
-        sport_id=sport_id, event_id=event_id, bet_type=bet_type, scope=scope, md5=digest
+        sport_id=sport_id,
+        event_id=event_id,
+        bet_type=resolved.bet_type,
+        scope=resolved.scope,
+        md5=digest,
     )
     return f"{_FEED_HOST}{path}"
 
 
-def build_feed_urls(sport_id: int, event_id: str, markets: Sequence[str]) -> dict[str, str]:
+def build_feed_urls(
+    sport_id: int,
+    event_id: str,
+    markets: Sequence[str],
+    default_bet_id: int = 0,
+    default_scope_id: int = 0,
+) -> dict[str, str]:
     """Build the pure-Python feed URL for every supported market in `markets`.
 
     Unsupported / unmappable markets are simply omitted (they keep flowing
@@ -583,7 +679,7 @@ def build_feed_urls(sport_id: int, event_id: str, markets: Sequence[str]) -> dic
     `FeedToken` carries."""
     out: dict[str, str] = {}
     for market_key in markets:
-        url = build_feed_url(sport_id, event_id, market_key)
+        url = build_feed_url(sport_id, event_id, market_key, default_bet_id, default_scope_id)
         if url is not None:
             out[market_key] = url
     return out
@@ -600,6 +696,11 @@ class FeedToken:
     event_id: str
     sport_id: int
     feed_urls: Mapping[str, str]
+    # The event's OWN headline-market declaration (eventData.defaultBetId /
+    # defaultScopeId): the betType/scope the dynamic basketball/tennis markets
+    # bind to (0 => absent, the market is skipped, never guessed).
+    default_bet_id: int = 0
+    default_scope_id: int = 0
     xhash: str = ""
     xhashf: str = ""
     home: str = ""
@@ -668,6 +769,11 @@ def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedT
     if not event_id:
         raise ValueError("bootstrap JSON has no eventData.id")
     sport_id = int(event.get("sportId") or 0)
+    # The event's headline-market declaration — the basis for the dynamic
+    # basketball/tennis feed binding (the money line / totals betType+scope come
+    # from these, not a hardcoded per-sport table). Absent => 0 => skipped.
+    default_bet_id = int(event.get("defaultBetId") or 0)
+    default_scope_id = int(event.get("defaultScopeId") or 0)
     # Kickoff lives in eventData.startDate for some events and eventBody.startDate
     # for others (US lower-league fixtures, live verify 2026-06-24); read whichever
     # carries a real positive epoch, eventData first (authoritative when present).
@@ -683,7 +789,9 @@ def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedT
     return FeedToken(
         event_id=event_id,
         sport_id=sport_id,
-        feed_urls=build_feed_urls(sport_id, event_id, markets),
+        feed_urls=build_feed_urls(sport_id, event_id, markets, default_bet_id, default_scope_id),
+        default_bet_id=default_bet_id,
+        default_scope_id=default_scope_id,
         xhash=_decode_xhash(event.get("xhash")),
         xhashf=_decode_xhash(event.get("xhashf")),
         home=str(event.get("home") or ""),
@@ -757,11 +865,23 @@ async def fetch_match_feed(
     headers = dict(_FEED_HEADERS)
     headers["Referer"] = token.referer or match_url
 
-    snapshots: list[OddsSnapshotIn] = []
+    # Group the requested markets by their feed URL: several markets can ride ONE
+    # encrypted feed (e.g. every over_under_games_<line> line lives in the same
+    # betType-2/scope `.dat`, the line riding the decrypted body, not the URL). GET
+    # each unique URL ONCE and parse every market on it, so adding basketball
+    # totals never multiplies the per-match GET count — otherwise the longer cycle
+    # pushes soccer candidates past the odds-age freshness window. Insertion order
+    # is preserved, so the requested-market order is honoured.
+    url_to_markets: dict[str, list[str]] = {}
     for market_key in markets:
         feed_url = token.feed_urls.get(market_key)
         if not feed_url:
             continue  # no URL minted for this market this cycle — scrape gap
+        url_to_markets.setdefault(feed_url, []).append(market_key)
+
+    snapshots: list[OddsSnapshotIn] = []
+    for feed_url, market_keys in url_to_markets.items():
+        label = ",".join(market_keys)
         try:
             resp = await session.get(
                 feed_url,
@@ -771,15 +891,15 @@ async def fetch_match_feed(
             )
         except Exception as exc:  # network / TLS / timeout -> scrape gap
             logger.warning(
-                "oddsportal feed GET failed for market %s (%s) — treating as gap",
-                market_key,
+                "oddsportal feed GET failed for market(s) %s (%s) — treating as gap",
+                label,
                 type(exc).__name__,
             )
             continue
         if getattr(resp, "status_code", 0) != 200:
             logger.info(
-                "oddsportal feed for market %s returned status %s — gap",
-                market_key,
+                "oddsportal feed for market(s) %s returned status %s — gap",
+                label,
                 getattr(resp, "status_code", "?"),
             )
             continue
@@ -789,8 +909,8 @@ async def fetch_match_feed(
             # A 200 odds body that WON'T decrypt = the bundle likely rotated its
             # static AES constants. Loud so ops re-scrapes them (version guard).
             logger.warning(
-                "oddsportal feed ROTATION suspected for market %s: %s",
-                market_key,
+                "oddsportal feed ROTATION suspected for market(s) %s: %s",
+                label,
                 exc,
             )
             continue
@@ -802,16 +922,16 @@ async def fetch_match_feed(
             # naming the bundle (it is NOT a ValueError, so it would otherwise
             # escape to the loader's quiet INFO catch). Fail-closed: no rows.
             logger.warning(
-                "oddsportal feed KEY/BUNDLE ROTATION (version guard) for market %s — "
+                "oddsportal feed KEY/BUNDLE ROTATION (version guard) for market(s) %s — "
                 "JSON feed fail-closed, scrape gap until constants re-verified: %s",
-                market_key,
+                label,
                 exc,
             )
             continue
         except ValueError as exc:  # off-window / empty match -> benign gap
             logger.info(
-                "oddsportal feed decrypt skipped for market %s (%s)",
-                market_key,
+                "oddsportal feed decrypt skipped for market(s) %s (%s)",
+                label,
                 type(exc).__name__,
             )
             continue
@@ -823,13 +943,15 @@ async def fetch_match_feed(
                 away=token.away,
                 league=token.league,
                 starts_at=token.starts_at,
-                markets=(market_key,),
+                markets=tuple(market_keys),
                 directory=directory,
                 now=now,
                 bookmakers=bookmakers,
                 home_score=token.home_score,
                 away_score=token.away_score,
                 finished=token.finished,
+                default_bet_id=token.default_bet_id,
+                default_scope_id=token.default_scope_id,
             )
         )
     return snapshots

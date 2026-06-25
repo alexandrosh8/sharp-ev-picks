@@ -31,14 +31,20 @@ POLICY = GatePolicy(
 
 
 def snap(book: str, sel: str, odds: float, age_s: float = 30.0) -> OddsSnapshotIn:
+    # Stamp from a FRESH now per call, not the module-level NOW. The pipeline
+    # computes odds age against datetime.now() at cycle time; a stale module NOW
+    # — when a long full-suite run reaches a test minutes after collection —
+    # otherwise turns a "future" (age_s < 0) or fresh snapshot stale, flaking the
+    # odds-age assertions (e.g. test_value_pipeline_handles_future_captured_at).
+    now = datetime.now(tz=UTC)
     return OddsSnapshotIn(
         event_id="evt-1",
         bookmaker=book,
         market=Market.H2H,
         selection=sel,
         decimal_odds=odds,
-        captured_at=NOW - timedelta(seconds=age_s),
-        ingested_at=NOW,
+        captured_at=now - timedelta(seconds=age_s),
+        ingested_at=now,
     )
 
 
