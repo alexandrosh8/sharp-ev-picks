@@ -184,6 +184,26 @@ def test_out_of_range_pacing_knobs_fail_at_startup(field: str, value: float) -> 
         make_settings(**{field: value})
 
 
+def test_oddsportal_concurrency_may_exceed_5_only_with_enough_proxies() -> None:
+    # The single-IP ceiling is 5. Higher concurrency is safe ONLY when per-match
+    # rotation gives >=1 proxy per concurrent request, so the cap scales with the
+    # SCRAPER_PROXY_POOL size (max(5, len(pool))): each concurrent GET exits a
+    # distinct IP, never piling onto one.
+    pool15 = ",".join(f"h{i}.example|8080|user|pass" for i in range(15))
+    s = make_settings(oddsportal_concurrency=12, scraper_proxy_pool=pool15)
+    assert s.oddsportal_concurrency == 12
+    # no pool: one IP cannot safely sustain 12 -> reject
+    with pytest.raises(ValidationError):
+        make_settings(oddsportal_concurrency=12)
+    # too few proxies (cap = max(5, 3) = 5) -> reject
+    pool3 = ",".join(f"h{i}.example|8080|user|pass" for i in range(3))
+    with pytest.raises(ValidationError):
+        make_settings(oddsportal_concurrency=12, scraper_proxy_pool=pool3)
+    # concurrency above the proxy count (>1 request/IP) -> reject
+    with pytest.raises(ValidationError):
+        make_settings(oddsportal_concurrency=16, scraper_proxy_pool=pool15)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

@@ -457,9 +457,12 @@ class Settings(BaseSettings):
     # Concurrency = parallel match pages; request_delay = seconds between
     # requests (+ jitter upstream). Tuning these is sanctioned configuration
     # — anti-bot bypassing remains forbidden everywhere. Bounds fail fast at
-    # startup: concurrency 0 becomes Semaphore(0) upstream (silent hang);
-    # >5 or sub-0.5s delays exceed responsible pacing for a free source.
-    oddsportal_concurrency: int = Field(default=3, ge=1, le=5)
+    # startup: concurrency 0 becomes Semaphore(0) upstream (silent hang).
+    # 5 is the single-IP pacing ceiling; ABOVE 5 needs >=1 proxy per concurrent
+    # request (gated by _enforce_scrape_concurrency_within_proxy_budget, so each
+    # GET exits a distinct IP). le=64 is an absolute sanity stop. Sub-0.5s delays
+    # exceed responsible pacing for a free source.
+    oddsportal_concurrency: int = Field(default=3, ge=1, le=64)
     oddsportal_request_delay: float = Field(default=1.0, ge=0.5)
     # OddsHarvester hardcodes a 15s match-page navigation (Page.goto) timeout
     # that is NOT env-configurable upstream; on OddsPortal's heavy pages a slow
@@ -826,6 +829,23 @@ class Settings(BaseSettings):
                     "with 18 tabs a cycle runs HOURS and the odds-age gate then "
                     "silently discards almost the whole slate."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_scrape_concurrency_within_proxy_budget(self) -> "Settings":
+        # Concurrency is safe up to ONE in-flight request per proxy IP: per-match
+        # rotation (SCRAPER_PROXY_POOL) spreads each concurrent GET to a distinct
+        # IP. The single-IP ceiling is 5; ABOVE that, require >=1 proxy per
+        # concurrent request so a higher concurrency can never pile N requests
+        # onto one IP and invite a block.
+        cap = max(5, len(self.scraper_proxies()))
+        if self.oddsportal_concurrency > cap:
+            raise ValueError(
+                f"ODDSPORTAL_CONCURRENCY={self.oddsportal_concurrency} exceeds the safe "
+                f"ceiling {cap}: above 5 you need >=1 proxy per concurrent request, but "
+                f"SCRAPER_PROXY_POOL has {len(self.scraper_proxies())}. Add proxies or "
+                "lower the concurrency so each request exits a distinct IP."
+            )
         return self
 
     @model_validator(mode="after")
