@@ -1568,6 +1568,23 @@
           margin-bottom: 10px;
           padding: 13px 14px !important;
         }
+        /* Inside the elevated card, drop the stacked-table divider line that sat
+           above Fair/EV·Edge·Conf — within a card it read as a "banner" cutting
+           across the pick. Keep a little breathing room, no rule. */
+        #picks-table:not(.settled) tbody tr:not(:has(td[colspan])) td:nth-child(7),
+        #picks-table:not(.settled) tbody tr:not(:has(td[colspan])) td:nth-child(8),
+        #picks-table:not(.settled) tbody tr:not(:has(td[colspan])) td:nth-child(9) {
+          border-top: 0;
+          margin-top: 4px;
+          padding-top: 0;
+        }
+        /* No grey tap-flash when a pick is pressed; a soft border tint instead. */
+        #picks-table tbody tr {
+          -webkit-tap-highlight-color: transparent;
+        }
+        #picks-table tbody tr:not(:has(td[colspan])):active {
+          border-color: var(--app-line) !important;
+        }
       }
     </style>
   </head>
