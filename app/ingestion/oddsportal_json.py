@@ -348,8 +348,12 @@ class _FeedMarketSpec:
 
 
 _FEED_MARKETS: dict[str, _FeedMarketSpec] = {
-    # 1x2 (betType 1, 3-way dict): feed idx 0=home,1=away,2=draw -> OH 1 / 2 / X.
-    "1x2": _FeedMarketSpec("E-1-2-0-0-0", {"0": "1", "1": "2", "2": "X"}),
+    # 1x2 (betType 1, 3-way dict): feed idx 0=home, 1=draw, 2=away -> OH 1 / X / 2.
+    # EMPIRICALLY VERIFIED 2026-06-25 by decrypting live feeds (idx2 is the
+    # favourite/away, idx1 the draw across every book). The prior 0=home,1=away,
+    # 2=draw map SWAPPED Draw<->away, so the draw got the favourite's short price
+    # and poisoned every double_chance fair derived from the 1x2 anchor (fake +EV).
+    "1x2": _FeedMarketSpec("E-1-2-0-0-0", {"0": "1", "1": "X", "2": "2"}),
     # Over/Under 2.5 goals, FT (betType 2, line in 5th segment, 2-way list):
     # idx 0=over, 1=under.
     "over_under_2_5": _FeedMarketSpec("E-2-2-0-2.5-0", {"0": "odds_over", "1": "odds_under"}),

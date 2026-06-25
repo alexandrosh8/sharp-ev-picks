@@ -126,9 +126,9 @@ async def test_json_feed_source_selected_when_flag_on() -> None:
 
     assert seen == [str(LISTED_MATCH["match_link"])]
     by_sel = {(s.bookmaker, s.selection): s.decimal_odds for s in snaps}
-    assert by_sel[("bet365", "Alpha FC")] == 1.50
-    assert by_sel[("bet365", "Beta United")] == 6.00
-    assert by_sel[("bet365", "Draw")] == 4.20
+    assert by_sel[("bet365", "Alpha FC")] == 1.50  # idx0 = home
+    assert by_sel[("bet365", "Draw")] == 6.00  # idx1 = Draw (1/X/2 feed order)
+    assert by_sel[("bet365", "Beta United")] == 4.20  # idx2 = away
     assert all(s.bookmaker == "bet365" for s in snaps)  # NAME, no numeric, no PWBook
     assert all(s.market is Market.H2H for s in snaps)
 

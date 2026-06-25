@@ -118,12 +118,15 @@ def test_parse_feed_yields_playwright_identical_snapshots() -> None:
         assert s.captured_at == FEED_CAPTURED_AT  # feed time-base, not now()
         assert not s.bookmaker.isdigit()  # NAME, never a numeric feed id
 
-    # --- 1x2 (H2H): home/Draw/away with the verified bookie prices, keyed by
-    # the canonical NAME (BetMGM = id 707, Betfair Exchange = id 44). ---
+    # --- 1x2 (H2H): feed idx 0=home(1), 1=draw(X), 2=away(2) — the canonical
+    # 1/X/2 order, empirically verified by decrypting live feeds. The fixture's
+    # raw BetMGM block is {0:1.15, 1:15.0, 2:7.5}, so Draw(idx1)=15.0 and
+    # Ghana/away(idx2)=7.5 (synthetic prices; realism is the regression test
+    # test_parse_feed_1x2_index_order_home_draw_away below). ---
     h2h = {(s.bookmaker, s.selection): s.decimal_odds for s in snaps if s.market_detail == "1x2"}
-    assert h2h[("BetMGM", "England")] == 1.15
-    assert h2h[("BetMGM", "Draw")] == 7.5
-    assert h2h[("BetMGM", "Ghana")] == 15.0
+    assert h2h[("BetMGM", "England")] == 1.15  # idx0 = home
+    assert h2h[("BetMGM", "Draw")] == 15.0  # idx1 = Draw (was mislabeled away pre-fix)
+    assert h2h[("BetMGM", "Ghana")] == 7.5  # idx2 = away (was mislabeled Draw pre-fix)
     assert h2h[("Betfair Exchange", "England")] == 1.20
     assert all(s.market is Market.H2H for s in snaps if s.market_detail == "1x2")
     # six bookies x three outcomes
@@ -354,8 +357,8 @@ async def test_fetch_match_feed_is_get_only_and_yields_snapshots() -> None:
     assert all("match-event/" in url or EVENT_URL in url for url, _ in session.requests)
 
     h2h = {(s.bookmaker, s.selection): s.decimal_odds for s in snaps}
-    assert h2h[("BetMGM", "England")] == 1.15  # id 707 -> canonical NAME (BetMGM)
-    assert h2h[("BetMGM", "Draw")] == 7.5
+    assert h2h[("BetMGM", "England")] == 1.15  # id 707 -> canonical NAME (BetMGM); idx0=home
+    assert h2h[("BetMGM", "Draw")] == 15.0  # idx1 = Draw (1/X/2 feed order)
     assert all(s.event_id == EVENT_URL for s in snaps)
     assert directory.lookup(EVENT_URL) is not None
 

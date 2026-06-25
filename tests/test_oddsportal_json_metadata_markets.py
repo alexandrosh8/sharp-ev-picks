@@ -130,7 +130,8 @@ def test_soccer_static_markets_unchanged_by_defaults() -> None:
         default_scope_id=0,
     )
     got = {(s.selection, s.decimal_odds) for s in snaps}
-    assert got == {("Home", 2.5), ("Away", 4.0), ("Draw", 3.3)}
+    # feed idx 0=home, 1=draw, 2=away (1/X/2): Home=2.5, Draw=4.0, Away=3.3.
+    assert got == {("Home", 2.5), ("Draw", 4.0), ("Away", 3.3)}
 
 
 def test_build_feed_url_uses_bootstrap_defaults_for_dynamic_markets() -> None:
