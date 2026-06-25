@@ -30,8 +30,16 @@ from app.ingestion.oddsportal import _selections  # noqa: E402
 CONFIGURED_FOOTBALL_KEYS = tuple(
     Settings.model_fields["oddsportal_football_markets"].default.split(",")
 )
+# JSON-feed-only WILDCARD families: one GET enumerates every half-line
+# (oddsportal_json). They are DELIBERATELY not oddsharvester upstream keys — the
+# Playwright fallback does not scrape them (basketball there is moneyline-only) —
+# so they're excluded from the upstream-existence guarantees below and asserted
+# separately in test_json_wildcard_families_are_configured_but_not_upstream.
+_JSON_WILDCARD_KEYS = frozenset({"over_under_games", "asian_handicap_games"})
 CONFIGURED_BASKETBALL_KEYS = tuple(
-    Settings.model_fields["oddsportal_basketball_markets"].default.split(",")
+    k
+    for k in Settings.model_fields["oddsportal_basketball_markets"].default.split(",")
+    if k not in _JSON_WILDCARD_KEYS
 )
 
 
@@ -105,3 +113,16 @@ def test_configured_basketball_key_exists_upstream_with_matching_labels(key: str
     assert key in mapping
     ours = [label for label, _ in _selections(key, "Home", "Away")]
     assert ours == _upstream_odds_labels(mapping[key])
+
+
+def test_json_wildcard_families_are_configured_but_not_upstream_keys() -> None:
+    """The bare wildcard families enumerate every half-line from ONE JSON-feed GET
+    (oddsportal_json), so they are JSON-feed-only and DELIBERATELY not oddsharvester
+    upstream keys — the Playwright fallback does not scrape them (basketball there is
+    moneyline-only). Guard all three facts so the divergence stays explicit, not silent."""
+    from app.ingestion.oddsportal_json import _WILDCARD_FAMILIES
+
+    configured = set(Settings.model_fields["oddsportal_basketball_markets"].default.split(","))
+    assert configured >= _JSON_WILDCARD_KEYS  # they ARE the configured basketball markets
+    assert set(_WILDCARD_FAMILIES) >= _JSON_WILDCARD_KEYS  # recognized JSON wildcard families
+    assert not (_JSON_WILDCARD_KEYS & _basketball_upstream_keys())  # but NOT upstream keys
