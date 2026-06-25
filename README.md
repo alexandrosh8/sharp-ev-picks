@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/logo.svg" alt="betting-ai — manual-betting +EV picks platform" width="560">
+<img src="docs/assets/logo.svg" alt="sharp-ev-picks — +EV picks decision-support platform" width="560">
 
 **A picks-only +EV decision-support platform for football &amp; basketball.**
 
@@ -12,7 +12,7 @@ You review every pick and place any bet yourself — the system never does.
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-async-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)](Dockerfile)
 [![Lint: Ruff](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)](https://docs.astral.sh/ruff/)
-[![CI](https://github.com/alexandrosh8/betting-picks-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/alexandrosh8/betting-picks-bot/actions/workflows/ci.yml)
+[![CI](https://github.com/alexandrosh8/sharp-ev-picks/actions/workflows/ci.yml/badge.svg)](https://github.com/alexandrosh8/sharp-ev-picks/actions/workflows/ci.yml)
 [![Safety: picks-only · no auto-bet](https://img.shields.io/badge/safety-picks--only%20%C2%B7%20no%20auto--bet-22c55e)](#-safety--read-this-first)
 
 [Install](#install--run) · [How it works](#how-it-works-backtested-positive-clv) · [Sports](#sports-coverage) · [Configuration](#configuration) · [Architecture](#architecture) · [Docs](#documentation)
@@ -72,8 +72,8 @@ Both supported paths run the **same code** and serve the picks dashboard at **ht
 2. Get the code and a config file:
 
    ```bash
-   git clone https://github.com/alexandrosh8/betting-picks-bot.git
-   cd betting-picks-bot
+   git clone https://github.com/alexandrosh8/sharp-ev-picks.git
+   cd sharp-ev-picks
    cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
    ```
 
@@ -95,9 +95,9 @@ The same Docker stack on a server, with `restart: unless-stopped` so it survives
 
 ```bash
 sudo apt install -y docker.io docker-compose-v2 git      # if Docker is missing
-sudo git clone https://github.com/alexandrosh8/betting-picks-bot.git /opt/betting-ai
-sudo chown -R $USER /opt/betting-ai
-cd /opt/betting-ai
+sudo git clone https://github.com/alexandrosh8/sharp-ev-picks.git /opt/sharp-ev-picks
+sudo chown -R $USER /opt/sharp-ev-picks
+cd /opt/sharp-ev-picks
 cp .env.example .env
 chmod 600 .env
 # edit .env: uncomment COMPOSE_PROFILES=prod, set TELEGRAM_*; create the /setup
@@ -107,17 +107,23 @@ docker compose up -d --build
 
 Reach it over an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <vps>`, then http://localhost:8000/), or on the VPS IP once dashboard auth is on. Full runbook — every `.env` key, public-IP hardening, logs, backups, troubleshooting: **[`docs/deployment/openclaw-ubuntu.md`](docs/deployment/openclaw-ubuntu.md)**.
 
-### Developer mode (Mac / Linux, host Python)
+### Mac / Linux — run natively (no Docker)
 
-Hot-reload for development — the app runs on the host, only Postgres/Redis are containerized:
+On a Mac you don't need Docker at all — run the app **and** its services directly on the host. Install Postgres + Redis once with Homebrew:
 
 ```bash
-docker compose up -d postgres redis
-uv sync --extra football --extra backfill   # basketball/NBA: also --extra nba --extra models --extra ml
-uv run playwright install chromium
+brew install postgresql@16 redis
+brew services start postgresql@16
+brew services start redis
+createdb betting_ai                          # match POSTGRES_DB / DATABASE_URL in .env
+
+uv sync --extra football --extra backfill    # NBA: also --extra nba --extra models --extra ml
+uv run playwright install chromium           # only if ODDSPORTAL_USE_JSON_FEED=false (Playwright transport)
 uv run alembic upgrade head
-uv run uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload         # http://localhost:8000/  (hot-reload)
 ```
+
+Prefer not to install the databases? Run just those two in Docker and keep the app native: `docker compose up -d postgres redis`.
 
 New here? **[`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md)** has the exact verify-the-backtest and live-picks commands. Common dev tasks:
 
@@ -158,7 +164,7 @@ The free OddsPortal scrape runs from your host IP — which OddsPortal can throt
 SCRAPER_PROXY_POOL=host1|port1|user1|pass1,host2|port2|user2|pass2
 ```
 
-- **Rotation + failover** — the scraper tries proxies in turn and fails over on an error _or_ a zero-match result (the throttle signature), capped so an empty slate never burns the whole pool.
+- **Per-match rotation + failover** — on the JSON-feed transport each match's GETs exit a _different_ proxy IP (round-robin), so the slate spreads across the whole pool instead of hammering one IP, and a fetch error fails over to the next proxy. `ODDSPORTAL_CONCURRENCY` then scales safely with the pool size — a startup validator caps it at `max(5, len(pool))` so there is always ≥1 proxy per concurrent request (each in-flight GET on a distinct IP). With a healthy pool this cut a full-slate cycle from tens of minutes to ~4 minutes. The dated listing scrape also fails over on a zero-match result (the throttle signature), capped so an empty slate never burns the whole pool.
 - **Read-only + safe** — the proxy only changes the outbound IP of GET odds requests; no login, cookies, or order path. Credentials reach the browser as separate fields (never in a logged URL) and live only in `.env`. These are _infrastructure_ proxies, not betting accounts.
 
 > A UK exit hides **Pinnacle** (UK-restricted); the primary sharp anchor is the free Pinnacle **ARCADIA** close (a geo-independent read-only feed), not the scrape.
@@ -207,6 +213,7 @@ open http://localhost:8000/                       # the picks dashboard
 - [x] Multisport visibility — Tennis (ATP/WTA) + American football (NFL/NCAA/CFL) as visibility-only feeds (scraped, shown `UNVALIDATED`, no picks); per-sport CLV-readiness probe; tennis surname-initial name reconciliation + CC0 cross-source alias seed for soccer coverage.
 - [x] Dashboard "PICKS TERMINAL" — proof-led redesign (desktop + mobile, 1–5★ confidence, clickable sorting, segmented LIVE / UNVERIFIED / RESULTS tabs, first-run `/setup` admin password stored hashed); the sharp-anchor coverage panel now reports the _real_ inline Betfair coverage and clean games/kickoff display.
 - [x] Rotating scrape proxies — optional `SCRAPER_PROXY_POOL` (rotation + capped failover, off by default) widening soft-book coverage (~18 UK books vs ~5 from a region-restricted IP). Read-only; creds in `.env` only.
+- [x] Scrape throughput + correctness — per-match proxy rotation on the JSON feed (each match exits a different IP) with retry-failover, plus a proxy-budget concurrency validator (≥1 proxy per concurrent request), cut a full-slate cycle from >60 min to ~4 min so odds refresh every few minutes and the freshness gate no longer discards the slate. Plus a soccer 1X2 feed-order fix, a max-edge data-error cap, and a fail-safe double-chance derivation guard (skips DC if the H2H anchor order is ever non-canonical).
 - [ ] Next: bankroll tracking (phase 6) + a validated NBA model (phase 5).
 
 ## Documentation

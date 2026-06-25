@@ -1,6 +1,6 @@
 <svg width="680" height="220" viewBox="0 0 680 220" role="img" xmlns="http://www.w3.org/2000/svg">
-  <title>betting-ai</title>
-  <desc>Dark terminal tile with a green +EV uptrend line capturing the edge above a muted market line, beside the monospace wordmark betting-ai and a tagline.</desc>
+  <title>sharp-ev-picks</title>
+  <desc>Dark terminal tile with a green +EV uptrend line capturing the edge above a muted market line, beside the monospace wordmark sharp-ev-picks (ev highlighted) and a tagline.</desc>
   <rect x="20" y="20" width="640" height="180" rx="20" fill="#0b1220" stroke="#1e293b" stroke-width="1"/>
   <rect x="52" y="54" width="112" height="112" rx="20" fill="#0f1a2e" stroke="#243043" stroke-width="1"/>
   <line x1="68" y1="148" x2="150" y2="148" stroke="#243043" stroke-width="1"/>
@@ -10,6 +10,6 @@
   <polyline points="70,142 98,124 124,100 146,80" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
   <circle cx="146" cy="80" r="9" fill="none" stroke="#22c55e" stroke-opacity="0.4" stroke-width="1.5"/>
   <circle cx="146" cy="80" r="5" fill="#22c55e"/>
-  <text x="194" y="114" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="48" font-weight="600"><tspan fill="#e2e8f0">betting</tspan><tspan fill="#475569">-</tspan><tspan fill="#22c55e">ai</tspan></text>
-  <text x="196" y="146" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="17" fill="#94a3b8">sharp-vs-soft line shopping · CLV-validated edges</text>
+  <text x="194" y="116" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="44" font-weight="600"><tspan fill="#e2e8f0">sharp</tspan><tspan fill="#475569">-</tspan><tspan fill="#22c55e">ev</tspan><tspan fill="#475569">-</tspan><tspan fill="#e2e8f0">picks</tspan></text>
+  <text x="196" y="148" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="17" fill="#94a3b8">sharp-anchored · vig-stripped +EV picks · CLV-validated</text>
 </svg>
