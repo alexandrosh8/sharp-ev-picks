@@ -1,5 +1,25 @@
 # Decisions Log
 
+- 2026-06-24 (+EV/value/sharp-line STRATEGY repo sweep — repo-researcher,
+  file-inspected; log: docs/research/ev-strategy-repo-research-2026-06-24.md) —
+  hunted GitHub for a premade +EV *strategy* more robust than ours (sharp-anchor
+  devig → fair → soft-book edge → tier → CLV). VERDICT: **no adopt; ours is at/
+  ahead of public SOTA.** Every hit is a basic +EV/Kelly calc, matched-bet/arb,
+  ML predictor (wrong shape), or a sharp-devig scanner that is a SUBSET of ours.
+  Settled (don't re-eval): **cjbrant/probability-calibration-pipeline** (NO LICENSE;
+  the ONE genuine idea — Beta-cal + **BBQ** calibrate the *devigged* prob to fix
+  tail bias, underdogs overpriced/favorites underpriced → adapt-math clean-room,
+  walk-forward); **NateDeMoro/prediction-market-ev-engine** (NO LICENSE; **REJECT
+  code — real-money autobet** `execution/real.py` + `adapters/*_trade.py`; but
+  `pmev/core/devig.py` power+Shin+`synthesize_combined_american` = adapt-math
+  clean-room; independently confirms our decision-time sharp re-fetch + dual
+  net_ev/net_ev_close CLV); **Sanju311/plusEV-odds-finder** (REJECT — wrong
+  additive devig + consensus-avg fallback = OUR OLD PITFALL); **jjc256/devigger**
+  (reference-only, right shape, sheet-glue); **superkush06/kelly-bet** (reference
+  — portfolio/simultaneous Kelly if we ever size correlated bets); ianalloway/
+  kelly-js (reject, TS trivial). devtry8/* CLV repos = SEO-spam, content-less.
+  Net new action: pilot calibration-of-fair-prob (the only axis the public beats us).
+
 - 2026-06-21 (multi-sport historical-ODDS dataset deep-scan — repo-researcher,
   file-inspected) — hunted GitHub+Kaggle for repos/datasets that VENDOR historical
   odds CSV/parquet (not scrapers) carrying odds + results, judged vs the sharp-vs-soft
