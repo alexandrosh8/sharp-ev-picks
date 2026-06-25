@@ -679,9 +679,7 @@ def build_feed_urls(
     `FeedToken` carries."""
     out: dict[str, str] = {}
     for market_key in markets:
-        url = build_feed_url(
-            sport_id, event_id, market_key, default_bet_id, default_scope_id
-        )
+        url = build_feed_url(sport_id, event_id, market_key, default_bet_id, default_scope_id)
         if url is not None:
             out[market_key] = url
     return out
@@ -791,9 +789,7 @@ def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedT
     return FeedToken(
         event_id=event_id,
         sport_id=sport_id,
-        feed_urls=build_feed_urls(
-            sport_id, event_id, markets, default_bet_id, default_scope_id
-        ),
+        feed_urls=build_feed_urls(sport_id, event_id, markets, default_bet_id, default_scope_id),
         default_bet_id=default_bet_id,
         default_scope_id=default_scope_id,
         xhash=_decode_xhash(event.get("xhash")),

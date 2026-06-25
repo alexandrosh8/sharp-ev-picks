@@ -487,10 +487,16 @@ async def test_fetch_match_feed_dedupes_shared_feed_url_across_markets(
 
     def fake_decrypt(text: str) -> dict:
         if text == "OU":
-            return {"d": {"oddsdata": {"back": {
-                "E-2-1-0-220.5-0": {"odds": {"707": [1.9, 1.95]}},
-                "E-2-1-0-225.5-0": {"odds": {"707": [2.0, 1.85]}},
-            }}}}
+            return {
+                "d": {
+                    "oddsdata": {
+                        "back": {
+                            "E-2-1-0-220.5-0": {"odds": {"707": [1.9, 1.95]}},
+                            "E-2-1-0-225.5-0": {"odds": {"707": [2.0, 1.85]}},
+                        }
+                    }
+                }
+            }
         return {"d": {"oddsdata": {"back": {"E-3-1-0-0-0": {"odds": {"707": [1.35, 2.9]}}}}}}
 
     monkeypatch.setattr(oj, "decrypt_feed_body", fake_decrypt)

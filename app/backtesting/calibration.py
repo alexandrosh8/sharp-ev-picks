@@ -223,9 +223,7 @@ def bet_band_reliability(
     insufficient-n honesty gate applies). Pure: stdlib/math only.
     """
     if not 0.0 <= band_lo_q < band_hi_q <= 1.0:
-        raise ValueError(
-            f"need 0 <= band_lo_q < band_hi_q <= 1, got ({band_lo_q}, {band_hi_q})"
-        )
+        raise ValueError(f"need 0 <= band_lo_q < band_hi_q <= 1, got ({band_lo_q}, {band_hi_q})")
     odds = sorted(o.fill_odds for o in observations)
     band_lo = _quantile_sorted(odds, band_lo_q) if odds else None
     band_hi = _quantile_sorted(odds, band_hi_q) if odds else None

@@ -660,9 +660,7 @@ async def _seed_canonical_with_books(  # type: ignore[no-untyped-def]
     for bm in bookmakers:
         # Betfair defaults to the moneyline key (a usable anchor) unless the caller
         # overrides it to a non-moneyline market; every soft book stays moneyline.
-        detail = (
-            (betfair_market_detail or moneyline) if bm == "Betfair Exchange" else moneyline
-        )
+        detail = (betfair_market_detail or moneyline) if bm == "Betfair Exchange" else moneyline
         snaps.extend(
             _soft_snap_at(bm, sel, o, ref, captured, market_detail=detail) for sel, o in sels
         )
@@ -683,26 +681,46 @@ async def test_betfair_inline_capture_counts_canonical_event_betfair_row(factory
 
     # soccer fixture WITH an inline Betfair Exchange moneyline row -> captured
     await _seed_canonical_with_books(
-        factory, "inl-soc-bf", "Alpha", "Beta", ko, "soccer",
+        factory,
+        "inl-soc-bf",
+        "Alpha",
+        "Beta",
+        ko,
+        "soccer",
         bookmakers=["bet365", "Betfair Exchange"],
     )
     # soccer fixture with ONLY soft odds, no Betfair -> scraped++ only
     await _seed_canonical_with_books(
-        factory, "inl-soc-nobf", "Gamma", "Delta", ko, "soccer",
+        factory,
+        "inl-soc-nobf",
+        "Gamma",
+        "Delta",
+        ko,
+        "soccer",
         bookmakers=["bet365", "Unibet"],
     )
     # soccer fixture whose ONLY Betfair price is in a NON-moneyline market
     # (over/under): NOT a usable anchor -> scraped++ but NOT captured. This is the
     # exact live case the panel must not over-count (Betfair on O/U but not 1X2).
     await _seed_canonical_with_books(
-        factory, "inl-soc-ou", "Iota", "Kappa", ko, "soccer",
+        factory,
+        "inl-soc-ou",
+        "Iota",
+        "Kappa",
+        ko,
+        "soccer",
         bookmakers=["bet365", "Betfair Exchange"],
         betfair_market_detail="over_under_2_5",
     )
     # basketball fixture, soft only, no Betfair -> structural 0 (Betfair renders
     # for liquid soccer majors only)
     await _seed_canonical_with_books(
-        factory, "inl-bball", "Lakers", "Celtics", ko, "basketball",
+        factory,
+        "inl-bball",
+        "Lakers",
+        "Celtics",
+        ko,
+        "basketball",
         bookmakers=["bet365"],
     )
 

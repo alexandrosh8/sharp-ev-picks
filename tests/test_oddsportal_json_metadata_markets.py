@@ -59,8 +59,11 @@ def test_basketball_home_away_binds_to_default_bet_and_scope() -> None:
     # E-3-1 (defaultBetId 3, defaultScopeId 1): list [home, away].
     snaps = _parse(
         _payload("E-3-1-0-0-0", [1.35, 2.9]),
-        market="home_away", home="Lakers", away="Celtics",
-        default_bet_id=3, default_scope_id=1,
+        market="home_away",
+        home="Lakers",
+        away="Celtics",
+        default_bet_id=3,
+        default_scope_id=1,
     )
     got = {(s.selection, s.decimal_odds, s.market, s.market_detail) for s in snaps}
     assert got == {
@@ -74,8 +77,11 @@ def test_tennis_match_winner_binds_to_default_bet_and_scope() -> None:
     # E-3-2 (defaultBetId 3, defaultScopeId 2): list [player1=home, player2=away].
     snaps = _parse(
         _payload("E-3-2-0-0-0", [1.5, 2.6]),
-        market="match_winner", home="Alcaraz", away="Sinner",
-        default_bet_id=3, default_scope_id=2,
+        market="match_winner",
+        home="Alcaraz",
+        away="Sinner",
+        default_bet_id=3,
+        default_scope_id=2,
     )
     got = {(s.selection, s.decimal_odds) for s in snaps}
     assert got == {("Alcaraz", 1.5), ("Sinner", 2.6)}
@@ -85,8 +91,11 @@ def test_tennis_match_winner_binds_to_default_bet_and_scope() -> None:
 def test_basketball_over_under_games_binds_to_betType2_at_default_scope() -> None:
     snaps = _parse(
         _payload("E-2-1-0-220.5-0", [1.9, 1.95]),
-        market="over_under_games_220_5", home="Lakers", away="Celtics",
-        default_bet_id=3, default_scope_id=1,
+        market="over_under_games_220_5",
+        home="Lakers",
+        away="Celtics",
+        default_bet_id=3,
+        default_scope_id=1,
     )
     got = {(s.selection, s.decimal_odds, s.market, s.market_detail) for s in snaps}
     assert got == {
@@ -100,8 +109,11 @@ def test_dynamic_markets_skipped_without_defaults() -> None:
     # is a scrape gap (never guessed), never a crash.
     snaps = _parse(
         _payload("E-3-1-0-0-0", [1.35, 2.9]),
-        market="home_away", home="Lakers", away="Celtics",
-        default_bet_id=0, default_scope_id=0,
+        market="home_away",
+        home="Lakers",
+        away="Celtics",
+        default_bet_id=0,
+        default_scope_id=0,
     )
     assert snaps == []
 
@@ -111,8 +123,11 @@ def test_soccer_static_markets_unchanged_by_defaults() -> None:
     # the dynamic defaults), keeping the live soccer path byte-identical.
     snaps = _parse(
         _payload("E-1-2-0-0-0", {"0": 2.5, "1": 4.0, "2": 3.3}),
-        market="1x2", home="Home", away="Away",
-        default_bet_id=0, default_scope_id=0,
+        market="1x2",
+        home="Home",
+        away="Away",
+        default_bet_id=0,
+        default_scope_id=0,
     )
     got = {(s.selection, s.decimal_odds) for s in snaps}
     assert got == {("Home", 2.5), ("Away", 4.0), ("Draw", 3.3)}
@@ -136,14 +151,20 @@ def test_build_feed_url_uses_bootstrap_defaults_for_dynamic_markets() -> None:
 
 
 def _bootstrap_html(*, sport_id: int, default_bet_id: int, default_scope_id: int) -> str:
-    data = json.dumps({
-        "eventData": {
-            "id": "EVENTID1", "sportId": sport_id,
-            "defaultBetId": default_bet_id, "defaultScopeId": default_scope_id,
-            "home": "Lakers", "away": "Celtics", "startDate": 1782000000,
-        },
-        "eventBody": {},
-    })
+    data = json.dumps(
+        {
+            "eventData": {
+                "id": "EVENTID1",
+                "sportId": sport_id,
+                "defaultBetId": default_bet_id,
+                "defaultScopeId": default_scope_id,
+                "home": "Lakers",
+                "away": "Celtics",
+                "startDate": 1782000000,
+            },
+            "eventBody": {},
+        }
+    )
     return f"<div id='react-event-header' data='{data}'></div>"
 
 

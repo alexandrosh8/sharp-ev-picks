@@ -123,9 +123,7 @@ def test_n_bins_must_be_positive() -> None:
 
 
 def _bet(pairs: list[tuple[float, bool, float]]) -> list[BetBandObservation]:
-    return [
-        BetBandObservation(claimed_fair=p, won=w, fill_odds=o) for p, w, o in pairs
-    ]
+    return [BetBandObservation(claimed_fair=p, won=w, fill_odds=o) for p, w, o in pairs]
 
 
 def test_bet_band_reliability_zero_ece_when_claims_match_outcomes() -> None:
