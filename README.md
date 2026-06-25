@@ -38,7 +38,7 @@ The v3 maximal-data run (18 leagues × 7 seasons × two markets, **46k matches**
 | **Premium** (live default) | 62  | **+22.4%** | **+0.107** ( > 2 SE ) | positive even vs the Max-of-books close; 1X2 and OU2.5 each positive |
 | Volume (shadow)            | 379 | +2.5%      | +0.019                | tracked, never alerted                                               |
 
-The number to trust is the **CLV** — small-sample ROI is noisy. A sport only earns **alerting picks** after its own held-out incremental CLV clears **> 2 SE**; everything else is visibility-only (scraped, shown, tracked — but pick-free and exposure-free, enforced in both the scheduler and the warehouse path).
+The number to trust is the **CLV** — small-sample ROI is noisy. **Football** has cleared that bar (held-out incremental CLV **> 2 SE**, table above). **Basketball** runs the _identical_ sharp-vs-soft method (moneyline + totals) but its **own** held-out CLV is **still accruing** — so basketball picks are mechanically sound, _not_ yet independently proven to football's bar. **Tennis and American football are under construction**: scraped and shown, but pick-free and exposure-free (enforced in both the scheduler and the warehouse path) until their closing-line evidence accrues.
 
 The edge is only real **where a sharp price exists**. An optional, off-by-default gate (`VALUE_REQUIRE_SHARP_ANCHOR`) makes that structural: a premium pick must be priced against a genuine sharp anchor (Pinnacle or Betfair Exchange) — a candidate whose "fair" value came only from the soft-book consensus median is **demoted to the shadow tier** (persisted, CLV-tracked, never alerted, never reserving exposure). That scopes premium by _data_, not by a curated league list, so obscure-league bleed can't mint false +EV. A standing **fake-CLV independence guard** backs it: a closing line anchored by a pick's _own_ fill book (circular, `|clv| ≈ 0`) is flagged and excluded from the sharp CLV subset, so the metric that proves edge cannot be quietly faked.
 
@@ -53,12 +53,12 @@ uv run python scripts/value_picks.py --league world-cup --min-edge 0.015
 
 | Sport                                    | Status                       | Notes                                                                                                                        |
 | ---------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Football / Soccer**                    | ✅ Pick source _(validated)_ | The held-out CLV edge lives here — sharp-vs-soft line shopping.                                                              |
-| **Basketball** (NBA / EuroLeague)        | ✅ Pick source               | Moneyline + main totals; same devig → edge gate.                                                                             |
-| **Tennis** (ATP / WTA)                   | 👁 Visibility-only           | Scraped and shown `UNVALIDATED`; mints **no** picks until matched closing-line volume clears the CLV bar (data-short today). |
-| **American football** (NFL / NCAA / CFL) | 👁 Visibility-only           | In-season games shown; a free Pinnacle close is forward-captured so it can eventually be CLV-graded.                         |
+| **Football / Soccer**             | ✅ Pick source — **validated**      | Held-out CLV **> 2 SE** (1X2 + O/U 2.5). Sharp-vs-soft line shopping.                                        |
+| **Basketball** (NBA / EuroLeague) | ⚠️ Pick source — **not yet proven** | Same sharp-vs-soft method (moneyline + totals); **no** basketball-specific held-out CLV yet — live CLV accruing. |
+| **Tennis** (ATP / WTA)            | 🚧 **Under construction**           | Scraped + shown for the games view; mints **no** picks (no free sharp close to validate against yet).        |
+| **American football** (NFL)       | 🚧 **Under construction**           | Scraped + shown; mints **no** picks — forward-capturing the Pinnacle close until CLV can be graded.          |
 
-> **Getting odds ≠ getting picks.** A sport is shown the moment we can scrape it, but it only mints picks once its _own_ closing-line evidence proves an edge. Tennis and American football have odds flowing but not yet enough matched sharp closes to graduate.
+> **Getting odds ≠ getting picks.** A sport is shown the moment it's scrapeable, but its picks are only trustworthy once its _own_ closing-line evidence proves an edge. Only **football** has cleared that bar; **basketball** runs the same method with evidence still accruing; **tennis and American football are under construction** (scraped + shown, no picks).
 
 ## Install &amp; run
 
