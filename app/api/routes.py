@@ -248,8 +248,8 @@ _PWA_MANIFEST = (
     '"start_url":"/","scope":"/","display":"standalone",'
     '"orientation":"portrait-primary","background_color":"#0a0c10","theme_color":"#0a0c10",'
     '"icons":['
-    '{"src":"data:image/svg+xml,%3Csvg%20xmlns=\'http://www.w3.org/2000/svg\'%20viewBox=\'0%200%20192%20192\'%3E%3Crect%20width=\'192\'%20height=\'192\'%20rx=\'42\'%20fill=\'%230a0c10\'/%3E%3Ccircle%20cx=\'96\'%20cy=\'96\'%20r=\'54\'%20fill=\'none\'%20stroke=\'%2338bdf8\'%20stroke-width=\'11\'/%3E%3Ccircle%20cx=\'96\'%20cy=\'96\'%20r=\'17\'%20fill=\'%2334d399\'/%3E%3C/svg%3E","sizes":"192x192","type":"image/svg+xml","purpose":"any"},'
-    '{"src":"data:image/svg+xml,%3Csvg%20xmlns=\'http://www.w3.org/2000/svg\'%20viewBox=\'0%200%20512%20512\'%3E%3Crect%20width=\'512\'%20height=\'512\'%20fill=\'%230a0c10\'/%3E%3Ccircle%20cx=\'256\'%20cy=\'256\'%20r=\'118\'%20fill=\'none\'%20stroke=\'%2338bdf8\'%20stroke-width=\'26\'/%3E%3Ccircle%20cx=\'256\'%20cy=\'256\'%20r=\'40\'%20fill=\'%2334d399\'/%3E%3C/svg%3E","sizes":"512x512","type":"image/svg+xml","purpose":"maskable"}'
+    "{\"src\":\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20192%20192'%3E%3Crect%20width='192'%20height='192'%20rx='42'%20fill='%230a0c10'/%3E%3Ccircle%20cx='96'%20cy='96'%20r='54'%20fill='none'%20stroke='%2338bdf8'%20stroke-width='11'/%3E%3Ccircle%20cx='96'%20cy='96'%20r='17'%20fill='%2334d399'/%3E%3C/svg%3E\",\"sizes\":\"192x192\",\"type\":\"image/svg+xml\",\"purpose\":\"any\"},"
+    "{\"src\":\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20fill='%230a0c10'/%3E%3Ccircle%20cx='256'%20cy='256'%20r='118'%20fill='none'%20stroke='%2338bdf8'%20stroke-width='26'/%3E%3Ccircle%20cx='256'%20cy='256'%20r='40'%20fill='%2334d399'/%3E%3C/svg%3E\",\"sizes\":\"512x512\",\"type\":\"image/svg+xml\",\"purpose\":\"maskable\"}"
     "]}"
 )
 _SERVICE_WORKER = (
