@@ -155,32 +155,24 @@ All secrets live in `.env` only (copy from `.env.example`; `.env` is `0600` and 
 
 > **All env keys ship with safe defaults — production works with none of them set.** The four scrape-tuning rows above matter mainly on a slow VPS/proxy: a dedicated, time-boxed finished-score job commits each game's score as it's scraped, so a slow odds pass can't leave finished picks stuck on "awaiting result" on the deployed site.
 
-### Rotating scrape proxies (more soft books, no IP throttle)
+### Rotating scrape proxies (optional)
 
-The free OddsPortal scrape runs from your host IP — which OddsPortal can throttle (it starts returning empty pages) and which only shows the books available in _your_ region (often a thin, crypto-heavy set). A proxy pool rotates the outbound IP (no single IP gets throttled) and, via a deeper-market region, surfaces far more soft books to shop — a **UK** exit lists ~18 mainstream books (Sky Bet, Paddy Power, William Hill, BetVictor, Betfred, Betway, bet365…) vs ~5 from a region-restricted IP.
+The free OddsPortal scrape runs from your host IP — which OddsPortal can throttle (empty pages) and which only lists _your_ region's books (often a thin, crypto-heavy set). A proxy pool fixes both: rotate the outbound IP and exit via a deeper-market region — a **UK** exit lists ~18 mainstream books (Sky Bet, William Hill, bet365…) vs ~5 region-restricted.
 
 ```bash
-# .env — comma-separated host|port|user|pass quads. Empty = scrape from the host IP.
+# .env — comma-separated host|port|user|pass quads. Empty = host IP.
 SCRAPER_PROXY_POOL=host1|port1|user1|pass1,host2|port2|user2|pass2
 ```
 
-- **Per-match rotation + failover** — on the JSON-feed transport each match's GETs exit a _different_ proxy IP (round-robin), so the slate spreads across the whole pool instead of hammering one IP, and a fetch error fails over to the next proxy. `ODDSPORTAL_CONCURRENCY` then scales safely with the pool size — a startup validator caps it at `max(5, len(pool))` so there is always ≥1 proxy per concurrent request (each in-flight GET on a distinct IP). With a healthy pool this cut a full-slate cycle from tens of minutes to ~4 minutes. The dated listing scrape also fails over on a zero-match result (the throttle signature), capped so an empty slate never burns the whole pool.
-- **Read-only + safe** — the proxy only changes the outbound IP of GET odds requests; no login, cookies, or order path. Credentials reach the browser as separate fields (never in a logged URL) and live only in `.env`. These are _infrastructure_ proxies, not betting accounts.
+On the JSON-feed transport each match's GETs exit a **different** IP (round-robin) and a fetch error **fails over** to the next proxy; `ODDSPORTAL_CONCURRENCY` is capped at `max(5, pool size)` so every concurrent request lands on a distinct IP (this took a full-slate cycle from tens of minutes to ~4). Read-only — only the outbound IP of GET requests changes; creds live in `.env`, never in a logged URL. (A UK exit hides Pinnacle, which is UK-restricted; the sharp anchor is the free Pinnacle **ARCADIA** close, not the scrape.)
 
-> A UK exit hides **Pinnacle** (UK-restricted); the primary sharp anchor is the free Pinnacle **ARCADIA** close (a geo-independent read-only feed), not the scrape.
+### JSON-feed odds transport (optional, faster)
 
-### JSON-feed odds transport (faster per-match scrape, optional)
-
-Per-match odds can be read two ways, chosen by `ODDSPORTAL_USE_JSON_FEED`:
-
-- **`false` (default)** — OddsHarvester renders each match page in Playwright (Chromium). Proven and robust, but the per-match render is the chronic CPU/latency cost.
-- **`true`** — a read-only `curl_cffi` client (`app/ingestion/oddsportal_json.py`) fetches OddsPortal's encrypted odds feed (AES-256-CBC, decrypted with the static `app.js` key) and parses it directly — **no per-match Playwright render**. The dated listing runs with no market tabs (so OddsHarvester never opens each match page for odds), and team/league/kickoff context comes from the listing. A per-match feed miss is a logged scrape gap and is **skipped** — there is **no Playwright odds fallback on this path**, so a key/bundle rotation fails closed with a loud warning rather than silently.
-
-The feed keys odds by numeric provider id; those are resolved to canonical bookmaker **names** via a static, in-repo id→name map (`app/ingestion/oddsportal_bookmakers.py`). OddsPortal moved to a Vite/React SSR build that no longer ships the old `bookies-*.js` bundle, so the map is shipped in the repo (read live from the `/bookmaker/` directory page and cross-checked against the spellings the Playwright path already stores). An unknown id is **skipped, never persisted numeric** — a numeric bookmaker would silently break sharp/soft classification, the CLV join and devig grouping. Finished-score capture stays Playwright (header-only). The transport is read-only GET either way; flip the flag only with monitoring on the soft-book flow.
+`ODDSPORTAL_USE_JSON_FEED=true` swaps the per-match Playwright (Chromium) render for a read-only `curl_cffi` client (`app/ingestion/oddsportal_json.py`) that fetches OddsPortal's encrypted odds feed (AES-256-CBC) and parses it directly — **no per-match render** (the chronic CPU/latency cost); team/league/kickoff come from the dated listing. Provider ids resolve to canonical bookmaker **names** via a static in-repo map (`oddsportal_bookmakers.py`); an unknown id is **skipped, never persisted numeric** (a numeric book would break sharp/soft classification + the CLV join). A feed miss is a logged scrape gap and **skipped** — no Playwright fallback on this path, so a key/bundle rotation fails closed, loudly. Read-only GET either way; `false` keeps the proven Playwright render.
 
 ### Betfair Exchange capture (optional second sharp anchor)
 
-OddsPortal _does_ list **Betfair Exchange** — in a separate "Betting exchanges" table that the default scrape doesn't parse. An optional, **off-by-default**, read-only reader (`app/ingestion/betfair_exchange.py`, [ADR-0015](docs/adr/adr-0015-betfair-exchange-back-odds-capture.md)) captures its BACK odds (fractional → decimal, liquidity-gated) as a second free sharp reference. Because that row is read from the **same** OddsPortal match page as the soft books, Betfair binds **inline onto the canonical event** (it attaches only to a fixture the main scrape already created) — so there is **no cross-source matching and no wrong-game risk**, and every liquid Betfair-priced game is anchored. Coverage is liquidity-gated and seasonal (the dashboard's sharp-anchor panel now reports the _real_ inline coverage — on a full slate ~65% of priced games, thinner off-season). Set `BETFAIR_EXCHANGE_ENABLED=true` to enable.
+An off-by-default, read-only reader (`app/ingestion/betfair_exchange.py`, [ADR-0015](docs/adr/adr-0015-betfair-exchange-back-odds-capture.md)) captures Betfair Exchange BACK odds from the **same** OddsPortal match page as the soft books, so it binds **inline on the canonical event** — no cross-source matching, no wrong-game risk. Coverage is liquidity-gated and seasonal (~65% of priced games on a full slate, thinner off-season). Set `BETFAIR_EXCHANGE_ENABLED=true`.
 
 ## Architecture
 
