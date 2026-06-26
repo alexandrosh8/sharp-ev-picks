@@ -67,6 +67,10 @@ def test_health_exposes_poll_interval_seconds() -> None:
     body = TestClient(make_app()).get("/health").json()
     assert isinstance(body["poll_interval_seconds"], int)
     assert body["poll_interval_seconds"] >= 30  # Settings enforces the floor
+    # The dashboard "verified/fresh" window now tracks the value-freshness window
+    # (MAX_ODDS_AGE_SECONDS) so a stale-priced pick reads UNVERIFIED (audit 2026-06-26).
+    assert isinstance(body["max_odds_age_seconds"], (int, float))
+    assert body["max_odds_age_seconds"] > 0
 
 
 def test_dashboard_served_at_root() -> None:

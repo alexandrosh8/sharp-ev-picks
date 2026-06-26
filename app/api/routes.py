@@ -586,9 +586,12 @@ async def health() -> dict[str, Any]:
         "mode": "picks-only",
         "upstream": LAST_CHECK,
         "polls": LAST_POLL,
-        # The dashboard derives its "verified within" window from the actual
-        # poll cadence (max(45min, 3 * interval)) instead of hardcoding it.
+        # The dashboard derives its "verified within" window from the value
+        # freshness window (MAX_ODDS_AGE_SECONDS): a pick whose last re-price is
+        # older than this has a STALE price and must read UNVERIFIED, not show a
+        # current "now" (audit 2026-06-26). poll_interval is the cadence fallback.
         "poll_interval_seconds": get_settings().poll_interval_seconds,
+        "max_odds_age_seconds": get_settings().max_odds_age_seconds,
     }
 
 
