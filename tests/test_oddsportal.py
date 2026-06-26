@@ -47,13 +47,14 @@ def test_event_finished_fields_parses_status() -> None:
     finished = (
         '<div id="react-event-header" data=\''
         '{"eventBody": {"eventStageId": 3, "eventStageName": "Finished"},'
-        ' "eventData": {"isFinished": true}}'
+        ' "eventData": {"isFinished": true, "countryName": "Ethiopia"}}'
         "'></div>"
     )
     assert _event_finished_fields(finished) == {
         "is_finished": True,
         "event_stage_id": 3,
         "event_stage_name": "Finished",
+        "country_name": "Ethiopia",  # feature A: dated-page country capture
     }
 
     inplay = (
@@ -66,6 +67,7 @@ def test_event_finished_fields_parses_status() -> None:
         "is_finished": False,
         "event_stage_id": 13,
         "event_stage_name": "2nd Half",
+        "country_name": None,  # absent in eventData -> None
     }
 
     assert _event_finished_fields("<div>no header here</div>") == {}
