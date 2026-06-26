@@ -12,10 +12,9 @@ from redis.asyncio import Redis
 
 from app.api.auth import install_auth, set_active_credentials
 from app.api.routes import router
-from app.config import get_settings
+from app.config import exposure_ledger, get_settings
 from app.database import create_engine, create_session_factory
 from app.ingestion.oddsportal import install_scrape_future_handler
-from app.risk.exposure import DailyExposureLedger
 from app.scheduler import build_scheduler, seed_exposure_ledger
 from app.storage.repositories import load_dashboard_credentials
 
@@ -64,7 +63,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The exposure ledger is in-memory: seed it from today's persisted picks
     # BEFORE the scheduler starts, or a mid-day restart doubles the day's
     # recommendable exposure (re-detections reserve-then-release to ~0).
-    ledger = DailyExposureLedger(max_daily_fraction=settings.max_daily_exposure_percent)
+    ledger = exposure_ledger(settings)
     try:
         await seed_exposure_ledger(ledger, session_factory)
     except Exception as exc:

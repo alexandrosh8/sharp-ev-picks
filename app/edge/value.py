@@ -40,6 +40,14 @@ EXCHANGE_COMMISSION = {
 CONSENSUS_ANCHOR = "consensus(median)"
 MIN_CONSENSUS_BOOKS = 3
 
+# edge-ev-devig-r2-2: an anchor whose devigged probability ORDERING inverts the
+# cross-book consensus ordering by more than this margin (in probability units) is
+# treated as untrustworthy (a mislabeled/swapped line, e.g. the 1X2 Draw<->Away
+# swap) and the WHOLE market is skipped — a market-level guard the per-leg max_edge
+# cap cannot provide (a swap can sit under the cap). Generous enough that ordinary
+# soft-vs-sharp disagreement never trips it; only a genuine rank inversion does.
+ANCHOR_SWAP_TOLERANCE = 0.10
+
 # Anchor-type tags persisted on picks (picks.anchor_type) so live CLV can be
 # stratified by the anchor that produced each pick — the live verdict
 # mechanism for the consensus fallback (train-only validation 2026-06-12:
@@ -83,6 +91,7 @@ def close_is_independent_of_fill(
     *,
     pick_anchor_type: str = "",
     close_anchor_type: str = "",
+    pick_anchor_book: str = "",
 ) -> bool:
     """Whether the CLOSE was priced INDEPENDENTLY of the pick (P0-1/P0-3).
 
@@ -108,7 +117,17 @@ def close_is_independent_of_fill(
     if _norm(close_anchor_book) == _norm(fill_book):
         return False
     # (2) the SAME sharp source at pick-time and close-time (same archived line) is
-    # circular; only a close from a DIFFERENT source is independent.
+    # circular; only a close from a DIFFERENT source is independent. When BOTH anchor
+    # BOOKS are known (CLV-3), a DIFFERENT book is a genuinely different source even if
+    # both collapse to the same anchor TYPE — e.g. a Smarkets-anchored pick validated
+    # by a Betfair-exchange close (both 'sharp'): independent. Book equality is the
+    # precise test; anchor-TYPE equality is the fallback only when a book is unknown.
+    if (
+        pick_anchor_book
+        and pick_anchor_book != CONSENSUS_ANCHOR
+        and close_anchor_book != CONSENSUS_ANCHOR
+    ):
+        return _norm(pick_anchor_book) != _norm(close_anchor_book)
     return not (
         pick_anchor_type
         and close_anchor_type
@@ -285,6 +304,59 @@ def find_value_bets_with_fair(
     )
 
 
+def _consensus_implied(
+    prices: Mapping[str, Mapping[str, float]],
+    fair_by_sel: Mapping[str, float],
+    commissions: Mapping[str, float],
+) -> dict[str, float] | None:
+    """Cross-book reference probabilities for the swap guard: per selection, the
+    MEDIAN effective-implied probability across the distinct books pricing it,
+    normalized to sum 1. Returns None when any priced selection has fewer than
+    MIN_CONSENSUS_BOOKS books — too thin to cross-check the anchor. Outlier-
+    resistant by construction (a single swapped book cannot move the median),
+    so a swapped anchor stands out against it."""
+    ref: dict[str, float] = {}
+    for sel in fair_by_sel:
+        by_norm: dict[str, float] = {}
+        for book, odds in prices.get(sel, {}).items():
+            if odds <= 1.0:
+                continue
+            nb = _norm(book)
+            implied = 1.0 / effective_odds(book, odds, commissions)
+            # keep the LOWEST implied (best price) per book — mirrors consensus dedupe
+            if nb not in by_norm or implied < by_norm[nb]:
+                by_norm[nb] = implied
+        if len(by_norm) < MIN_CONSENSUS_BOOKS:
+            return None
+        ref[sel] = statistics.median(by_norm.values())
+    total = sum(ref.values())
+    if total <= 0.0:
+        return None
+    return {sel: p / total for sel, p in ref.items()}
+
+
+def _anchor_disagrees_with_consensus(
+    prices: Mapping[str, Mapping[str, float]],
+    fair_by_sel: Mapping[str, float],
+    commissions: Mapping[str, float],
+    tolerance: float,
+) -> bool:
+    """True when the anchor's devigged ORDERING inverts the cross-book consensus
+    ordering by more than `tolerance` — the signature of a mislabeled/swapped
+    anchor line (e.g. 1X2 Draw<->Away). Whenever the consensus separates A above B
+    by more than the tolerance yet the anchor ranks A at-or-below B, the anchor is
+    untrustworthy. No-op when there is no consensus to cross-check against."""
+    ref = _consensus_implied(prices, fair_by_sel, commissions)
+    if ref is None:
+        return False
+    sels = list(fair_by_sel)
+    for a in sels:
+        for b in sels:
+            if ref[a] - ref[b] > tolerance and fair_by_sel[a] <= fair_by_sel[b]:
+                return True
+    return False
+
+
 def _scan_against_fair(
     prices: Mapping[str, Mapping[str, float]],
     fair_by_sel: Mapping[str, float],
@@ -293,7 +365,14 @@ def _scan_against_fair(
     min_odds: float,
     commissions: Mapping[str, float],
     max_edge: float = math.inf,
+    anchor_swap_tolerance: float = ANCHOR_SWAP_TOLERANCE,
 ) -> list[ValueBet]:
+    # edge-ev-devig-r2-2: MARKET-LEVEL anchor-swap guard. If the anchor's devigged
+    # ordering inverts the cross-book consensus ordering beyond tolerance, the anchor
+    # is untrustworthy (a swapped/mislabeled line) — mint NOTHING for the whole
+    # market. Complements the per-leg max_edge cap, which a swap can slip under.
+    if _anchor_disagrees_with_consensus(prices, fair_by_sel, commissions, anchor_swap_tolerance):
+        return []
     out: list[ValueBet] = []
     for sel in prices:
         fair_p = fair_by_sel.get(sel)

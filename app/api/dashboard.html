@@ -1600,7 +1600,7 @@
         >
         <div class="statusbar" role="status">
           <span class="chip" id="chip-poll">poll: —</span>
-          <span class="chip" id="chip-window">verified ≤ 45m</span>
+          <span class="chip" id="chip-window">verified ≤ …</span>
           <span class="chip" id="chip-sports"
             >football — · basketball — · tennis —</span
           >
@@ -1621,12 +1621,18 @@
         <div class="proof-row">
           <div class="card hero" id="card-swclv" data-flag="STALE">
             <div class="v" id="c-swclv">—</div>
-            <div class="k">Stake-wtd CLV (premium settled)</div>
+            <div class="k">Stake-wtd CLV (premium, sharp closes)</div>
           </div>
           <div class="cards">
             <div class="card" id="card-clv" data-flag="STALE">
               <div class="v" id="c-clv">—</div>
-              <div class="k" id="c-clv-k">Beat close (premium)</div>
+              <div class="k" id="c-clv-k">Beat close (premium, sharp closes)</div>
+            </div>
+            <div class="card" id="card-swclv-all" data-flag="STALE">
+              <div class="v" id="c-swclv-all">—</div>
+              <div class="k">
+                Stake-wtd CLV — all closes (incl. consensus/fallback)
+              </div>
             </div>
             <div class="card" id="card-pnl" data-flag="STALE">
               <div class="v" id="c-pnl">—</div>
@@ -1984,28 +1990,41 @@
           card.querySelector(".k").removeAttribute("title");
         }
       }
-      const PICKS_CARDS = ["card-open", "card-edge", "card-clv"];
+      // card-clv (Beat close) + card-swclv-all moved to the PERF set: both are
+      // now driven by /performance (sharp subset / blended), not the /picks
+      // window (CLV-1). PICKS still owns the open-count + avg-edge cards.
+      const PICKS_CARDS = ["card-open", "card-edge"];
       const PERF_CARDS = [
         "card-settled",
         "card-record",
         "card-pnl",
         "card-swclv",
+        "card-clv",
+        "card-swclv-all",
       ];
 
       // --- verified window ---------------------------------------------------
-      // An open pick is "verified" when its odds were re-checked recently;
-      // stale alerts are REMOVED from the default view (filter shows them).
-      // Window = max(45 min, 3 × poll interval):
+      // An open pick is "verified/fresh" when its last re-price is within the
+      // value FRESHNESS window (MAX_ODDS_AGE_SECONDS, from /health). Beyond it
+      // the price is STALE for value, so the pick reads UNVERIFIED rather than
+      // showing a "now" price the book may no longer offer (audit 2026-06-26).
+      // This freshness window — NOT a flat 45 min — is the value used whenever
+      // /health has reported max_odds_age_seconds (the normal case).
+      // FALLBACK (only before /health reports, or if it omits the field):
+      //   max(45 min, 3 × poll interval):
       //   · 45 min floor — a leagues=all scrape runs 19-38 min REGARDLESS of
       //     the configured interval, so the window must always cover one full
       //     cycle or picks flicker out of the default view between cycles;
       //   · 3 × interval — when the operator configures a slower cadence the
-      //     window follows it, tolerating one slow/missed cycle before picks
-      //     are demoted to unverified.
-      // POLL_INTERVAL_S arrives via /health; until then the floor applies.
+      //     window follows it, tolerating one slow/missed cycle.
+      // POLL_INTERVAL_S / MAX_ODDS_AGE_S arrive via /health.
       const VERIFIED_FLOOR_MS = 45 * 60 * 1000;
       let POLL_INTERVAL_S = null;
       let MAX_ODDS_AGE_S = null;
+      // Tier edge floors from /health — the GLOBAL fallback for edgeFloor()
+      // when a row predates the per-row edge_floor field (dash-2 / EEV-1).
+      let VALUE_MIN_EDGE = null; // premium floor
+      let VALUE_VOLUME_MIN_EDGE = null; // volume (shadow) floor
       function verifiedWindowMs() {
         // "Verified/fresh" = the last re-price is within the value-freshness window
         // (MAX_ODDS_AGE_SECONDS). Beyond it the price is STALE for value, so the pick
@@ -2083,6 +2102,22 @@
           p.current_edge !== undefined &&
           Number(p.current_edge) <= 0
         );
+      }
+
+      // Per-row edge FLOOR (dash-2 / EEV-1): the minimum edge the pick was held
+      // to. Premium needs ~3%, the volume shadow tier only ~1.5%, so colouring
+      // every row against a hardcoded 0.03 painted bettable volume picks amber.
+      // Prefer the serialized per-row edge_floor; fall back to the tier's
+      // /health floor, then the premium 3% default for an older API.
+      function edgeFloor(p) {
+        const raw = p && p.edge_floor;
+        if (raw != null && raw !== "") {
+          const f = Number(raw);
+          if (!isNaN(f)) return f;
+        }
+        const fromHealth =
+          tierOf(p) === "volume" ? VALUE_VOLUME_MIN_EDGE : VALUE_MIN_EDGE;
+        return fromHealth != null ? fromHealth : 0.03;
       }
 
       function emptyRow(tbody) {
@@ -2744,9 +2779,12 @@
           // Color the live PRICE by its edge (green/amber/red); the edge NUMBER
           // itself lives only in the Edge column now — showing the "· x%" here
           // too just duplicated it.
+          // Tier-aware floor: green at/above the row's OWN edge floor, amber
+          // when positive-but-thin, red when gone (dash-2 / EEV-1).
+          const floor = edgeFloor(p);
           let color = "var(--faint)";
           if (curEdge !== null) {
-            if (curEdge >= 0.03) color = "var(--pos)";
+            if (curEdge >= floor) color = "var(--pos)";
             else if (curEdge > 0) color = "var(--warn)";
             else color = "var(--neg)";
           }
@@ -2760,7 +2798,7 @@
           const verdictTip =
             curEdge === null
               ? "current price at " + nowBook
-              : curEdge >= 0.03
+              : curEdge >= floor
                 ? "still value at " + nowBook
                 : curEdge > 0
                   ? "thin edge at " + nowBook
@@ -2812,13 +2850,34 @@
           const minLine = document.createElement("small");
           minLine.style.display = "block";
           minLine.style.color = "var(--faint)";
-          minLine.textContent = "ok ≥ " + p.min_acceptable_odds;
-          minLine.title =
-            "still +EV down to " +
-            p.min_acceptable_odds +
-            " — the lowest odds at which this pick keeps its tier's edge floor " +
-            "against the LIVE sharp fair probability; if the book now quotes less, " +
-            "skip. Informational only — never a profit guarantee.";
+          // Welwalo clarity: when the FAIR drifted the value out while the book
+          // price held, the floor now sits ABOVE the current price — so "ok ≥ X"
+          // misleads (the price hasn't moved; the fair has). Read it as
+          // "needs ≥ X (fair drifted out)" in that case (audit 2026-06-26).
+          const priceUnchanged =
+            p.current_odds == null ||
+            Number(p.current_odds) === Number(p.decimal_odds);
+          const fairDrifted =
+            p.closing_fair_probability != null &&
+            Number(p.closing_fair_probability) !== Number(p.model_probability);
+          const driftedOut =
+            priceUnchanged &&
+            fairDrifted &&
+            p.current_edge != null &&
+            Number(p.current_edge) <= 0;
+          minLine.textContent =
+            (driftedOut ? "needs ≥ " : "ok ≥ ") + p.min_acceptable_odds;
+          minLine.title = driftedOut
+            ? "needs ≥ " +
+              p.min_acceptable_odds +
+              " — your book price hasn't moved, but the de-vigged sharp FAIR " +
+              "drifted, pushing the value floor above the current price. Skip at " +
+              "this price. Informational only — never a profit guarantee."
+            : "still +EV down to " +
+              p.min_acceptable_odds +
+              " — the lowest odds at which this pick keeps its tier's edge floor " +
+              "against the LIVE sharp fair probability; if the book now quotes less, " +
+              "skip. Informational only — never a profit guarantee.";
           oddsCell.appendChild(minLine);
         }
         td(tr, oddsCell).dataset.label = "Odds";
@@ -2840,17 +2899,58 @@
         const fairCell = document.createElement("div");
         const fairPct = document.createElement("span");
         fairPct.textContent = pct(liveFair);
+        // Welwalo clarity: when a re-price moved the fair, show a VISIBLE
+        // entry->live delta ("fair 64%->58%") next to the live Fair% — not just
+        // a tooltip — so a value-gone pick reads as "the fair drifted", not "the
+        // price moved" (audit 2026-06-26).
+        const entryFair = Number(p.model_probability);
+        if (reprised && Math.abs(entryFair - liveFair) >= 0.005) {
+          const drift = document.createElement("small");
+          drift.style.display = "block";
+          drift.style.color = "var(--faint)";
+          drift.textContent =
+            "fair " + pct(entryFair) + "→" + pct(liveFair);
+          drift.title =
+            "The de-vigged sharp fair moved from your entry " +
+            pct(entryFair) +
+            " to " +
+            pct(liveFair) +
+            " — the live edge/EV reason against the LIVE fair, so a pick can lose " +
+            "value from the fair drifting even when the book price is unchanged.";
+          fairPct.title = drift.title;
+          fairCell.appendChild(fairPct);
+          fairCell.appendChild(drift);
+        } else {
+          fairCell.appendChild(fairPct);
+        }
         const evLine = document.createElement("small");
         evLine.style.display = "block";
         evLine.style.color = "var(--faint)";
-        // live EV from the live fair + current price (else the entry EV, pre-re-price).
+        // live EV from the live fair (else the entry EV, pre-re-price). When a
+        // live edge exists, derive EV from the COMMISSION-NETTED edge, not the
+        // raw book price: current_edge = liveFair − netted-implied, so the
+        // effective (post-commission) odds are 1/(liveFair − current_edge) and
+        // EV = liveFair/(liveFair − current_edge) − 1. Using raw current_odds
+        // here would ignore the exchange commission already netted into the edge
+        // (edge-ev-devig-r2-1). Fall back to raw odds only when current_edge is
+        // null (book dropped the line / pre-re-price).
         let ev = Number(p.ev);
-        if (reprised && p.current_odds != null) {
-          ev = liveFair * Number(p.current_odds) - 1;
+        if (reprised) {
+          if (p.current_edge != null) {
+            const ce = Number(p.current_edge);
+            const denom = liveFair - ce;
+            ev =
+              denom > 0
+                ? liveFair / (liveFair - ce) - 1
+                : liveFair * Number(p.current_odds) - 1;
+          } else {
+            ev = liveFair * Number(p.current_odds) - 1;
+          }
         }
         const evPct = ev * 100;
         evLine.textContent = "EV " + (evPct >= 0 ? "+" : "") + evPct.toFixed(1) + "%";
-        fairCell.append(fairPct, evLine);
+        // fairPct (and the optional drift line) are already appended above.
+        fairCell.appendChild(evLine);
         const cell = td(tr, fairCell);
         cell.dataset.label = "Fair / EV";
         cell.title = reprised
@@ -2876,10 +2976,13 @@
         const ev_ = document.createElement("span");
         ev_.className = "edge";
         ev_.textContent = (eff >= 0 ? "+" : "") + pct(eff);
-        // Color by the live edge: green at/above the premium floor, amber when
-        // thin, red when gone — mirrors the "now …" verdict in the Odds cell.
+        // Color by the live edge: green at/above the row's TIER floor, amber
+        // when thin, red when gone — mirrors the "now …" verdict in the Odds
+        // cell. Tier-aware (volume needs only ~1.5%) so a bettable volume pick
+        // isn't painted amber (dash-2 / EEV-1).
+        const floor = edgeFloor(p);
         ev_.style.color =
-          eff >= 0.03 ? "var(--pos)" : eff > 0 ? "var(--warn)" : "var(--neg)";
+          eff >= floor ? "var(--pos)" : eff > 0 ? "var(--warn)" : "var(--neg)";
         const bar = document.createElement("div");
         bar.className = "bar";
         const fill = document.createElement("i");
@@ -2949,6 +3052,18 @@
             tr,
             badge(p.status === "alerted" ? "pending" : "n/a", "b-neutral"),
           );
+        } else if (p.close_independent_of_fill === false) {
+          // CLV-1: a CIRCULAR (self-priced) close — the close was anchored by
+          // the pick's OWN fill book — has |clv_log| ≈ 0 by construction. That
+          // is NOT a genuine beat of an independent sharp line, so it must never
+          // render as honest CLV (the headline sharp subset already excludes
+          // it). Neutral "self-priced" marker instead of a green/red badge.
+          cell = td(tr, badge("n/a (self-priced)", "b-neutral"));
+          cell.title =
+            "No trustworthy CLV: the de-vigged closing line was priced by your " +
+            "OWN fill book, so any value vs it is circular (≈0 by construction), " +
+            "not a genuine beat of an INDEPENDENT sharp close. Excluded from the " +
+            "stake-weighted CLV headline.";
         } else {
           const clvPct = (Math.exp(Number(p.clv_log)) - 1) * 100;
           cell = td(
@@ -3605,24 +3720,80 @@
               : "")
           : "—";
         pnlEl.style.color = pnl < 0 ? "var(--neg)" : "";
+        // CLV-1: the PROOF-OF-EDGE hero (#c-swclv) and the Beat-close tile
+        // (#c-clv) read the TRUSTED sharp-close subset (perf.sharp_*), gated on
+        // perf.sharp_status === 'ok'. Genuine sharp closes (Pinnacle/Betfair/
+        // sharp anchors, independent of the fill) are the only honest proof of
+        // edge; consensus/fallback closes are demoted to the secondary
+        // "all closes" tile (#c-swclv-all) so they never headline.
+        const sharpOk = perf.sharp_status === "ok";
+        const nSharp = perf.n_sharp_close || 0;
         const clvEl = $("c-swclv");
-        if (perf.stake_weighted_clv_log === null) {
+        if (!sharpOk || perf.sharp_stake_weighted_clv_log == null) {
           clvEl.textContent = "—";
-          // Honest about WHY it is blank: the premium CLV headline is suppressed
-          // until enough premium picks settle (thin samples are noise), not broken.
+          clvEl.style.color = "";
           clvEl.title =
-            "Insufficient sample — premium stake-weighted CLV reports once enough " +
-            "premium picks settle (" +
-            (perf.n_settled || 0) +
-            " settled so far). It accrues as sharp-anchored premium picks settle; " +
-            "off-season the premium book is small.";
+            "Insufficient sharp-close sample — the premium stake-weighted CLV " +
+            "headline reports only over GENUINE sharp closes (Pinnacle/Betfair/" +
+            "sharp anchors, independent of your fill) and only once enough have " +
+            "settled (" +
+            nSharp +
+            " so far). Consensus/fallback closes are excluded here — see the " +
+            "'all closes' tile.";
         } else {
           const clvPct =
-            (Math.exp(Number(perf.stake_weighted_clv_log)) - 1) * 100;
+            (Math.exp(Number(perf.sharp_stake_weighted_clv_log)) - 1) * 100;
           // toFixed(1): one precision for every percentage on the page.
           clvEl.textContent =
             (clvPct >= 0 ? "+" : "") + clvPct.toFixed(1) + "%";
           clvEl.style.color = clvPct < 0 ? "var(--neg)" : "";
+          clvEl.title =
+            "Stake-weighted CLV over GENUINE sharp closes only (" +
+            nSharp +
+            " settled, independent of your fill) — the trustworthy proof-of-edge " +
+            "figure. Consensus/fallback closes are excluded (see the 'all closes' " +
+            "tile).";
+        }
+        // Beat-close (#c-clv) — TRUSTED sharp subset, same gate.
+        const beatEl = $("c-clv");
+        if (!sharpOk || perf.sharp_beat_close_rate == null) {
+          beatEl.textContent = "—";
+          $("card-clv").title =
+            "Share of settled premium picks that beat the GENUINE sharp close " +
+            "(independent of your fill). Reports once enough sharp closes settle (" +
+            nSharp +
+            " so far). Consensus/fallback closes are excluded.";
+        } else {
+          beatEl.textContent =
+            (Number(perf.sharp_beat_close_rate) * 100).toFixed(0) + "%";
+          $("card-clv").title =
+            "Share of settled premium picks that beat the GENUINE sharp close (" +
+            nSharp +
+            " settled, independent of your fill). Consensus/fallback closes are " +
+            "excluded — those are in the 'all closes' tile.";
+        }
+        // Blended (all-closes) stake-weighted CLV — DEMOTED secondary tile.
+        // Includes consensus/fallback closes, so it is continuity/context only,
+        // never the headline (#c-swclv-all).
+        const allEl = $("c-swclv-all");
+        if (perf.stake_weighted_clv_log == null) {
+          allEl.textContent = "—";
+          allEl.style.color = "";
+          $("card-swclv-all").title =
+            "Stake-weighted CLV over ALL closes (incl. consensus/fallback). " +
+            "Suppressed until enough premium picks settle (" +
+            (perf.n_settled || 0) +
+            " so far). Context only — the trustworthy figure is the sharp-close " +
+            "hero above.";
+        } else {
+          const allPct =
+            (Math.exp(Number(perf.stake_weighted_clv_log)) - 1) * 100;
+          allEl.textContent = (allPct >= 0 ? "+" : "") + allPct.toFixed(1) + "%";
+          allEl.style.color = allPct < 0 ? "var(--neg)" : "";
+          $("card-swclv-all").title =
+            "Stake-weighted CLV over ALL closes (incl. consensus/fallback) — " +
+            "context only. The trustworthy proof-of-edge figure is the " +
+            "sharp-close hero above (consensus closes can flatter CLV).";
         }
         // Live-evidence panel removed from the dashboard (2026-06-21): it was a
         // dev instrument (stratified CLV "for the VALUE_ML_FILTER flip") that read
@@ -3855,7 +4026,7 @@
           );
         } else {
           $("evidence-panel").style.display = "none";
-          ["c-settled", "c-record", "c-pnl", "c-swclv"].forEach(
+          ["c-settled", "c-record", "c-pnl", "c-swclv", "c-clv", "c-swclv-all"].forEach(
             (id) => ($(id).textContent = "—"),
           );
           PERF_CARDS.forEach((id) =>
@@ -3878,9 +4049,11 @@
         // exist purely as CLV evidence) — each caption says "premium".
         const premium = PICKS.filter((p) => tierOf(p) === "premium");
         const open = premium.filter((p) => p.status === "alerted");
-        // Match the LIVE tab exactly: verified AND not yet kicked off, so the
-        // card count never disagrees with the LIVE (n) tab.
-        const verified = open.filter((p) => isVerified(p) && !hasStarted(p));
+        // open-card mismatch: count the SAME predicate as the LIVE tab
+        // (inLiveTab — fresh re-price, pre-kickoff, value still present) so the
+        // "Open picks (premium, verified)" card can never diverge from the
+        // LIVE (n) tab badge (e.g. a value-gone pick that LIVE excludes).
+        const verified = premium.filter(inLiveTab);
         // Match the default OPEN (VERIFIED) + PREMIUM view; surface the
         // rest in the caption instead of silently disagreeing with the
         // table below.
@@ -3900,32 +4073,10 @@
               ) / verified.length,
             )
           : "—";
-        // CLV record over the picks window. NOT all "final": settled rows
-        // carry final CLV, open rows carry live provisional CLV, and
-        // superseded rows keep the provisional CLV frozen when they were
-        // replaced (those never get a true closing number) — the card
-        // tooltip says so instead of implying everything is judged at close.
-        const withClv = premium.filter((p) => p.clv_log !== null);
-        $("c-clv").textContent = withClv.length
-          ? withClv.filter((p) => p.beat_close).length + " / " + withClv.length
-          : "—";
-        const pending = open.filter((p) => p.clv_log === null).length;
-        $("c-clv-k").textContent =
-          "Beat close (premium, last " +
-          premium.length +
-          ")" +
-          (pending ? " · " + pending + " pending" : "");
-        $("card-clv").title =
-          "Window = the latest " +
-          premium.length +
-          " PREMIUM picks among the " +
-          PICKS.length +
-          " served by /picks (the volume shadow tier is excluded from " +
-          "every headline card). Mixed maturity: settled rows = final " +
-          "closing CLV; open rows = live provisional CLV (re-priced every " +
-          "cycle); superseded rows = provisional CLV frozen at the moment a " +
-          "newer strategy version replaced them (never finalized). " +
-          "'Pending' = open picks awaiting their first re-price.";
+        // CLV-1: the Beat-close tile (#c-clv) is now owned by fillPerf and
+        // reads the TRUSTED sharp-close subset (perf.sharp_beat_close_rate),
+        // NOT a blended PICKS-window count — so consensus/fallback closes can
+        // never headline the proof of edge. Nothing CLV-related is set here.
       }
 
       // --- status bar (poll age · verified window · ingestion · deps) -------
@@ -3959,7 +4110,13 @@
             windowChip,
             "verified ≤ " + fmtDur(verifiedWindowMs()),
             null,
-            "verified window (using last-known poll cadence — /health is down)",
+            // /health is down: this is the last-known value FRESHNESS window if
+            // one was ever reported, else the poll-cadence fallback.
+            MAX_ODDS_AGE_S !== null
+              ? "verified window = last-known value freshness window (" +
+                MAX_ODDS_AGE_S +
+                "s) — /health is down"
+              : "verified window — /health is down; using the poll-cadence fallback",
           );
           ing.replaceChildren(
             ingChip(
@@ -3976,6 +4133,12 @@
           POLL_INTERVAL_S = health.poll_interval_seconds;
         if (typeof health.max_odds_age_seconds === "number")
           MAX_ODDS_AGE_S = health.max_odds_age_seconds;
+        // Tier edge floors — the fallback for edgeFloor() on rows without a
+        // serialized edge_floor (dash-2 / EEV-1).
+        if (typeof health.value_min_edge === "number")
+          VALUE_MIN_EDGE = health.value_min_edge;
+        if (typeof health.value_volume_min_edge === "number")
+          VALUE_VOLUME_MIN_EDGE = health.value_volume_min_edge;
 
         // last completed poll age — the engine-liveness verdict
         const polls = health.polls || {};
@@ -4013,11 +4176,22 @@
           windowChip,
           "verified ≤ " + fmtDur(windowMs),
           null,
-          "Open picks count as VERIFIED when re-priced within this window = " +
-            "max(45 min, 3 × poll interval" +
-            (POLL_INTERVAL_S !== null ? " of " + POLL_INTERVAL_S + "s" : "") +
-            "). The floor covers one full multi-league scrape; the 3× term " +
-            "tolerates one slow/missed cycle on long cadences.",
+          // dash-1: describe the window ACTUALLY in use. When /health reports
+          // the value freshness window we use exactly that (no flat 45 min);
+          // the max(45 min, 3 × interval) form is only the pre-/health fallback.
+          MAX_ODDS_AGE_S !== null
+            ? "Open picks count as VERIFIED when re-priced within the value " +
+              "freshness window (" +
+              MAX_ODDS_AGE_S +
+              "s = " +
+              fmtDur(MAX_ODDS_AGE_S * 1000) +
+              "); beyond it the price is STALE for value and the pick drops to " +
+              "UNVERIFIED."
+            : "Open picks count as VERIFIED when re-priced within the verified " +
+              "window — /health hasn't reported the value freshness window yet, " +
+              "so the fallback max(45 min, 3 × poll interval" +
+              (POLL_INTERVAL_S !== null ? " of " + POLL_INTERVAL_S + "s" : "") +
+              ") applies.",
         );
 
         // ingestion health per sport: snapshots / matches + the explicit

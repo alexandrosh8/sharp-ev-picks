@@ -31,7 +31,7 @@ from app.notifications.base import build_pick_alert
 from app.notifications.dispatcher import AlertDispatcher
 from app.probabilities.devig import DevigMethod, devig
 from app.risk.exposure import DailyExposureLedger
-from app.risk.staking import StakePolicy, recommended_stake, stake_amount
+from app.risk.staking import StakeBreakdown, StakePolicy, recommended_stake, stake_amount
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
@@ -440,10 +440,6 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             breakdown = recommended_stake(
                 prediction.probability, snap.decimal_odds, deps.stake_policy
             )
-            granted = deps.ledger.reserve(now.date(), breakdown.final)
-            if granted <= 0.0:
-                logger.info("daily exposure cap reached; skipping %s", snap.selection)
-                continue
 
             event_label = snap.event_id
             if deps.directory is not None:
@@ -451,6 +447,10 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 if teams is not None:
                     event_label = f"{teams.home} vs {teams.away}"
 
+            # Build the pick with the per-bet-capped fraction (NO daily clip yet);
+            # the daily-exposure ledger is consumed below and ONLY for brand-new
+            # detections, so the persisted row carries the reproducible
+            # breakdown.final and a re-alert can rebuild the exact same stake.
             pick = PickOut(
                 pick_id=str(uuid.uuid4()),
                 sport=sport_key,
@@ -466,17 +466,14 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 edge=decision.edge,
                 ev=decision.ev,
                 confidence=prediction.confidence,
-                recommended_stake_fraction=granted,
-                recommended_stake_amount=stake_amount(granted, deps.bankroll),
+                recommended_stake_fraction=breakdown.final,
+                recommended_stake_amount=stake_amount(breakdown.final, deps.bankroll),
                 stake_breakdown=StakeBreakdownOut(
                     raw_kelly=breakdown.raw_kelly,
                     fractional=breakdown.fractional,
                     capped=breakdown.capped,
-                    final=granted,
-                    # True when the daily-exposure ledger clipped the per-bet-capped
-                    # fraction further (granted < breakdown.final) — distinguishes a
-                    # daily clip from the per-bet cap in the breakdown.
-                    daily_clipped=granted < breakdown.final,
+                    final=breakdown.final,
+                    daily_clipped=False,
                 ),
                 odds_age_seconds=max(candidate.odds_age_seconds, 0.0),
                 liquidity=snap.liquidity,
@@ -490,19 +487,21 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 tier="premium",
                 created_at=now,
             )
+            # Persist FIRST, then reserve only on a genuinely new detection
+            # (inserted/upgraded). This (a) lets a re-detected 'duplicate' — and
+            # an 'unpersisted' pick whose DB state we cannot confirm — avoid
+            # reserving exposure they could never release, so a sustained
+            # duplicate/unpersisted pick never silently exhausts the daily cap
+            # (kr-1 / kelly-risk-r2-1); and (b) never lets an exhausted cap
+            # (granted<=0) skip the re-dispatch of an ALREADY-persisted pick.
             outcome = await _maybe_persist(deps, pick, snap.event_id)
-            if outcome == "duplicate":
-                # Confirmed DB duplicate (the picks unique key ignores odds):
-                # hand the exposure grant back — a re-detection is not new
-                # exposure — but STILL dispatch. The alert dedupe key includes
-                # decimal_odds (notifications/base.py), so an unchanged price
-                # stays quiet for the idempotency TTL (7d default) while a
-                # material price move re-alerts by design; and because the
-                # dispatcher releases the claim when no sink delivers, an
-                # alert whose dispatch failed is retried by this very
-                # re-dispatch on the next cycle.
-                deps.ledger.release(now.date(), granted)
-            else:  # inserted / upgraded / unpersisted (uncertainty = "new")
+            staked = _reserve_for_outcome(deps, pick, breakdown, outcome, snap.event_id, now)
+            if staked is None:
+                # brand-new pick with no remaining daily/event capacity: skip it
+                logger.info("daily exposure cap reached; skipping %s", snap.selection)
+                continue
+            pick = staked
+            if outcome in ("inserted", "upgraded", "unpersisted"):
                 picks.append(pick)
             await deps.dispatcher.dispatch(
                 build_pick_alert(
@@ -646,6 +645,45 @@ async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> 
     except Exception as exc:  # persistence must never break alerting
         logger.error("pick persistence failed for %s: %s", pick.pick_id, type(exc).__name__)
         return "unpersisted"
+
+
+def _reserve_for_outcome(
+    deps: "PipelineDeps",
+    pick: PickOut,
+    breakdown: StakeBreakdown,
+    outcome: PersistOutcome,
+    event_id: str,
+    now: datetime,
+) -> PickOut | None:
+    """Apply the daily-exposure ledger AFTER persistence (kr-1 ordering).
+
+    - inserted/upgraded: reserve breakdown.final, bounded by the daily AND the
+      optional per-event cap. A clip below breakdown.final rebuilds the pick
+      with the daily-clipped stake. A brand-new INSERTED pick with a zero grant
+      returns None (no capacity -> skip); an already-persisted UPGRADED pick is
+      never skipped on a zero grant — its alert moment must still fire.
+    - duplicate: already persisted; reserve NOTHING (a re-detection is not new
+      exposure). The pick keeps breakdown.final, matching its persisted row.
+    - unpersisted: DB state is unknown; reserve NOTHING it could never release,
+      so a sustained-unpersisted pick cannot accumulate standing daily exposure
+      across cycles and silently exhaust the cap (kelly-risk-r2-1).
+    """
+    if outcome in ("duplicate", "unpersisted"):
+        return pick
+    granted = deps.ledger.reserve(now.date(), breakdown.final, event_id)
+    if granted <= 0.0 and outcome == "inserted":
+        return None
+    if granted < breakdown.final:
+        return pick.model_copy(
+            update={
+                "recommended_stake_fraction": granted,
+                "recommended_stake_amount": stake_amount(granted, deps.bankroll),
+                "stake_breakdown": pick.stake_breakdown.model_copy(
+                    update={"final": granted, "daily_clipped": True}
+                ),
+            }
+        )
+    return pick
 
 
 async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
@@ -896,21 +934,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     f" | ml-filter {ml_score:.3f} < q* "
                     f"{deps.value_filter.threshold:.3f}: demoted to volume"
                 )
-            # Stake from the sharp fair prob at the EFFECTIVE (net) price.
+            # Stake from the sharp fair prob at the EFFECTIVE (net) price. The
+            # daily-exposure ledger is consumed AFTER persistence (below), and
+            # ONLY for brand-new premium detections — so the pick is built with
+            # the per-bet-capped breakdown.final and a re-alert can reproduce it.
             breakdown = recommended_stake(
                 v.sharp_fair_prob, v.best_odds_effective, deps.stake_policy
             )
-            if tier == "premium":
-                granted = deps.ledger.reserve(now.date(), breakdown.final)
-                if granted <= 0.0:
-                    logger.info("daily exposure cap reached; skipping %s", v.selection)
-                    continue
-            else:
-                # VOLUME tier: the stake breakdown is computed (what WOULD
-                # be recommended) but the daily exposure ledger is NEVER
-                # touched — the informational shadow tier must not consume
-                # the cap premium picks need.
-                granted = breakdown.final
             # Named sharp anchors are backtested; consensus anchors are the
             # fallback path with weaker evidence — reflected in confidence.
             confidence = 0.7 if v.sharp_book == CONSENSUS_ANCHOR else 0.9
@@ -939,17 +969,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 edge=v.edge,
                 ev=v.ev,
                 confidence=confidence,
-                recommended_stake_fraction=granted,
-                recommended_stake_amount=stake_amount(granted, deps.bankroll),
+                recommended_stake_fraction=breakdown.final,
+                recommended_stake_amount=stake_amount(breakdown.final, deps.bankroll),
                 stake_breakdown=StakeBreakdownOut(
                     raw_kelly=breakdown.raw_kelly,
                     fractional=breakdown.fractional,
                     capped=breakdown.capped,
-                    final=granted,
-                    # True when the daily-exposure ledger clipped the per-bet-capped
-                    # fraction further (granted < breakdown.final) — distinguishes a
-                    # daily clip from the per-bet cap in the breakdown.
-                    daily_clipped=granted < breakdown.final,
+                    final=breakdown.final,
+                    daily_clipped=False,
                 ),
                 odds_age_seconds=age,
                 liquidity=None,
@@ -974,8 +1001,19 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 value_filter_score=ml_score,
                 # anchor stratification key for live CLV (PIN/SHARP/CONS)
                 anchor_type=anchor_type_for(v.sharp_book),
+                # CLV-3: the concrete pick-time anchor BOOK behind anchor_type, so the
+                # CLV close can test BOOK independence (a Smarkets-anchored pick vs a
+                # Betfair-exchange close is independent though both are 'sharp').
+                anchor_book=v.sharp_book,
                 created_at=now,
             )
+            # Persist FIRST (kr-1 ordering), then reserve only on a genuinely
+            # new premium detection. A re-detected 'duplicate' (already in the
+            # DB) and an 'unpersisted' pick (DB state unknown) reserve NOTHING —
+            # so a sustained duplicate/unpersisted pick never accumulates
+            # standing exposure that would silently exhaust the daily cap
+            # (kr-1 / kelly-risk-r2-1) — and an exhausted cap never skips the
+            # re-dispatch of an already-persisted pick.
             outcome = await _maybe_persist(deps, pick, event_id)
             if tier == "volume":
                 # Shadow tier: persisted + CLV-tracked but NOT alerted and NEVER
@@ -990,22 +1028,17 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     picks.append(pick)
                     n_volume += 1
                 continue
-            if outcome == "duplicate":
-                # Confirmed DB duplicate (the picks unique key ignores odds):
-                # hand the exposure grant back — a re-detection is not new
-                # exposure — but STILL dispatch. The alert dedupe key includes
-                # decimal_odds (notifications/base.py), so an unchanged price
-                # stays quiet for the idempotency TTL (7d default) while a
-                # material price move re-alerts by design; and because the
-                # dispatcher releases the claim when no sink delivers, an
-                # alert whose dispatch failed is retried by this very
-                # re-dispatch on the next cycle.
-                deps.ledger.release(now.date(), granted)
-            else:
-                # "inserted", "unpersisted" (uncertainty = "new"), or
-                # "upgraded" — a volume row just cleared the premium
-                # threshold: THIS is its alert moment, and the reservation
-                # made above stays (the shadow row never held one).
+            staked = _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
+            if staked is None:
+                # brand-new premium pick with no remaining daily/event capacity
+                logger.info("daily exposure cap reached; skipping %s", v.selection)
+                continue
+            pick = staked
+            if outcome in ("inserted", "upgraded", "unpersisted"):
+                # "inserted"/"unpersisted" (uncertainty = "new") or "upgraded"
+                # — a volume row just cleared the premium threshold: THIS is its
+                # alert moment. A "duplicate" is re-dispatched (below) but is not
+                # a NEW pick this cycle, so it is not appended.
                 picks.append(pick)
             # value_min_edge adds the "Still +EV down to X.XX" execution
             # line (value-strategy semantics: model_probability holds the

@@ -179,6 +179,46 @@ async def test_experimental_sport_forces_premium_pick_to_volume() -> None:
     assert LAST_POLL["soccer"]["picks"] == 0  # n_premium == 0 (forced to volume)
 
 
+async def test_basketball_experimental_demoted_while_football_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Batch 3 DEMOTION: with basketball in experimental_sports, an identical slate
+    # is shadow-only for basketball (no alert, ZERO exposure reserved) yet still
+    # alerts for football. The safe direction — basketball is minted + tracked but
+    # never claims a validated edge until its per-sport CLV clears.
+    #
+    # Exposure is reserved only on a PERSISTED premium detection (kr-1 ordering),
+    # so both decks carry a session factory: basketball persists as volume (no
+    # reserve), football persists as premium (reserves).
+    from dataclasses import replace
+
+    from app.pipeline import LAST_POLL
+
+    patch_persist_recording(monkeypatch, ["inserted", "inserted"])
+
+    # Basketball: experimental -> forced to volume/shadow.
+    sink_bb = RecordingSink()
+    deps_bb = replace(
+        make_deps(sink_bb, FakeLoader(market_snapshots())),
+        experimental_sports=frozenset({"basketball"}),
+        session_factory=FakeSessionFactory(),
+    )
+    await run_value_pipeline(deps_bb, "basketball")
+    assert sink_bb.sent == []  # never alerted
+    assert deps_bb.ledger.used(datetime.now(tz=UTC).date()) == 0.0  # zero exposure reserved
+    assert LAST_POLL["basketball"]["picks"] == 0  # n_premium == 0 (forced to volume)
+
+    # Football: the SAME slate, NOT experimental -> premium pick alerts + reserves.
+    sink_fb = RecordingSink()
+    deps_fb = replace(
+        make_deps(sink_fb, FakeLoader(market_snapshots())),
+        session_factory=FakeSessionFactory(),
+    )
+    await run_value_pipeline(deps_fb, "soccer")
+    assert len(sink_fb.sent) == 1  # football still alerts the identical edge
+    assert deps_fb.ledger.used(datetime.now(tz=UTC).date()) > 0.0  # premium reserves exposure
+
+
 async def test_major_league_gate_disabled_keeps_all_premium() -> None:
     # Empty major_leagues = gate OFF: the obscure-league pick still alerts
     # (current behavior, the non-breaking default).
@@ -597,6 +637,25 @@ async def test_duplicate_pick_with_price_move_realerts_and_still_releases(
     assert deps.ledger.used(day) == pytest.approx(used_after_first)  # grant returned
     assert len(sink.sent) == 2  # price move re-alerted
     assert "2.95" in sink.sent[1].title
+
+
+async def test_unpersisted_premium_pick_does_not_accumulate_exposure() -> None:
+    """kelly-risk-r2-1 (value path): with persistence unavailable (no session
+    factory) a premium pick re-detected each cycle is 'unpersisted'. It must
+    reserve NOTHING — a sustained-unpersisted pick that accumulated standing
+    exposure would silently exhaust the 5% daily cap and suppress later alerts.
+    The pick still flows (minted + alerted)."""
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))  # no session_factory
+    day = datetime.now(tz=UTC).date()
+
+    first = await run_value_pipeline(deps, "soccer")
+    assert [p.tier for p in first] == ["premium"]
+    assert deps.ledger.used(day) == 0.0  # unpersisted reserves NOTHING
+
+    second = await run_value_pipeline(deps, "soccer")
+    assert [p.tier for p in second] == ["premium"]
+    assert deps.ledger.used(day) == 0.0  # still zero -> no cross-cycle accumulation
 
 
 def test_pick_tier_boundaries() -> None:

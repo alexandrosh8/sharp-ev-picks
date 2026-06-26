@@ -622,8 +622,10 @@ async def test_performance_report_aggregates(session) -> None:  # type: ignore[n
     won = await seed_pick(session, "evt-perf-1")  # Over 2.5, odds 2.10, stake 20
     won.clv_log = Decimal("0.05")
     won.beat_close = True
-    # Genuine sharp close: snapshot-sourced (closing_odds set) + Pinnacle anchor.
+    # Genuine sharp close: a real SNAPSHOT close (has_snapshot_close — clv-1 gate)
+    # anchored by Pinnacle. closing_odds is now just the optional soft display price.
     won.closing_anchor_type = "pinnacle"
+    won.has_snapshot_close = True
     won.closing_odds = Decimal("2.1000")
     lost = await seed_pick(session, "evt-perf-2")
     lost.clv_log = Decimal("-0.01")

@@ -94,3 +94,58 @@ def test_preload_other_days_untouched_and_negative_raises() -> None:
     assert ledger.used(OTHER_DAY) == pytest.approx(0.0)
     with pytest.raises(ValueError):
         ledger.preload(DAY, -0.01)
+
+
+# --- Per-event sub-cap (Kelly correlation backstop) --------------------------
+
+
+def test_per_event_subcap_bounds_combined_reservations() -> None:
+    # Two +EV selections on ONE event_id must not jointly exceed the per-event
+    # cap, even though the daily cap has plenty of room. Kelly assumes
+    # independent bets; multiple selections on the same match are correlated,
+    # so their COMBINED exposure is bounded.
+    ledger = DailyExposureLedger(max_daily_fraction=0.05, max_event_fraction=0.03)
+    assert ledger.reserve(DAY, 0.02, "evt-1") == pytest.approx(0.02)
+    # second selection on the same event is clipped to the remaining event room
+    assert ledger.reserve(DAY, 0.02, "evt-1") == pytest.approx(0.01)
+    # the per-event cap is now exhausted: a third selection gets nothing
+    assert ledger.reserve(DAY, 0.02, "evt-1") == 0.0
+    assert ledger.event_used(DAY, "evt-1") == pytest.approx(0.03)
+    # daily ledger still tracks the real consumed total
+    assert ledger.used(DAY) == pytest.approx(0.03)
+
+
+def test_per_event_subcap_independent_across_events() -> None:
+    ledger = DailyExposureLedger(max_daily_fraction=0.05, max_event_fraction=0.03)
+    assert ledger.reserve(DAY, 0.02, "evt-1") == pytest.approx(0.02)
+    assert ledger.reserve(DAY, 0.02, "evt-2") == pytest.approx(0.02)
+    assert ledger.used(DAY) == pytest.approx(0.04)
+    assert ledger.event_used(DAY, "evt-1") == pytest.approx(0.02)
+    assert ledger.event_used(DAY, "evt-2") == pytest.approx(0.02)
+
+
+def test_per_event_subcap_still_bounded_by_daily() -> None:
+    # The per-event cap never overrides the daily cap: the tighter of the two
+    # binds. Daily room (0.01) is smaller than per-event room here.
+    ledger = DailyExposureLedger(max_daily_fraction=0.05, max_event_fraction=0.04)
+    ledger.reserve(DAY, 0.04, "evt-1")
+    assert ledger.reserve(DAY, 0.04, "evt-2") == pytest.approx(0.01)  # daily binds
+
+
+def test_per_event_subcap_disabled_when_none() -> None:
+    # max_event_fraction=None (default) keeps the plain daily-only behaviour:
+    # multiple selections on one event accumulate up to the daily cap.
+    ledger = DailyExposureLedger(max_daily_fraction=0.05)
+    assert ledger.reserve(DAY, 0.02, "evt-1") == pytest.approx(0.02)
+    assert ledger.reserve(DAY, 0.02, "evt-1") == pytest.approx(0.02)
+    assert ledger.used(DAY) == pytest.approx(0.04)
+
+
+def test_per_event_release_returns_event_capacity() -> None:
+    ledger = DailyExposureLedger(max_daily_fraction=0.05, max_event_fraction=0.03)
+    granted = ledger.reserve(DAY, 0.02, "evt-1")
+    ledger.release(DAY, granted, "evt-1")
+    assert ledger.used(DAY) == pytest.approx(0.0)
+    assert ledger.event_used(DAY, "evt-1") == pytest.approx(0.0)
+    # full event room is available again
+    assert ledger.reserve(DAY, 0.03, "evt-1") == pytest.approx(0.03)

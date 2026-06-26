@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.edge.gates import GatePolicy
 from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import ScraperProxy
+from app.risk.exposure import DailyExposureLedger
 from app.risk.staking import StakePolicy
 
 # leagues=all scrapes oddsportal's WORLDWIDE daily pages — typically 100-300+
@@ -194,6 +195,14 @@ class Settings(BaseSettings):
     fractional_kelly: float = Field(default=0.25, gt=0.0, le=1.0)
     max_recommended_stake_percent: float = Field(default=0.02, gt=0.0, le=1.0)
     max_daily_exposure_percent: float = Field(default=0.05, gt=0.0, le=1.0)
+    # Per-event correlation backstop (Kelly assumes INDEPENDENT bets; multiple
+    # +EV selections on the same event_id are correlated, so their COMBINED
+    # recommended exposure is bounded). Default-conservative: ON, capped at 2x
+    # the per-bet cap so a single full-cap pick always fits but two correlated
+    # selections on one match can never jointly exceed it. Disable by setting
+    # EVENT_EXPOSURE_CAP_ENABLED=false (then only the daily cap binds).
+    event_exposure_cap_enabled: bool = True
+    max_event_exposure_percent: float = Field(default=0.04, gt=0.0, le=1.0)
 
     # --- Alerts ----------------------------------------------------------------
     # SecretStr (audit #3): repr-redacted so a whole-Settings log/serialize can
@@ -738,6 +747,19 @@ class Settings(BaseSettings):
     # tennis/NFL" without claiming a validated edge or guaranteed ROI.
     enable_unvalidated_picks: bool = False
 
+    # Basketball DEMOTION knob (Batch 3, audit 2026-06-26). Default True =
+    # EXPERIMENTAL: basketball is still scraped, minted, persisted, CLV-tracked,
+    # auto-settled, AND shown in the dashboard, but every basketball pick is
+    # FORCED to the volume/shadow tier — NEVER alerted and reserving ZERO daily
+    # exposure — because the sport has not cleared the held-out > 2 SE CLV gate
+    # (per-sport evidence is only now accruing). The safe direction: it stops
+    # alerting an unproven sport without losing its forward evidence. Wired at the
+    # composition root (app/scheduler.py) into PipelineDeps.experimental_sports;
+    # the warehouse display path (_VALIDATED_SPORT_PREFIXES) badges it unvalidated.
+    # Set False ONLY after a per-(sport, market) CLV-readiness gate clears — a
+    # deliberate, ADR-logged promotion, never automatic.
+    nba_experimental: bool = True
+
     @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":
         if self.auto_betting or self.bet_execution_enabled:
@@ -765,6 +787,18 @@ class Settings(BaseSettings):
         # void) the daily exposure ceiling (audit #1).
         if self.max_recommended_stake_percent > self.max_daily_exposure_percent:
             raise ValueError("MAX_RECOMMENDED_STAKE_PERCENT must be <= MAX_DAILY_EXPOSURE_PERCENT")
+        # The per-event cap must sit between the per-bet cap (so a single
+        # full-cap pick always fits) and the daily cap (the daily ceiling can
+        # never be voided by a looser per-event sub-cap).
+        if self.event_exposure_cap_enabled and not (
+            self.max_recommended_stake_percent
+            <= self.max_event_exposure_percent
+            <= self.max_daily_exposure_percent
+        ):
+            raise ValueError(
+                "MAX_EVENT_EXPOSURE_PERCENT must be between "
+                "MAX_RECOMMENDED_STAKE_PERCENT and MAX_DAILY_EXPOSURE_PERCENT"
+            )
         return self
 
     @model_validator(mode="after")
@@ -928,6 +962,20 @@ def stake_policy(settings: Settings) -> StakePolicy:
         # 0.25x/2% path, numerically unchanged) — see Settings comments.
         max_drawdown=settings.stake_max_drawdown,
         max_drawdown_probability=settings.stake_max_drawdown_probability,
+    )
+
+
+def exposure_ledger(settings: Settings) -> DailyExposureLedger:
+    """Build the daily exposure ledger from Settings (composition root only).
+
+    The per-event correlation sub-cap is applied when EVENT_EXPOSURE_CAP_ENABLED
+    is set (default); otherwise only the daily cap binds.
+    """
+    return DailyExposureLedger(
+        max_daily_fraction=settings.max_daily_exposure_percent,
+        max_event_fraction=(
+            settings.max_event_exposure_percent if settings.event_exposure_cap_enabled else None
+        ),
     )
 
 

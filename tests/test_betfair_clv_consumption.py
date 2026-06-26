@@ -362,6 +362,116 @@ async def test_flag_on_anchors_on_betfair_basketball_two_way_close(factory) -> N
         assert float(pick.clv_log) == pytest.approx(math.log(2.50 * fair), abs=1e-5)
 
 
+async def test_fresh_sharp_close_rescues_coverage_when_soft_scrape_dropped(factory) -> None:  # type: ignore[no-untyped-def]
+    # clv-2: the pick's own event FELL OUT of the soft OddsPortal scrape (no soft
+    # close snapshot at all), so the soft-coverage gate is NOT satisfied. But a
+    # FRESH matched Betfair sharp close exists. Coverage must be satisfied by the
+    # sharp side alone — finalize anchors on the Betfair close and returns True
+    # (the OLD gate returned False before ever resolving the sharp archive).
+    ref = "evt-sharp-rescues"
+    pick_id = await seed_pick(factory, ref)
+    await seed_betfair_event(factory, ref)  # fresh Betfair close, NO soft close seeded
+    async with factory() as session:
+        pick = await session.get(Pick, pick_id)
+        assert pick is not None
+        applied = await finalize_closing_from_snapshots(
+            session, pick, ref, KICKOFF, DevigMethod.SHIN, use_betfair_exchange=True
+        )
+        assert applied is True  # sharp close alone satisfied coverage
+        eff_close = tuple(1.0 + (o - 1.0) * 0.95 for o in BETFAIR_CLOSE)
+        fair = devig(eff_close, method=DevigMethod.SHIN)[0]
+        assert pick.closing_fair_probability is not None
+        assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
+        # A genuine snapshot close was anchored even though NO soft book quoted it,
+        # so closing_odds (the soft display price) stays NULL while the trusted-CLV
+        # marker is set — exactly the clv-1 sharp-only-close case.
+        assert pick.has_snapshot_close is True
+        assert pick.closing_odds is None
+        assert pick.closing_anchor_type == "sharp"  # Betfair Exchange -> sharp
+        assert pick.close_independent_of_fill is True  # Betfair close != SoftBook fill
+
+
+async def test_loader_drops_stale_pinnacle_but_keeps_fresh_betfair_per_source(factory) -> None:  # type: ignore[no-untyped-def]
+    # temporal-leakage-1: with a FRESH Betfair capture and a STALE Pinnacle capture
+    # for the SAME event, the per-source freshness gate must drop ONLY the stale
+    # Pinnacle rows. The old event-wide max(captured_at) clock would let the fresh
+    # Betfair row vouch for the stale Pinnacle line — temporal leakage that anchors
+    # the live pick on an outdated sharp price.
+    from app.clv_trueup import build_sharp_anchor_loader
+    from app.ingestion.base import EventDirectory
+
+    now = datetime.now(UTC)
+    kickoff = now + timedelta(hours=2)
+    ref = "evt-mixed-freshness"
+    home, away = "Mixed Home FC", "Mixed Away FC"
+
+    # FRESH Betfair close (1h old) under the namespaced betfair:<ref> event.
+    bref = f"betfair:{ref}"
+    fresh = now - timedelta(hours=1)
+    betfair_snaps = [
+        OddsSnapshotIn(
+            event_id=bref,
+            bookmaker="Betfair Exchange",
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=o,
+            captured_at=fresh,
+            ingested_at=fresh,
+        )
+        for sel, o in ((home, 2.40), ("Draw", 3.50), (away, 3.20))
+    ]
+    await persist_odds_snapshots(
+        factory,
+        betfair_snaps,
+        {bref: EventTeams(home=home, away=away, starts_at=kickoff)},
+        "betfair_soccer",
+        "betfair_soccer",
+    )
+    # STALE Pinnacle archive (10h old) under pinnacle_soccer, EXACT team names so the
+    # strict matcher resolves it without relying on the alias table.
+    stale = now - timedelta(hours=10)
+    pinnacle_snaps = [
+        OddsSnapshotIn(
+            event_id=ref,
+            bookmaker="Pinnacle",
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=o,
+            captured_at=stale,
+            ingested_at=stale,
+        )
+        for sel, o in ((home, 2.45), ("Draw", 3.45), (away, 3.15))
+    ]
+    await persist_odds_snapshots(
+        factory,
+        pinnacle_snaps,
+        {ref: EventTeams(home=home, away=away, starts_at=kickoff)},
+        "pinnacle_soccer",
+        "pinnacle_soccer",
+    )
+
+    directory = EventDirectory()
+    directory.register(ref, EventTeams(home=home, away=away, starts_at=kickoff))
+    loader = build_sharp_anchor_loader(
+        factory, directory, use_betfair=True, use_pinnacle=True, max_age_seconds=14400.0
+    )
+    scrape = [
+        OddsSnapshotIn(
+            event_id=ref,
+            bookmaker="SoftBook",
+            market=Market.H2H,
+            selection=home,
+            decimal_odds=2.90,
+            captured_at=now,
+            ingested_at=now,
+        )
+    ]
+    out = await loader("soccer", scrape)
+    books = {s.bookmaker for s in out}
+    assert "Betfair Exchange" in books  # fresh source kept
+    assert "Pinnacle" not in books  # stale source dropped per-source (no leakage)
+
+
 async def test_sharp_anchor_loader_event_wide_freshness(factory) -> None:  # type: ignore[no-untyped-def]
     # REGRESSION (review 2026-06-21): the pick-time sharp-anchor freshness gate is
     # EVENT-WIDE — a recently-captured event keeps its Betfair anchor; an event

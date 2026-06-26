@@ -11,7 +11,11 @@ Pure: _aggregate_settled takes plain row tuples, so no DB is needed.
 
 from decimal import Decimal
 
-from app.storage.repositories import MIN_HEADLINE_N, _aggregate_settled
+from app.storage.repositories import (
+    MIN_HEADLINE_N,
+    _aggregate_settled,
+    _aggregate_settled_by_sport,
+)
 
 
 def _row(
@@ -23,9 +27,11 @@ def _row(
     closing_odds: float | None = 2.0,
     closing_anchor: str | None = "pinnacle",
     close_independent: bool | None = True,
+    has_snapshot_close: bool | None = True,
 ) -> tuple[object, ...]:
     # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
-    #  close_independent) — the tuple shape performance_report._tier_rows builds.
+    #  close_independent, has_snapshot_close) — the tuple shape
+    #  performance_report._tier_rows builds.
     return (
         outcome,
         Decimal(str(pnl)),
@@ -35,6 +41,7 @@ def _row(
         Decimal(str(closing_odds)) if closing_odds is not None else None,
         closing_anchor,
         close_independent,
+        has_snapshot_close,
     )
 
 
@@ -62,6 +69,49 @@ def test_headline_reported_at_or_above_min_n() -> None:
     assert agg["roi"] is not None
     assert agg["roi"] == "0.1"  # 50 * 1.0 pnl / (50 * 10.0 staked)
     assert agg["stake_weighted_clv_log"] is not None
+
+
+def test_sharp_only_close_with_no_soft_price_enters_trusted_subset() -> None:
+    # clv-1: a close anchored by a sharp book that NO soft book quoted has
+    # closing_odds=None (there is no soft display price), yet it is a GENUINE
+    # snapshot close (has_snapshot_close=True). Gating on closing_odds wrongly
+    # excluded it; gating on has_snapshot_close admits it to the trusted subset.
+    rows = [
+        _row(closing_odds=None, has_snapshot_close=True, clv_log=0.04, close_independent=True)
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg = _aggregate_settled(rows)
+    assert agg["n_sharp_close"] == MIN_HEADLINE_N  # sharp-only closes counted
+    assert agg["sharp_status"] == "ok"
+    assert agg["sharp_stake_weighted_clv_log"] == "0.04"
+
+
+def test_revalidation_fallback_close_excluded_even_with_soft_price() -> None:
+    # clv-1 converse: a poll-time revalidation FALLBACK close (no snapshot close,
+    # has_snapshot_close=False) is NOT trusted even though a soft closing_odds
+    # exists — closing_odds is now purely a display price, not the gate.
+    rows = [_row(closing_odds=2.0, has_snapshot_close=False) for _ in range(MIN_HEADLINE_N)]
+    agg = _aggregate_settled(rows)
+    assert agg["n_sharp_close"] == 0
+
+
+def test_by_sport_split_aggregates_and_suppresses_per_sport() -> None:
+    # PER-SPORT split: soccer has enough settled picks to report a headline ROI;
+    # basketball has only 3 — gated on its OWN n (MIN_HEADLINE_N), so it reads
+    # insufficient. A thin/experimental sport can never borrow soccer's n.
+    soccer = [("soccer", _row(outcome="won", pnl=1.0)) for _ in range(MIN_HEADLINE_N)]
+    basketball = [("basketball", _row(outcome="lost", pnl=-0.5)) for _ in range(3)]
+    by_sport = _aggregate_settled_by_sport(soccer + basketball)
+    assert set(by_sport) == {"soccer", "basketball"}
+    assert by_sport["soccer"]["roi_status"] == "ok"
+    assert by_sport["soccer"]["roi"] is not None
+    assert by_sport["basketball"]["roi_status"] == "insufficient"
+    assert by_sport["basketball"]["roi"] is None  # nulled at the source
+    assert by_sport["basketball"]["n_settled"] == 3  # honest denominator survives
+
+
+def test_by_sport_split_empty_when_no_rows() -> None:
+    assert _aggregate_settled_by_sport([]) == {}
 
 
 def test_sharp_subset_gated_on_its_own_n_not_n_settled() -> None:

@@ -349,10 +349,22 @@ async def latest_picks_with_events(
     `min_edge` (Settings.value_min_edge, passed by the route) adds
     `min_acceptable_odds` per row — "still +EV down to X.XX": the minimum
     displayed odds retaining >= that edge vs the pick's sharp fair prob.
+    Each row also carries `edge_floor` — the tier-resolved minimum edge the pick
+    was held to (volume_min_edge on volume rows, min_edge on premium) — so the
+    dashboard colours edges/verdicts against the row's OWN floor instead of a
+    hardcoded 3% (dash-2 / EEV-1).
     VALUE-strategy semantics: `model_probability` holds the devigged sharp
     fair probability on value picks (the deployed strategy — the dashboard
     documents the same caveat for its Fair column)."""
     from app.edge.value import ceil_odds, min_acceptable_odds
+
+    def _edge_floor(p: Pick) -> str | None:
+        # The floor the pick was actually minted at: volume rows at
+        # volume_min_edge, premium at min_edge (mirrors _min_acceptable). null
+        # when the route passed no threshold (legacy feed) — the dashboard then
+        # falls back to the /health value_min_edge / value_volume_min_edge.
+        eff = volume_min_edge if (volume_min_edge is not None and p.tier == "volume") else min_edge
+        return str(eff) if eff is not None else None
 
     def _min_acceptable(p: Pick) -> str | None:
         # Use the floor the pick was actually held to: volume-tier picks are minted at
@@ -452,6 +464,12 @@ async def latest_picks_with_events(
             # (pinnacle/sharp/consensus). With closing_odds set it marks a
             # genuine sharp close vs a consensus/fallback one.
             "closing_anchor_type": p.closing_anchor_type,
+            # CLV-1: per-row close independence — True = the close was anchored by a
+            # book OTHER than the pick's own fill book (a genuine, independent close);
+            # False = circular self-priced close (fake CLV, |clv_log|~0); null =
+            # unknown / no snapshot close yet. Drives the per-pick CLV tile's trust
+            # marker so a circular close is never shown as honest CLV.
+            "close_independent_of_fill": p.close_independent_of_fill,
             "created_at": p.created_at.isoformat(),
             "clv_log": str(p.clv_log) if p.clv_log is not None else None,
             "beat_close": p.beat_close,
@@ -475,6 +493,9 @@ async def latest_picks_with_events(
             # execution helper: "still +EV down to X.XX" (null = not
             # computable — min_edge unset or fair prob >= floor impossible)
             "min_acceptable_odds": _min_acceptable(p),
+            # tier-resolved edge floor (premium=min_edge, volume=volume_min_edge)
+            # so the dashboard colours edges/verdicts tier-aware (dash-2/EEV-1).
+            "edge_floor": _edge_floor(p),
             # settlement result + realized P&L from ResultTracking (LEFT JOIN):
             # the dashboard SETTLED tab's Result/P&L columns. null = no result
             # row yet (open/unverified picks, or settled-but-unrecorded).
@@ -527,11 +548,14 @@ def _sport_label(sport_key: str, sport_name: str) -> str:
 
 
 # Sports that have cleared the held-out CLV doctrine gate and are alerted as
-# picks. Everything else (e.g. tennis) is VISIBILITY-ONLY / UNVALIDATED and the
-# dashboard badges it. Mirrors app/pipeline.visibility_only_sports (the runtime
-# set), but is the warehouse-path source of truth: the restart-durability query
-# has no access to the in-memory pipeline registry.
-_VALIDATED_SPORT_PREFIXES = ("soccer", "basketball")
+# picks. Everything else (tennis, NFL — and, since the Batch 3 audit 2026-06-26,
+# basketball, demoted to EXPERIMENTAL/shadow until its per-sport CLV clears) is
+# VISIBILITY-ONLY / UNVALIDATED and the dashboard badges it. Mirrors
+# app/pipeline.visibility_only_sports + experimental_sports (the runtime sets),
+# but is the warehouse-path source of truth: the restart-durability query has no
+# access to the in-memory pipeline registry. Basketball is intentionally absent —
+# it is shown (the display query lists it explicitly) but badged unvalidated.
+_VALIDATED_SPORT_PREFIXES = ("soccer",)
 
 
 def _is_unvalidated_sport(sport_key: str) -> bool:
@@ -736,8 +760,9 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     strings; undefined ratios are None.
 
     A TRUSTED sharp-close subset (``sharp_*``) is reported ALONGSIDE the blended
-    headline: a close counts only when it is snapshot-sourced (closing_odds NOT
-    NULL — not a poll-time revalidation fallback), anchored by a named sharp
+    headline: a close counts only when it is a GENUINE snapshot close
+    (has_snapshot_close — clv-1: NOT a poll-time revalidation fallback, and
+    independent of whether a soft book also quoted it), anchored by a named sharp
     book (closing_anchor_type in pinnacle/sharp — not a soft-book consensus
     median), AND independent of the fill (close_independent_of_fill is not False —
     the close was NOT anchored by the pick's own fill book; a self-priced close
@@ -746,9 +771,11 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     blended ``stake_weighted_clv_log`` still mixes every close in for continuity.
 
     Each row is (outcome, pnl, stake, clv_log, beat_close, closing_odds,
-    closing_anchor, close_independent). ``close_independent`` is None when the
-    column is feature-detected absent (pre-column rows) — treated as "unknown,
-    NOT circular" so historical sharp closes keep their status.
+    closing_anchor, close_independent, has_snapshot_close). ``closing_odds`` is
+    now purely the optional SOFT display price (a sharp-only close has it NULL yet
+    is a real close). ``close_independent`` / ``has_snapshot_close`` are None when
+    feature-detected absent (pre-column rows) — unknown independence is treated as
+    "NOT circular", and a None snapshot flag as "not a genuine snapshot close".
     """
     counts = {"won": 0, "lost": 0, "void": 0, "push": 0, "half_won": 0, "half_lost": 0}
     total_staked = Decimal("0")
@@ -766,9 +793,10 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         stake,
         clv_log,
         beat_close,
-        closing_odds,
+        _closing_odds,  # optional SOFT display price — no longer the trusted-close gate
         closing_anchor,
         close_independent,
+        has_snapshot_close,
     ) in rows:
         if outcome in counts:
             counts[outcome] += 1
@@ -781,7 +809,12 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             beat_known += 1
             beat_true += int(beat_close)
         if (
-            closing_odds is not None
+            # clv-1: a GENUINE snapshot close is marked by has_snapshot_close, NOT by
+            # closing_odds. A close anchored only by sharp books (no soft book quoted
+            # it) has closing_odds=None yet is a real snapshot close; gating on
+            # closing_odds false-negatived it. closing_odds is now purely the optional
+            # SOFT display price.
+            bool(has_snapshot_close)
             and closing_anchor in _SHARP_CLOSE_ANCHORS
             and clv_log is not None
             # INDEPENDENCE guard (P0-1/P0-3): a close anchored by the pick's OWN
@@ -839,6 +872,25 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     }
 
 
+def _aggregate_settled_by_sport(
+    rows: Sequence[tuple[str, Sequence[Any]]],
+) -> dict[str, dict[str, Any]]:
+    """Per-sport split of the settled-pick headline (Batch 3 PER-SPORT EVIDENCE).
+
+    ``rows`` are (sport_key, settled_row) pairs where ``settled_row`` is the
+    9-tuple ``_aggregate_settled`` consumes. Each sport is aggregated on its OWN
+    sample, so MIN_HEADLINE_N suppression applies per sport — a thin or
+    experimental sport (e.g. basketball, currently shadow-only) can never borrow
+    another sport's sufficiency. TIER-AGNOSTIC by design: it spans both premium
+    and the volume/shadow tier, because accumulating an experimental sport's
+    forward evidence (which is entirely shadow) IS the point of this split.
+    """
+    by_sport: dict[str, list[Sequence[Any]]] = {}
+    for sport_key, settled_row in rows:
+        by_sport.setdefault(sport_key, []).append(settled_row)
+    return {k: _aggregate_settled(v) for k, v in sorted(by_sport.items())}
+
+
 async def performance_report(session: AsyncSession) -> dict[str, Any]:
     """ROI + stake-weighted log-CLV over settled picks (phase 4 report).
 
@@ -857,6 +909,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     # the sharp-close subset is simply empty (n_sharp_close == 0).
     close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
     indep_attr = getattr(Pick, "close_independent_of_fill", None)
+    snapshot_attr = getattr(Pick, "has_snapshot_close", None)
     select_cols: list[Any] = [
         ResultTracking.outcome,  # 0
         ResultTracking.pnl,  # 1
@@ -864,17 +917,27 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         Pick.clv_log,  # 3
         Pick.beat_close,  # 4
         Pick.tier,  # 5 — split key, not passed to _aggregate_settled
-        Pick.closing_odds,  # 6 — snapshot-close marker
+        Pick.closing_odds,  # 6 — optional SOFT display price (no longer the gate)
+        Sport.key,  # 7 — per-sport split key, not passed to _aggregate_settled
     ]
-    close_anchor_idx = indep_idx = None
+    sport_idx = 7
+    close_anchor_idx = indep_idx = snapshot_idx = None
     if close_anchor_attr is not None:
         close_anchor_idx = len(select_cols)
         select_cols.append(close_anchor_attr)  # 7
     if indep_attr is not None:
         indep_idx = len(select_cols)
         select_cols.append(indep_attr)  # 8 — INDEPENDENCE provenance (P0-1/P0-3)
+    if snapshot_attr is not None:
+        snapshot_idx = len(select_cols)
+        select_cols.append(snapshot_attr)  # 9 — clv-1 genuine-snapshot-close marker
     rows = (
-        await session.execute(select(*select_cols).join(Pick, ResultTracking.pick_id == Pick.id))
+        await session.execute(
+            select(*select_cols)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .join(Sport, Event.sport_id == Sport.id)
+        )
     ).all()
     pending_by_tier: dict[str, int] = {
         tier: int(n)
@@ -885,28 +948,44 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         ).all()
     }
 
-    def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
+    def _settled_tuple(r: Any) -> tuple[Any, ...]:
         # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
-        #  close_independent) — close_independent is None when feature-detected
-        # absent (pre-column), which the sharp gate treats as "unknown, NOT
-        # circular".
-        out: list[tuple[Any, ...]] = []
-        for r in rows:
-            if r[5] != tier_name:
-                continue
-            closing_anchor = r[close_anchor_idx] if close_anchor_idx is not None else None
-            close_independent = r[indep_idx] if indep_idx is not None else None
-            out.append((r[0], r[1], r[2], r[3], r[4], r[6], closing_anchor, close_independent))
-        return out
+        #  close_independent, has_snapshot_close) — close_independent /
+        #  has_snapshot_close are None when feature-detected absent (pre-column):
+        #  the sharp gate treats unknown independence as "NOT circular" and a None
+        #  snapshot flag as "not a genuine snapshot close" (excluded).
+        closing_anchor = r[close_anchor_idx] if close_anchor_idx is not None else None
+        close_independent = r[indep_idx] if indep_idx is not None else None
+        has_snapshot_close = r[snapshot_idx] if snapshot_idx is not None else None
+        return (
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            r[4],
+            r[6],
+            closing_anchor,
+            close_independent,
+            has_snapshot_close,
+        )
+
+    def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
+        return [_settled_tuple(r) for r in rows if r[5] == tier_name]
 
     premium = _aggregate_settled(_tier_rows("premium"))
     volume = _aggregate_settled(_tier_rows("volume"))
     volume["n_pending"] = pending_by_tier.get("volume", 0)
+    # PER-SPORT split (Batch 3): TIER-AGNOSTIC — spans premium + the volume/shadow
+    # tier so an experimental sport (basketball, currently all-shadow) accrues its
+    # own forward CLV/ROI evidence. Each sport is gated on its OWN n inside
+    # _aggregate_settled (MIN_HEADLINE_N), so a thin sport reads "insufficient".
+    by_sport = _aggregate_settled_by_sport([(r[sport_idx], _settled_tuple(r)) for r in rows])
     return {
         **premium,
         "n_pending": pending_by_tier.get("premium", 0),
         "tier_scope": "premium",
         "volume": volume,
+        "by_sport": by_sport,
     }
 
 
@@ -940,7 +1019,9 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
         Pick.recommended_stake_amount,  # 4
         ResultTracking.pnl,  # 5
         Pick.closing_odds,  # 6 — snapshot-close marker (NON-NULL = a true close)
+        Sport.key,  # 7 — per-sport split key (Batch 3)
     ]
+    sport_idx = 7
     # closing_anchor_type / close_independent_of_fill are FEATURE-DETECTED like
     # anchor_type (same migration contract): until the ORM attr lands, every
     # row's value is None and the close-anchor grouping / sharp-close subset are
@@ -956,7 +1037,12 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
         indep_idx = len(columns)
         columns.append(indep_attr)
     rows = (
-        await session.execute(select(*columns).join(Pick, ResultTracking.pick_id == Pick.id))
+        await session.execute(
+            select(*columns)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .join(Sport, Event.sport_id == Sport.id)
+        )
     ).all()
     return [
         SettledPickRow(
@@ -966,6 +1052,7 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             beat_close=row[3],
             stake=float(row[4]),
             pnl=float(row[5]) if row[5] is not None else None,
+            sport=row[sport_idx],
             anchor_type=row[anchor_idx] if anchor_idx is not None else None,
             closing_anchor_type=row[close_anchor_idx] if close_anchor_idx is not None else None,
             # closing_odds NON-NULL marks a genuine snapshot close (not a
@@ -2018,6 +2105,9 @@ async def persist_pick(
                 else None
             ),
             anchor_type=pick.anchor_type,
+            # CLV-3: the concrete pick-time anchor BOOK (behind anchor_type) so the CLV
+            # close can test BOOK independence, not just anchor-type equality.
+            anchor_book=pick.anchor_book,
             created_at=datetime.now(tz=UTC),
         )
         .on_conflict_do_nothing(constraint="uq_picks_event_market_selection_model")
@@ -2070,6 +2160,7 @@ async def persist_pick(
         # likewise the promoting detection's anchor: the row must describe
         # the alert the operator acts on
         existing.anchor_type = pick.anchor_type
+        existing.anchor_book = pick.anchor_book
         # created_at advances to the upgrade moment: it is when the pick
         # became an actionable premium alert AND when its exposure was
         # reserved — seed_exposure_ledger (premium-scoped, created_at within
@@ -2085,6 +2176,11 @@ async def persist_pick(
         # on a re-priced row (audit #6; closing_odds is NULL here today).
         existing.closing_odds = None
         existing.closing_anchor_type = None
+        # close-side provenance also described the OLD fill — clear the snapshot-close
+        # marker and independence flag so a re-priced row never carries stale trusted-
+        # CLV provenance (clv-1 / P0-1).
+        existing.has_snapshot_close = None
+        existing.close_independent_of_fill = None
         existing.current_odds = None
         existing.current_edge = None
         existing.current_bookmaker = None

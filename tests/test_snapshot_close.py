@@ -396,6 +396,25 @@ async def test_single_soft_book_close_is_not_anchorable(session) -> None:  # typ
     assert pick.closing_odds is None
 
 
+async def test_sharp_only_close_sets_snapshot_flag_with_null_closing_odds(session) -> None:  # type: ignore[no-untyped-def]
+    # clv-1: a close anchored ONLY by a sharp book that NO soft book quoted is a
+    # GENUINE snapshot close. The pick's SoftBook fill is absent from the close set
+    # (Pinnacle-only), so closing_odds (the soft display price) is NULL — but
+    # has_snapshot_close must be True so the trusted sharp-CLV subset, now gated on
+    # that flag (not on closing_odds), still admits the close.
+    pick = await seed_pick(session, "evt-snapclose-sharponly", bookmaker="SoftBook")
+    await seed_1x2_snaps(
+        session, pick.event_id, "Pinnacle", PINNACLE_CLOSE, KICKOFF - timedelta(hours=1)
+    )
+    ref = await event_ref_of(session, pick)
+    assert await finalize_closing_from_snapshots(session, pick, ref, KICKOFF, DevigMethod.SHIN)
+    assert pick.has_snapshot_close is True  # genuine snapshot close anchored
+    assert pick.closing_odds is None  # ...but no soft book priced it -> no display price
+    assert pick.closing_anchor_type == "pinnacle"
+    fair = devig(PINNACLE_CLOSE, method=DevigMethod.SHIN)[0]
+    assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
+
+
 async def test_closing_odds_from_snapshots_last_row_per_book(session) -> None:  # type: ignore[no-untyped-def]
     # The read helper itself: last pre-kickoff row per (market, book,
     # selection), provider market keys mapped back, post-kickoff excluded,

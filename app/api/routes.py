@@ -592,6 +592,12 @@ async def health() -> dict[str, Any]:
         # current "now" (audit 2026-06-26). poll_interval is the cadence fallback.
         "poll_interval_seconds": get_settings().poll_interval_seconds,
         "max_odds_age_seconds": get_settings().max_odds_age_seconds,
+        # Tier edge floors so the dashboard colours edges/verdicts against the
+        # floor the pick was actually held to (premium vs volume), not a
+        # hardcoded 3% (dash-2 / EEV-1). The per-pick payload also carries a
+        # tier-resolved `edge_floor`; these are the global fallback.
+        "value_min_edge": get_settings().value_min_edge,
+        "value_volume_min_edge": get_settings().value_volume_min_edge,
     }
 
 

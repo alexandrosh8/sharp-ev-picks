@@ -28,6 +28,7 @@ def row(
     closing_anchor: str | None = None,
     has_snapshot: bool = False,
     close_independent: bool | None = True,
+    sport: str | None = None,
 ) -> SettledPickRow:
     return SettledPickRow(
         tier=tier,
@@ -40,6 +41,7 @@ def row(
         closing_anchor_type=closing_anchor,
         has_snapshot_close=has_snapshot,
         close_independent_of_fill=close_independent,
+        sport=sport,
     )
 
 
@@ -58,6 +60,92 @@ def test_sharp_close_stratum_counts_only_genuine_sharp_snapshot_closes() -> None
     assert sc["n"] == 2  # only the two trusted sharp snapshot closes
     assert sc["stake_weighted_clv_log"] == pytest.approx((10 * 0.05 + 10 * 0.03) / 20)
     assert sc["sufficient"] is True
+
+
+def test_by_sport_stratifies_and_suppresses_thin_buckets() -> None:
+    # Per-sport evidence: soccer has enough CLV obs to be sufficient at min_n=2;
+    # basketball has one — flagged insufficient with estimates nulled at source,
+    # so an experimental/thin sport can never borrow another sport's sufficiency.
+    rows = [
+        row(sport="soccer", clv=0.02),
+        row(sport="soccer", clv=0.03),
+        row(sport="basketball", clv=0.05),
+    ]
+    rep = live_evidence_report(rows, ml_threshold=None, min_n=2)
+    bs = rep["by_sport"]
+    assert set(bs) == {"soccer", "basketball"}
+    assert bs["soccer"]["n"] == 2
+    assert bs["soccer"]["sufficient"] is True
+    assert bs["basketball"]["n"] == 1
+    assert bs["basketball"]["sufficient"] is False
+    assert bs["basketball"]["mean_clv_log"] is None  # nulled at the source
+
+
+def test_by_sport_absent_when_no_row_carries_sport() -> None:
+    # Feature-detected like by_anchor: until a row carries a sport key the
+    # dimension is None ("not available"), not an empty grouping.
+    rep = live_evidence_report([row(), row()], ml_threshold=None, min_n=1)
+    assert rep["by_sport"] is None
+
+
+def test_sport_market_clv_gate_defaults_to_not_promoting() -> None:
+    from app.backtesting.live_evidence import SportMarketClvGate
+
+    gate = SportMarketClvGate()
+    assert gate.enabled is False
+    assert gate.min_n_sharp_close == 500
+    assert gate.min_clv_sigma == 2.0
+    assert gate.min_beat_close_ci_lower == 0.5
+    # Even with overwhelming evidence, the DEFAULT (disabled) gate NEVER promotes.
+    assert (
+        gate.is_ready(
+            n_sharp_close=10_000,
+            sharp_clv_mean=0.05,
+            sharp_clv_se=0.001,
+            beat_close_ci_lower=0.6,
+        )
+        is False
+    )
+
+
+def test_sport_market_clv_gate_enabled_requires_every_bar() -> None:
+    from app.backtesting.live_evidence import SportMarketClvGate
+
+    enabled = SportMarketClvGate(enabled=True)
+    # Clears every bar -> the ONLY True path.
+    assert (
+        enabled.is_ready(
+            n_sharp_close=600, sharp_clv_mean=0.05, sharp_clv_se=0.001, beat_close_ci_lower=0.6
+        )
+        is True
+    )
+    # Thin sample -> not ready.
+    assert (
+        enabled.is_ready(
+            n_sharp_close=10, sharp_clv_mean=0.05, sharp_clv_se=0.001, beat_close_ci_lower=0.6
+        )
+        is False
+    )
+    # CLV not > 2 SE -> not ready.
+    assert (
+        enabled.is_ready(
+            n_sharp_close=600, sharp_clv_mean=0.05, sharp_clv_se=0.05, beat_close_ci_lower=0.6
+        )
+        is False
+    )
+    # Beat-close CI lower bound at coin-flip -> not ready; missing inputs fail closed.
+    assert (
+        enabled.is_ready(
+            n_sharp_close=600, sharp_clv_mean=0.05, sharp_clv_se=0.001, beat_close_ci_lower=0.5
+        )
+        is False
+    )
+    assert (
+        enabled.is_ready(
+            n_sharp_close=600, sharp_clv_mean=None, sharp_clv_se=None, beat_close_ci_lower=None
+        )
+        is False
+    )
 
 
 def test_sharp_close_stratum_is_zero_when_no_trusted_closes() -> None:
@@ -112,6 +200,38 @@ def test_by_close_anchor_groups_on_the_close_anchor_not_creation() -> None:
     assert report["by_close_anchor"]["pinnacle"]["n"] == 1
     # by_anchor (CREATION anchor) keeps its existing contract, unchanged
     assert set(report["by_anchor"]) == {"pinnacle", "consensus"}
+
+
+def test_circular_close_excluded_from_close_anchor_clv() -> None:
+    # CLV-2: a pinnacle-anchored, pinnacle-CLOSED row whose close is NON-independent
+    # (circular self-priced, close_independent_of_fill=False) carries a FAKE positive
+    # clv_log. It must NOT move by_close_anchor['pinnacle'].mean_clv_log — _stratum_stats
+    # excludes proven-circular closes from the CLV/beat samples (pnl_rows untouched, so
+    # ROI still sees the row's realized P&L).
+    indep = row(
+        clv=0.02,
+        beat=True,
+        pnl=1.0,
+        closing_anchor="pinnacle",
+        has_snapshot=True,
+        close_independent=True,
+    )
+    circular = row(
+        clv=0.99,
+        beat=True,
+        pnl=-1.0,
+        closing_anchor="pinnacle",
+        has_snapshot=True,
+        close_independent=False,
+    )
+    pin = live_evidence_report([indep, circular], ml_threshold=None, min_n=1)["by_close_anchor"][
+        "pinnacle"
+    ]
+    assert pin["n"] == 2  # both rows still counted in the honest n
+    assert pin["n_clv"] == 1  # ...but only the INDEPENDENT close in the CLV sample
+    assert pin["mean_clv_log"] == pytest.approx(0.02)  # circular 0.99 did NOT move it
+    assert pin["stake_weighted_clv_log"] == pytest.approx(0.02)
+    assert pin["n_roi"] == 2  # pnl_rows untouched: ROI still sees both realized P&Ls
 
 
 def test_score_buckets_split_on_q_star_inclusive() -> None:

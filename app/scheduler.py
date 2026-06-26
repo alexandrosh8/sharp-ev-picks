@@ -28,7 +28,7 @@ from redis.asyncio import Redis
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.config import Settings, gate_policy, stake_policy, value_policy
+from app.config import Settings, exposure_ledger, gate_policy, stake_policy, value_policy
 from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
 from app.ingestion.football_data import (
     MatchRow,
@@ -219,6 +219,15 @@ def build_scheduler(
             config["basketball"] = ("basketball", bb_leagues)
             markets_by["basketball"] = tuple(_csv(settings.oddsportal_basketball_markets))
             sport_keys = ("soccer", "basketball")
+            # Batch 3 DEMOTION (audit 2026-06-26): basketball has NOT cleared the
+            # held-out > 2 SE per-sport CLV gate, so by default it is EXPERIMENTAL —
+            # still scraped/minted/persisted/CLV-tracked/auto-settled AND shown, but
+            # every pick is forced to the volume/shadow tier (never alerted, zero
+            # exposure). Flip NBA_EXPERIMENTAL=false only after a deliberate,
+            # ADR-logged promotion. Unlike tennis/NFL, basketball still MINTS picks
+            # either way — the knob only governs whether they can alert.
+            if settings.nba_experimental:
+                experimental_sports = experimental_sports | frozenset({"basketball"})
         # Tennis is VISIBILITY-ONLY / UNVALIDATED (held-out CLV undefined — no
         # closing source; app/config.py). Enabled only when leagues are set
         # (OFF by default); it scrapes for the AVAILABLE GAMES view but mints
@@ -392,9 +401,7 @@ def build_scheduler(
             stake_policy=stake_policy(settings),
             # seeded at the composition root (app/main.py lifespan) so a
             # restart cannot forget today's already-recommended exposure
-            ledger=ledger
-            if ledger is not None
-            else DailyExposureLedger(max_daily_fraction=settings.max_daily_exposure_percent),
+            ledger=ledger if ledger is not None else exposure_ledger(settings),
             bankroll=Decimal(str(settings.bankroll_base)),
             league=league_label,
             directory=directory,

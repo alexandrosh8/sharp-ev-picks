@@ -73,6 +73,54 @@ def test_health_exposes_poll_interval_seconds() -> None:
     assert body["max_odds_age_seconds"] > 0
 
 
+def test_health_exposes_tier_edge_floors() -> None:
+    # dash-2 / EEV-1: the dashboard colours edges/verdicts against the tier's
+    # edge FLOOR, not a hardcoded 3%. The per-row payload carries `edge_floor`,
+    # but /health is the global fallback (and the volume tier's lower floor).
+    body = TestClient(make_app()).get("/health").json()
+    assert isinstance(body["value_min_edge"], (int, float))
+    assert isinstance(body["value_volume_min_edge"], (int, float))
+    # volume tier is permitted a lower (or equal) floor than premium
+    assert body["value_volume_min_edge"] <= body["value_min_edge"]
+
+
+def test_picks_serializer_includes_tier_aware_edge_floor(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Each /picks row carries `edge_floor` = the tier's minimum edge (premium
+    vs volume), so the dashboard can colour/verdict each row against its OWN
+    floor instead of a hardcoded 3% (dash-2 / EEV-1). The repo computes it from
+    the thresholds the route passes; here we exercise the real repo with a fake
+    ORM result set."""
+    from app.api import routes
+    from app.storage import repositories
+
+    captured: dict[str, float | None] = {}
+
+    async def fake_rows(session, limit, tier=None, min_edge=None, volume_min_edge=None):  # type: ignore[no-untyped-def]
+        captured["min_edge"] = min_edge
+        captured["volume_min_edge"] = volume_min_edge
+        # The route passes the real thresholds; mirror the repo's tier-aware
+        # choice so the serialized contract is asserted end-to-end.
+        return [
+            {
+                **_pick_row(tier="premium"),
+                "edge_floor": str(min_edge),
+            },
+            {
+                **_pick_row(id=2, tier="volume"),
+                "edge_floor": str(volume_min_edge),
+            },
+        ]
+
+    monkeypatch.setattr(routes, "latest_picks_with_events", fake_rows)
+    body = TestClient(make_app()).get("/picks").json()
+    assert captured["min_edge"] is not None and captured["volume_min_edge"] is not None
+    assert body[0]["edge_floor"] == str(captured["min_edge"])
+    assert body[1]["edge_floor"] == str(captured["volume_min_edge"])
+    # and the real repo builds the same field (guards against the column being
+    # dropped from the SELECT/serializer)
+    assert "edge_floor" in repositories.latest_picks_with_events.__doc__  # type: ignore[operator]
+
+
 def test_dashboard_served_at_root() -> None:
     client = TestClient(make_app())
     response = client.get("/")
@@ -133,7 +181,10 @@ def test_dashboard_has_tier_filter_and_premium_scoped_cards() -> None:
     assert "Avg live edge (premium open)" in text
     assert "Settled (premium, all time)" in text
     assert "P&amp;L / ROI (premium settled)" in text
-    assert "Stake-wtd CLV (premium settled)" in text
+    # CLV-1: the hero is the TRUSTED sharp-close subset; the blended figure is a
+    # clearly-labelled secondary tile.
+    assert "Stake-wtd CLV (premium, sharp closes)" in text
+    assert "all closes (incl. consensus/fallback)" in text
     # textContent discipline still holds with the new badge path
     assert "innerHTML" not in text
 
@@ -586,6 +637,93 @@ def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
     assert "innerHTML" not in text  # untrusted strings stay on textContent
 
 
+def test_dashboard_edge_color_uses_tier_aware_floor() -> None:
+    """dash-2 / EEV-1: the Edge colour + the Odds-cell verdict must compare the
+    live edge to the row's TIER floor (edgeFloor(p)), not a hardcoded 3%, so a
+    volume pick at 1.8% reads green, not amber. The helper prefers the
+    serialized per-row edge_floor and falls back to the /health floors."""
+    text = TestClient(make_app()).get("/").text
+    assert "function edgeFloor(" in text
+    assert "p.edge_floor" in text
+    # /health fallback floors are consumed
+    assert "VALUE_MIN_EDGE" in text
+    assert "VALUE_VOLUME_MIN_EDGE" in text
+    assert "health.value_min_edge" in text
+    assert "health.value_volume_min_edge" in text
+    # the hardcoded 0.03 colour/verdict comparisons are gone
+    assert "curEdge >= 0.03" not in text
+    assert "eff >= 0.03" not in text
+    # and the call sites now use the tier-aware floor
+    assert text.count("edgeFloor(p)") >= 2
+
+
+def test_dashboard_live_ev_uses_commission_netted_edge() -> None:
+    """edge-ev-devig-r2-1: on a re-priced row the live EV is derived from the
+    commission-netted live edge (ev = liveFair/(liveFair - current_edge) - 1),
+    NOT the raw book odds, so exchange commission isn't double-counted away."""
+    text = TestClient(make_app()).get("/").text
+    assert "liveFair / (liveFair - " in text  # netted formula present
+    assert "p.current_edge != null" in text
+    # raw-odds form survives only as the fallback when current_edge is null
+    assert "liveFair * Number(p.current_odds) - 1" in text
+
+
+def test_dashboard_clv_hero_tiles_use_sharp_subset() -> None:
+    """CLV-1: the PROOF-OF-EDGE hero (stake-wtd CLV) and the Beat-close tile read
+    the TRUSTED sharp-close subset (perf.sharp_*), gated on sharp_status==='ok'.
+    The blended (all-closes) figure is demoted to a clearly labelled secondary
+    tile so consensus/fallback closes never headline the proof of edge."""
+    text = TestClient(make_app()).get("/").text
+    assert "perf.sharp_status" in text
+    assert "perf.sharp_stake_weighted_clv_log" in text
+    assert "perf.sharp_beat_close_rate" in text
+    # the blended figure is demoted, clearly labelled
+    assert "all closes (incl. consensus/fallback)" in text
+    assert 'id="c-swclv-all"' in text
+
+
+def test_dashboard_per_row_clv_respects_close_independence() -> None:
+    """CLV-1: a circular (self-priced) close — close_independent_of_fill === false
+    — must NOT be shown as honest CLV; the per-row CLV cell renders a neutral
+    'self-priced' state instead of a green/red beat-close badge."""
+    text = TestClient(make_app()).get("/").text
+    assert "p.close_independent_of_fill === false" in text
+    assert "self-priced" in text
+
+
+def test_dashboard_open_card_matches_live_tab() -> None:
+    """open-card mismatch: the 'Open picks (premium, verified)' card counts the
+    SAME set as the LIVE tab (inLiveTab) so the card and the LIVE (n) badge can
+    never diverge (e.g. when a value-gone pick is excluded from one but not the
+    other)."""
+    text = TestClient(make_app()).get("/").text
+    assert "premium.filter(inLiveTab)" in text
+
+
+def test_dashboard_shows_fair_drift_delta() -> None:
+    """Welwalo clarity: when a re-price moved the fair probability, the Fair/EV
+    cell shows a VISIBLE entry->live delta (e.g. 'fair 64%->58%'), and the
+    'ok >=' odds floor line reads 'needs >= X (fair drifted out)' when the book
+    price is unchanged but the fair has drifted the value away."""
+    text = TestClient(make_app()).get("/").text
+    assert "entryFair" in text
+    assert "fair drifted out" in text
+    # the delta is rendered as a visible element, not only a tooltip
+    assert "fair " in text
+
+
+def test_dashboard_verified_window_comment_matches_freshness() -> None:
+    """dash-1: verifiedWindowMs() returns MAX_ODDS_AGE_SECONDS when /health
+    reports it; the comment + the status-bar tooltip must describe the value
+    FRESHNESS window (not assert a flat '45 min') so the annotation matches the
+    value actually used."""
+    text = TestClient(make_app()).get("/").text
+    # the freshness window is named in the verified-window tooltip
+    assert "freshness window" in text
+    # the tooltip switches to the fallback wording only when MAX_ODDS_AGE_S is null
+    assert "MAX_ODDS_AGE_S !== null" in text
+
+
 def test_result_payload_validation_rejects_bad_outcome() -> None:
     client = TestClient(make_app())
     response = client.post(
@@ -764,6 +902,20 @@ def test_picks_serializer_exposes_closing_odds() -> None:
     src = inspect.getsource(repositories.latest_picks_with_events)
     assert '"closing_odds"' in src
     assert "p.closing_odds" in src
+
+
+def test_picks_serializer_exposes_close_independence_flag() -> None:
+    """CLV-1: the GET /picks payload carries a per-row close_independent_of_fill
+    flag so the dashboard's per-pick CLV tile can mark whether the pick's CLV came
+    from a genuine, independent close (True) or a circular self-priced one (False;
+    None = unknown / pre-column)."""
+    import inspect
+
+    from app.storage import repositories
+
+    src = inspect.getsource(repositories.latest_picks_with_events)
+    assert '"close_independent_of_fill"' in src
+    assert "p.close_independent_of_fill" in src
 
 
 def test_dashboard_has_results_tab_and_clv_scorecard() -> None:

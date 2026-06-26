@@ -64,6 +64,13 @@ class PickOut(InternalModel):
     # strategy. Persisted so live CLV can be stratified by anchor — the
     # consensus fallback's live verdict mechanism.
     anchor_type: str | None = None
+    # The concrete pick-time sharp anchor BOOK NAME (e.g. "Pinnacle", "Betfair
+    # Exchange", "Smarkets") or the CONSENSUS_ANCHOR sentinel. anchor_type collapses
+    # every named sharp book to "sharp"; this keeps the actual book so the CLV close
+    # can test BOOK independence (CLV-3: a Smarkets-anchored pick vs a Betfair-exchange
+    # close is independent though both are anchor_type "sharp"). None for the model
+    # strategy or a pre-column row.
+    anchor_book: str | None = None
     # Final score of the settled game ("HOME-AWAY", e.g. "2-1"). None until the
     # pick settles (or when no score was recorded). Surfaced in the dashboard
     # SETTLED view; /picks serializes the repo dict, so this keeps the contract

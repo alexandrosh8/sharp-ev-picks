@@ -169,6 +169,71 @@ def test_max_edge_cap_rejects_implausible_data_error_edges() -> None:
     assert not any(b.selection == "home" for b in capped)
 
 
+def test_anchor_swap_vs_consensus_mints_zero_picks() -> None:
+    # edge-ev-devig-r2-2: the named sharp anchor (Pinnacle) has its Draw and Away
+    # prices SWAPPED relative to the cross-book consensus (the live 1X2-swap data
+    # error). The swapped anchor makes Draw look fairly-priced at ~0.40 while soft
+    # books offer Draw at 5.00 (~0.20) — a phantom +0.20 edge that sits UNDER any
+    # sane per-leg max_edge cap. A market-level anchor-swap guard must cross-check
+    # the anchor's devig ordering against the consensus and mint NOTHING for the
+    # whole market when they disagree.
+    prices = {
+        "home": {"Pinnacle": 2.00, "SoftA": 2.00, "SoftB": 2.00, "SoftC": 2.00},
+        "draw": {"Pinnacle": 2.50, "SoftA": 5.00, "SoftB": 5.00, "SoftC": 5.00},
+        "away": {"Pinnacle": 5.00, "SoftA": 2.50, "SoftB": 2.50, "SoftC": 2.50},
+    }
+    assert find_value_bets(prices, min_edge=0.01) == []
+
+
+def test_anchor_agreeing_with_consensus_still_mints() -> None:
+    # Control: when the anchor's ordering AGREES with the consensus, the swap guard
+    # is a no-op and a genuine soft-book value still mints (home generous at SoftA).
+    prices = {
+        "home": {"Pinnacle": 2.00, "SoftA": 2.30, "SoftB": 2.02, "SoftC": 2.01},
+        "draw": {"Pinnacle": 5.00, "SoftA": 5.00, "SoftB": 5.00, "SoftC": 5.00},
+        "away": {"Pinnacle": 2.50, "SoftA": 2.50, "SoftB": 2.50, "SoftC": 2.50},
+    }
+    bets = find_value_bets(prices, min_edge=0.01)
+    assert any(b.selection == "home" and b.best_book == "SoftA" for b in bets)
+
+
+def test_close_is_independent_when_anchor_books_differ_even_if_same_type() -> None:
+    # CLV-3: a Smarkets-anchored PICK validated by a Betfair-exchange CLOSE is a
+    # GENUINELY independent close — two DIFFERENT sharp books — even though both
+    # collapse to anchor_type 'sharp'. Type-equality alone would wrongly call it
+    # circular; with both anchor BOOKS known, book inequality wins.
+    from app.edge.value import close_is_independent_of_fill
+
+    assert (
+        close_is_independent_of_fill(
+            "Betfair Exchange",  # close anchor book
+            "Bet365",  # fill book (soft) — not either sharp
+            pick_anchor_type="sharp",
+            close_anchor_type="sharp",
+            pick_anchor_book="Smarkets",
+        )
+        is True
+    )
+    # same sharp BOOK on both sides is still circular even with books known
+    assert (
+        close_is_independent_of_fill(
+            "Betfair Exchange",
+            "Bet365",
+            pick_anchor_type="sharp",
+            close_anchor_type="sharp",
+            pick_anchor_book="Betfair Exchange",
+        )
+        is False
+    )
+    # book unknown -> fall back to anchor-TYPE equality (back-compat)
+    assert (
+        close_is_independent_of_fill(
+            "Pinnacle", "Bet365", pick_anchor_type="pinnacle", close_anchor_type="pinnacle"
+        )
+        is False
+    )
+
+
 # --- structural guards --------------------------------------------------------
 
 

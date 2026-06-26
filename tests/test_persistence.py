@@ -255,6 +255,28 @@ async def test_min_acceptable_odds_uses_volume_floor_for_volume_tier(session) ->
     ours = [p for p in payload if p["bookmaker"] == "testbook"][0]
     # volume floor from entry fair 0.55 at 0.015: 1/(0.55-0.015)=1.869 -> ceil 1.87 (NOT 1.93)
     assert ours["min_acceptable_odds"] == "1.87"
+    # dash-2 / EEV-1: the serialized edge_floor is the tier's floor (volume),
+    # so the dashboard colours/verdicts this row at 0.015, not the premium 0.03.
+    assert ours["edge_floor"] == "0.015"
+
+
+async def test_edge_floor_uses_premium_floor_for_premium_tier(session) -> None:  # type: ignore[no-untyped-def]
+    # dash-2 / EEV-1: a premium pick serializes edge_floor = the premium
+    # value_min_edge, so its Edge colour / "still value" verdict is judged
+    # against 0.03 (the floor it was minted at), tier-aware on the dashboard.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(
+        session,
+        make_pick("evt-premfloor", tier="premium", decimal_odds=2.00, edge=0.05),
+        teams,
+        "value-sharp-vs-soft",
+        "pf-1",
+    )
+    payload = await latest_picks_with_events(
+        session, limit=200, min_edge=0.03, volume_min_edge=0.015
+    )
+    ours = [p for p in payload if p["bookmaker"] == "testbook"][0]
+    assert ours["edge_floor"] == "0.03"
 
 
 async def test_premium_key_is_shielded_from_volume_redetection(session) -> None:  # type: ignore[no-untyped-def]

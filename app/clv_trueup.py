@@ -172,6 +172,10 @@ async def revalidate_open_picks(
                     pick.bookmaker,
                     pick_anchor_type=pick.anchor_type or "",
                     close_anchor_type=pick.closing_anchor_type or "",
+                    # CLV-3: prefer BOOK identity — two different sharp books (e.g.
+                    # Smarkets pick vs Betfair close) are independent even though
+                    # both collapse to anchor_type 'sharp'.
+                    pick_anchor_book=pick.anchor_book or "",
                 )
             books = prices_by_key.get(key) or {}
             # The pick's own book is the actionable price; if it dropped the
@@ -778,42 +782,49 @@ async def finalize_closing_from_snapshots(
     snaps, last_capture = await closing_odds_from_snapshots(
         session, pick.event_id, external_ref, kickoff
     )
-    if last_capture is None or kickoff - last_capture > max_gap:
+    soft_fresh = last_capture is not None and kickoff - last_capture <= max_gap
+    # clv-2: resolve the SHARP-ARCHIVE (Pinnacle/Betfair) close BEFORE the coverage
+    # verdict. An event that fell OUT of the soft OddsPortal scrape can still have a
+    # FRESH matched sharp close — the close we most want to anchor on. Coverage is
+    # satisfied if EITHER the soft scrape is fresh OR a fresh sharp close exists; we
+    # return False only when NEITHER is fresh.
+    sharp_snaps: list[OddsSnapshotIn] = []
+    if use_pinnacle_archive:
+        # Matched Pinnacle ARCHIVE close (strict cross-source match) so a real sharp
+        # close anchors the fair (value.SHARP_BOOKS[0]=="pinnacle"). No match -> [].
+        sharp_snaps.extend(await _pinnacle_archive_close(session, pick, external_ref, kickoff))
+    if use_betfair_exchange:
+        # Captured Betfair Exchange BACK close (EXACT-match: betfair ref is
+        # deterministically "betfair:"+ref). No betfair event / no close -> [].
+        # Both flags may be on: event_fair_probs prefers Pinnacle (SHARP_BOOKS[0])
+        # over Betfair (index 2), so Pinnacle wins when both price the market.
+        sharp_snaps.extend(await _betfair_exchange_close(session, pick, external_ref, kickoff))
+    sharp_last = max(
+        (s.captured_at for s in sharp_snaps if s.captured_at is not None), default=None
+    )
+    sharp_fresh = sharp_last is not None and kickoff - sharp_last <= max_gap
+    if not soft_fresh and not sharp_fresh:
         logger.info(
-            "pick %d: no snapshot-close coverage (event not scraped within %s "
-            "of kickoff) — keeping revalidation close",
+            "pick %d: no snapshot-close coverage (neither soft scrape nor sharp "
+            "archive fresh within %s of kickoff) — keeping revalidation close",
             pick.id,
             max_gap,
         )
         return False
-    if use_pinnacle_archive:
-        # Inject the matched Pinnacle ARCHIVE close (strict cross-source match)
-        # so a real sharp close anchors the fair (value.SHARP_BOOKS[0]=="pinnacle")
-        # for incremental CLV. No match -> [] -> behaviour unchanged.
-        extra = await _pinnacle_archive_close(session, pick, external_ref, kickoff)
-        if extra:
-            snaps = [*snaps, *extra]
-            logger.info(
-                "pick %d: injected %d Pinnacle archive close rows (strict match)",
-                pick.id,
-                len(extra),
-            )
-    if use_betfair_exchange:
-        # Inject the captured Betfair Exchange BACK close (EXACT-match resolution:
-        # the betfair event's external_ref is deterministically "betfair:"+ref) so
-        # a sharp exchange close can anchor the fair (value.SHARP_BOOKS lists
-        # "betfair exchange" with EXCHANGE_COMMISSION). No betfair event / no close
-        # -> [] -> behaviour unchanged. Both flags may be on: event_fair_probs
-        # already prefers Pinnacle (SHARP_BOOKS[0]) over Betfair (index 2), so
-        # Pinnacle wins when both price the market and Betfair fills the gap.
-        extra = await _betfair_exchange_close(session, pick, external_ref, kickoff)
-        if extra:
-            snaps = [*snaps, *extra]
-            logger.info(
-                "pick %d: injected %d Betfair Exchange close rows (exact match)",
-                pick.id,
-                len(extra),
-            )
+    if not soft_fresh:
+        # The soft scrape is stale (event dropped from coverage); a fresh sharp close
+        # must NOT be anchored against a stale soft book set — use the sharp close
+        # alone. When soft IS fresh, the original soft set is kept and sharp rows are
+        # added below.
+        snaps = []
+    if sharp_snaps:
+        snaps = [*snaps, *sharp_snaps]
+        logger.info(
+            "pick %d: injected %d sharp archive close rows (fresh=%s)",
+            pick.id,
+            len(sharp_snaps),
+            sharp_fresh,
+        )
     grouped = group_market_prices(snaps)
     fair_by_key: dict[tuple[str, str], float] = {}
     anchor_by_key: dict[tuple[str, str], str] = {}
@@ -849,6 +860,12 @@ async def finalize_closing_from_snapshots(
     pick.closing_fair_probability = Decimal(f"{fair:.6f}")
     pick.clv_log = Decimal(f"{clv:.6f}")
     pick.beat_close = clv > 0
+    # clv-1: a fair was ANCHORED from our own odds_snapshots history — this IS a
+    # genuine snapshot close, regardless of whether a soft book also quoted it
+    # (close_odds may be None when only sharp books priced the selection). Mark it
+    # explicitly so the trusted sharp-CLV subset is gated on this flag, not on the
+    # presence of a soft display price (closing_odds).
+    pick.has_snapshot_close = True
     # Keep current_edge consistent with the refreshed close fair (audit 2026-06-26):
     # finalize rewrites the fair, so a stale current_edge would contradict it.
     pick.current_edge = _consistent_current_edge(pick, fair)
@@ -870,6 +887,10 @@ async def finalize_closing_from_snapshots(
             pick.bookmaker,
             pick_anchor_type=pick.anchor_type or "",
             close_anchor_type=pick.closing_anchor_type or "",
+            # CLV-3: a Smarkets-anchored pick validated by a Betfair-exchange close
+            # is independent (different sharp BOOKS) though both are anchor_type
+            # 'sharp'; book identity is the precise test, type-equality the fallback.
+            pick_anchor_book=pick.anchor_book or "",
         )
     if close_odds is not None and close_odds > 1.0:
         pick.closing_odds = Decimal(f"{close_odds:.4f}")
@@ -984,6 +1005,22 @@ def build_sharp_anchor_loader(
         now = datetime.now(tz=UTC)
         out: list[OddsSnapshotIn] = []
         seen: set[str] = set()
+
+        # temporal-leakage-1: gate freshness PER SOURCE, not on a single event-wide
+        # clock. A fresh Betfair capture must NOT drag a STALE Pinnacle line in under
+        # the event's max(captured_at) — the stale Pinnacle rows would then anchor the
+        # live pick on an outdated sharp price (temporal leakage). Each source keeps
+        # its rows only if ITS OWN most-recent row is within max_age_seconds (the same
+        # change-only 'steady price stays current' logic, applied per source).
+        def _fresh_source(rows: list[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
+            last = max(
+                (s.captured_at for s in rows if s.captured_at is not None),
+                default=None,
+            )
+            if last is None or (now - last).total_seconds() > max_age_seconds:
+                return []
+            return rows
+
         async with session_factory() as session:
             for snap in snapshots:
                 ref = snap.event_id
@@ -996,32 +1033,24 @@ def build_sharp_anchor_loader(
                 event_snaps: list[OddsSnapshotIn] = []
                 if use_betfair:
                     event_snaps.extend(
-                        await resolve_betfair_back_snaps(session, ref, teams.starts_at)
+                        _fresh_source(
+                            await resolve_betfair_back_snaps(session, ref, teams.starts_at)
+                        )
                     )
                 if use_pinnacle:
                     event_snaps.extend(
-                        await resolve_pinnacle_close_snaps(
-                            session,
-                            pinnacle_sport_key=f"pinnacle_{base}",
-                            pick_external_ref=ref,
-                            home=teams.home,
-                            away=teams.away,
-                            kickoff=teams.starts_at,
+                        _fresh_source(
+                            await resolve_pinnacle_close_snaps(
+                                session,
+                                pinnacle_sport_key=f"pinnacle_{base}",
+                                pick_external_ref=ref,
+                                home=teams.home,
+                                away=teams.away,
+                                kickoff=teams.starts_at,
+                            )
                         )
                     )
                 if not event_snaps:
-                    continue
-                # EVENT-WIDE freshness (review 2026-06-21): keep the event's anchor
-                # only if it is STILL being captured — gauge by the event's
-                # most-recent row, NOT per-row, because change-only persistence
-                # leaves a STEADY sharp price's row old yet still current. This
-                # drops only events that fell OUT of capture, never a quiet liquid
-                # market (where this feature is supposed to win).
-                last = max(
-                    (s.captured_at for s in event_snaps if s.captured_at is not None),
-                    default=None,
-                )
-                if last is None or (now - last).total_seconds() > max_age_seconds:
                     continue
                 out.extend(event_snaps)
         return out

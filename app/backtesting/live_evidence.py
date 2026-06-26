@@ -61,6 +61,11 @@ class SettledPickRow:
     stake: float  # recommended stake (same weighting as performance_report)
     pnl: float | None  # None = outcome recorded without a pnl figure
     anchor_type: str | None = None  # CREATION anchor — None = column absent or value missing
+    # Sport key of the pick (e.g. "soccer", "basketball_nba") for the per-sport
+    # evidence split. None = dimension not joined (pre-feature row / pure-test
+    # construction); the report then omits the by_sport grouping entirely, the
+    # same feature-detected contract as anchor_type.
+    sport: str | None = None
     # CLOSE-side provenance (the anchor that produced closing_fair / clv_log):
     closing_anchor_type: str | None = None  # pinnacle / sharp / consensus; None = unknown
     has_snapshot_close: bool = False  # closing_odds present => a true snapshot close,
@@ -91,9 +96,19 @@ class SettledPickRow:
 
 def _stratum_stats(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]:
     """Aggregates for one stratum — every estimate rides with its n."""
-    clv_rows = [r for r in rows if r.clv_log is not None]
+    # CLV-2: a CIRCULAR close (close_independent_of_fill is False — the pick's own
+    # fill book pricing its own close, |clv_log|~0 fake CLV) must NOT enter the CLV
+    # or beat-close samples of ANY stratum; it would drag a per-anchor mean toward a
+    # mechanical zero (or a fabricated value). Only a definite False excludes; None
+    # (pre-column / unknown) is treated as not-proven-circular. pnl_rows is left
+    # untouched — realized P&L is real regardless of how the close was priced.
+    clv_rows = [
+        r for r in rows if r.clv_log is not None and r.close_independent_of_fill is not False
+    ]
     pnl_rows = [r for r in rows if r.pnl is not None]
-    beat_rows = [r for r in rows if r.beat_close is not None]
+    beat_rows = [
+        r for r in rows if r.beat_close is not None and r.close_independent_of_fill is not False
+    ]
 
     mean_clv: float | None = None
     sw_clv: float | None = None
@@ -182,6 +197,7 @@ def live_evidence_report(
     by_tier: dict[str, list[SettledPickRow]] = {}
     by_anchor: dict[str, list[SettledPickRow]] = {}
     by_close_anchor: dict[str, list[SettledPickRow]] = {}
+    by_sport: dict[str, list[SettledPickRow]] = {}
     for row in rows:
         by_score.setdefault(_score_bucket(row.value_filter_score, ml_threshold), []).append(row)
         by_tier.setdefault(row.tier, []).append(row)
@@ -189,6 +205,8 @@ def live_evidence_report(
             by_anchor.setdefault(row.anchor_type, []).append(row)
         if row.closing_anchor_type is not None:
             by_close_anchor.setdefault(row.closing_anchor_type, []).append(row)
+        if row.sport is not None:
+            by_sport.setdefault(row.sport, []).append(row)
     # The TRUSTED subset: closes the platform can stand behind for honest CLV
     # (a genuine sharp snapshot close, not a consensus median or a poll-time
     # revalidation fallback). Always reported — n=0 honestly says "none yet".
@@ -225,5 +243,68 @@ def live_evidence_report(
             if by_close_anchor
             else None
         ),
+        # PER-SPORT evidence (Batch 3): each sport accumulates its OWN CLV/ROI on
+        # its OWN n — a thin/experimental sport (e.g. basketball, shadow-only) can
+        # never borrow another sport's sufficiency (min-n suppression is per
+        # stratum). None = no row carries a sport key (feature-detected, mirrors
+        # by_anchor), distinct from an empty grouping.
+        "by_sport": (
+            {k: _stratum_stats(v, min_n) for k, v in sorted(by_sport.items())} if by_sport else None
+        ),
         "sharp_close": _stratum_stats(sharp_rows, min_n),
     }
+
+
+@dataclass(frozen=True)
+class SportMarketClvGate:
+    """Per-(sport, market) CLV-READINESS gate — a DOCUMENTED policy scaffold that
+    is default-OFF and shadow-only. It NEVER promotes anything on its own.
+
+    A (sport, market) is promotion-READY (eligible to leave the experimental
+    shadow tier and earn alerts) ONLY when, on its OWN trusted sharp-close sample:
+
+      - ``n_sharp_close >= min_n_sharp_close`` — enough genuine, independent sharp
+        closes to measure CLV at all;
+      - the sport-scoped sharp stake-weighted CLV is positive by more than
+        ``min_clv_sigma`` standard errors (the held-out > 2 SE doctrine bar,
+        measured PER sport/market — never borrowed from football);
+      - the beat-close rate's CI lower bound exceeds ``min_beat_close_ci_lower``
+        (a coin-flip beat rate is no edge).
+
+    ``enabled`` defaults False: this is reporting-only scaffolding. No code path
+    flips ``enabled`` or auto-promotes a sport; an operator must both enable the
+    gate AND the evidence must clear every bar. Promotion stays a deliberate,
+    human, ADR-logged act. Pure: stdlib only, no env/DB/HTTP — policy enters as a
+    frozen dataclass from the composition root, like every other gate here.
+    """
+
+    enabled: bool = False
+    min_n_sharp_close: int = 500
+    min_clv_sigma: float = 2.0
+    min_beat_close_ci_lower: float = 0.5
+
+    def is_ready(
+        self,
+        *,
+        n_sharp_close: int,
+        sharp_clv_mean: float | None,
+        sharp_clv_se: float | None,
+        beat_close_ci_lower: float | None,
+    ) -> bool:
+        """True ONLY if the gate is enabled AND every readiness bar is cleared.
+
+        Disabled (the default) always returns False — the scaffold cannot promote.
+        A missing/degenerate input (None mean/SE, non-positive SE, None CI bound)
+        is treated as NOT ready: the gate fails closed, never open.
+        """
+        if not self.enabled:
+            return False
+        if n_sharp_close < self.min_n_sharp_close:
+            return False
+        if sharp_clv_se is None or sharp_clv_se <= 0.0:
+            return False
+        if sharp_clv_mean is None or sharp_clv_mean <= self.min_clv_sigma * sharp_clv_se:
+            return False
+        return beat_close_ci_lower is not None and (
+            beat_close_ci_lower > self.min_beat_close_ci_lower
+        )

@@ -251,6 +251,66 @@ async def test_pick_pipeline_duplicate_price_move_realerts(
     assert "2.20" in sink.sent[1].title
 
 
+async def test_unpersisted_premium_pick_does_not_accumulate_exposure() -> None:
+    """kelly-risk-r2-1: with persistence unavailable (no session factory),
+    _maybe_persist returns 'unpersisted'. A premium pick re-detected every
+    cycle must NOT accumulate standing daily exposure — otherwise a sustained-
+    unpersisted pick silently exhausts the 5% cap and suppresses later alerts.
+    The pick still flows (alerted) but reserves nothing it can never release."""
+    sink = RecordingSink()
+    deps = make_deps(sink)  # no session_factory -> outcome == "unpersisted"
+    day = datetime.now(tz=UTC).date()
+
+    first = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(first) == 1
+    assert deps.ledger.used(day) == 0.0  # unpersisted reserves NOTHING
+
+    second = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(second) == 1
+    assert deps.ledger.used(day) == 0.0  # still zero -> no cross-cycle accumulation
+
+
+async def test_duplicate_realert_uses_persisted_stake_even_when_cap_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """kr-1: an already-persisted pick re-detected as a DB duplicate must
+    re-alert with the stake from its persisted row (breakdown.final, never
+    daily-clipped) and must NOT be skipped just because the daily cap is now
+    exhausted (a fresh reserve would grant 0)."""
+    patch_persist_dedupe_after_first(monkeypatch)
+
+    import app.pipeline as pl
+
+    real_build = pl.build_pick_alert
+    captured: list[float] = []
+
+    def spy_build(pick, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.append(pick.recommended_stake_fraction)
+        return real_build(pick, *args, **kwargs)
+
+    monkeypatch.setattr(pl, "build_pick_alert", spy_build)
+
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)
+    day = datetime.now(tz=UTC).date()
+
+    first = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(first) == 1
+    persisted_stake = first[0].recommended_stake_fraction
+    assert persisted_stake > 0.0
+    assert first[0].stake_breakdown.daily_clipped is False
+
+    # Exhaust the rest of the daily cap so a fresh reserve would grant ~0.
+    deps.ledger.reserve(day, deps.ledger.remaining(day))
+    assert deps.ledger.remaining(day) == pytest.approx(0.0)
+
+    second = await run_pick_pipeline(deps, "soccer_epl")
+    assert second == []  # a duplicate is not a NEW pick this cycle
+    assert len(captured) == 2  # re-alert NOT skipped despite the exhausted cap
+    # the re-alert stake equals the persisted row's stake, not a daily-clipped 0
+    assert captured[1] == pytest.approx(persisted_stake)
+
+
 async def test_pipeline_no_model_predictions_no_picks() -> None:
     sink = RecordingSink()
     deps = make_deps(sink)

@@ -263,6 +263,13 @@ class Pick(Base):
     # lets live CLV be stratified by anchor (the consensus fallback's live
     # verdict mechanism). NULL = model-strategy pick or pre-column row.
     anchor_type: Mapped[str | None] = mapped_column(String(16))
+    # The pick-time sharp anchor BOOK NAME (e.g. 'Pinnacle', 'Betfair Exchange',
+    # or the CONSENSUS_ANCHOR sentinel) — the concrete book behind anchor_type.
+    # anchor_type collapses every named sharp book to 'sharp'; this keeps the
+    # actual book so per-book anchor analysis (which sharp book sourced the fair,
+    # finding CLV-3) is possible without re-deriving it. NULL = model-strategy
+    # pick or pre-column row.
+    anchor_book: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     # --- CLV (filled at/after market close) ---------------------------------
     closing_odds: Mapped[Decimal | None] = mapped_column(ODDS)
@@ -276,6 +283,15 @@ class Pick(Base):
     # CLV can trust only genuine sharp closes. NULL = no close computed yet /
     # pre-column row.
     closing_anchor_type: Mapped[str | None] = mapped_column(String(16))
+    # True whenever finalize_closing_from_snapshots ANCHORED a close fair from our
+    # own odds_snapshots history — INDEPENDENT of whether a SOFT book also priced
+    # the selection (closing_odds). When only sharp books quote the close,
+    # closing_odds stays NULL yet the close fair is real; deriving the snapshot-
+    # close flag from `closing_odds IS NOT NULL` then false-negatives those rows
+    # (finding clv-1). This explicit flag records the genuine state: True = real
+    # snapshot close anchored; NULL = no snapshot close computed yet / pre-column
+    # row. Additive + nullable — rows closed before this column stay NULL.
+    has_snapshot_close: Mapped[bool | None] = mapped_column(Boolean)
     # INDEPENDENCE provenance (P0-1/P0-3 fake-CLV guard): True = the book that
     # ANCHORED the close is NOT this pick's own fill book (bookmaker) — a genuine,
     # independent close; False = the close was anchored by the fill book itself
