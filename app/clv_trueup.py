@@ -139,6 +139,16 @@ async def revalidate_open_picks(
                 # only if finalize_closing_from_snapshots later overwrites with a
                 # sharp anchor AND closing_odds (the snapshot-close marker).
                 pick.closing_anchor_type = anchor_type_for(close_anchor)
+                # Stamp independence here too (audit #4): this path previously left
+                # close_independent_of_fill NULL, which the trusted-CLV gate admitted as
+                # "not circular". Record it so a re-scrape close can never leak in as
+                # trusted (same source as the pick, or fill self-priced => not independent).
+                pick.close_independent_of_fill = close_is_independent_of_fill(
+                    close_anchor,
+                    pick.bookmaker,
+                    pick_anchor_type=pick.anchor_type or "",
+                    close_anchor_type=pick.closing_anchor_type or "",
+                )
             books = prices_by_key.get(key) or {}
             # The pick's own book is the actionable price; if it dropped the
             # market, the best remaining price is what a bettor could take —
