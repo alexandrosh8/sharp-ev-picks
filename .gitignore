@@ -40,3 +40,10 @@ logs/
 .claude/settings.local.json
 .playwright-mcp/
 vendor/
+
+# Ralph autonomous-loop scaffold + runtime (dev-local tooling, not product code)
+.ralph/
+.ralphrc
+
+# Local Docker overrides (per-environment deploy topology; keep out of the repo)
+docker-compose.override.yml
