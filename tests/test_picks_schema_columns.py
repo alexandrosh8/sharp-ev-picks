@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from types import ModuleType
+from typing import Any
 
 import sqlalchemy as sa
 
@@ -25,7 +25,7 @@ MIGRATION_PATH = (
 PRIOR_HEAD = "e1a4d9c7b3f5"
 
 
-def _load_migration() -> ModuleType:
+def _load_migration() -> Any:
     # alembic/versions has no __init__.py, so it is not an importable package —
     # load the revision module straight from its file path.
     spec = importlib.util.spec_from_file_location("_mig_2d37faf2d3fd", MIGRATION_PATH)
@@ -70,7 +70,7 @@ def test_migration_adds_both_columns_additively() -> None:
 
     class _RecordingOp:
         @staticmethod
-        def add_column(table: str, column: sa.Column) -> None:  # type: ignore[type-arg]
+        def add_column(table: str, column: sa.Column) -> None:
             assert table == "picks"
             added.append((column.name, column.type))
 
@@ -79,7 +79,7 @@ def test_migration_adds_both_columns_additively() -> None:
             raise AssertionError("upgrade must not drop columns")
 
     original_op = mod.op
-    mod.op = _RecordingOp  # type: ignore[assignment]
+    mod.op = _RecordingOp
     try:
         mod.upgrade()
     finally:
@@ -90,7 +90,7 @@ def test_migration_adds_both_columns_additively() -> None:
     by_name = dict(added)
     assert isinstance(by_name["has_snapshot_close"], sa.Boolean)
     assert isinstance(by_name["anchor_book"], sa.String)
-    assert by_name["anchor_book"].length == 64  # type: ignore[attr-defined]
+    assert by_name["anchor_book"].length == 64
 
 
 def test_migration_downgrade_drops_both_columns() -> None:
@@ -108,7 +108,7 @@ def test_migration_downgrade_drops_both_columns() -> None:
             dropped.append(name)
 
     original_op = mod.op
-    mod.op = _RecordingOp  # type: ignore[assignment]
+    mod.op = _RecordingOp
     try:
         mod.downgrade()
     finally:

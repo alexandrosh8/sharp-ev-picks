@@ -201,7 +201,7 @@ async def test_basketball_experimental_demoted_while_football_alerts(
     deps_bb = replace(
         make_deps(sink_bb, FakeLoader(market_snapshots())),
         experimental_sports=frozenset({"basketball"}),
-        session_factory=FakeSessionFactory(),
+        session_factory=FakeSessionFactory(),  # type: ignore[arg-type]
     )
     await run_value_pipeline(deps_bb, "basketball")
     assert sink_bb.sent == []  # never alerted
@@ -212,7 +212,7 @@ async def test_basketball_experimental_demoted_while_football_alerts(
     sink_fb = RecordingSink()
     deps_fb = replace(
         make_deps(sink_fb, FakeLoader(market_snapshots())),
-        session_factory=FakeSessionFactory(),
+        session_factory=FakeSessionFactory(),  # type: ignore[arg-type]
     )
     await run_value_pipeline(deps_fb, "soccer")
     assert len(sink_fb.sent) == 1  # football still alerts the identical edge

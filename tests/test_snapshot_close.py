@@ -412,6 +412,7 @@ async def test_sharp_only_close_sets_snapshot_flag_with_null_closing_odds(sessio
     assert pick.closing_odds is None  # ...but no soft book priced it -> no display price
     assert pick.closing_anchor_type == "pinnacle"
     fair = devig(PINNACLE_CLOSE, method=DevigMethod.SHIN)[0]
+    assert pick.closing_fair_probability is not None
     assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
 
 
