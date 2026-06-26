@@ -30,7 +30,7 @@ def test_handler_retrieves_and_logs_orphaned_playwright_timeout(caplog) -> None:
         "message": "Future exception was never retrieved\nfuture: <Future ...>",
     }
     with caplog.at_level(logging.WARNING):
-        scrape_loop_exception_handler(loop, ctx)
+        scrape_loop_exception_handler(loop, ctx)  # type: ignore[arg-type]
 
     assert loop.delegated == []  # handled here, NOT dumped via the default ERROR path
     assert any("orphaned" in r.getMessage() for r in caplog.records)  # logged, not hidden
@@ -49,7 +49,7 @@ def test_handler_retrieves_target_closed_error(caplog) -> None:  # type: ignore[
         "message": "Future exception was never retrieved\nfuture: <Future ...>",
     }
     with caplog.at_level(logging.WARNING):
-        scrape_loop_exception_handler(loop, ctx)
+        scrape_loop_exception_handler(loop, ctx)  # type: ignore[arg-type]
 
     assert loop.delegated == []  # handled, not dumped at ERROR
     assert any("orphaned" in r.getMessage() for r in caplog.records)
@@ -61,7 +61,7 @@ def test_handler_delegates_non_playwright_exceptions() -> None:
 
     loop = _FakeLoop()
     ctx = {"exception": ValueError("boom"), "message": "Future exception was never retrieved"}
-    scrape_loop_exception_handler(loop, ctx)
+    scrape_loop_exception_handler(loop, ctx)  # type: ignore[arg-type]
 
     assert len(loop.delegated) == 1  # a real unhandled-future bug still surfaces loudly
 
@@ -70,5 +70,5 @@ def test_handler_delegates_orphan_message_without_exception() -> None:
     from app.ingestion.oddsportal import scrape_loop_exception_handler
 
     loop = _FakeLoop()
-    scrape_loop_exception_handler(loop, {"message": "Task was destroyed but it is pending!"})
+    scrape_loop_exception_handler(loop, {"message": "Task was destroyed but it is pending!"})  # type: ignore[arg-type]
     assert len(loop.delegated) == 1  # not our benign case -> default path

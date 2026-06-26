@@ -41,7 +41,9 @@ def _period(rng: np.random.Generator, n: int, shrink: float) -> list[Calibration
     ]
 
 
-def _periods(shrink: float, *, seed: int, k: int = 5, n: int = 4000):
+def _periods(
+    shrink: float, *, seed: int, k: int = 5, n: int = 4000
+) -> list[tuple[str, list[CalibrationObservation]]]:
     rng = np.random.default_rng(seed)
     return [(f"S{i}", _period(rng, n, shrink)) for i in range(k)]
 

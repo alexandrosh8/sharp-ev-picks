@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 from app.ingestion.base import EventDirectory
 from app.ingestion.oddsportal_bookmakers import static_bookmaker_map
@@ -38,7 +39,15 @@ def _payload(feed_key: str, outcomes: object) -> dict:
     return {"d": {"oddsdata": {"back": {feed_key: {"odds": {BOOKIE: outcomes}}}}}}
 
 
-def _parse(payload, *, market, home, away, default_bet_id, default_scope_id):
+def _parse(
+    payload: Any,
+    *,
+    market: str,
+    home: str,
+    away: str,
+    default_bet_id: int,
+    default_scope_id: int,
+) -> Any:
     return parse_feed_payload(
         payload,
         event_url="https://www.oddsportal.com/x/y/h-a-EVENTID1/",

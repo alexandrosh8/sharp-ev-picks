@@ -62,7 +62,9 @@ def _load_periods(path: Path, *, market: str | None, bet_set: bool):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data", type=Path, default=None, help="parquet path (default: full pool)")
-    ap.add_argument("--bet-set", action="store_true", help="argmax-edge bet set instead of full pool")
+    ap.add_argument(
+        "--bet-set", action="store_true", help="argmax-edge bet set instead of full pool"
+    )
     ap.add_argument("--market", default=None, help="filter to one market (e.g. 1x2, ou25)")
     ap.add_argument("--min-train", type=int, default=2000)
     ap.add_argument("--min-test", type=int, default=200)
@@ -87,23 +89,36 @@ def main() -> int:
     print(f"\nWalk-forward recalibration-gain probe — {scope}, market={mkt}, {path.name}")
     print("=" * 78)
     if report.insufficient:
-        print(f"INSUFFICIENT: no eligible walk-forward fold "
-              f"(need >= {args.min_train} train / {args.min_test} test). n_total={report.n_total}")
+        print(
+            f"INSUFFICIENT: no eligible walk-forward fold "
+            f"(need >= {args.min_train} train / {args.min_test} test). n_total={report.n_total}"
+        )
         return 0
 
-    print(f"{'period':>8} {'n':>8} {'slope_a':>9} {'intcpt_b':>9} "
-          f"{'identity_ll':>12} {'recal_ll':>10} {'oos_gain':>10}")
+    print(
+        f"{'period':>8} {'n':>8} {'slope_a':>9} {'intcpt_b':>9} "
+        f"{'identity_ll':>12} {'recal_ll':>10} {'oos_gain':>10}"
+    )
     for f in report.folds:
-        print(f"{str(f.period):>8} {f.n:>8} {f.slope:>9.4f} {f.intercept:>9.4f} "
-              f"{f.identity_log_loss:>12.6f} {f.recal_log_loss:>10.6f} {f.oos_log_loss_gain:>+10.6f}")
+        print(
+            f"{str(f.period):>8} {f.n:>8} {f.slope:>9.4f} {f.intercept:>9.4f} "
+            f"{f.identity_log_loss:>12.6f} {f.recal_log_loss:>10.6f} "
+            f"{f.oos_log_loss_gain:>+10.6f}"
+        )
     print("-" * 78)
-    print(f"POOLED ({report.n_folds} folds, n={report.n_total}): "
-          f"identity_ll={report.pooled_identity_log_loss:.6f} "
-          f"recal_ll={report.pooled_recal_log_loss:.6f}")
-    print(f"  out-of-sample log-loss gain = {report.pooled_oos_gain:+.6f} "
-          f"({report.pooled_rel_gain_pct:+.4f}%)")
-    verdict = "WARRANTED — revisit the haircut" if report.warrants_recalibration else (
-        "NOT WARRANTED — fair_prob already calibrated; no haircut"
+    print(
+        f"POOLED ({report.n_folds} folds, n={report.n_total}): "
+        f"identity_ll={report.pooled_identity_log_loss:.6f} "
+        f"recal_ll={report.pooled_recal_log_loss:.6f}"
+    )
+    print(
+        f"  out-of-sample log-loss gain = {report.pooled_oos_gain:+.6f} "
+        f"({report.pooled_rel_gain_pct:+.4f}%)"
+    )
+    verdict = (
+        "WARRANTED — revisit the haircut"
+        if report.warrants_recalibration
+        else ("NOT WARRANTED — fair_prob already calibrated; no haircut")
     )
     print(f"  VERDICT: recalibration {verdict}")
     print(f"  (threshold: pooled OOS gain >= {args.min_warrant_rel_pct}% AND every fold positive)")

@@ -161,3 +161,18 @@ def test_single_token_prefix_is_not_same_game() -> None:
     assert (
         verify_same_game("America", "Flamengo", "America Mineiro", "Flamengo", KO, KO) is not None
     )
+
+
+def test_nordic_vowel_digraph_variants_do_not_false_flag() -> None:
+    # ø ASCII-spelled 'o' ("Gjovik") vs 'oe' ("Gjoevik") is the SAME club; the
+    # log-only audit must not raise a wrong-game ERROR for an anchor the primary
+    # matcher correctly accepted (the live 2026-06-26 false positive).
+    from app.maintenance.wrong_game_audit import _names_same_game
+
+    assert _names_same_game("SK Gjovik-Lyn", "Gjoevik-Lyn") is True
+    assert (
+        verify_same_game("Brumunddal", "SK Gjovik-Lyn", "Brumunddal", "Gjoevik-Lyn", KO, KO) is None
+    )
+    # ...but the digraph fold must NOT merge genuinely different clubs.
+    assert _names_same_game("Manchester United", "Manchester City") is False
+    assert _names_same_game("Lazio", "Inter") is False

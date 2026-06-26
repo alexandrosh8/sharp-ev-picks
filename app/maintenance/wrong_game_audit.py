@@ -52,6 +52,18 @@ _TOKEN_SORT_ACCEPT = 90.0
 _DEFAULT_MAX_MINUTE_DRIFT = 6 * 60
 
 
+def _fold_vowel_digraphs(s: str) -> str:
+    """Collapse Germanic/Nordic vowel-digraph transliteration variants to one form.
+
+    Sources disagree on how to ASCII-spell ø/ü/æ/å: ``ø`` appears as ``o`` ("Gjovik")
+    or ``oe`` ("Gjoevik"); ``ü`` as ``u`` or ``ue`` ("Munchen"/"Muenchen"). Folding
+    ``oe->o``, ``ue->u``, ``ae->a``, ``aa->a`` makes those variants compare equal.
+    AUDIT-ONLY: used to stop the non-destructive wrong-game net from false-flagging
+    an anchor the primary matcher already accepted — the minting matcher is untouched.
+    """
+    return s.replace("oe", "o").replace("ue", "u").replace("ae", "a").replace("aa", "a")
+
+
 def _names_same_game(a: str, b: str) -> bool:
     """True when two team names are the SAME side: alias-canonical BASE equality,
     OR the matcher's two-tier fuzzy bar (JW>=0.92 AND token_sort>=90) with NO
@@ -90,9 +102,25 @@ def _names_same_game(a: str, b: str) -> bool:
     # fallback, without blessing a one-word prefix as a whole different club.
     if (tokens_a <= tokens_b or tokens_b <= tokens_a) and min(len(tokens_a), len(tokens_b)) >= 2:
         return True
-    return jaro_winkler(base_a, base_b) >= _JW_ACCEPT and (
+    if jaro_winkler(base_a, base_b) >= _JW_ACCEPT and (
         token_sort_ratio(base_a, base_b) >= _TOKEN_SORT_ACCEPT
-    )
+    ):
+        return True
+    # Germanic/Nordic transliteration variants: the ASCII bases differ ONLY by a
+    # folded vowel digraph (ø as 'o' vs 'oe' -> 'gjovik' vs 'gjoevik'; ü as 'u' vs
+    # 'ue'). Re-test base-equality / token-containment on the folded form so the
+    # log-only audit stops false-flagging such an anchor. The disambiguating-token
+    # veto still applies (United/City/B/II are never folded away), and the minting
+    # matcher is unchanged — this can only SUPPRESS a false ERROR, never accept a
+    # close, so it cannot create a wrong-game anchor.
+    fa, fb = _fold_vowel_digraphs(base_a), _fold_vowel_digraphs(base_b)
+    if (fa, fb) == (base_a, base_b):
+        return False  # no digraph present -> nothing new to accept
+    fta, ftb = set(fa.split()), set(fb.split())
+    fdiff = fta ^ ftb
+    if fdiff and fdiff <= _DISAMBIGUATING_TOKENS:
+        return False
+    return fa == fb or ((fta <= ftb or ftb <= fta) and min(len(fta), len(ftb)) >= 2)
 
 
 def verify_same_game(
