@@ -2005,7 +2005,13 @@
       // POLL_INTERVAL_S arrives via /health; until then the floor applies.
       const VERIFIED_FLOOR_MS = 45 * 60 * 1000;
       let POLL_INTERVAL_S = null;
+      let MAX_ODDS_AGE_S = null;
       function verifiedWindowMs() {
+        // "Verified/fresh" = the last re-price is within the value-freshness window
+        // (MAX_ODDS_AGE_SECONDS). Beyond it the price is STALE for value, so the pick
+        // reads UNVERIFIED instead of showing a current "now" price the book may no
+        // longer offer (audit 2026-06-26). Poll cadence is the fallback only.
+        if (MAX_ODDS_AGE_S !== null) return MAX_ODDS_AGE_S * 1000;
         if (POLL_INTERVAL_S === null) return VERIFIED_FLOOR_MS;
         return Math.max(VERIFIED_FLOOR_MS, 3 * POLL_INTERVAL_S * 1000);
       }
@@ -3593,8 +3599,17 @@
           : "—";
         pnlEl.style.color = pnl < 0 ? "var(--neg)" : "";
         const clvEl = $("c-swclv");
-        if (perf.stake_weighted_clv_log === null) clvEl.textContent = "—";
-        else {
+        if (perf.stake_weighted_clv_log === null) {
+          clvEl.textContent = "—";
+          // Honest about WHY it is blank: the premium CLV headline is suppressed
+          // until enough premium picks settle (thin samples are noise), not broken.
+          clvEl.title =
+            "Insufficient sample — premium stake-weighted CLV reports once enough " +
+            "premium picks settle (" +
+            (perf.n_settled || 0) +
+            " settled so far). It accrues as sharp-anchored premium picks settle; " +
+            "off-season the premium book is small.";
+        } else {
           const clvPct =
             (Math.exp(Number(perf.stake_weighted_clv_log)) - 1) * 100;
           // toFixed(1): one precision for every percentage on the page.
@@ -3952,6 +3967,8 @@
 
         if (typeof health.poll_interval_seconds === "number")
           POLL_INTERVAL_S = health.poll_interval_seconds;
+        if (typeof health.max_odds_age_seconds === "number")
+          MAX_ODDS_AGE_S = health.max_odds_age_seconds;
 
         // last completed poll age — the engine-liveness verdict
         const polls = health.polls || {};
