@@ -2804,10 +2804,9 @@
           minLine.title =
             "still +EV down to " +
             p.min_acceptable_odds +
-            " — the lowest odds at which this pick keeps the premium " +
-            "edge floor against its sharp fair probability; if the book " +
-            "now quotes less, skip. Informational only — never a profit " +
-            "guarantee.";
+            " — the lowest odds at which this pick keeps its tier's edge floor " +
+            "against the LIVE sharp fair probability; if the book now quotes less, " +
+            "skip. Informational only — never a profit guarantee.";
           oddsCell.appendChild(minLine);
         }
         td(tr, oddsCell).dataset.label = "Odds";
@@ -2916,6 +2915,12 @@
         empty.className = "dim";
         empty.textContent = "☆".repeat(5 - n); // unfilled
         cell.append(stars, empty);
+        // Value-gone: the rating was set at flagging and doesn't degrade. Dim it +
+        // qualify so ★★☆☆☆ next to "no value now" doesn't read as a live rec (audit #7).
+        if (valueGone(p)) {
+          cell.style.opacity = "0.45";
+          cell.title += " (rating at flagging — value has since gone)";
+        }
         tr.appendChild(cell);
       }
 

@@ -322,7 +322,11 @@ def _provisional_result_fields(
 
 
 async def latest_picks_with_events(
-    session: AsyncSession, limit: int = 50, tier: str | None = None, min_edge: float | None = None
+    session: AsyncSession,
+    limit: int = 50,
+    tier: str | None = None,
+    min_edge: float | None = None,
+    volume_min_edge: float | None = None,
 ) -> list[dict[str, Any]]:
     """Latest picks joined with their event (match label, league, kickoff) —
     the payload served by GET /picks and rendered by the dashboard.
@@ -342,7 +346,13 @@ async def latest_picks_with_events(
     from app.edge.value import ceil_odds, min_acceptable_odds
 
     def _min_acceptable(p: Pick) -> str | None:
-        if min_edge is None:
+        # Use the floor the pick was actually held to: volume-tier picks are minted at
+        # volume_min_edge, premium at min_edge (audit #2) — the wrong tier shows a
+        # stricter-than-real floor on volume rows.
+        eff_min_edge = (
+            volume_min_edge if (volume_min_edge is not None and p.tier == "volume") else min_edge
+        )
+        if eff_min_edge is None:
             return None
         # Reason against the SAME fair the LIVE verdict (current_edge) uses: the
         # re-priced live fair (closing_fair_probability) once a re-price exists, else
@@ -355,7 +365,7 @@ async def latest_picks_with_events(
         )
         if not 0.0 < fair < 1.0:
             return None  # degenerate stored prob: no honest floor exists
-        floor = min_acceptable_odds(fair, min_edge, book=p.current_bookmaker or p.bookmaker)
+        floor = min_acceptable_odds(fair, eff_min_edge, book=p.current_bookmaker or p.bookmaker)
         return f"{ceil_odds(floor):.2f}" if floor is not None else None
 
     home = aliased(Team)

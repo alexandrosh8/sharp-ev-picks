@@ -675,7 +675,7 @@ def test_picks_serializer_attaches_confidence_rating(monkeypatch) -> None:  # ty
         ),
     ]
 
-    async def fake_rows(session, limit, tier=None, min_edge=0.0):  # type: ignore[no-untyped-def]
+    async def fake_rows(session, limit, tier=None, min_edge=0.0, volume_min_edge=0.0):  # type: ignore[no-untyped-def]
         return [dict(r) for r in rows]
 
     monkeypatch.setattr(routes, "latest_picks_with_events", fake_rows)

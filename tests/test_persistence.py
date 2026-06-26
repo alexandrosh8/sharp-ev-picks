@@ -237,6 +237,26 @@ async def test_min_acceptable_odds_uses_live_fair_after_reprice(session) -> None
     assert ours["min_acceptable_odds"] == "2.39"
 
 
+async def test_min_acceptable_odds_uses_volume_floor_for_volume_tier(session) -> None:  # type: ignore[no-untyped-def]
+    # Audit #2: a volume-tier pick is minted at value_volume_min_edge (0.015), so its
+    # "ok >= X" floor must use 0.015 — not the premium value_min_edge (0.03), which would
+    # show a floor stricter than the one the pick was actually held to.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(
+        session,
+        make_pick("evt-volfloor", tier="volume", decimal_odds=2.00, edge=0.02),
+        teams,
+        "value-sharp-vs-soft",
+        "vf-1",
+    )
+    payload = await latest_picks_with_events(
+        session, limit=200, min_edge=0.03, volume_min_edge=0.015
+    )
+    ours = [p for p in payload if p["bookmaker"] == "testbook"][0]
+    # volume floor from entry fair 0.55 at 0.015: 1/(0.55-0.015)=1.869 -> ceil 1.87 (NOT 1.93)
+    assert ours["min_acceptable_odds"] == "1.87"
+
+
 async def test_premium_key_is_shielded_from_volume_redetection(session) -> None:  # type: ignore[no-untyped-def]
     # The unique key (event, market, selection, model) collides across tiers
     # BY DESIGN; tier may only ratchet upward. A premium row must never be

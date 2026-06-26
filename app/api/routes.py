@@ -604,7 +604,9 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
-def _attach_confidence(rows: list[dict[str, Any]], threshold: float) -> list[dict[str, Any]]:
+def _attach_confidence(
+    rows: list[dict[str, Any]], threshold: float, volume_threshold: float
+) -> list[dict[str, Any]]:
     """Add a `confidence_rating` block to each /picks row from existing fields.
 
     The star rating is the dashboard headline that replaces the recommended
@@ -623,9 +625,11 @@ def _attach_confidence(rows: list[dict[str, Any]], threshold: float) -> list[dic
         edge = _coerce_float(row.get("current_edge"))
         if edge is None:
             edge = _coerce_float(row.get("edge")) or 0.0
+        # rate against the floor the pick was held to (volume vs premium) — audit #2
+        thr = volume_threshold if row.get("tier") == "volume" else threshold
         rating = confidence_rating(
             edge=edge,
-            threshold=threshold,
+            threshold=thr,
             value_filter_score=_coerce_float(row.get("value_filter_score")),
             anchor_type=row.get("anchor_type"),
             book_count=None,
@@ -659,9 +663,13 @@ async def latest_picks(
     ("still +EV down to X.XX" on the dashboard)."""
     from app.config import get_settings
 
-    threshold = get_settings().value_min_edge
-    rows = await latest_picks_with_events(session, limit, tier=tier, min_edge=threshold)
-    return _attach_confidence(rows, threshold)
+    settings = get_settings()
+    threshold = settings.value_min_edge
+    volume_threshold = settings.value_volume_min_edge
+    rows = await latest_picks_with_events(
+        session, limit, tier=tier, min_edge=threshold, volume_min_edge=volume_threshold
+    )
+    return _attach_confidence(rows, threshold, volume_threshold)
 
 
 async def _warehouse_available_games(
