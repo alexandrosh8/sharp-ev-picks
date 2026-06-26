@@ -809,7 +809,12 @@ async def finalize_closing_from_snapshots(
         # masked the -EV. Stamped beside the anchor type so the trusted sharp
         # subset can exclude self-priced closes. Consensus -> True (a >=3-book
         # median is independent of any single fill by construction).
-        pick.close_independent_of_fill = close_is_independent_of_fill(close_anchor, pick.bookmaker)
+        pick.close_independent_of_fill = close_is_independent_of_fill(
+            close_anchor,
+            pick.bookmaker,
+            pick_anchor_type=pick.anchor_type or "",
+            close_anchor_type=pick.closing_anchor_type or "",
+        )
     if close_odds is not None and close_odds > 1.0:
         pick.closing_odds = Decimal(f"{close_odds:.4f}")
     logger.info(

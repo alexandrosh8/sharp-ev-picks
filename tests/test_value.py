@@ -389,6 +389,38 @@ def test_close_is_independent_of_fill_detects_circular_self_priced_close() -> No
     assert close_is_independent_of_fill("", "Pinnacle") is True
 
 
+def test_close_is_independent_of_fill_rejects_same_sharp_source_as_pick() -> None:
+    # Audit finding #2: pick-time and close-time inject the SAME archived sharp line,
+    # so a close from the SAME sharp SOURCE as the pick is circular (close_fair ~= pick
+    # fair, |clv|~0 fake CLV). A trustworthy close must come from a DIFFERENT sharp
+    # source than the one that anchored the pick.
+    from app.edge.value import close_is_independent_of_fill
+
+    # same sharp source (pick anchored Pinnacle, close also Pinnacle) -> circular
+    assert (
+        close_is_independent_of_fill(
+            "Pinnacle", "Bet365", pick_anchor_type="pinnacle", close_anchor_type="pinnacle"
+        )
+        is False
+    )
+    # DIFFERENT sharp sources (pick Pinnacle, close Betfair/sharp) -> independent
+    assert (
+        close_is_independent_of_fill(
+            "Betfair Exchange", "Bet365", pick_anchor_type="pinnacle", close_anchor_type="sharp"
+        )
+        is True
+    )
+    # a consensus-anchored PICK validated by a real sharp close -> independent
+    assert (
+        close_is_independent_of_fill(
+            "Pinnacle", "Bet365", pick_anchor_type="consensus", close_anchor_type="pinnacle"
+        )
+        is True
+    )
+    # back-compat: with no anchor-type args, only the fill-book check applies
+    assert close_is_independent_of_fill("Pinnacle", "Bet365") is True
+
+
 def test_consensus_anchor_dedups_casing_variant_books() -> None:
     # audit #5: two raw keys that normalize to the same book ('BookA' + 'booka')
     # must count ONCE in the per-selection median. 'home' deduped median of

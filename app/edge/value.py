@@ -77,25 +77,43 @@ def is_sharp_anchored(anchor_book: str) -> bool:
     return bool(anchor_book) and anchor_book != CONSENSUS_ANCHOR
 
 
-def close_is_independent_of_fill(close_anchor_book: str, fill_book: str) -> bool:
-    """Whether the CLOSE was priced INDEPENDENTLY of the fill book (P0-1/P0-3).
+def close_is_independent_of_fill(
+    close_anchor_book: str,
+    fill_book: str,
+    *,
+    pick_anchor_type: str = "",
+    close_anchor_type: str = "",
+) -> bool:
+    """Whether the CLOSE was priced INDEPENDENTLY of the pick (P0-1/P0-3).
 
-    A "sharp" close whose anchor book IS the pick's own fill book is CIRCULAR —
-    the pick's own book pricing its own close (closing == fill, |clv_log|~0). That
-    fake CLV is what masked the -EV, so it must never count as genuine CLV.
+    A close is CIRCULAR (fake CLV, |clv_log|~0) two ways:
+    (1) it is anchored by the pick's OWN fill book (the book pricing its own close), or
+    (2) it is anchored by the SAME sharp SOURCE that set pick-time fair — pick-time and
+        close-time inject the same archived sharp line (audit 2026-06-25 finding #2), so
+        close_fair ~= the number the edge was measured against and CLV is mechanical.
+        A trustworthy close must come from a DIFFERENT source than the pick's anchor.
 
-    `close_anchor_book` is the book that anchored the close (a named sharp book
-    from SHARP_BOOKS, or the CONSENSUS_ANCHOR sentinel); `fill_book` is the pick's
-    own bookmaker. Independent iff the close anchor is NOT (a normalized match to)
-    the fill book. The CONSENSUS_ANCHOR is a >= MIN_CONSENSUS_BOOKS median, not a
-    single book, so it is independent of any single fill by construction (the
-    sentinel never normalizes to a real book name -> True). A blank/unknown close
-    anchor is treated as independent (it is not a self-priced close). Pure
-    function (tested directly); the CLV true-up persists its result on each pick.
+    `close_anchor_book` is the book that anchored the close (a named sharp book from
+    SHARP_BOOKS, or the CONSENSUS_ANCHOR sentinel); `fill_book` is the pick's own
+    bookmaker. The optional keyword `pick_anchor_type`/`close_anchor_type` are the anchor
+    TYPES (pinnacle/sharp/consensus, via ``anchor_type_for``) of the pick and the close;
+    when both are present and equal, the close is same-source => NOT independent. A
+    CONSENSUS or blank close anchor is a >= MIN_CONSENSUS_BOOKS median, independent of any
+    single fill by construction. Pure function (tested directly); the CLV true-up persists
+    its result on each pick.
     """
     if not close_anchor_book or close_anchor_book == CONSENSUS_ANCHOR:
         return True
-    return _norm(close_anchor_book) != _norm(fill_book)
+    # (1) the pick's own fill book pricing its own close
+    if _norm(close_anchor_book) == _norm(fill_book):
+        return False
+    # (2) the SAME sharp source at pick-time and close-time (same archived line) is
+    # circular; only a close from a DIFFERENT source is independent.
+    return not (
+        pick_anchor_type
+        and close_anchor_type
+        and _norm(pick_anchor_type) == _norm(close_anchor_type)
+    )
 
 
 @dataclass(frozen=True)
