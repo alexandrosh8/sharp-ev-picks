@@ -1027,7 +1027,11 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         from app.clv_trueup import revalidate_offwindow_picks, revalidate_open_picks
 
         try:
-            await revalidate_open_picks(deps.session_factory, snapshots, deps.devig_method)
+            # Re-price against the SAME anchored set used at mint (anchor_snapshots =
+            # scrape + injected Pinnacle/Betfair sharp lines), NOT raw snapshots — else
+            # current_edge re-anchors on the soft consensus and can flip from an anchor
+            # SWITCH rather than a true line move (audit #8, 2026-06-26).
+            await revalidate_open_picks(deps.session_factory, anchor_snapshots, deps.devig_method)
             await revalidate_offwindow_picks(
                 deps.loader,
                 deps.session_factory,
