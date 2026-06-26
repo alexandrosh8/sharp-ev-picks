@@ -107,6 +107,11 @@ class EventDirectory:
             kickoff = prefer_kickoff(existing.starts_at, teams.starts_at)
             if kickoff != teams.starts_at:
                 teams = replace(teams, starts_at=kickoff)
+            # A known country must NEVER be clobbered by an empty one: the OddsHarvester
+            # dated-page path registers country="" while the JSON-feed bootstrap carries
+            # the real countryName (register order varies). Preserve it, like kickoff.
+            if existing.country and not teams.country:
+                teams = replace(teams, country=existing.country)
         self._events[event_id] = teams
 
     def lookup(self, event_id: str) -> EventTeams | None:

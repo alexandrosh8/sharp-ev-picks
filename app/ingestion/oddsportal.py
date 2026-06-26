@@ -1559,6 +1559,7 @@ class OddsPortalLoader:
                 home=home,
                 away=away,
                 league=league,
+                country=str(match.get("country_name") or ""),
                 starts_at=_parse_ts(match.get("match_date")),
                 # Final score + explicit finished-status, present on a post-finish
                 # scrape. The capture path settles from these, gated by `finished`
@@ -1746,6 +1747,9 @@ def _event_finished_fields(html: str) -> dict[str, Any]:
             "is_finished": event.get("isFinished"),
             "event_stage_id": body.get("eventStageId"),
             "event_stage_name": body.get("eventStageName"),
+            # league country (eventData.countryName) for the dated-page EventTeams —
+            # the JSON-feed path captures it separately (feature A, 2026-06-26).
+            "country_name": event.get("countryName"),
         }
     except (ValueError, TypeError, AttributeError):
         return {}
