@@ -344,10 +344,18 @@ async def latest_picks_with_events(
     def _min_acceptable(p: Pick) -> str | None:
         if min_edge is None:
             return None
-        fair = float(p.model_probability)
+        # Reason against the SAME fair the LIVE verdict (current_edge) uses: the
+        # re-priced live fair (closing_fair_probability) once a re-price exists, else
+        # the entry fair (model_probability). Otherwise "ok >= X" (entry fair) would
+        # contradict "no value now" (live fair) at an UNCHANGED price (audit 2026-06-26).
+        fair = (
+            float(p.closing_fair_probability)
+            if p.closing_fair_probability is not None
+            else float(p.model_probability)
+        )
         if not 0.0 < fair < 1.0:
             return None  # degenerate stored prob: no honest floor exists
-        floor = min_acceptable_odds(fair, min_edge, book=p.bookmaker)
+        floor = min_acceptable_odds(fair, min_edge, book=p.current_bookmaker or p.bookmaker)
         return f"{ceil_odds(floor):.2f}" if floor is not None else None
 
     home = aliased(Team)
@@ -426,6 +434,11 @@ async def latest_picks_with_events(
             "beat_close": p.beat_close,
             "current_odds": str(p.current_odds) if p.current_odds is not None else None,
             "current_edge": str(p.current_edge) if p.current_edge is not None else None,
+            # the LIVE re-priced fair the current_edge + "ok >=" floor reason against
+            # (entry fair is model_probability; this is what moved, not the odds).
+            "closing_fair_probability": str(p.closing_fair_probability)
+            if p.closing_fair_probability is not None
+            else None,
             # the de-vigged CLOSING price (last odds before kickoff), set at
             # settlement by finalize_closing_from_snapshots. null until then —
             # for a kicked-off-but-unsettled pick the frozen current_odds is the

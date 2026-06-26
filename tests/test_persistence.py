@@ -212,6 +212,31 @@ async def test_volume_pick_persists_with_tier_and_serializes_it(session) -> None
     assert ours and ours[0]["tier"] == "volume"  # API exposes the tier
 
 
+async def test_min_acceptable_odds_uses_live_fair_after_reprice(session) -> None:  # type: ignore[no-untyped-def]
+    # Audit 2026-06-26: "ok >= X" must reason about the SAME fair the LIVE edge uses.
+    # After a re-price drops the live fair (closing_fair_probability) below the entry
+    # fair (model_probability) at an unchanged price, the value floor must rise from the
+    # LIVE fair — otherwise the card says "price clears the floor (ok >= X)" while
+    # current_edge says "no value now" at the same odds.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(
+        session, make_pick("evt-livefair", decimal_odds=2.00), teams, "value-sharp-vs-soft", "lf-1"
+    )
+    row = await session.scalar(select(Pick).where(Pick.bookmaker == "testbook"))
+    assert row is not None
+    # live re-price: fair dropped 0.55 -> 0.45 at the same 2.00 price => value gone
+    row.closing_fair_probability = Decimal("0.450000")
+    row.current_odds = Decimal("2.0000")
+    row.current_edge = Decimal("-0.050000")
+    row.current_bookmaker = "testbook"
+    await session.flush()
+
+    payload = await latest_picks_with_events(session, limit=200, min_edge=0.03)
+    ours = [p for p in payload if p["bookmaker"] == "testbook"][0]
+    # floor from the LIVE fair 0.45: 1/(0.45-0.03)=2.381 -> ceil 2.39 (NOT entry-fair 1.93)
+    assert ours["min_acceptable_odds"] == "2.39"
+
+
 async def test_premium_key_is_shielded_from_volume_redetection(session) -> None:  # type: ignore[no-untyped-def]
     # The unique key (event, market, selection, model) collides across tiers
     # BY DESIGN; tier may only ratchet upward. A premium row must never be

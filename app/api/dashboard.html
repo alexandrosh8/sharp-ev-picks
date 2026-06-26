@@ -2039,7 +2039,12 @@
       //   CLOSED     = kicked off (line has closed; CLV locked) — the
       //                proof-of-edge ledger, awaiting a settled result.
       function inLiveTab(p) {
-        return p.status === "alerted" && isVerified(p) && !hasStarted(p);
+        // LIVE = bettable NOW: alerted, freshly re-priced, pre-kickoff, AND value still
+        // present. A value-gone pick (current_edge <= 0) drops to UNVERIFIED so the LIVE
+        // board never shows a "no value now" pick as bettable (audit 2026-06-26).
+        return (
+          p.status === "alerted" && isVerified(p) && !hasStarted(p) && !valueGone(p)
+        );
       }
       function inClosedTab(p) {
         return p.status === "alerted" && hasStarted(p);
@@ -2809,26 +2814,36 @@
       }
 
       function cellFairEv(tr, p) {
-        // model_probability IS the devigged sharp fair prob in the value
-        // pipeline (the validated default).
+        // Fair % AND EV reason about the SAME fair the Edge column uses: the LIVE
+        // re-priced fair (closing_fair_probability) once a re-price exists, else the
+        // entry fair (model_probability). Showing the entry fair/EV next to a "no value
+        // now" live edge contradicted the card (audit 2026-06-26).
+        const reprised = p.closing_fair_probability != null;
+        const liveFair = reprised
+          ? Number(p.closing_fair_probability)
+          : Number(p.model_probability);
         const fairCell = document.createElement("div");
         const fairPct = document.createElement("span");
-        fairPct.textContent = pct(p.model_probability);
+        fairPct.textContent = pct(liveFair);
         const evLine = document.createElement("small");
         evLine.style.display = "block";
         evLine.style.color = "var(--faint)";
-        evLine.textContent = "EV +" + pct(p.ev);
+        // live EV from the live fair + current price (else the entry EV, pre-re-price).
+        let ev = Number(p.ev);
+        if (reprised && p.current_odds != null) {
+          ev = liveFair * Number(p.current_odds) - 1;
+        }
+        const evPct = ev * 100;
+        evLine.textContent = "EV " + (evPct >= 0 ? "+" : "") + evPct.toFixed(1) + "%";
         fairCell.append(fairPct, evLine);
         const cell = td(tr, fairCell);
         cell.dataset.label = "Fair / EV";
-        // Pre-empt the same entry-vs-live confusion as Edge: this EV is the
-        // value at the ENTRY price. Once the line moves, the live read is the
-        // Edge column ("no value now" if the current price no longer beats fair).
-        cell.title =
-          "Fair % = de-vigged sharp fair win probability (the anchor — stays " +
-          "put). EV = expected value at the ENTRY price when first flagged; " +
-          "after the line moves the live read is the Edge column — “no value " +
-          "now” if the current price no longer beats fair.";
+        cell.title = reprised
+          ? "Fair % = LIVE de-vigged sharp fair (entry was " +
+            pct(p.model_probability) +
+            "). EV = live expected value at the current price — negative once the " +
+            "price no longer beats fair."
+          : "Fair % = de-vigged sharp fair win probability. EV = expected value at the entry price.";
       }
 
       function cellEdge(tr, p) {
