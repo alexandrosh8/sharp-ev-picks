@@ -71,24 +71,24 @@ _LOGIN_HTML = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PICKS TERMINAL — sign in</title>
+    <title>TAPE — sign in</title>
     <style>
       :root {
-        --bg: #0a0c10;
-        --surface-1: #0f1216;
-        --surface-2: #151921;
-        --line: #232a35;
-        --text: #e8edf4;
-        --dim: #aeb8c6;
-        --faint: #8793a3;
-        --pos: #34d399;
-        --neg: #f4525f;
-        --info: #38bdf8;
-        --radius: 10px;
-        --radius-sm: 6px;
+        --bg: #100d09;
+        --surface-1: #16120c;
+        --surface-2: #1e1810;
+        --line: #2d2417;
+        --text: #ece2cf;
+        --dim: #b4a78f;
+        --faint: #8a7e67;
+        --pos: #4fc78d;
+        --neg: #e2554a;
+        --info: #d3a02f;
+        --radius: 3px;
+        --radius-sm: 3px;
         --font-display:
-          "SF Pro Display", "Söhne", "Geist", "Helvetica Neue", system-ui,
-          -apple-system, sans-serif;
+          ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
+          monospace;
         --mono:
           ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
           Consolas, monospace;
@@ -105,25 +105,32 @@ _LOGIN_HTML = """<!doctype html>
         justify-content: center;
         padding: 24px;
         background:
-          radial-gradient(900px 380px at 50% -8%,
-            rgba(52, 211, 153, 0.06), transparent 60%), var(--bg);
+          radial-gradient(820px 360px at 50% -10%,
+            rgba(79, 199, 141, 0.07), transparent 60%),
+          repeating-linear-gradient(0deg, transparent 0 23px, rgba(45, 36, 23, 0.28) 23px 24px),
+          repeating-linear-gradient(90deg, transparent 0 23px, rgba(45, 36, 23, 0.16) 23px 24px),
+          var(--bg);
       }
       .card {
         width: 100%;
         max-width: 360px;
         border: 1px solid var(--line);
         border-radius: var(--radius);
-        background: var(--surface-2);
+        background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
         padding: 26px 24px 22px;
-        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
       }
       .brand {
+        display: flex;
+        align-items: baseline;
         font-family: var(--font-display);
-        font-size: 19px;
-        font-weight: 600;
-        letter-spacing: 0.14em;
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: 0.22em;
         color: var(--text);
       }
+      .brand .mark { color: var(--pos); letter-spacing: 0; margin-right: 7px; }
+      .brand .tick { color: var(--pos); }
       .sub {
         color: var(--faint);
         font-size: 10px;
@@ -151,12 +158,13 @@ _LOGIN_HTML = """<!doctype html>
         font: 13px var(--mono);
         letter-spacing: 0.02em;
       }
-      input:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+      input:hover { border-color: var(--faint); }
+      input:focus-visible { outline: 2px solid var(--pos); outline-offset: 2px; }
       button {
         width: 100%;
         margin-top: 22px;
         cursor: pointer;
-        background: rgba(52, 211, 153, 0.10);
+        background: rgba(79, 199, 141, 0.10);
         color: var(--pos);
         border: 1px solid var(--pos);
         border-radius: var(--radius-sm);
@@ -166,8 +174,8 @@ _LOGIN_HTML = """<!doctype html>
         text-transform: uppercase;
         transition: background-color 120ms, box-shadow 120ms;
       }
-      button:hover { background: rgba(52, 211, 153, 0.18); box-shadow: 0 0 0 1px var(--pos); }
-      button:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+      button:hover { background: rgba(79, 199, 141, 0.18); box-shadow: 0 0 0 1px var(--pos); }
+      button:focus-visible { outline: 2px solid var(--pos); outline-offset: 2px; }
       .err {
         color: var(--neg);
         font-size: 11px;
@@ -175,12 +183,15 @@ _LOGIN_HTML = """<!doctype html>
         margin-top: 13px;
         letter-spacing: 0.02em;
       }
+      @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; animation: none !important; }
+      }
     </style>
   </head>
   <body>
     <form class="card" id="login-form" autocomplete="off">
-      <div class="brand">PICKS&nbsp;TERMINAL</div>
-      <div class="sub">sign in to continue</div>
+      <div class="brand"><span class="mark">▌</span>TAPE<span class="tick">.</span></div>
+      <div class="sub">picks terminal · sign in</div>
       <label for="u">Username</label>
       <input id="u" name="username" type="text" autocomplete="username" autofocus />
       <label for="p">Password</label>
@@ -352,24 +363,24 @@ _SETUP_HTML = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PICKS TERMINAL — first-run setup</title>
+    <title>TAPE — first-run setup</title>
     <style>
       :root {
-        --bg: #0a0c10;
-        --surface-1: #0f1216;
-        --surface-2: #151921;
-        --line: #232a35;
-        --text: #e8edf4;
-        --dim: #aeb8c6;
-        --faint: #8793a3;
-        --pos: #34d399;
-        --neg: #f4525f;
-        --info: #38bdf8;
-        --radius: 10px;
-        --radius-sm: 6px;
+        --bg: #100d09;
+        --surface-1: #16120c;
+        --surface-2: #1e1810;
+        --line: #2d2417;
+        --text: #ece2cf;
+        --dim: #b4a78f;
+        --faint: #8a7e67;
+        --pos: #4fc78d;
+        --neg: #e2554a;
+        --info: #d3a02f;
+        --radius: 3px;
+        --radius-sm: 3px;
         --font-display:
-          "SF Pro Display", "Söhne", "Geist", "Helvetica Neue", system-ui,
-          -apple-system, sans-serif;
+          ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
+          monospace;
         --mono:
           ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
           Consolas, monospace;
@@ -386,25 +397,32 @@ _SETUP_HTML = """<!doctype html>
         justify-content: center;
         padding: 24px;
         background:
-          radial-gradient(900px 380px at 50% -8%,
-            rgba(52, 211, 153, 0.06), transparent 60%), var(--bg);
+          radial-gradient(820px 360px at 50% -10%,
+            rgba(79, 199, 141, 0.07), transparent 60%),
+          repeating-linear-gradient(0deg, transparent 0 23px, rgba(45, 36, 23, 0.28) 23px 24px),
+          repeating-linear-gradient(90deg, transparent 0 23px, rgba(45, 36, 23, 0.16) 23px 24px),
+          var(--bg);
       }
       .card {
         width: 100%;
         max-width: 360px;
         border: 1px solid var(--line);
         border-radius: var(--radius);
-        background: var(--surface-2);
+        background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
         padding: 26px 24px 22px;
-        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
       }
       .brand {
+        display: flex;
+        align-items: baseline;
         font-family: var(--font-display);
-        font-size: 19px;
-        font-weight: 600;
-        letter-spacing: 0.14em;
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: 0.22em;
         color: var(--text);
       }
+      .brand .mark { color: var(--pos); letter-spacing: 0; margin-right: 7px; }
+      .brand .tick { color: var(--pos); }
       .sub {
         color: var(--faint);
         font-size: 10px;
@@ -432,12 +450,13 @@ _SETUP_HTML = """<!doctype html>
         font: 13px var(--mono);
         letter-spacing: 0.02em;
       }
-      input:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+      input:hover { border-color: var(--faint); }
+      input:focus-visible { outline: 2px solid var(--pos); outline-offset: 2px; }
       button {
         width: 100%;
         margin-top: 22px;
         cursor: pointer;
-        background: rgba(52, 211, 153, 0.10);
+        background: rgba(79, 199, 141, 0.10);
         color: var(--pos);
         border: 1px solid var(--pos);
         border-radius: var(--radius-sm);
@@ -447,8 +466,8 @@ _SETUP_HTML = """<!doctype html>
         text-transform: uppercase;
         transition: background-color 120ms, box-shadow 120ms;
       }
-      button:hover { background: rgba(52, 211, 153, 0.18); box-shadow: 0 0 0 1px var(--pos); }
-      button:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+      button:hover { background: rgba(79, 199, 141, 0.18); box-shadow: 0 0 0 1px var(--pos); }
+      button:focus-visible { outline: 2px solid var(--pos); outline-offset: 2px; }
       .hint { color: var(--faint); font-size: 10px; margin-top: 6px; letter-spacing: 0.02em; }
       .err {
         color: var(--neg);
@@ -457,11 +476,14 @@ _SETUP_HTML = """<!doctype html>
         margin-top: 13px;
         letter-spacing: 0.02em;
       }
+      @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; animation: none !important; }
+      }
     </style>
   </head>
   <body>
     <form class="card" id="setup-form" autocomplete="off">
-      <div class="brand">PICKS&nbsp;TERMINAL</div>
+      <div class="brand"><span class="mark">▌</span>TAPE<span class="tick">.</span></div>
       <div class="sub">first run · create your admin password</div>
       <label for="u">Username</label>
       <input id="u" name="username" type="text" autocomplete="username" value="admin" />
