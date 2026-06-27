@@ -640,15 +640,6 @@ def test_dashboard_renders_known_kickoff_and_clean_tbd() -> None:
     assert "time to be confirmed" in text
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="TAPE redesign dropped the stratified live-evidence panel (renderEvidence / "
-    "by_score / by_tier insufficient-n groups — the VALUE_ML_FILTER-flip instrument). "
-    "GET /performance still serves `live_evidence`, so this is a dashboard rendering gap, "
-    "not a data gap. The min-odds execution helper (min_acceptable_odds / 'Still +EV down "
-    "to') DID survive in the pick card. Restore the panel to flip this back to green. "
-    "See coverage report (genuinely-missing dashboard behaviours).",
-)
 def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
     """Live-evidence panel + execution helper on the dashboard: honest-n
     insufficient states, hidden-until-served panel, the 'ok >=' odds-floor
@@ -752,14 +743,6 @@ def test_dashboard_open_card_matches_live_tab() -> None:
     assert "premium.filter(inLiveTab)" in text
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="TAPE redesign dropped the numeric entry->live fair delta ('fair 64%->58%') and "
-    "the 'needs >= X (fair drifted out)' odds-floor note. The card shows the CURRENT live "
-    "fair (mkStat 'fair') plus a visual fill-vs-fair-vs-close drift BAR, but not the "
-    "entry->live numeric delta nor the drifted-out wording. Restore them to flip this back "
-    "to green. See coverage report (genuinely-missing dashboard behaviours).",
-)
 def test_dashboard_shows_fair_drift_delta() -> None:
     """Welwalo clarity: when a re-price moved the fair probability, the Fair/EV
     cell shows a VISIBLE entry->live delta (e.g. 'fair 64%->58%'), and the
@@ -1039,35 +1022,36 @@ def test_dashboard_settled_view_swaps_table_header() -> None:
     assert "function mkStat(label, val)" in text
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="TAPE redesign replaced the sortable picks TABLE with an auto-ordered card feed: "
-    "cards sort best-on-top by confidence then effective edge (rows.sort with conf()/eff()), "
-    "but the interactive column-sort machinery (SORT_COLS registry, toggleSort, aria-sort "
-    "headers, OUTCOME_RANK, pt_sortcol/pt_sortdir persistence) is gone — there are no column "
-    "headers to click. The default best-on-top ordering survives; clickable/persisted sorting "
-    "does not. Restore it (or drop the requirement) to resolve this. See coverage report.",
-)
-def test_dashboard_picks_table_columns_are_sortable() -> None:
-    """Clickable column-sort machinery is served: a comparator registry keyed
-    per column, per-view sortable-key gating, a toggle that flips direction,
-    accessible sortable headers (aria-sort), and persisted column+direction
-    validated on restore. Display-only — sorts the `rows` array, never the
-    server ORDER BY (the no-innerHTML XSS contract is asserted globally)."""
+def test_dashboard_tape_has_persisted_sort_control() -> None:
+    """The TAPE card feed replaced the old clickable column-sort TABLE with an
+    explicit 'sort by' selector over the tape. The control must: exist as a real
+    <select id="f-sort"> with the documented comparator options; drive the order
+    via a comparator registry consumed by render() (sortRows reads the select);
+    keep the best-on-top default (confidence -> effective edge) as the no-key
+    fallback; and PERSIST the choice in localStorage, validated against the known
+    comparators on restore. Display-only — it reorders the `rows` array, never
+    the server ORDER BY (the no-innerHTML XSS contract is asserted globally)."""
     text = TestClient(make_app()).get("/").text
-    # comparator registry + the per-view key gate
-    assert "const SORT_COLS = {" in text
-    assert "function headSortKeys(settledView)" in text
-    assert "function toggleSort(key)" in text
-    # accessible, clickable headers
-    assert 'th.classList.add("sortable")' in text
-    assert '"aria-sort"' in text
-    # settled Result ranking exists (clusters + orders outcomes)
-    assert "const OUTCOME_RANK = {" in text
-    # active column + direction persist across reloads and are validated on
-    # restore against the known comparator keys
-    assert '"pt_sortcol"' in text
-    assert '"pt_sortdir"' in text
-    assert "SORT_COLS[savedSortCol]" in text
-    # the default best-on-top sort is still the no-active-column fallback
+    # the sort control is a real, accessible selector on the tape
+    assert 'id="f-sort"' in text
+    assert 'aria-label="Sort the tape"' in text
+    # the documented comparator options are offered
+    assert '<option value="default">' in text
+    for key in ("confidence", "edge", "kickoff", "clv"):
+        assert '<option value="' + key + '">' in text
+    # a comparator registry keyed per option + the function that applies it
+    assert "const SORT_KEYS = {" in text
+    assert "function sortRows(rows, key)" in text
+    # render() drives the order from the live selector value (not a static order)
+    assert 'sortRows(rows, ($("f-sort") && $("f-sort").value) || "default")' in text
+    # the default best-on-top order (confidence -> effective edge) is the
+    # no-explicit-key fallback inside sortRows
     assert "confLevel" in text
+    assert "SORT_KEYS.confidence" in text
+    # the chosen sort PERSISTS across reloads and is validated on restore against
+    # the known comparator keys before being applied
+    assert 'localStorage.setItem("pt_sortcol"' in text
+    assert 'localStorage.getItem("pt_sortcol")' in text
+    assert "SORT_KEYS[savedSortCol]" in text
+    # display-only reorder, never a second server fetch / no XSS sink
+    assert "innerHTML" not in text

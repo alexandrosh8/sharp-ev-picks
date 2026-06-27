@@ -371,6 +371,8 @@
         color: var(--dim);
       }
       .pane-h .grow { flex: 1; }
+      .pane-h .sort-lbl { color: var(--faint); }
+      .pane-h #f-sort { font-size: 11px; padding: 3px 6px; }
 
       /* ---- view tabs (left pane) --------------------------------------- */
       #tabs { display: flex; gap: 1px; flex-wrap: wrap; padding: 8px 10px; }
@@ -603,6 +605,30 @@
       .legend div { font-size: 11px; color: var(--faint); line-height: 1.4; }
       .legend b { color: var(--dim); font-family: var(--mono); font-weight: 600; }
 
+      /* ---- live-evidence panel ---------------------------------------- */
+      .evpanel { padding: 2px 0 4px; }
+      .evtitle {
+        font-family: var(--mono); font-size: 11px; text-transform: uppercase;
+        letter-spacing: 0.08em; color: var(--dim); margin-bottom: 4px;
+      }
+      table.evtable { width: 100%; border-collapse: collapse; }
+      .evtable th, .evtable td {
+        text-align: left; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line);
+        font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dim);
+      }
+      .evtable th { color: var(--faint); font-weight: 600; text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em; }
+      .evtable td.r, .evtable th.r { text-align: right; padding-right: 0; }
+      .evtable tr.evgroup td { border-bottom: 0; padding-top: 7px; }
+      .evtoggle {
+        display: inline-flex; align-items: baseline; gap: 6px; width: 100%;
+        background: transparent; border: 0; color: var(--dim); cursor: pointer;
+        font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+        letter-spacing: 0.06em; padding: 0;
+      }
+      .evtoggle .evmark { color: var(--faint); }
+      .evtoggle .evcount { margin-left: auto; color: var(--faint); }
+      .evtable td.evinsuf { color: var(--faint); font-style: italic; }
+
       @media (prefers-reduced-motion: reduce) {
         * { animation: none !important; transition: none !important; }
       }
@@ -685,6 +711,14 @@
         <div class="pane-h">
           <span class="title">The Tape</span>
           <span class="grow"></span>
+          <label class="eye sort-lbl" for="f-sort">sort</label>
+          <select id="f-sort" aria-label="Sort the tape">
+            <option value="default">Best on top</option>
+            <option value="confidence">Confidence</option>
+            <option value="edge">Edge</option>
+            <option value="kickoff">Kickoff</option>
+            <option value="clv">CLV</option>
+          </select>
           <span class="eye" id="tape-count">—</span>
         </div>
         <div id="tabs" role="tablist" aria-label="Pick views">
@@ -761,6 +795,28 @@
               <table>
                 <thead><tr><th>Kickoff</th><th>Match</th><th>League</th><th>Sport</th><th class="r">Markets</th></tr></thead>
                 <tbody id="game-rows"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- stratified live-evidence panel: hidden until /performance serves
+               live_evidence; renders per-stratum CLV/ROI with honest-n
+               suppression (the VALUE_ML_FILTER-flip instrument). Shadow-only. -->
+          <div class="sub-block">
+            <div class="evpanel" id="evidence-panel" style="display:none">
+              <div class="evtitle" id="evidence-title">Live evidence</div>
+              <div class="muted" style="margin:4px 0 8px">
+                Stratified CLV / beat-close / ROI over your settled picks — the
+                VALUE_ML_FILTER readiness instrument. Each stratum reports its n;
+                a thin stratum reads "insufficient data" instead of noise.
+                Shadow-only: changes no pick.
+              </div>
+              <table class="evtable" aria-label="Live evidence by slice">
+                <thead><tr>
+                  <th>Slice</th><th class="r">n</th><th class="r">n CLV</th>
+                  <th class="r">CLV</th><th class="r">Beat</th><th class="r">ROI</th>
+                </tr></thead>
+                <tbody id="evidence-rows"></tbody>
               </table>
             </div>
           </div>
@@ -1077,7 +1133,18 @@
                 evv = denom > 0 ? liveFair / denom - 1 : liveFair * Number(p.current_odds) - 1;
               } else evv = liveFair * Number(p.current_odds) - 1;
             }
-            st.appendChild(mkStat("fair", pct(liveFair)));
+            // Fair %: when a re-price moved the fair, show a VISIBLE entry→live
+            // delta ("fair 64%→58%") so a value-gone pick reads as "the fair
+            // drifted", not "the price moved" (not just a tooltip).
+            const entryFair = Number(p.model_probability);
+            const fairDriftShown = reprised && Math.abs(entryFair - liveFair) >= 0.005;
+            const fairStat = mkStat("fair", fairDriftShown ? pct(entryFair) + "→" + pct(liveFair) : pct(liveFair));
+            if (fairDriftShown) {
+              fairStat.title = "The de-vigged sharp fair moved from your entry " + pct(entryFair) +
+                " to " + pct(liveFair) + " — edge/EV reason against the LIVE fair, so a pick can lose " +
+                "value from the fair drifting even when the book price is unchanged.";
+            }
+            st.appendChild(fairStat);
             const evPct = evv * 100;
             st.appendChild(mkStat("EV", (evPct >= 0 ? "+" : "") + evPct.toFixed(1) + "%"));
             const eff = p.current_edge == null ? Number(p.edge) : Number(p.current_edge);
@@ -1098,8 +1165,27 @@
             if (valueGone(p)) cs.style.opacity = "0.5";
             st.appendChild(cs);
             if (p.min_acceptable_odds != null && !hasStarted(p)) {
-              const ms = mkStat("ok ≥", String(p.min_acceptable_odds));
-              ms.title = "Still +EV down to this price against the live sharp fair. Informational only.";
+              // When the FAIR drifted the value out while the book price held, the
+              // floor now sits ABOVE the current price — "ok ≥ X" would mislead
+              // (the price hasn't moved; the fair has). Read it as "needs ≥ X
+              // (fair drifted out)" in that case.
+              const priceUnchanged = p.current_odds == null ||
+                Number(p.current_odds) === Number(p.decimal_odds);
+              const fairDrifted = p.closing_fair_probability != null &&
+                Number(p.closing_fair_probability) !== Number(p.model_probability);
+              const driftedOut = priceUnchanged && fairDrifted &&
+                p.current_edge != null && Number(p.current_edge) <= 0;
+              const ms = mkStat(
+                driftedOut ? "needs ≥" : "ok ≥",
+                String(p.min_acceptable_odds) + (driftedOut ? " (fair drifted out)" : "")
+              );
+              ms.title = driftedOut
+                ? "needs ≥ " + p.min_acceptable_odds + " (fair drifted out) — your book price hasn't " +
+                  "moved, but the de-vigged sharp FAIR drifted, pushing the value floor above the current " +
+                  "price. Skip at this price. Informational only — never a profit guarantee."
+                : "still +EV down to " + p.min_acceptable_odds + " — the lowest odds at which this pick " +
+                  "keeps its tier's edge floor against the LIVE sharp fair. Informational only — never a " +
+                  "profit guarantee.";
               st.appendChild(ms);
             }
           }
@@ -1164,13 +1250,11 @@
             : inResultsTab(p);
           const rows = scoped.filter(matchesTab);
 
-          // default order: confidence then effective edge (live/unverified);
-          // results/closed keep server recent-first order.
-          if (STATUS_TAB === "live" || STATUS_TAB === "unverified") {
-            const conf = (p) => { const c = p.confidence_rating || {}; return Math.max(1, Math.min(5, Number(c.level) || 1)); };
-            const eff = (p) => { const v = Number(p.current_edge ?? p.edge); return isFinite(v) ? v : -Infinity; };
-            rows.sort((a, b) => conf(b) - conf(a) || eff(b) - eff(a));
-          }
+          // ordering: the sort selector drives the tape. "default" keeps the
+          // best-on-top order (confidence → effective edge) for live/unverified
+          // and the server recent-first order for closed/results; any explicit
+          // key reorders every view.
+          sortRows(rows, ($("f-sort") && $("f-sort").value) || "default");
 
           $("tape-count").textContent = rows.length + (rows.length === 1 ? " pick" : " picks");
           const box = $("cards");
@@ -1181,6 +1265,25 @@
           }
           if (!rows.length) { box.appendChild(emptyState()); return; }
           rows.forEach((p) => box.appendChild(pickCard(p)));
+        }
+
+        // ===== tape sort control (persisted) ========================
+        // The default best-on-top comparator (confidence → effective edge) is
+        // the no-explicit-key fallback; explicit keys reorder the whole view.
+        const confLevel = (p) => { const c = p.confidence_rating || {}; return Math.max(1, Math.min(5, Number(c.level) || 1)); };
+        const effEdge = (p) => { const v = Number(p.current_edge ?? p.edge); return isFinite(v) ? v : -Infinity; };
+        const koTime = (p) => (p.starts_at == null ? Infinity : new Date(p.starts_at).getTime());
+        const clvVal = (p) => (p.clv_log == null ? -Infinity : Number(p.clv_log));
+        const SORT_KEYS = {
+          confidence: (a, b) => confLevel(b) - confLevel(a) || effEdge(b) - effEdge(a),
+          edge: (a, b) => effEdge(b) - effEdge(a),
+          kickoff: (a, b) => koTime(a) - koTime(b),
+          clv: (a, b) => clvVal(b) - clvVal(a),
+        };
+        function sortRows(rows, key) {
+          if (key && SORT_KEYS[key]) { rows.sort(SORT_KEYS[key]); return; }
+          // default: best-on-top for live/unverified; server order elsewhere
+          if (STATUS_TAB === "live" || STATUS_TAB === "unverified") rows.sort(SORT_KEYS.confidence);
         }
 
         function emptyState() {
@@ -1354,6 +1457,131 @@
         }
         const PERF_CARDS = ["card-settled", "card-record", "card-pnl"];
 
+        // ===== stratified live-evidence panel ======================
+        // Honesty contract (mirrors app/backtesting/live_evidence.py): every
+        // stratum shows its n; a stratum whose CLV sample is under min_n shows
+        // "insufficient data (n<min_n)" INSTEAD of point estimates. The panel
+        // hides entirely on payloads without the section (older API).
+        const EVIDENCE_GROUP_OPEN = {};
+        function td(tr, text, cls) {
+          const c = document.createElement("td");
+          if (cls) c.className = cls;
+          c.textContent = text;
+          tr.appendChild(c);
+          return c;
+        }
+        function setEvidenceGroupOpen(key, open) {
+          EVIDENCE_GROUP_OPEN[key] = !!open;
+          const button = document.querySelector('[data-ev-toggle="' + key + '"]');
+          if (button) {
+            button.setAttribute("aria-expanded", String(EVIDENCE_GROUP_OPEN[key]));
+            const marker = button.querySelector(".evmark");
+            if (marker) marker.textContent = EVIDENCE_GROUP_OPEN[key] ? "[-]" : "[+]";
+          }
+          document.querySelectorAll('[data-ev-group="' + key + '"]').forEach((row) => {
+            row.hidden = !EVIDENCE_GROUP_OPEN[key];
+          });
+        }
+        function evGroupRow(tbody, key, label, count) {
+          const open = EVIDENCE_GROUP_OPEN[key] !== false;
+          const tr = document.createElement("tr");
+          tr.className = "evgroup";
+          const cell = document.createElement("td");
+          cell.colSpan = 6;
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "evtoggle";
+          button.dataset.evToggle = key;
+          button.setAttribute("aria-expanded", String(open));
+          button.title = "Show/hide " + label;
+          const marker = document.createElement("span");
+          marker.className = "evmark";
+          marker.textContent = open ? "[-]" : "[+]";
+          const name = document.createElement("span");
+          name.textContent = " " + label;
+          const rows = document.createElement("span");
+          rows.className = "evcount";
+          rows.textContent = count + " rows";
+          button.append(marker, name, rows);
+          button.addEventListener("click", () => {
+            setEvidenceGroupOpen(key, EVIDENCE_GROUP_OPEN[key] === false);
+          });
+          cell.appendChild(button);
+          tr.appendChild(cell);
+          tbody.appendChild(tr);
+          return open;
+        }
+        function evRow(tbody, groupKey, open, label, s, minN) {
+          const tr = document.createElement("tr");
+          tr.dataset.evGroup = groupKey;
+          tr.hidden = !open;
+          td(tr, label);
+          td(tr, String(s.n), "r");
+          td(tr, String(s.n_clv), "r");
+          if (!s.sufficient) {
+            const cell = td(tr, "insufficient data (n<" + minN + ")", "evinsuf");
+            cell.colSpan = 3;
+            cell.classList.add("r");
+            cell.title = "fewer than " + minN + " CLV-revalidated settled picks in this stratum — " +
+              "point estimates would be noise; the row fills in as live evidence accumulates";
+          } else {
+            const swclv = s.stake_weighted_clv_log === null ? "—"
+              : (() => { const p = (Math.exp(Number(s.stake_weighted_clv_log)) - 1) * 100; return (p >= 0 ? "+" : "") + p.toFixed(1) + "%"; })();
+            td(tr, swclv, "r");
+            td(tr, s.beat_close_rate === null ? "—" : (Number(s.beat_close_rate) * 100).toFixed(0) + "%", "r");
+            td(tr, s.roi === null ? "—" : (Number(s.roi) >= 0 ? "+" : "") + (Number(s.roi) * 100).toFixed(1) + "%", "r");
+          }
+          tbody.appendChild(tr);
+        }
+        function renderEvidence(ev) {
+          const panel = $("evidence-panel");
+          if (!ev) { panel.style.display = "none"; return; }
+          if (!Number(ev.n_settled)) { panel.style.display = "none"; return; }
+          const minN = Number(ev.min_n) || 50;
+          const tbody = $("evidence-rows");
+          tbody.replaceChildren();
+          $("evidence-title").textContent = "Live evidence — how your " + ev.n_settled + " settled picks performed";
+          // Below the floor EVERY stratum reads "insufficient data" — show one
+          // clear accumulating line instead of a wall of identical rows.
+          if (Number(ev.n_settled) < minN) {
+            const tr = document.createElement("tr");
+            const cell = td(tr, "Accumulating — " + ev.n_settled + " / " + minN +
+              " settled picks. The CLV strata fill in once ≥ " + minN +
+              " results are recorded (a smaller sample is too noisy to read). For per-match detail use the RESULTS tab.", "evinsuf");
+            cell.colSpan = 6;
+            tbody.appendChild(tr);
+            panel.style.display = "";
+            return;
+          }
+          const SCORE_LABELS = {
+            score_ge_q: "ML score ≥ q*" + (ev.q_star !== null ? " (" + Number(ev.q_star).toFixed(3) + ")" : ""),
+            score_lt_q: "ML score < q*",
+            scored: "ML scored (no q* configured)",
+            unscored: "unscored (out of model scope)",
+          };
+          // Hide the model-score slice when nothing is actually scored.
+          const scoreKeys = Object.keys(ev.by_score || {});
+          const meaningfulScore = scoreKeys.some((k) => k !== "unscored");
+          if (scoreKeys.length && meaningfulScore) {
+            const open = evGroupRow(tbody, "score", "by ML score bucket", scoreKeys.length);
+            scoreKeys.forEach((k) => evRow(tbody, "score", open, SCORE_LABELS[k] || k, ev.by_score[k], minN));
+          }
+          const tierKeys = Object.keys(ev.by_tier || {});
+          if (tierKeys.length) {
+            const open = evGroupRow(tbody, "tier", "by tier", tierKeys.length);
+            tierKeys.forEach((k) => evRow(tbody, "tier", open, k, ev.by_tier[k], minN));
+          }
+          // by_anchor === null means the anchor_type dimension is unavailable.
+          if (ev.by_anchor) {
+            const anchorKeys = Object.keys(ev.by_anchor);
+            if (anchorKeys.length) {
+              const open = evGroupRow(tbody, "anchor", "by anchor", anchorKeys.length);
+              anchorKeys.forEach((k) => evRow(tbody, "anchor", open, k, ev.by_anchor[k], minN));
+            }
+          }
+          panel.style.display = "";
+        }
+
         function fillSettled(perf) {
           $("c-settled").textContent = String(perf.n_settled);
           const hw = perf.half_won || 0, hl = perf.half_lost || 0;
@@ -1370,12 +1598,18 @@
           if (perf) {
             LAST_PERF = perf; LAST_PERF_AT = new Date();
             fillHero(perf, false); fillSettled(perf);
+            renderEvidence(perf.live_evidence);
             PERF_CARDS.forEach((id) => setCardStale(id, false));
           } else if (LAST_PERF) {
             fillHero(LAST_PERF, true); fillSettled(LAST_PERF);
+            renderEvidence(LAST_PERF.live_evidence); // frozen payload, visibly demoted
+            if (LAST_PERF.live_evidence && Number(LAST_PERF.live_evidence.n_settled)) {
+              $("evidence-title").textContent += " · STALE — /performance failing, frozen at " + fmtTime(LAST_PERF_AT);
+            }
             PERF_CARDS.forEach((id) => setCardStale(id, true, "GET /performance failing — frozen at " + fmtTime(LAST_PERF_AT), "STALE"));
           } else {
             fillHero(null, false);
+            renderEvidence(null);
             ["c-settled", "c-record", "c-pnl"].forEach((id) => ($(id).textContent = "—"));
             PERF_CARDS.forEach((id) => setCardStale(id, true, "GET /performance failing — no data loaded yet", "NO DATA"));
           }
@@ -1666,6 +1900,18 @@
           b.addEventListener("click", () => { STATUS_TAB = b.dataset.status; render(); }));
         $("f-tier").addEventListener("change", render);
         $("f-search").addEventListener("input", render);
+        // tape sort: persist the chosen comparator (validated on restore) and
+        // re-render. Persistence key mirrors the old pt_sortcol/pt_sortdir.
+        $("f-sort").addEventListener("change", () => {
+          try { localStorage.setItem("pt_sortcol", $("f-sort").value); } catch (e) {}
+          render();
+        });
+        try {
+          const savedSortCol = localStorage.getItem("pt_sortcol");
+          if (savedSortCol && (savedSortCol === "default" || SORT_KEYS[savedSortCol])) {
+            $("f-sort").value = savedSortCol;
+          }
+        } catch (e) {}
         $("btn-refresh").addEventListener("click", () => load());
         $("f-game-sport").addEventListener("change", renderGames);
         $("f-game-search").addEventListener("input", renderGames);
