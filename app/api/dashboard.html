@@ -144,6 +144,20 @@
       /* search + tier group: transparent on desktop (children stay inline in
          the command bar exactly as before); becomes a full-width row on mobile */
       .filters { display: contents; }
+      /* engine state + timestamp grouped; inline on desktop, own quiet row on mobile */
+      .status { display: inline-flex; align-items: baseline; gap: 10px; min-width: 0; }
+      /* reload / EXIT as proper bordered icon-buttons (clear affordance, big tap target) */
+      .iconbtn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+        background: var(--s2); border: 1px solid var(--line); border-radius: 3px;
+        color: var(--bone); padding: 6px 10px; min-height: 34px;
+      }
+      .iconbtn:hover { border-color: var(--faint); }
+      .iconbtn .glyph { font-size: 14px; line-height: 1; color: var(--dim); }
+      .iconbtn .blabel {
+        font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
+        text-transform: uppercase; color: var(--bone);
+      }
       .eng {
         display: inline-flex;
         align-items: center;
@@ -342,9 +356,9 @@
         }
         .filters #f-search { flex: 1 1 auto; width: auto; }
         .filters #f-tier { flex: 0 0 auto; }
-        /* "updated HH:MM:SS" is demoted to a small quiet status line beside the
-           POLLING chip — never prime top space */
-        #stamp { font-size: 9.5px; opacity: 0.85; }
+        /* "updated HH:MM:SS" is demoted to a quiet, still-readable status line
+           beside the POLLING chip — never prime top space */
+        #stamp { font-size: 10.5px; opacity: 0.9; }
         /* clear the fixed bottom tab bar so the last tape rows aren't hidden */
         body { padding-bottom: calc(58px + env(safe-area-inset-bottom)); }
         /* the wrapped filter row must ride INSIDE the sticky bar's opaque
@@ -353,6 +367,23 @@
         .cmdbar { height: auto; min-height: var(--bar-h); padding-bottom: 8px; }
         /* pane headers must not stick UNDER the now-taller command bar */
         .pane-h { position: static; }
+        /* command-bar reflow: brand + the two action icon-buttons on row 1; the
+           engine/updated status line and the search/tier filter row each drop to
+           their own full-width line, so nothing is squashed or overlapping. */
+        .cmd-grow { order: 1; }
+        #btn-refresh { order: 2; }
+        #btn-logout { order: 3; }
+        .status { order: 4; flex: 1 1 100%; display: flex; gap: 10px; }
+        /* >=44px tap targets with clear button affordance */
+        .iconbtn { min-width: 44px; min-height: 44px; padding: 8px 12px; }
+        /* THE CLOSE hero shows the SAME overall proof in every view, so its size
+           must be STABLE across tabs. Reserve heights so the "—"/accruing
+           headline and the empty (accruing) drift axis never shrink the band
+           when Results/Closed is active — the accruing state occupies the same
+           height as a populated number. */
+        .close-inner { min-height: 440px; }
+        .hero-num { min-height: 48px; display: flex; align-items: flex-end; }
+        .clvaxis { min-height: 58px; }
       }
 
       .pane-h {
@@ -643,8 +674,13 @@
         <span class="sub">picks terminal · beat the close</span>
       </div>
       <span class="cmd-grow"></span>
-      <span class="eng" id="eng"><span class="dot"></span><span id="eng-label">CONNECTING</span></span>
-      <span id="stamp">loading…</span>
+      <!-- engine state + the quiet "updated HH:MM:SS" line, grouped so the
+           timestamp reads as a calm status line and never collides with the
+           action buttons (own row on mobile). -->
+      <div class="status">
+        <span class="eng" id="eng"><span class="dot"></span><span id="eng-label">CONNECTING</span></span>
+        <span id="stamp">loading…</span>
+      </div>
       <!-- search + tier are their own group: inline on desktop, a full-width
            filter row on mobile (display:contents → flex at the breakpoint) -->
       <div class="filters">
@@ -655,8 +691,12 @@
           <option value="volume">VOLUME (shadow)</option>
         </select>
       </div>
-      <button id="btn-refresh" class="ghost" title="Refresh now">↻</button>
-      <button id="btn-logout" class="ghost" title="Log out">EXIT</button>
+      <button id="btn-refresh" class="iconbtn" type="button" aria-label="Refresh now" title="Refresh now">
+        <span class="glyph" aria-hidden="true">↻</span>
+      </button>
+      <button id="btn-logout" class="iconbtn" type="button" aria-label="Log out" title="Log out">
+        <span class="glyph" aria-hidden="true">⏻</span><span class="blabel">EXIT</span>
+      </button>
     </header>
 
     <!-- ============ THE CLOSE — full-width hero band ================== -->
