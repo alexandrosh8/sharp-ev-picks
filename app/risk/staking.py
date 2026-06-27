@@ -87,6 +87,24 @@ def uncertainty_multiplier(base: float, edge_variance: float, coef: float) -> fl
     return base / (1.0 + coef * edge_variance)
 
 
+def correlation_haircut(n_legs: int, avg_correlation: float) -> float:
+    """Diversification haircut on a per-leg Kelly fraction for CORRELATED same-slate
+    bets (B7). Independent Kelly sizes each leg as if uncorrelated, which OVERBETS
+    the slate once legs move together (Busseti-Boyd 2016, arXiv:1603.06183). For
+    ``n`` equally-correlated unit legs with average pairwise correlation ``rho``, the
+    equal-weight portfolio variance is ``n*(1 + (n-1)*rho)`` vs ``n`` when
+    independent, so scaling each leg by ``1/sqrt(1 + (n-1)*rho)`` holds total risk at
+    the independent budget. Returns 1.0 at ``n_legs <= 1`` OR ``rho == 0`` (default
+    path bit-for-bit unchanged); can only shrink, never raise. Informational."""
+    if n_legs < 1:
+        raise ValueError(f"n_legs must be >= 1, got {n_legs}")
+    if not 0.0 <= avg_correlation < 1.0:
+        raise ValueError(f"avg_correlation must be in [0, 1), got {avg_correlation}")
+    if n_legs == 1 or avg_correlation == 0.0:
+        return 1.0
+    return 1.0 / math.sqrt(1.0 + (n_legs - 1) * avg_correlation)
+
+
 def effective_kelly_multiplier(policy: StakePolicy) -> float:
     """The Kelly multiplier actually applied: the configured fraction, tightened
     by the drawdown constraint when (and only when) both knobs are set."""
@@ -114,6 +132,8 @@ def recommended_stake(
     policy: StakePolicy,
     *,
     edge_variance: float = 0.0,
+    correlated_legs: int = 1,
+    avg_correlation: float = 0.0,
 ) -> StakeBreakdown:
     raw = kelly_fraction(probability, decimal_odds)
     # effective_kelly_multiplier == policy.fractional_kelly unless the
@@ -123,6 +143,10 @@ def recommended_stake(
     # supplies a positive per-pick edge variance -> otherwise bit-for-bit unchanged.
     if policy.edge_uncertainty_coef is not None and edge_variance > 0.0:
         mult = uncertainty_multiplier(mult, edge_variance, policy.edge_uncertainty_coef)
+    # B7 correlation haircut: OFF unless the caller flags a correlated same-slate
+    # exposure (>1 leg AND positive avg correlation) -> otherwise bit-for-bit unchanged.
+    if correlated_legs > 1 and avg_correlation > 0.0:
+        mult = mult * correlation_haircut(correlated_legs, avg_correlation)
     fractional = raw * mult
     capped = fractional > policy.max_stake_fraction
     final = min(fractional, policy.max_stake_fraction)

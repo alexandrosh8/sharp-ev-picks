@@ -184,3 +184,51 @@ def test_recommended_stake_shrinks_with_edge_uncertainty() -> None:
     assert noisy.fractional < sharp.fractional
     assert noisy.final <= sharp.final
     assert noisy.raw_kelly == pytest.approx(sharp.raw_kelly)  # only sizing shrinks
+
+
+def test_correlation_haircut_no_cut_when_independent_or_single() -> None:
+    # build #5: single leg OR zero correlation -> no haircut (== 1.0).
+    from app.risk.staking import correlation_haircut
+
+    assert correlation_haircut(1, 0.5) == 1.0
+    assert correlation_haircut(5, 0.0) == 1.0
+
+
+def test_correlation_haircut_monotone_and_matches_closed_form() -> None:
+    import math
+
+    from app.risk.staking import correlation_haircut
+
+    # 5 legs at rho=0.4 -> 1/sqrt(1 + 4*0.4) = 1/sqrt(2.6)
+    assert correlation_haircut(5, 0.4) == pytest.approx(1.0 / math.sqrt(2.6))
+    # shrinks as either correlation or leg-count grows; always in (0, 1]
+    assert 1.0 > correlation_haircut(3, 0.4) > correlation_haircut(5, 0.4) > 0.0
+    assert correlation_haircut(5, 0.2) > correlation_haircut(5, 0.6)
+
+
+def test_correlation_haircut_rejects_bad_inputs() -> None:
+    from app.risk.staking import correlation_haircut
+
+    with pytest.raises(ValueError):
+        correlation_haircut(0, 0.3)
+    with pytest.raises(ValueError):
+        correlation_haircut(3, -0.1)
+    with pytest.raises(ValueError):
+        correlation_haircut(3, 1.0)  # rho must be < 1
+
+
+def test_recommended_stake_unchanged_when_correlation_off() -> None:
+    # default (1 leg, 0 corr) -> bit-for-bit unchanged.
+    policy = StakePolicy()
+    assert recommended_stake(0.60, 2.10, policy, correlated_legs=1, avg_correlation=0.5) == (
+        recommended_stake(0.60, 2.10, policy)
+    )
+
+
+def test_recommended_stake_shrinks_for_correlated_slate() -> None:
+    # build #5: >1 correlated leg + positive correlation -> smaller stake; raw edge unchanged.
+    policy = StakePolicy(max_stake_fraction=1.0)
+    solo = recommended_stake(0.60, 2.10, policy)
+    slate = recommended_stake(0.60, 2.10, policy, correlated_legs=5, avg_correlation=0.4)
+    assert slate.fractional < solo.fractional
+    assert slate.raw_kelly == pytest.approx(solo.raw_kelly)
