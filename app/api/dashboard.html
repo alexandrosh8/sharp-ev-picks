@@ -117,12 +117,14 @@
         display: flex;
         align-items: center;
         gap: 12px;
-        height: var(--bar-h);
         /* fill the TOP safe-area (Dynamic Island / notch) so the banner reaches
-           the screen's top edge on iPhone Pro Max instead of sitting below a gap
-           — the bottom inset was already handled, the top was missing. env() is
-           0 on devices without an inset, so non-notch layouts are unchanged; on
-           mobile .cmdbar is height:auto so the bar grows by the inset. */
+           the screen's top edge — the bottom inset was already handled, the top
+           was missing. Put the inset in the HEIGHT (not just padding) so the bar
+           GROWS by it on EVERY breakpoint: under global border-box a fixed height
+           would otherwise have the padding eaten out of it, overflowing the
+           controls on a wide/standalone-PWA viewport with a notch (Codex P2).
+           env() is 0 without an inset, so non-notch layouts are unchanged. */
+        height: calc(var(--bar-h) + env(safe-area-inset-top));
         padding: env(safe-area-inset-top) 14px 0;
         background: rgba(22, 18, 12, 0.94);
         backdrop-filter: blur(6px);
@@ -348,7 +350,7 @@
 
       @media (min-width: 981px) {
         #tape {
-          position: sticky; top: var(--bar-h);
+          position: sticky; top: calc(var(--bar-h) + env(safe-area-inset-top));
           max-height: calc(100vh - var(--bar-h));
           overflow: auto;
         }
@@ -377,7 +379,7 @@
         /* the wrapped filter row must ride INSIDE the sticky bar's opaque
            background — the fixed height clipped it, letting scrolled content
            bleed through between the two rows. Let the bar grow to fit both. */
-        .cmdbar { height: auto; min-height: var(--bar-h); padding-bottom: 8px; }
+        .cmdbar { height: auto; min-height: calc(var(--bar-h) + env(safe-area-inset-top)); padding-bottom: 8px; }
         /* auto-hiding header: slides up on scroll-down, back on scroll-up */
         .cmdbar.hidden { transform: translateY(-100%); }
         /* pane headers must not stick UNDER the now-taller command bar */
