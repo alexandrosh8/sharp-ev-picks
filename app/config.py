@@ -948,6 +948,24 @@ class Settings(BaseSettings):
         """Live OddsPortal scrape outbound proxy pool, in rotation order."""
         return parse_scraper_proxy_pool(self.scraper_proxy_pool.get_secret_value())
 
+    def arcadia_effective_proxy_urls(self) -> tuple[str, ...]:
+        """Proxy URLs for the Pinnacle Arcadia client, in rotation order.
+
+        Arcadia 403s datacenter egress, so a proxy is REQUIRED for capture
+        (direct fetches fail /sports discovery + every matchup). Prefer the
+        dedicated ARCADIA_PROXY_URLS; when unset, fall back to the shared scraper
+        pool — credentials embedded in the URL, the same shape parse_proxy_urls
+        already accepts — so a single SCRAPER_PROXY_POOL keeps the sharp Pinnacle
+        archive flowing without duplicate config. Empty only when BOTH are unset
+        (capture then runs direct and 403s — logged, never fatal)."""
+        own = self.arcadia_proxies()
+        if own:
+            return own
+        return tuple(
+            f"http://{p.username}:{p.password}@{p.url.split('://', 1)[-1]}"
+            for p in self.scraper_proxies()
+        )
+
 
 def gate_policy(settings: Settings) -> GatePolicy:
     return GatePolicy(

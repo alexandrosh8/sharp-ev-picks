@@ -484,3 +484,30 @@ def test_parse_scraper_proxy_pool_parses_and_hides_creds() -> None:
         parse_scraper_proxy_pool("1.2.3.4|notaport|u|p")
     # empty -> empty tuple (default OFF)
     assert parse_scraper_proxy_pool("") == ()
+
+
+def test_arcadia_effective_proxy_urls_prefers_dedicated() -> None:
+    # ARCADIA_PROXY_URLS wins over the scraper pool when set.
+    s = make_settings(
+        arcadia_proxy_urls="http://u:p@host.example:8080",
+        scraper_proxy_pool="h2|9000|user2|pass2",
+    )
+    assert s.arcadia_effective_proxy_urls() == ("http://u:p@host.example:8080",)
+
+
+def test_arcadia_effective_proxy_urls_falls_back_to_scraper_pool() -> None:
+    # Arcadia 403s direct egress, so with ARCADIA_PROXY_URLS unset it reuses the
+    # scraper pool (creds embedded in the URL) to keep the Pinnacle archive flowing.
+    s = make_settings(
+        arcadia_proxy_urls="",
+        scraper_proxy_pool="h2|9000|user2|pass2,h3|9001|u3|p3",
+    )
+    assert s.arcadia_effective_proxy_urls() == (
+        "http://user2:pass2@h2:9000",
+        "http://u3:p3@h3:9001",
+    )
+
+
+def test_arcadia_effective_proxy_urls_empty_when_both_unset() -> None:
+    s = make_settings(arcadia_proxy_urls="", scraper_proxy_pool="")
+    assert s.arcadia_effective_proxy_urls() == ()

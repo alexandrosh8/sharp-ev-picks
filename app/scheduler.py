@@ -609,11 +609,22 @@ def build_scheduler(
         from app.ingestion.pinnacle_arcadia import (
             PinnacleArcadiaCapture,
             PinnacleArcadiaClient,
+            build_arcadia_proxy_http_client,
             discover_arcadia_config,
         )
 
+        # Arcadia 403s datacenter egress, so capture REQUIRES a proxy. Route
+        # through the effective pool (ARCADIA_PROXY_URLS, else the shared scraper
+        # pool); only when BOTH are empty fall back to the direct client (which
+        # will 403 — logged, never fatal). An injected test client always wins.
+        _arcadia_proxy_urls = settings.arcadia_effective_proxy_urls()
         arcadia_client = PinnacleArcadiaClient(
-            arcadia_http_client or http_client,
+            arcadia_http_client
+            or (
+                build_arcadia_proxy_http_client(_arcadia_proxy_urls)
+                if _arcadia_proxy_urls
+                else http_client
+            ),
             base_url=settings.arcadia_base_url,
             guest_key=settings.arcadia_guest_key.get_secret_value(),
         )
