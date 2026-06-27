@@ -141,6 +141,9 @@
         color: var(--faint);
       }
       .cmd-grow { flex: 1 1 18px; }
+      /* search + tier group: transparent on desktop (children stay inline in
+         the command bar exactly as before); becomes a full-width row on mobile */
+      .filters { display: contents; }
       .eng {
         display: inline-flex;
         align-items: center;
@@ -328,6 +331,28 @@
           grid-template-columns: 1fr;
           grid-template-areas: "tape" "settled" "coverage";
         }
+        /* search + tier drop onto their own full-width filter row, below the
+           brand/status row — search grows, tier sized sensibly. Never overlaps
+           the hero (it is in normal flow, not a floating control). */
+        .filters {
+          display: flex;
+          gap: 8px;
+          order: 5;
+          flex: 1 1 100%;
+        }
+        .filters #f-search { flex: 1 1 auto; width: auto; }
+        .filters #f-tier { flex: 0 0 auto; }
+        /* "updated HH:MM:SS" is demoted to a small quiet status line beside the
+           POLLING chip — never prime top space */
+        #stamp { font-size: 9.5px; opacity: 0.85; }
+        /* clear the fixed bottom tab bar so the last tape rows aren't hidden */
+        body { padding-bottom: calc(58px + env(safe-area-inset-bottom)); }
+        /* the wrapped filter row must ride INSIDE the sticky bar's opaque
+           background — the fixed height clipped it, letting scrolled content
+           bleed through between the two rows. Let the bar grow to fit both. */
+        .cmdbar { height: auto; min-height: var(--bar-h); padding-bottom: 8px; }
+        /* pane headers must not stick UNDER the now-taller command bar */
+        .pane-h { position: static; }
       }
 
       .pane-h {
@@ -365,6 +390,54 @@
       }
       #tabs button[data-status="live"][aria-selected="true"] {
         color: var(--pos); border-color: var(--pos);
+      }
+
+      /* ---- mobile bottom tab bar (hidden on desktop) ------------------- */
+      .tabbar { display: none; }
+      @media (max-width: 980px) {
+        .tabbar {
+          display: flex;
+          position: fixed;
+          left: 0; right: 0; bottom: 0;
+          z-index: 50;
+          background: rgba(22, 18, 12, 0.97);
+          backdrop-filter: blur(8px);
+          border-top: 1px solid var(--line);
+          padding-bottom: env(safe-area-inset-bottom);
+        }
+        .tabbar button {
+          flex: 1 1 0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 2px;
+          background: transparent;
+          border: 0;
+          border-radius: 0;
+          color: var(--dim);
+          font-family: var(--mono);
+          font-size: 10px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          padding: 9px 4px;
+          min-height: 52px;
+        }
+        .tabbar button .n {
+          font-size: 12px; font-weight: 600; color: var(--bone);
+          font-variant-numeric: tabular-nums;
+        }
+        .tabbar button[aria-selected="true"] {
+          color: var(--bone);
+          box-shadow: inset 0 2px 0 var(--faint);
+        }
+        .tabbar button[data-status="live"][aria-selected="true"] {
+          color: var(--pos);
+          box-shadow: inset 0 2px 0 var(--pos);
+        }
+        .tabbar button[data-status="live"][aria-selected="true"] .n { color: var(--pos); }
+        /* the inline left-pane tabs move to the bottom bar on mobile */
+        #tabs { display: none; }
       }
 
       /* ---- pick cards (the tape) --------------------------------------- */
@@ -546,12 +619,16 @@
       <span class="cmd-grow"></span>
       <span class="eng" id="eng"><span class="dot"></span><span id="eng-label">CONNECTING</span></span>
       <span id="stamp">loading…</span>
-      <input id="f-search" type="search" placeholder="search…" aria-label="Search picks" />
-      <select id="f-tier" aria-label="Tier filter">
-        <option value="premium">PREMIUM</option>
-        <option value="">ALL TIERS</option>
-        <option value="volume">VOLUME (shadow)</option>
-      </select>
+      <!-- search + tier are their own group: inline on desktop, a full-width
+           filter row on mobile (display:contents → flex at the breakpoint) -->
+      <div class="filters">
+        <input id="f-search" type="search" placeholder="search…" aria-label="Search picks" />
+        <select id="f-tier" aria-label="Tier filter">
+          <option value="premium">PREMIUM</option>
+          <option value="">ALL TIERS</option>
+          <option value="volume">VOLUME (shadow)</option>
+        </select>
+      </div>
       <button id="btn-refresh" class="ghost" title="Refresh now">↻</button>
       <button id="btn-logout" class="ghost" title="Log out">EXIT</button>
     </header>
@@ -702,6 +779,25 @@
         </div>
       </section>
     </main>
+
+    <!-- ============ MOBILE: fixed bottom tab bar (<=980px) ===========
+         Thumb-reachable view switcher. Drives the SAME STATUS_TAB state as the
+         inline #tabs (kept for desktop); render() syncs active + counts on both.
+         Hidden on desktop. -->
+    <nav class="tabbar" id="tabbar" role="tablist" aria-label="Pick views (mobile)">
+      <button role="tab" data-status="live" aria-selected="true">
+        <span class="lbl">LIVE</span><span class="n" data-status="live">0</span>
+      </button>
+      <button role="tab" data-status="unverified" aria-selected="false">
+        <span class="lbl">UNVERIF</span><span class="n" data-status="unverified">0</span>
+      </button>
+      <button role="tab" data-status="closed" aria-selected="false">
+        <span class="lbl">CLOSED</span><span class="n" data-status="closed">0</span>
+      </button>
+      <button role="tab" data-status="results" aria-selected="false">
+        <span class="lbl">RESULTS</span><span class="n" data-status="results">0</span>
+      </button>
+    </nav>
 
     <script>
       "use strict";
@@ -1051,6 +1147,14 @@
             const k = b.dataset.status;
             b.textContent = LABELS[k] + " (" + (counts[k] || 0) + ")";
             b.setAttribute("aria-selected", String(k === STATUS_TAB));
+          });
+          // mirror active state + counts onto the mobile bottom tab bar
+          document.querySelectorAll("#tabbar button[data-status]").forEach((b) => {
+            const k = b.dataset.status;
+            b.setAttribute("aria-selected", String(k === STATUS_TAB));
+          });
+          document.querySelectorAll("#tabbar .n[data-status]").forEach((el) => {
+            el.textContent = String(counts[el.dataset.status] || 0);
           });
 
           const matchesTab = (p) =>
@@ -1556,7 +1660,9 @@
         }
 
         // ===== wiring ===============================================
-        document.querySelectorAll("#tabs button[data-status]").forEach((b) =>
+        // inline tabs (desktop) + the fixed bottom bar (mobile) both drive the
+        // same STATUS_TAB; render() syncs active state + counts back onto both.
+        document.querySelectorAll("#tabs button[data-status], #tabbar button[data-status]").forEach((b) =>
           b.addEventListener("click", () => { STATUS_TAB = b.dataset.status; render(); }));
         $("f-tier").addEventListener("change", render);
         $("f-search").addEventListener("input", render);
