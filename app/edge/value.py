@@ -28,6 +28,10 @@ from app.probabilities.devig import DevigMethod, devig
 # Books treated as "sharp" for fair-value estimation, in priority order.
 SHARP_BOOKS = ("pinnacle", "pinnacle sports", "betfair exchange", "smarkets")
 
+# Normalized membership set for the classifier: ONLY these names earn a sharp/
+# pinnacle anchor type. Anything else (blank, soft book) is consensus-grade.
+_SHARP_BOOK_NORMS = frozenset(b.strip().lower() for b in SHARP_BOOKS)
+
 # Net commission on winnings, by normalized book name. Configurable at the
 # call site; these are conservative defaults (Betfair varies 2-8% by region).
 EXCHANGE_COMMISSION = {
@@ -64,12 +68,24 @@ def anchor_type_for(anchor_book: str) -> str:
     `anchor_book` is ValueBet.sharp_book — either a named sharp book from
     SHARP_BOOKS or the CONSENSUS_ANCHOR sentinel. Pure function (tested
     directly); the pipeline persists its result on every value pick.
+
+    "sharp" is minted ONLY for a genuine SHARP_BOOKS member (exchange), and
+    "pinnacle" only for Pinnacle. A blank/unknown/SOFT book name is NOT a sharp
+    anchor — it falls through to the not-trusted ANCHOR_TYPE_CONSENSUS bucket
+    (consistent with ``is_sharp_anchored`` and excluded by the trusted CLV
+    subset). This closes a latent honest-premium-faking hole: every live path
+    feeds a SHARP_BOOKS member or CONSENSUS_ANCHOR, so live tags are unchanged,
+    but no refactored/future call site can silently mint "sharp" from a soft or
+    blank anchor.
     """
     if anchor_book == CONSENSUS_ANCHOR:
         return ANCHOR_TYPE_CONSENSUS
-    if "pinnacle" in _norm(anchor_book):
+    norm = _norm(anchor_book)
+    if "pinnacle" in norm:
         return ANCHOR_TYPE_PINNACLE
-    return ANCHOR_TYPE_SHARP
+    if norm in _SHARP_BOOK_NORMS:
+        return ANCHOR_TYPE_SHARP
+    return ANCHOR_TYPE_CONSENSUS
 
 
 def is_sharp_anchored(anchor_book: str) -> bool:
@@ -77,12 +93,14 @@ def is_sharp_anchored(anchor_book: str) -> bool:
 
     `anchor_book` is ValueBet.sharp_book — a named sharp book from SHARP_BOOKS
     (Pinnacle/Betfair/Smarkets) or the CONSENSUS_ANCHOR sentinel. The soft
-    consensus(median) fallback (and any blank/unknown anchor) is NOT sharp; only
-    a named sharp anchor is. Equivalent to ``anchor_type_for(...) != consensus``
-    but stated as the gate predicate. Pure function (tested directly); the
+    consensus(median) fallback (and any blank/unknown/soft anchor) is NOT sharp;
+    only a named sharp anchor is. Defined as ``anchor_type_for(...) != consensus``
+    so the twin predicates can never contradict each other (audit 2026-06-27: a
+    blank/soft name previously passed this gate as True while routing to a sharp
+    type — now both agree). Pure function (tested directly); the
     require-sharp-anchor premium gate (app/pipeline.py) consumes it.
     """
-    return bool(anchor_book) and anchor_book != CONSENSUS_ANCHOR
+    return anchor_type_for(anchor_book) != ANCHOR_TYPE_CONSENSUS
 
 
 def close_is_independent_of_fill(

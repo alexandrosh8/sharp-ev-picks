@@ -385,7 +385,15 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
     from app.backtesting.live_evidence import SettledPickRow
 
     async def fake_perf(session):  # type: ignore[no-untyped-def]
-        return {"n_settled": 2, "tier_scope": "premium"}
+        return {
+            "n_settled": 2,
+            "tier_scope": "premium",
+            # The sharp-subset progress fields the PROOF-OF-EDGE hero needs to
+            # render its INSUFFICIENT-EVIDENCE state ("n / min — accruing").
+            "n_sharp_close": 0,
+            "min_headline_n": 50,
+            "sharp_status": "insufficient",
+        }
 
     async def fake_rows(session):  # type: ignore[no-untyped-def]
         return [
@@ -405,6 +413,12 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
 
     body = TestClient(make_app()).get("/performance").json()
     assert body["tier_scope"] == "premium"  # headline scope untouched
+    # PROOF-OF-EDGE accruing state: the route must pass the sharp-subset progress
+    # fields through untouched so the hero can render "0 / 50 — accruing" instead
+    # of a blank "—" that reads as broken.
+    assert body["n_sharp_close"] == 0
+    assert body["min_headline_n"] == 50
+    assert body["sharp_status"] == "insufficient"
     ev = body["live_evidence"]
     assert ev["q_star"] == 0.725
     assert ev["min_n"] == 50
@@ -680,6 +694,21 @@ def test_dashboard_clv_hero_tiles_use_sharp_subset() -> None:
     # the blended figure is demoted, clearly labelled
     assert "all closes (incl. consensus/fallback)" in text
     assert 'id="c-swclv-all"' in text
+
+
+def test_dashboard_clv_hero_shows_accruing_progress_when_insufficient() -> None:
+    """DASHBOARD CLARITY: below the sharp-close floor (sharp_status !== 'ok') the
+    PROOF-OF-EDGE hero must render an explicit INSUFFICIENT-EVIDENCE progress
+    state ('n / min — accruing') from perf.n_sharp_close + perf.min_headline_n,
+    NOT a blank '—' (which reads as broken) and NOT the blended/circular CLV."""
+    text = TestClient(make_app()).get("/").text
+    # progress fraction is built from BOTH payload fields
+    assert "perf.min_headline_n" in text
+    assert "perf.n_sharp_close" in text
+    assert 'nSharp + " / " + minSharp' in text
+    # demoted, honest label + neutral 'accruing' styling (not green +EV)
+    assert "accruing" in text
+    assert ".card.hero .v.accruing" in text
 
 
 def test_dashboard_per_row_clv_respects_close_independence() -> None:

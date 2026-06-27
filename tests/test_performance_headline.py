@@ -28,10 +28,14 @@ def _row(
     closing_anchor: str | None = "pinnacle",
     close_independent: bool | None = True,
     has_snapshot_close: bool | None = True,
+    decimal_odds: float | None = 2.0,
+    closing_fair_probability: float | None = None,
 ) -> tuple[object, ...]:
     # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
-    #  close_independent, has_snapshot_close) — the tuple shape
-    #  performance_report._tier_rows builds.
+    #  close_independent, has_snapshot_close, decimal_odds,
+    #  closing_fair_probability) — the tuple shape performance_report._tier_rows
+    #  builds. decimal_odds + closing_fair_probability feed the CLV-1 implausible
+    #  close-implied-edge guard (defaults to a benign small edge / unknown).
     return (
         outcome,
         Decimal(str(pnl)),
@@ -42,6 +46,8 @@ def _row(
         closing_anchor,
         close_independent,
         has_snapshot_close,
+        Decimal(str(decimal_odds)) if decimal_odds is not None else None,
+        Decimal(str(closing_fair_probability)) if closing_fair_probability is not None else None,
     )
 
 
@@ -93,6 +99,132 @@ def test_revalidation_fallback_close_excluded_even_with_soft_price() -> None:
     rows = [_row(closing_odds=2.0, has_snapshot_close=False) for _ in range(MIN_HEADLINE_N)]
     agg = _aggregate_settled(rows)
     assert agg["n_sharp_close"] == 0
+
+
+def test_sharp_tagged_but_self_priced_close_excluded_from_trusted_subset() -> None:
+    # WELWALO REGRESSION PIN (data-integrity, lever-2 safe subset): a close that
+    # is anchor_type='sharp' but was priced by the pick's OWN source
+    # (close_independent_of_fill=False — circular, closing==fill, |clv_log|~0) is
+    # FAKE CLV. It must NEVER enter the trusted sharp subset even though it is a
+    # genuine snapshot close (has_snapshot_close=True) carrying a sharp anchor tag.
+    # This is exactly the obscure-league self-priced 'sharp' case (e.g. an
+    # Ethiopian-league pick with no real Pinnacle/Betfair close): the tag exists
+    # but the close cannot be trusted. Existing behavior is correct; this pins it
+    # so a future refactor of the gate cannot silently re-admit the fake and
+    # inflate n_sharp / the proof-of-edge headline.
+    fakes = [
+        _row(closing_anchor="sharp", has_snapshot_close=True, close_independent=False)
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg_fakes = _aggregate_settled(fakes)
+    assert agg_fakes["n_sharp_close"] == 0  # circular self-priced closes never counted
+    assert agg_fakes["sharp_status"] == "insufficient"
+
+    # CONVERSE (lever-2 test 3): a GENUINE independent sharp close IS counted, so
+    # the exclusion is targeted at circularity, not at the 'sharp' tag itself.
+    genuine = [
+        _row(closing_anchor="sharp", has_snapshot_close=True, close_independent=True)
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg_genuine = _aggregate_settled(genuine)
+    assert agg_genuine["n_sharp_close"] == MIN_HEADLINE_N
+    assert agg_genuine["sharp_status"] == "ok"
+
+
+def test_blended_clv_excludes_implausible_close_implied_edge() -> None:
+    # CLV-1: a settled pick whose close-implied edge is physically impossible
+    # (closing_fair_probability - 1/decimal_odds = 0.891433 - 1/6.50 = 0.737 >>
+    # value_max_edge=0.20) is the favorite-prob-on-underdog-leg residue of the
+    # since-fixed double-chance orientation bug. Its outcome/pnl stay counted (it
+    # IS a real settled pick) but its fabricated clv_log (1.756877) and beat_close
+    # must NOT inflate the blended stake_weighted_clv_log / beat_close_rate.
+    honest = [
+        _row(
+            outcome="lost",
+            pnl=0.0,
+            clv_log=0.0,
+            beat_close=False,
+            decimal_odds=2.0,
+            closing_fair_probability=0.50,
+        )
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    poison = _row(
+        outcome="won",
+        pnl=5.5,
+        stake=10.0,
+        clv_log=1.756877,
+        beat_close=True,
+        decimal_odds=6.50,
+        closing_fair_probability=0.891433,
+    )
+    agg = _aggregate_settled(honest + [poison])
+    # The poison row survives as a real settled pick (honest denominator).
+    assert agg["n_settled"] == MIN_HEADLINE_N + 1
+    assert agg["won"] == 1
+    assert Decimal(agg["total_pnl"]) == Decimal("5.5")
+    # ... but its fabricated CLV/beat_close are dropped: only the 50 honest zeros
+    # remain, so the blended headline reads 0, not a flattered positive.
+    assert agg["stake_weighted_clv_log"] == "0"
+    assert agg["beat_close_rate"] == "0"
+
+
+def test_implausible_clv_excluded_from_trusted_sharp_subset() -> None:
+    # Defense-in-depth: even a sharp-anchored, independent, genuine-snapshot close
+    # cannot enter the trusted sharp subset if its close-implied edge is impossible
+    # — fabricated CLV must never reach the proof-of-edge headline by any path.
+    honest = [
+        _row(
+            closing_anchor="pinnacle",
+            clv_log=0.03,
+            decimal_odds=2.0,
+            closing_fair_probability=0.51,
+            close_independent=True,
+            has_snapshot_close=True,
+        )
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    poison = _row(
+        closing_anchor="pinnacle",
+        clv_log=1.5,
+        decimal_odds=6.50,
+        closing_fair_probability=0.891433,
+        close_independent=True,
+        has_snapshot_close=True,
+    )
+    agg = _aggregate_settled(honest + [poison])
+    # 50 honest sharp closes counted; the impossible one excluded.
+    assert agg["n_sharp_close"] == MIN_HEADLINE_N
+    assert agg["sharp_stake_weighted_clv_log"] == "0.03"
+
+
+def test_clv_log_fallback_excludes_when_close_edge_uncomputable() -> None:
+    # Fallback path: when closing_fair_probability is absent the close-implied edge
+    # cannot be computed, so an implausibly large |clv_log| (1.76) is itself the
+    # tripwire. A genuinely small clv_log with no fair prob is kept.
+    big = _aggregate_settled(
+        [_row(clv_log=1.76, closing_fair_probability=None) for _ in range(MIN_HEADLINE_N)]
+    )
+    assert big["stake_weighted_clv_log"] == "0" or big["stake_weighted_clv_log"] is None
+    assert big["n_sharp_close"] == 0  # all fabricated -> none trusted
+
+    ok = _aggregate_settled(
+        [_row(clv_log=0.05, closing_fair_probability=None) for _ in range(MIN_HEADLINE_N)]
+    )
+    assert ok["stake_weighted_clv_log"] == "0.05"
+    assert ok["n_sharp_close"] == MIN_HEADLINE_N
+
+
+def test_plausible_large_clv_is_not_excluded() -> None:
+    # Converse guard: a row with a real, in-bounds close-implied edge (0.55 - 1/2.0
+    # = 0.05 <= 0.20) and a normal clv_log is NOT touched — the guard targets
+    # impossibility, not merely positive CLV.
+    rows = [
+        _row(clv_log=0.10, decimal_odds=2.0, closing_fair_probability=0.55)
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg = _aggregate_settled(rows)
+    assert agg["stake_weighted_clv_log"] == "0.1"
 
 
 def test_by_sport_split_aggregates_and_suppresses_per_sport() -> None:

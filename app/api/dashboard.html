@@ -332,6 +332,13 @@
         font-size: 11px;
         margin-top: 10px;
       }
+      /* accruing: insufficient sharp-close sample — the hero shows progress
+         (n / min), demoted to a neutral colour + smaller size so an accruing
+         count can never be misread as a (green) +EV CLV figure. */
+      .card.hero .v.accruing {
+        font-size: 30px;
+        color: var(--dim);
+      }
       /* stale: value demoted + corner flag — overrides hero green */
       .card.stale::before {
         background: var(--warn);
@@ -1621,7 +1628,7 @@
         <div class="proof-row">
           <div class="card hero" id="card-swclv" data-flag="STALE">
             <div class="v" id="c-swclv">—</div>
-            <div class="k">Stake-wtd CLV (premium, sharp closes)</div>
+            <div class="k" id="c-swclv-k">Stake-wtd CLV (premium, sharp closes)</div>
           </div>
           <div class="cards">
             <div class="card" id="card-clv" data-flag="STALE">
@@ -3728,25 +3735,38 @@
         // "all closes" tile (#c-swclv-all) so they never headline.
         const sharpOk = perf.sharp_status === "ok";
         const nSharp = perf.n_sharp_close || 0;
+        // Denominator for the accruing progress = the sharp-subset sufficiency
+        // floor (MIN_HEADLINE_N), shipped as perf.min_headline_n.
+        const minSharp = perf.min_headline_n || 0;
         const clvEl = $("c-swclv");
+        const clvK = $("c-swclv-k");
         if (!sharpOk || perf.sharp_stake_weighted_clv_log == null) {
-          clvEl.textContent = "—";
+          // INSUFFICIENT EVIDENCE — never blank (a "—" reads as broken). Show
+          // honest progress toward the floor ("0 / 50 — accruing"), demoted to
+          // a neutral colour so it can never be misread as a +EV CLV figure.
+          // Deliberately does NOT borrow the blended/circular all-closes CLV.
+          clvEl.textContent = nSharp + " / " + minSharp;
+          clvEl.classList.add("accruing");
           clvEl.style.color = "";
+          clvK.textContent = "Trusted sharp closes — accruing (proof pending)";
           clvEl.title =
             "Insufficient sharp-close sample — the premium stake-weighted CLV " +
             "headline reports only over GENUINE sharp closes (Pinnacle/Betfair/" +
-            "sharp anchors, independent of your fill) and only once enough have " +
-            "settled (" +
+            "sharp anchors, independent of your fill) and only once " +
+            minSharp +
+            " have settled (" +
             nSharp +
-            " so far). Consensus/fallback closes are excluded here — see the " +
-            "'all closes' tile.";
+            " so far — accruing). No blended/consensus CLV is shown here in its " +
+            "place; see the 'all closes' tile for context.";
         } else {
           const clvPct =
             (Math.exp(Number(perf.sharp_stake_weighted_clv_log)) - 1) * 100;
           // toFixed(1): one precision for every percentage on the page.
           clvEl.textContent =
             (clvPct >= 0 ? "+" : "") + clvPct.toFixed(1) + "%";
+          clvEl.classList.remove("accruing");
           clvEl.style.color = clvPct < 0 ? "var(--neg)" : "";
+          clvK.textContent = "Stake-wtd CLV (premium, sharp closes)";
           clvEl.title =
             "Stake-weighted CLV over GENUINE sharp closes only (" +
             nSharp +

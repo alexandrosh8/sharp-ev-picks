@@ -753,6 +753,48 @@ _SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
 # n (n_sharp_close), which is naturally thinner than n_settled.
 MIN_HEADLINE_N = 50
 
+# CLV-1 data-error tripwire. A settled pick whose CLOSE-IMPLIED edge
+# (closing_fair_probability - 1/decimal_odds) exceeds this ceiling carries a
+# physically impossible close: it is the residue of the since-fixed
+# double-chance orientation bug (a favorite-side probability mis-assigned to the
+# underdog leg), which mints |clv_log| of 0.5-1.76 and a fabricated beat_close.
+# Mirrors the mint-side value_max_edge=0.20 guard (app/config.py) that already
+# rejects such edges at signal time; kept local as a plain constant to preserve
+# this module's no-Settings-import boundary. Such a row stays a real settled pick
+# (its pnl/outcome are honest) but its CLV/beat_close are EXCLUDED from the
+# blended headline and the trusted sharp subset so fabricated CLV cannot inflate
+# either aggregate. A secondary |clv_log| ceiling catches the same pollution when
+# the close-implied edge cannot be computed (fair prob or odds absent).
+CLV_IMPLAUSIBLE_CLOSE_EDGE = 0.20
+CLV_IMPLAUSIBLE_LOG = 0.5
+
+
+def _clv_row_is_fabricated(
+    clv_log: Any,
+    decimal_odds: Any,
+    closing_fair_probability: Any,
+) -> bool:
+    """True when a settled row's CLV is physically impossible (CLV-1 pollution).
+
+    Primary test: close-implied edge = closing_fair_probability - 1/decimal_odds
+    exceeds CLV_IMPLAUSIBLE_CLOSE_EDGE (the favorite-prob-on-underdog-leg signature).
+    Fallback (when fair prob or odds is absent): |clv_log| exceeds
+    CLV_IMPLAUSIBLE_LOG. A row with no CLV at all (clv_log is None) is not
+    fabricated — it simply has no close to judge.
+    """
+    if clv_log is None:
+        return False
+    if decimal_odds is not None and closing_fair_probability is not None:
+        try:
+            implied = 1.0 / float(decimal_odds)
+        except (ZeroDivisionError, ValueError, TypeError):
+            implied = None
+        if implied is not None:
+            close_edge = float(closing_fair_probability) - implied
+            if close_edge > CLV_IMPLAUSIBLE_CLOSE_EDGE:
+                return True
+    return abs(float(clv_log)) > CLV_IMPLAUSIBLE_LOG
+
 
 def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     """Aggregate (outcome, pnl, stake, clv_log, beat_close, closing_odds,
@@ -771,11 +813,15 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     blended ``stake_weighted_clv_log`` still mixes every close in for continuity.
 
     Each row is (outcome, pnl, stake, clv_log, beat_close, closing_odds,
-    closing_anchor, close_independent, has_snapshot_close). ``closing_odds`` is
-    now purely the optional SOFT display price (a sharp-only close has it NULL yet
-    is a real close). ``close_independent`` / ``has_snapshot_close`` are None when
-    feature-detected absent (pre-column rows) — unknown independence is treated as
-    "NOT circular", and a None snapshot flag as "not a genuine snapshot close".
+    closing_anchor, close_independent, has_snapshot_close, decimal_odds,
+    closing_fair_probability). ``closing_odds`` is now purely the optional SOFT
+    display price (a sharp-only close has it NULL yet is a real close).
+    ``close_independent`` / ``has_snapshot_close`` are None when feature-detected
+    absent (pre-column rows) — unknown independence is treated as "NOT circular",
+    and a None snapshot flag as "not a genuine snapshot close". ``decimal_odds`` /
+    ``closing_fair_probability`` feed the CLV-1 fabricated-CLV guard
+    (_clv_row_is_fabricated): a row whose close-implied edge is physically
+    impossible has its clv_log/beat_close dropped from every CLV aggregate.
     """
     counts = {"won": 0, "lost": 0, "void": 0, "push": 0, "half_won": 0, "half_lost": 0}
     total_staked = Decimal("0")
@@ -797,24 +843,36 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         closing_anchor,
         close_independent,
         has_snapshot_close,
+        decimal_odds,
+        closing_fair_probability,
     ) in rows:
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
         total_pnl += pnl if pnl is not None else Decimal("0")
-        if clv_log is not None:
+        # CLV-1 guard: a row whose close-implied edge is physically impossible
+        # (or whose |clv_log| is implausibly large) is fabricated CLV from the
+        # since-fixed double-chance orientation bug. Its outcome/pnl are honest
+        # (counted above) but its clv_log/beat_close are dropped from BOTH the
+        # blended headline and the trusted sharp subset so they cannot inflate
+        # stake_weighted_clv_log / beat_close_rate.
+        clv_fabricated = _clv_row_is_fabricated(clv_log, decimal_odds, closing_fair_probability)
+        if clv_log is not None and not clv_fabricated:
             clv_weighted += stake * clv_log
             clv_stake += stake
-        if beat_close is not None:
+        if beat_close is not None and not clv_fabricated:
             beat_known += 1
             beat_true += int(beat_close)
         if (
+            # CLV-1: never admit a fabricated (impossible close-implied edge) CLV
+            # to the trusted sharp subset, by any path.
+            not clv_fabricated
             # clv-1: a GENUINE snapshot close is marked by has_snapshot_close, NOT by
             # closing_odds. A close anchored only by sharp books (no soft book quoted
             # it) has closing_odds=None yet is a real snapshot close; gating on
             # closing_odds false-negatived it. closing_odds is now purely the optional
             # SOFT display price.
-            bool(has_snapshot_close)
+            and bool(has_snapshot_close)
             and closing_anchor in _SHARP_CLOSE_ANCHORS
             and clv_log is not None
             # INDEPENDENCE guard (P0-1/P0-3): a close anchored by the pick's OWN
@@ -919,6 +977,8 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         Pick.tier,  # 5 — split key, not passed to _aggregate_settled
         Pick.closing_odds,  # 6 — optional SOFT display price (no longer the gate)
         Sport.key,  # 7 — per-sport split key, not passed to _aggregate_settled
+        Pick.decimal_odds,  # 8 — CLV-1 close-implied-edge guard (fill price)
+        Pick.closing_fair_probability,  # 9 — CLV-1 close-implied-edge guard (close fair)
     ]
     sport_idx = 7
     close_anchor_idx = indep_idx = snapshot_idx = None
@@ -950,7 +1010,8 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
 
     def _settled_tuple(r: Any) -> tuple[Any, ...]:
         # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
-        #  close_independent, has_snapshot_close) — close_independent /
+        #  close_independent, has_snapshot_close, decimal_odds,
+        #  closing_fair_probability) — close_independent /
         #  has_snapshot_close are None when feature-detected absent (pre-column):
         #  the sharp gate treats unknown independence as "NOT circular" and a None
         #  snapshot flag as "not a genuine snapshot close" (excluded).
@@ -967,6 +1028,8 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
             closing_anchor,
             close_independent,
             has_snapshot_close,
+            r[8],  # decimal_odds — CLV-1 close-implied-edge guard
+            r[9],  # closing_fair_probability — CLV-1 close-implied-edge guard
         )
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:

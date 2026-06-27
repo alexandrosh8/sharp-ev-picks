@@ -396,6 +396,28 @@ def test_is_sharp_anchored_only_named_sharps_are_sharp() -> None:
     assert is_sharp_anchored("Smarkets") is True
 
 
+def test_anchor_type_for_blank_and_soft_are_not_sharp() -> None:
+    # Robustness/honesty pin: anchor_type_for must mint "sharp" ONLY for a
+    # genuine SHARP_BOOKS member (or "pinnacle" for Pinnacle). A blank or a
+    # SOFT bookmaker name (e.g. Bet365) is NOT sharp — it must fall through to
+    # the not-trusted "consensus" bucket, so no refactored/future call site can
+    # silently fake an honest-premium "sharp" tag from a soft/blank anchor. The
+    # twin predicates must AGREE on the blank case (they previously contradicted:
+    # anchor_type_for("")=="sharp" while is_sharp_anchored("") is False).
+    from app.edge.value import anchor_type_for, is_sharp_anchored
+
+    assert anchor_type_for("") != "sharp"
+    assert anchor_type_for("Bet365") != "sharp"
+    assert anchor_type_for("William Hill") != "sharp"
+    # twins must agree on the blank/soft cases
+    assert (anchor_type_for("") == "sharp") == is_sharp_anchored("")
+    assert (anchor_type_for("Bet365") == "sharp") == is_sharp_anchored("Bet365")
+    # genuine sharps are unaffected
+    assert anchor_type_for("Betfair Exchange") == "sharp"
+    assert anchor_type_for("Smarkets") == "sharp"
+    assert anchor_type_for("Pinnacle") == "pinnacle"
+
+
 def test_no_sharp_anchor_means_no_premium_invariant() -> None:
     # P0-2 INVARIANT (regression pin): the require-sharp-anchor premium gate
     # (app/pipeline.py:841-848) demotes to the volume/shadow tier EXACTLY when
