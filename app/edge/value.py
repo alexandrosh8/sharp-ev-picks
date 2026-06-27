@@ -556,7 +556,12 @@ def _logit_consensus_anchor(
         return None, None
     # Synthetic NO-VIG prices (renormalized): 1 / (pooled/total) = total/pooled.
     synth_prices = [total / pooled[s] for s in selections]
-    if not 0.0 <= _overround(synth_prices) <= max_overround:
+    # The synthetic vector is no-vig by construction (overround ~ 0 +/- float dust).
+    # Only the UPPER bound is a meaningful sanity check: a 0.0 lower bound made this
+    # hash-seed-flaky, because the logit sum accumulates in set-iteration order and
+    # float rounding could push the overround a hair negative. Reject only a result
+    # that is genuinely over-margined.
+    if _overround(synth_prices) > max_overround:
         return None, None
     return CONSENSUS_ANCHOR, synth_prices
 

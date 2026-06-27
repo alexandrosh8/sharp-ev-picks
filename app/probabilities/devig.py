@@ -13,6 +13,7 @@ from enum import StrEnum
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import brentq
+from scipy.stats import norm
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,9 @@ class DevigMethod(StrEnum):
     ADDITIVE = "additive"
     POWER = "power"
     SHIN = "shin"
+    # Inverse-normal (probit) constant shift — best on SYMMETRIC markets
+    # (totals / Asian handicap / balanced props), where both sides price close.
+    PROBIT = "probit"
     # Buchdahl "Wisdom of the Crowds" family (parity-tested vs penaltyblog):
     ODDS_RATIO = "odds_ratio"
     LOGARITHMIC = "logarithmic"
@@ -53,6 +57,8 @@ def devig(
         p = _power(q)
     elif method is DevigMethod.SHIN:
         p = _shin(q)
+    elif method is DevigMethod.PROBIT:
+        p = _probit(q)
     elif method is DevigMethod.ODDS_RATIO:
         # ODDS_RATIO is a constant logit shift == LOGARITHMIC; route through the
         # logarithmic solver (robust bracket + underround branch) so the two can
@@ -126,6 +132,30 @@ def _logarithmic(q: _FloatArray) -> _FloatArray:
         return _multiplicative(q)
 
 
+def _probit(q: _FloatArray) -> _FloatArray:
+    """Probit (inverse-normal) constant shift: p_i = Phi(Phi^-1(q_i) - c), with c
+    solved so probabilities sum to 1. The Gaussian analogue of ``_logarithmic``;
+    preferred on SYMMETRIC markets (totals / Asian handicap) where both sides are
+    priced close. Underround/degenerate input falls back to multiplicative."""
+    if abs(q.sum() - 1.0) < 1e-12:
+        return q.copy()
+    safe = np.clip(q, 1e-15, 1.0 - 1e-15)
+    z = norm.ppf(safe)
+
+    def f(c: float) -> float:
+        return float(norm.cdf(z - c).sum() - 1.0)
+
+    try:
+        try:
+            c = float(brentq(f, 0.0, 20.0, xtol=1e-12))
+        except ValueError:  # underround books need a negative shift
+            c = float(brentq(f, -20.0, 20.0, xtol=1e-12))
+        return np.asarray(norm.cdf(z - c), dtype=np.float64)
+    except ValueError:
+        logger.warning("probit devig solve failed (booksum=%.6f); falling back", q.sum())
+        return _multiplicative(q)
+
+
 def _differential_margin(odds: _FloatArray, q: _FloatArray) -> _FloatArray:
     """Buchdahl's differential margin weighting.
 
@@ -171,7 +201,17 @@ def _shin(q: _FloatArray) -> _FloatArray:
 
     def probs_for(z: float) -> _FloatArray:
         inner = z * z + 4.0 * (1.0 - z) * (q * q) / booksum
-        return (np.sqrt(inner) - z) / (2.0 * (1.0 - z))
+        return (np.sqrt(np.maximum(inner, 0.0)) - z) / (2.0 * (1.0 - z))
+
+    # Exact 2-outcome closed form (Jullien & Salanie 1994) — no solver, no bracket
+    # failure: z = ((B-1)(D^2 - B)) / (B(D^2 - 1)), B=booksum, D=q_0 - q_1.
+    if q.size == 2:
+        d = float(q[0] - q[1])
+        denom = booksum * (d * d - 1.0)
+        if abs(denom) <= 1e-15:
+            return _multiplicative(q)
+        z2 = ((booksum - 1.0) * (d * d - booksum)) / denom
+        return probs_for(min(max(z2, 0.0), 0.999))
 
     def f(z: float) -> float:
         return float(probs_for(z).sum() - 1.0)

@@ -19,6 +19,7 @@ ALL_METHODS = [
     DevigMethod.ADDITIVE,
     DevigMethod.POWER,
     DevigMethod.SHIN,
+    DevigMethod.PROBIT,
 ]
 
 
@@ -61,6 +62,21 @@ def test_longshot_methods_favour_the_favourite(method: DevigMethod) -> None:
 def test_symmetric_two_way_is_half_half(method: DevigMethod) -> None:
     probs = devig([1.9, 1.9], method=method)
     assert probs[0] == pytest.approx(0.5, abs=1e-9)
+
+
+def test_probit_symmetric_two_way_is_half_half() -> None:
+    # build #2: Probit on a symmetric market (totals / Asian handicap) -> even.
+    probs = devig([1.9, 1.9], method=DevigMethod.PROBIT)
+    assert probs[0] == pytest.approx(0.5, abs=1e-9)
+    assert probs[1] == pytest.approx(0.5, abs=1e-9)
+
+
+def test_probit_devig_is_valid_and_order_preserving() -> None:
+    # build #2: Probit yields a valid distribution preserving the odds order
+    # (shorter odds -> higher fair probability).
+    probs = devig(THREE_WAY, method=DevigMethod.PROBIT)  # [2.5, 3.2, 2.9]
+    assert math.isclose(sum(probs), 1.0, abs_tol=1e-9)
+    assert probs[0] > probs[2] > probs[1]  # 2.5 > 2.9 > 3.2 in implied prob
 
 
 def test_additive_negative_prob_falls_back_to_multiplicative() -> None:
