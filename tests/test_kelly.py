@@ -141,3 +141,46 @@ def test_out_of_range_drawdown_raises(d: float) -> None:
 def test_out_of_range_drawdown_probability_raises(beta: float) -> None:
     with pytest.raises(ValueError):
         drawdown_constrained_multiplier(0.5, beta)
+
+
+def test_uncertainty_multiplier_no_shrink_at_zero_variance() -> None:
+    # build #4: zero edge variance -> no shrink (== base).
+    from app.risk.staking import uncertainty_multiplier
+
+    assert uncertainty_multiplier(0.25, 0.0, coef=5.0) == pytest.approx(0.25)
+
+
+def test_uncertainty_multiplier_monotone_decreasing_and_bounded() -> None:
+    from app.risk.staking import uncertainty_multiplier
+
+    base = 0.25
+    m_lo = uncertainty_multiplier(base, 0.001, coef=10.0)
+    m_hi = uncertainty_multiplier(base, 0.010, coef=10.0)
+    assert base >= m_lo > m_hi > 0.0  # shrinks as variance grows, never above base
+
+
+def test_uncertainty_multiplier_rejects_bad_inputs() -> None:
+    from app.risk.staking import uncertainty_multiplier
+
+    with pytest.raises(ValueError):
+        uncertainty_multiplier(0.25, -0.1, coef=1.0)
+    with pytest.raises(ValueError):
+        uncertainty_multiplier(0.25, 0.1, coef=-1.0)
+
+
+def test_recommended_stake_unchanged_when_uncertainty_off() -> None:
+    # default policy (coef None) -> edge_variance ignored, bit-for-bit unchanged.
+    policy = StakePolicy()
+    assert recommended_stake(0.60, 2.10, policy, edge_variance=0.05) == recommended_stake(
+        0.60, 2.10, policy
+    )
+
+
+def test_recommended_stake_shrinks_with_edge_uncertainty() -> None:
+    # build #4: coef set + positive variance -> smaller stake; raw edge unchanged.
+    policy = StakePolicy(edge_uncertainty_coef=20.0, max_stake_fraction=1.0)
+    sharp = recommended_stake(0.60, 2.10, policy, edge_variance=0.0)
+    noisy = recommended_stake(0.60, 2.10, policy, edge_variance=0.05)
+    assert noisy.fractional < sharp.fractional
+    assert noisy.final <= sharp.final
+    assert noisy.raw_kelly == pytest.approx(sharp.raw_kelly)  # only sizing shrinks
