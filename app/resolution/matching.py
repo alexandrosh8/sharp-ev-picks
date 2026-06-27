@@ -38,6 +38,14 @@ _SEED_PATH = Path(__file__).with_name("aliases_seed.json")
 _NOISE_TOKENS = frozenset(
     {"fc", "afc", "cf", "cfc", "sc", "fk", "ff", "bk", "if", "ac", "club", "calcio", "jk"}
 )
+# NOTE (2026-06-27): broadening this set with cd/sd/gd/ad/cs/se/ec/aa to recover
+# the Pinnacle-vs-OddsPortal club-form near-misses was REVERTED — it failed the
+# seed-alias collision guard (test_seed_alias_canonicals_do_not_collide):
+# stripping the form reduces "CD Nacional" -> "nacional" (and "GD Estoril" ->
+# "estoril", "Ponferradina SD" -> "ponferradina"), merging distinct clubs that
+# share a generic base (Nacional Madeira vs Uruguay). That is the wrong-game
+# cardinal sin. Recovering those near-misses safely needs reviewed PER-CLUB
+# aliases in aliases_seed.json, not a blanket token strip.
 
 
 def normalize_name(name: str) -> str:
