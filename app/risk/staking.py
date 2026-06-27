@@ -42,6 +42,13 @@ class StakePolicy:
     # docs/backtesting/value-findings.md and the next ADR.
     max_drawdown: float | None = None
     max_drawdown_probability: float | None = None
+    # OPTIONAL edge-uncertainty shrink (default OFF — None keeps the plain path
+    # bit-for-bit). Rising-Wyner: full-Kelly on a shrunk edge == fractional-Kelly
+    # on the raw edge, and the optimal multiplier is monotonically DECREASING in
+    # Var(p_hat) (Baker-McHale 2013). When set, the Kelly multiplier is divided by
+    # (1 + coef * edge_variance) so a noisier edge estimate is staked smaller. This
+    # can NEVER raise the stake; edge_variance is supplied per-pick by the caller.
+    edge_uncertainty_coef: float | None = None
 
 
 def drawdown_constrained_multiplier(max_drawdown: float, max_probability: float) -> float:
@@ -64,6 +71,20 @@ def drawdown_constrained_multiplier(max_drawdown: float, max_probability: float)
     floor = 1.0 - max_drawdown
     lam = 2.0 / (1.0 + math.log(max_probability) / math.log(floor))
     return min(lam, 1.0)
+
+
+def uncertainty_multiplier(base: float, edge_variance: float, coef: float) -> float:
+    """Shrink a Kelly multiplier for edge ESTIMATION uncertainty (B6).
+
+    ``base / (1 + coef * edge_variance)`` — monotonically decreasing in the edge
+    variance, equal to ``base`` at zero variance, and never larger than ``base``.
+    A noisier fair-probability estimate (e.g. wide cross-book disagreement) is
+    staked smaller. Pure, informational; can only shrink, never raise."""
+    if edge_variance < 0.0:
+        raise ValueError(f"edge_variance must be >= 0, got {edge_variance}")
+    if coef < 0.0:
+        raise ValueError(f"coef must be >= 0, got {coef}")
+    return base / (1.0 + coef * edge_variance)
 
 
 def effective_kelly_multiplier(policy: StakePolicy) -> float:
@@ -91,11 +112,18 @@ def recommended_stake(
     probability: float,
     decimal_odds: float,
     policy: StakePolicy,
+    *,
+    edge_variance: float = 0.0,
 ) -> StakeBreakdown:
     raw = kelly_fraction(probability, decimal_odds)
     # effective_kelly_multiplier == policy.fractional_kelly unless the
     # optional drawdown constraint (OFF by default) tightens it.
-    fractional = raw * effective_kelly_multiplier(policy)
+    mult = effective_kelly_multiplier(policy)
+    # B6 edge-uncertainty shrink: OFF unless the coef knob is set AND the caller
+    # supplies a positive per-pick edge variance -> otherwise bit-for-bit unchanged.
+    if policy.edge_uncertainty_coef is not None and edge_variance > 0.0:
+        mult = uncertainty_multiplier(mult, edge_variance, policy.edge_uncertainty_coef)
+    fractional = raw * mult
     capped = fractional > policy.max_stake_fraction
     final = min(fractional, policy.max_stake_fraction)
     return StakeBreakdown(raw_kelly=raw, fractional=fractional, capped=capped, final=final)
