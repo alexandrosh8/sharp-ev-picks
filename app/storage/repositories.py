@@ -768,6 +768,39 @@ MIN_HEADLINE_N = 50
 CLV_IMPLAUSIBLE_CLOSE_EDGE = 0.20
 CLV_IMPLAUSIBLE_LOG = 0.5
 
+# CLV TAUTOLOGY tripwire (live audit 2026-06-28). When a settled pick's close fair
+# equals its pick-time fair (closing_fair_probability == model_probability — the SAME
+# archived sharp line reused at pick-time and close-time), clv_log = ln(fill_eff *
+# closing_fair) merely re-encodes the pick-time edge: a TAUTOLOGY, not close evidence
+# (133/272 settled picks had round(model,4) == round(close_fair,4) yet a nonzero clv_log).
+# Such rows are EXCLUDED from BOTH the blended headline and the trusted sharp subset.
+# Kept local (mirrors app.edge.value.CLV_TAUTOLOGY_EPS = 1e-3, the 4-dp archived-line
+# resolution) to preserve this module's no-Settings-import boundary.
+CLV_TAUTOLOGY_EPS = 1e-3
+
+
+def _clv_row_is_tautological(
+    clv_log: Any,
+    closing_fair_probability: Any,
+    model_probability: Any,
+) -> bool:
+    """True when the close fair equals the pick-time fair (identical archived line).
+
+    clv_log is then a tautology that re-encodes the pick-time edge — not independent
+    close evidence — so its clv_log/beat_close are dropped from every CLV aggregate.
+    Only excludes when BOTH probabilities are present (we can PROVE the tautology); a
+    row with no CLV (clv_log is None) or an unknowable fair is not tautological here.
+    """
+    if clv_log is None:
+        return False
+    if closing_fair_probability is None or model_probability is None:
+        return False
+    try:
+        delta = abs(float(closing_fair_probability) - float(model_probability))
+    except (ValueError, TypeError):
+        return False
+    return delta <= CLV_TAUTOLOGY_EPS
+
 
 def _clv_row_is_fabricated(
     clv_log: Any,
@@ -814,14 +847,17 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
 
     Each row is (outcome, pnl, stake, clv_log, beat_close, closing_odds,
     closing_anchor, close_independent, has_snapshot_close, decimal_odds,
-    closing_fair_probability). ``closing_odds`` is now purely the optional SOFT
-    display price (a sharp-only close has it NULL yet is a real close).
+    closing_fair_probability, model_probability). ``closing_odds`` is now purely the
+    optional SOFT display price (a sharp-only close has it NULL yet is a real close).
     ``close_independent`` / ``has_snapshot_close`` are None when feature-detected
-    absent (pre-column rows) — unknown independence is treated as "NOT circular",
-    and a None snapshot flag as "not a genuine snapshot close". ``decimal_odds`` /
-    ``closing_fair_probability`` feed the CLV-1 fabricated-CLV guard
-    (_clv_row_is_fabricated): a row whose close-implied edge is physically
-    impossible has its clv_log/beat_close dropped from every CLV aggregate.
+    absent (pre-column rows). A None snapshot flag is "not a genuine snapshot close";
+    independence is now required to be exactly True for the trusted subset (audit
+    2026-06-28 P2: ``IS NOT FALSE`` let NULL/unknown independence leak in). ``decimal_odds``
+    / ``closing_fair_probability`` feed the CLV-1 fabricated-CLV guard
+    (_clv_row_is_fabricated); ``closing_fair_probability`` / ``model_probability`` feed
+    the TAUTOLOGY guard (_clv_row_is_tautological): a row whose close fair equals its
+    pick-time fair (identical archived line) has its clv_log/beat_close dropped from
+    BOTH the blended headline and the trusted sharp subset.
     """
     counts = {"won": 0, "lost": 0, "void": 0, "push": 0, "half_won": 0, "half_lost": 0}
     total_staked = Decimal("0")
@@ -845,6 +881,7 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         has_snapshot_close,
         decimal_odds,
         closing_fair_probability,
+        model_probability,
     ) in rows:
         if outcome in counts:
             counts[outcome] += 1
@@ -857,16 +894,24 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         # blended headline and the trusted sharp subset so they cannot inflate
         # stake_weighted_clv_log / beat_close_rate.
         clv_fabricated = _clv_row_is_fabricated(clv_log, decimal_odds, closing_fair_probability)
-        if clv_log is not None and not clv_fabricated:
+        # TAUTOLOGY guard (audit 2026-06-28 P2): a row whose close fair equals its
+        # pick-time fair (identical archived line) carries a clv_log that merely
+        # re-encodes the pick-time edge — drop it from BOTH the blended headline and
+        # the trusted sharp subset, exactly like a fabricated row.
+        clv_tautological = _clv_row_is_tautological(
+            clv_log, closing_fair_probability, model_probability
+        )
+        clv_excluded = clv_fabricated or clv_tautological
+        if clv_log is not None and not clv_excluded:
             clv_weighted += stake * clv_log
             clv_stake += stake
-        if beat_close is not None and not clv_fabricated:
+        if beat_close is not None and not clv_excluded:
             beat_known += 1
             beat_true += int(beat_close)
         if (
-            # CLV-1: never admit a fabricated (impossible close-implied edge) CLV
-            # to the trusted sharp subset, by any path.
-            not clv_fabricated
+            # CLV-1/tautology: never admit a fabricated (impossible close-implied
+            # edge) or tautological (identical-line) CLV to the trusted subset.
+            not clv_excluded
             # clv-1: a GENUINE snapshot close is marked by has_snapshot_close, NOT by
             # closing_odds. A close anchored only by sharp books (no soft book quoted
             # it) has closing_odds=None yet is a real snapshot close; gating on
@@ -875,18 +920,19 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             and bool(has_snapshot_close)
             and closing_anchor in _SHARP_CLOSE_ANCHORS
             and clv_log is not None
-            # INDEPENDENCE guard (P0-1/P0-3): a close anchored by the pick's OWN
-            # fill book is CIRCULAR (closing == fill, |clv_log|~0) — fake CLV that
-            # masked the -EV. Only a definite False excludes; None (pre-column /
-            # unknown) is NOT treated as circular, preserving historical rows.
-            and close_independent is not False
+            # INDEPENDENCE guard (P0-1/P0-3 + audit 2026-06-28 P2): a close anchored by
+            # the pick's OWN fill book, OR an identical-archived-line close, is CIRCULAR
+            # (closing == fill / closing_fair == pick_fair, |clv_log| fake). Require
+            # independence to be EXACTLY True — None (pre-column / unknown) no longer
+            # leaks in as "not circular": unproven independence is not trusted.
+            and close_independent is True
         ):
             # Genuine, INDEPENDENT sharp snapshot close with a measured CLV — the
             # trusted subset.
             n_sharp += 1
             sharp_clv_weighted += stake * clv_log
             sharp_clv_stake += stake
-            sharp_all_independent = sharp_all_independent and close_independent is not False
+            sharp_all_independent = sharp_all_independent and close_independent is True
             if beat_close is not None:
                 sharp_beat_known += 1
                 sharp_beat_true += int(beat_close)
@@ -979,6 +1025,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         Sport.key,  # 7 — per-sport split key, not passed to _aggregate_settled
         Pick.decimal_odds,  # 8 — CLV-1 close-implied-edge guard (fill price)
         Pick.closing_fair_probability,  # 9 — CLV-1 close-implied-edge guard (close fair)
+        Pick.model_probability,  # 10 — TAUTOLOGY guard (pick-time fair)
     ]
     sport_idx = 7
     close_anchor_idx = indep_idx = snapshot_idx = None
@@ -1030,6 +1077,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
             has_snapshot_close,
             r[8],  # decimal_odds — CLV-1 close-implied-edge guard
             r[9],  # closing_fair_probability — CLV-1 close-implied-edge guard
+            r[10],  # model_probability — TAUTOLOGY guard (pick-time fair)
         )
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:

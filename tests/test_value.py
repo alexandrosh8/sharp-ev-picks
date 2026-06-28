@@ -508,6 +508,78 @@ def test_close_is_independent_of_fill_rejects_same_sharp_source_as_pick() -> Non
     assert close_is_independent_of_fill("Pinnacle", "Bet365") is True
 
 
+def test_close_moved_from_pick_fair_gates_on_value_delta() -> None:
+    # Audit 2026-06-28: the close is real CLV only if the line MOVED from the
+    # pick-time fair. closing_fair == pick_fair is the identical-archived-line
+    # TAUTOLOGY (clv_log re-encodes the pick-time edge), so it is NOT moved.
+    from app.edge.value import CLV_TAUTOLOGY_EPS, close_moved_from_pick_fair
+
+    assert CLV_TAUTOLOGY_EPS == 1e-3
+    # genuine movement (Betfair 0.471 -> 0.516) -> moved
+    assert close_moved_from_pick_fair(0.471, 0.516) is True
+    # identical line (delta == 0) -> not moved (tautology)
+    assert close_moved_from_pick_fair(0.45, 0.45) is False
+    # de-minimis drift well within the epsilon -> still a tautology
+    assert close_moved_from_pick_fair(0.45, 0.4505) is False
+    # a clear move beyond the epsilon -> moved
+    assert close_moved_from_pick_fair(0.45, 0.455) is True
+    # unknowable pick-time fair cannot prove movement -> conservative False
+    assert close_moved_from_pick_fair(None, 0.5) is False
+
+
+def test_persisted_close_independent_recovers_same_book_moved_line() -> None:
+    # P1 fix: independence is gated on the VALUE DELTA, not the anchor BOOK NAME.
+    # A legitimate same-book MOVED-line close (a Pinnacle pick validated by a later,
+    # MOVED Pinnacle close) is now INDEPENDENT — the old book-name same-source test
+    # structurally dropped every Pinnacle-anchored pick (Pinnacle is SHARP_BOOKS[0]).
+    from app.edge.value import persisted_close_independent
+
+    # same SHARP source on both sides, but the line MOVED -> independent (recovered).
+    # fill book is a SOFT book (Bet365), distinct from the Pinnacle close anchor.
+    assert (
+        persisted_close_independent(
+            close_anchor_book="Pinnacle",
+            fill_book="Bet365",
+            pick_fair=0.471,
+            closing_fair=0.516,
+        )
+        is True
+    )
+
+
+def test_persisted_close_independent_rejects_identical_line_tautology() -> None:
+    # The identical-archived-line tautology (closing_fair == pick_fair) is CIRCULAR
+    # even when anchored by a DIFFERENT book than the fill — the book test let it
+    # through; the value-delta gate closes it.
+    from app.edge.value import persisted_close_independent
+
+    assert (
+        persisted_close_independent(
+            close_anchor_book="Pinnacle",
+            fill_book="Bet365",
+            pick_fair=0.50,
+            closing_fair=0.5005,  # delta 0.0005 <= 1e-3 -> tautology
+        )
+        is False
+    )
+
+
+def test_persisted_close_independent_keeps_fill_book_circular() -> None:
+    # The existing fill-book check is KEPT: a close anchored by the pick's OWN fill
+    # book is circular (the book pricing its own close) even if the line moved.
+    from app.edge.value import persisted_close_independent
+
+    assert (
+        persisted_close_independent(
+            close_anchor_book="Bet365",
+            fill_book="Bet365",
+            pick_fair=0.40,
+            closing_fair=0.52,  # moved, but fill book priced its own close
+        )
+        is False
+    )
+
+
 def test_consensus_anchor_dedups_casing_variant_books() -> None:
     # audit #5: two raw keys that normalize to the same book ('BookA' + 'booka')
     # must count ONCE in the per-selection median. 'home' deduped median of

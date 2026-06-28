@@ -31,8 +31,8 @@ from app.backtesting.clv import clv_log
 from app.edge.value import (
     SHARP_BOOKS,
     anchor_type_for,
-    close_is_independent_of_fill,
     effective_odds,
+    persisted_close_independent,
 )
 from app.ingestion.base import EventDirectory, OddsLoader
 from app.pipeline import event_fair_probs, group_market_prices
@@ -186,16 +186,21 @@ async def revalidate_open_picks(
                 # Stamp independence here too (audit #4): this path previously left
                 # close_independent_of_fill NULL, which the trusted-CLV gate admitted as
                 # "not circular". Record it so a re-scrape close can never leak in as
-                # trusted (same source as the pick, or fill self-priced => not independent).
-                pick.close_independent_of_fill = close_is_independent_of_fill(
-                    close_anchor,
-                    pick.bookmaker,
-                    pick_anchor_type=pick.anchor_type or "",
-                    close_anchor_type=pick.closing_anchor_type or "",
-                    # CLV-3: prefer BOOK identity — two different sharp books (e.g.
-                    # Smarkets pick vs Betfair close) are independent even though
-                    # both collapse to anchor_type 'sharp'.
-                    pick_anchor_book=pick.anchor_book or "",
+                # trusted. INDEPENDENCE = fill book did NOT price its own close AND the
+                # close fair MOVED from the pick-time fair (audit 2026-06-28): an
+                # identical archived line (closing_fair == model_probability) makes
+                # clv_log a tautology that re-encodes the pick-time edge — gating on the
+                # VALUE DELTA (not the anchor BOOK NAME) recovers a legitimate same-book
+                # moved-line close yet still drops the identical-line tautology.
+                pick.close_independent_of_fill = persisted_close_independent(
+                    close_anchor_book=close_anchor,
+                    fill_book=pick.bookmaker,
+                    pick_fair=(
+                        float(pick.model_probability)
+                        if pick.model_probability is not None
+                        else None
+                    ),
+                    closing_fair=closing_fair,
                 )
             books = prices_by_key.get(key) or {}
             # The pick's own book is the actionable price; if it dropped the
@@ -921,21 +926,23 @@ async def finalize_closing_from_snapshots(
         # snapshot-close marker), a sharp value here marks a genuine sharp
         # close the per-anchor and headline CLV can trust.
         pick.closing_anchor_type = anchor_type_for(close_anchor)
-        # INDEPENDENCE provenance (P0-1/P0-3): is the close anchored by a book
-        # OTHER than this pick's own fill book? A close priced by the fill book
-        # itself is CIRCULAR (closing == fill, |clv_log|~0) — fake CLV that
-        # masked the -EV. Stamped beside the anchor type so the trusted sharp
-        # subset can exclude self-priced closes. Consensus -> True (a >=3-book
-        # median is independent of any single fill by construction).
-        pick.close_independent_of_fill = close_is_independent_of_fill(
-            close_anchor,
-            pick.bookmaker,
-            pick_anchor_type=pick.anchor_type or "",
-            close_anchor_type=pick.closing_anchor_type or "",
-            # CLV-3: a Smarkets-anchored pick validated by a Betfair-exchange close
-            # is independent (different sharp BOOKS) though both are anchor_type
-            # 'sharp'; book identity is the precise test, type-equality the fallback.
-            pick_anchor_book=pick.anchor_book or "",
+        # INDEPENDENCE provenance (P0-1/P0-3 + audit 2026-06-28): a close is
+        # independent only when the fill book did NOT price its own close (CIRCULAR
+        # otherwise: closing == fill, |clv_log|~0) AND the close fair MOVED from the
+        # pick-time fair. An identical archived line (closing_fair == model_probability)
+        # makes clv_log a tautology re-encoding the pick-time edge; gating on the VALUE
+        # DELTA (not the anchor BOOK NAME) recovers a legitimate same-book moved-line
+        # close — e.g. a Pinnacle pick validated by a later, moved Pinnacle close —
+        # that the book-name same-source test structurally dropped, while still
+        # rejecting the identical-line tautology. Stamped beside the anchor type so the
+        # trusted sharp subset can exclude both circular and tautological closes.
+        pick.close_independent_of_fill = persisted_close_independent(
+            close_anchor_book=close_anchor,
+            fill_book=pick.bookmaker,
+            pick_fair=(
+                float(pick.model_probability) if pick.model_probability is not None else None
+            ),
+            closing_fair=fair,
         )
     if close_odds is not None and close_odds > 1.0:
         pick.closing_odds = Decimal(f"{close_odds:.4f}")
