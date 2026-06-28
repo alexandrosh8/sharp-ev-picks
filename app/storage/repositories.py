@@ -1823,11 +1823,18 @@ async def betfair_exchange_coverage_outcomes(
     CLV_USE_BETFAIR_EXCHANGE is enabled.
 
     For each pick it reproduces EXACTLY what the consumption path
-    (app.clv_trueup._betfair_exchange_close) would resolve — an EXACT lookup of
-    the ``"betfair:"+ref`` event (external_ref is globally unique, no fuzz/alias)
-    — and whether that event carries a USABLE BACK close: an anchorable H2H close
-    set whose event-wide last pre-kickoff capture is within SNAPSHOT_CLOSE_MAX_GAP
-    of kickoff (the same gate finalize_closing_from_snapshots applies). Writes
+    (app.clv_trueup._betfair_exchange_close / resolve_betfair_back_snaps) would
+    resolve. ADR-0015 v2 INLINE BINDING (audit 2026-06-28): the dedicated capture
+    persists Betfair rows on the CANONICAL event (``Event.external_ref == ref``,
+    ``bookmaker="Betfair Exchange"``), NOT a ``"betfair:"+ref`` namespace — a DEAD
+    namespace the producer no longer writes. So this mirrors the now-fixed resolver
+    (#139): read the pick's OWN canonical event close set and FILTER it to the
+    Betfair book. ``has_betfair_event`` therefore means "the canonical event carries
+    Betfair Exchange rows"; ``has_usable_close`` means those Betfair rows form a
+    USABLE BACK close — the FULL H2H width for the sport (soccer 3-way, basketball
+    2-way), counted over BETFAIR ROWS ONLY (soft books never inflate it), whose own
+    most-recent pre-kickoff capture is within SNAPSHOT_CLOSE_MAX_GAP of kickoff (the
+    same per-source freshness the consumption path gates the sharp close on). Writes
     NOTHING and attaches no close.
 
     Population: picks whose event has a known kickoff (``Event.starts_at`` NOT
@@ -1842,7 +1849,7 @@ async def betfair_exchange_coverage_outcomes(
         conds.append(Event.starts_at >= since)
     pick_rows = (
         await session.execute(
-            select(Pick.id, Sport.key, League.key, Event.external_ref, Event.starts_at)
+            select(Pick.id, Sport.key, League.key, Event.id, Event.external_ref, Event.starts_at)
             .select_from(Pick)
             .join(Event, Pick.event_id == Event.id)
             .join(Sport, Event.sport_id == Sport.id)
@@ -1856,25 +1863,29 @@ async def betfair_exchange_coverage_outcomes(
         return []
 
     outcomes: list[BetfairCoverageOutcome] = []
-    for pick_id, sport_key, league_key, external_ref, kickoff in pick_rows:
-        betfair_ref = f"betfair:{external_ref}"
-        betfair_event_id = await session.scalar(
-            select(Event.id).where(Event.external_ref == betfair_ref)
-        )
-        has_event = betfair_event_id is not None
+    for pick_id, sport_key, league_key, event_id, external_ref, kickoff in pick_rows:
+        has_event = False
         has_close = False
-        if betfair_event_id is not None and kickoff is not None:
-            snaps, last_capture = await closing_odds_from_snapshots(
-                session, betfair_event_id, betfair_ref, kickoff
+        if kickoff is not None:
+            # Mirror resolve_betfair_back_snaps (#139): the pick's OWN canonical
+            # event close set, narrowed to the Betfair book.
+            snaps, _last = await closing_odds_from_snapshots(
+                session, event_id, external_ref, kickoff
             )
-            # USABLE = event scraped near kickoff (coverage gate) AND the close
-            # set has the FULL H2H width for the sport (soccer 3-way home/draw/away,
-            # basketball 2-way home/away) — the same two conditions the consumption
-            # path requires to attach a fair.
+            betfair_snaps = [s for s in snaps if s.bookmaker.strip().lower().startswith("betfair")]
+            has_event = bool(betfair_snaps)
+            # USABLE = FULL H2H width over BETFAIR rows ONLY (the 'betfair%' filter
+            # keeps soft books from inflating coverage) whose OWN most-recent capture
+            # is within the gap — the consumption path gates the sharp close on its
+            # own last capture, NOT the event-wide soft clock.
+            betfair_last = max(
+                (s.captured_at for s in betfair_snaps if s.captured_at is not None),
+                default=None,
+            )
             in_window = (
-                last_capture is not None and kickoff - last_capture <= SNAPSHOT_CLOSE_MAX_GAP
+                betfair_last is not None and kickoff - betfair_last <= SNAPSHOT_CLOSE_MAX_GAP
             )
-            h2h_rows = sum(1 for s in snaps if s.market is Market.H2H)
+            h2h_rows = sum(1 for s in betfair_snaps if s.market is Market.H2H)
             has_close = in_window and h2h_rows >= _betfair_full_market_rows(sport_key)
         outcomes.append(
             BetfairCoverageOutcome(

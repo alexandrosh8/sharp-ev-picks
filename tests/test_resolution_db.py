@@ -821,10 +821,11 @@ def _betfair_back_snaps(event_ref: str) -> list[OddsSnapshotIn]:
 
 
 async def test_betfair_coverage_presence_absence(factory) -> None:  # type: ignore[no-untyped-def]
-    """betfair_exchange_coverage_outcomes reports, per pick, whether a
-    "betfair:"+ref event exists and carries a usable BACK close. Pick A has a
-    captured betfair event with a close (with_event + with_close); pick B has no
-    betfair event (neither). Read-only — attaches no close, writes no pick."""
+    """betfair_exchange_coverage_outcomes reports, per pick, whether the pick's
+    CANONICAL event carries a usable Betfair BACK close (ADR-0015 v2 inline binding
+    — bookmaker "Betfair Exchange" on the same event, NOT a "betfair:"+ref namespace).
+    Pick A's canonical event carries a Betfair close (with_event + with_close); pick
+    B carries none (neither). Read-only — attaches no close, writes no pick."""
     async with factory() as session:
         await persist_pick(
             session,
@@ -841,14 +842,17 @@ async def test_betfair_coverage_presence_absence(factory) -> None:  # type: igno
             "vbf",
         )
         await session.commit()
-    # Only A's fixture got a Betfair page captured (namespaced "betfair:"+ref).
+    # Only A's fixture carries an INLINE Betfair close on its CANONICAL event.
     teams = {
-        "betfair:evt-bf-A": EventTeams(
-            home="Alpha", away="Beta", league="betfair_soccer", starts_at=KO
-        )
+        "evt-bf-A": EventTeams(home="Alpha", away="Beta", league=_BETFAIR_LEAGUE, starts_at=KO)
     }
     await persist_odds_snapshots(
-        factory, _betfair_back_snaps("betfair:evt-bf-A"), teams, "betfair_soccer", "betfair_soccer"
+        factory,
+        _betfair_back_snaps("evt-bf-A"),
+        teams,
+        "soccer",
+        "soccer",
+        attach_only_to_existing=True,
     )
 
     async with factory() as session:
@@ -928,29 +932,30 @@ async def test_betfair_coverage_basketball_two_way_is_usable(factory) -> None:  
             "vbf",
         )
         await session.commit()
+    # INLINE Betfair closes on each pick's CANONICAL event (ADR-0015 v2).
     bball_teams = {
-        "betfair:evt-bf-bball": EventTeams(
-            home="Home", away="Away", league="betfair_basketball", starts_at=KO
+        "evt-bf-bball": EventTeams(
+            home="Home", away="Away", league=_BASKETBALL_COV_LEAGUE, starts_at=KO
         )
     }
     await persist_odds_snapshots(
         factory,
-        _betfair_basketball_back_snaps("betfair:evt-bf-bball"),
+        _betfair_basketball_back_snaps("evt-bf-bball"),
         bball_teams,
-        "betfair_basketball",
-        "betfair_basketball",
+        "basketball",
+        "basketball",
+        attach_only_to_existing=True,
     )
     soccer2_teams = {
-        "betfair:evt-bf-soccer2": EventTeams(
-            home="Home", away="Away", league="betfair_soccer", starts_at=KO
-        )
+        "evt-bf-soccer2": EventTeams(home="Home", away="Away", league=_BETFAIR_LEAGUE, starts_at=KO)
     }
     await persist_odds_snapshots(
         factory,
-        _betfair_basketball_back_snaps("betfair:evt-bf-soccer2"),  # only 2 H2H rows
+        _betfair_basketball_back_snaps("evt-bf-soccer2"),  # only 2 H2H rows
         soccer2_teams,
-        "betfair_soccer",
-        "betfair_soccer",
+        "soccer",
+        "soccer",
+        attach_only_to_existing=True,
     )
 
     async with factory() as session:
@@ -964,3 +969,89 @@ async def test_betfair_coverage_basketball_two_way_is_usable(factory) -> None:  
     soccer2 = by_league[_BETFAIR_LEAGUE]
     assert soccer2.has_betfair_event is True
     assert soccer2.has_usable_close is False  # 2 rows < soccer threshold (3)
+
+
+_COV_CANON_F = "betfair-cov-canon-f"
+_COV_CANON_G = "betfair-cov-canon-g"
+
+
+async def test_betfair_coverage_canonical_only_ignores_namespace_and_soft(factory) -> None:  # type: ignore[no-untyped-def]
+    # REGRESSION (audit 2026-06-28): betfair_exchange_coverage_outcomes mirrors the
+    # FIXED resolver (#139) — it counts INLINE Betfair rows on the pick's CANONICAL
+    # event, IGNORES a stray "betfair:"+ref namespace event, and counts the H2H width
+    # over BETFAIR rows ONLY (soft books must NEVER inflate Betfair coverage).
+    async with factory() as session:
+        await persist_pick(
+            session,
+            _betfair_pick("evt-bf-F").model_copy(update={"league": _COV_CANON_F}),
+            EventTeams(home="Foo", away="Bar", league=_COV_CANON_F, starts_at=KO),
+            "value",
+            "vbf",
+        )
+        await persist_pick(
+            session,
+            _betfair_pick("evt-bf-G").model_copy(update={"league": _COV_CANON_G}),
+            EventTeams(home="Baz", away="Qux", league=_COV_CANON_G, starts_at=KO),
+            "value",
+            "vbf",
+        )
+        await session.commit()
+
+    # Pick F canonical: a FULL 3-row Betfair close PLUS a soft book on the SAME event.
+    f_teams = {"evt-bf-F": EventTeams(home="Foo", away="Bar", league=_COV_CANON_F, starts_at=KO)}
+    await persist_odds_snapshots(
+        factory,
+        _betfair_back_snaps("evt-bf-F"),
+        f_teams,
+        "soccer",
+        "soccer",
+        attach_only_to_existing=True,
+    )
+    soft_f = [
+        _soft_snap_at("bet365", s, o, "evt-bf-F", CAPTURED)
+        for s, o in (("Home", 2.2), ("Draw", 3.4), ("Away", 3.3))
+    ]
+    await persist_odds_snapshots(
+        factory, soft_f, f_teams, "soccer", "soccer", attach_only_to_existing=True
+    )
+
+    # Pick G canonical: only TWO inline Betfair H2H rows + THREE soft H2H rows. If soft
+    # rows counted toward the width, 2+3 >= 3 would read usable — they must NOT.
+    g_teams = {"evt-bf-G": EventTeams(home="Baz", away="Qux", league=_COV_CANON_G, starts_at=KO)}
+    await persist_odds_snapshots(
+        factory,
+        _betfair_basketball_back_snaps("evt-bf-G"),
+        g_teams,
+        "soccer",
+        "soccer",
+        attach_only_to_existing=True,
+    )
+    soft_g = [
+        _soft_snap_at("bet365", s, o, "evt-bf-G", CAPTURED)
+        for s, o in (("Home", 2.2), ("Draw", 3.4), ("Away", 3.3))
+    ]
+    await persist_odds_snapshots(
+        factory, soft_g, g_teams, "soccer", "soccer", attach_only_to_existing=True
+    )
+    # G's FULL 3-row Betfair close exists ONLY under the DEAD "betfair:" namespace —
+    # the instrument must ignore it (reading the canonical event, where G has only 2).
+    g_ns = {
+        "betfair:evt-bf-G": EventTeams(
+            home="Baz", away="Qux", league="betfair_soccer", starts_at=KO
+        )
+    }
+    await persist_odds_snapshots(
+        factory, _betfair_back_snaps("betfair:evt-bf-G"), g_ns, "betfair_soccer", "betfair_soccer"
+    )
+
+    async with factory() as session:
+        outcomes = await betfair_exchange_coverage_outcomes(session)
+    by_league = {o.league: o for o in outcomes if o.league in (_COV_CANON_F, _COV_CANON_G)}
+    f = by_league[_COV_CANON_F]
+    assert f.has_betfair_event is True
+    assert f.has_usable_close is True  # canonical 3-row Betfair close (soft books harmless)
+    g = by_league[_COV_CANON_G]
+    assert g.has_betfair_event is True  # 2 inline Betfair rows ARE present
+    # 2 inline Betfair < 3: soft rows are NOT counted AND the dead-namespace 3-row
+    # close is ignored — both would have flipped this True if the bug persisted.
+    assert g.has_usable_close is False
