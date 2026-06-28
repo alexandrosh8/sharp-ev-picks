@@ -642,6 +642,11 @@
       .badge.info { color: var(--info); border-color: rgba(211,160,47,.4); }
       .badge.neu { color: var(--faint); }
       .clv-chip { font-size: 11px; padding: 2px 7px; font-weight: 600; }
+      /* INDICATIVE consensus-close sub-label — dim, clearly NOT a validated CLV */
+      .clv-sub {
+        font-family: var(--mono); font-size: 9px; letter-spacing: 0.04em;
+        text-transform: uppercase; color: var(--faint); font-style: italic;
+      }
 
       /* ---- empty / loading -------------------------------------------- */
       .empty { padding: 34px 18px; text-align: center; }
@@ -1053,24 +1058,77 @@
           return fromHealth != null ? fromHealth : 0.03;
         }
 
-        // CLV badge logic, mirrors the original cellClv contract.
+        // ===== per-pick CLV trust rules — MIRROR the aggregate ==========
+        // Audit 2026-06-28 P2: a per-pick CLV surface must inherit the SAME trust
+        // rules the headline uses, or a RESULTS scan reads an untrusted close as
+        // validated. These constants/guards mirror app/storage/repositories.py:
+        // _SHARP_CLOSE_ANCHORS, _clv_row_is_fabricated, _clv_row_is_tautological.
+        const SHARP_CLOSE_ANCHORS = ["pinnacle", "sharp"];
+        const CLV_IMPLAUSIBLE_CLOSE_EDGE = 0.2; // close-implied edge ceiling
+        const CLV_IMPLAUSIBLE_LOG = 0.5;        // |clv_log| ceiling (fallback)
+        const CLV_TAUTOLOGY_EPS = 1e-3;         // close fair == pick fair (4-dp line)
+
+        // Physically-impossible close (CLV-1 double-chance orientation residue):
+        // close-implied edge > 0.20, else |clv_log| > 0.5. No CLV row = not fabricated.
+        function clvRowFabricated(p) {
+          if (p.clv_log == null) return false;
+          if (p.decimal_odds != null && p.closing_fair_probability != null) {
+            const d = Number(p.decimal_odds);
+            if (d > 0) {
+              const closeEdge = Number(p.closing_fair_probability) - 1 / d;
+              if (closeEdge > CLV_IMPLAUSIBLE_CLOSE_EDGE) return true;
+            }
+          }
+          return Math.abs(Number(p.clv_log)) > CLV_IMPLAUSIBLE_LOG;
+        }
+        // Tautological close: close fair == pick-time fair (identical archived line)
+        // — clv_log merely re-encodes the pick-time edge, not close evidence.
+        function clvRowTautological(p) {
+          if (p.clv_log == null) return false;
+          if (p.closing_fair_probability == null || p.model_probability == null) return false;
+          return Math.abs(Number(p.closing_fair_probability) - Number(p.model_probability)) <= CLV_TAUTOLOGY_EPS;
+        }
+        function clvRowExcluded(p) { return clvRowFabricated(p) || clvRowTautological(p); }
+        function isSharpClose(p) { return SHARP_CLOSE_ANCHORS.indexOf(p.closing_anchor_type) !== -1; }
+
+        // CLV badge logic, mirrors the original cellClv contract + the headline's
+        // trust rule: trusted (green/red) ONLY for an independent, non-fabricated,
+        // sharp-anchored close; consensus/soft/null anchors are INDICATIVE (dim).
         function clvInfo(p) {
           if (p.clv_log === null || p.clv_log === undefined) {
-            return { text: p.status === "alerted" ? "CLV pending" : "CLV n/a", cls: "neu", val: null,
+            return { text: p.status === "alerted" ? "CLV pending" : "CLV n/a", cls: "neu", val: null, trusted: false,
               title: "No CLV row yet — open picks true up at the close." };
           }
           if (p.close_independent_of_fill === false) {
-            return { text: "self-priced", cls: "neu", val: null,
+            return { text: "self-priced", cls: "neu", val: null, trusted: false,
               title: "Close was anchored by your OWN fill book — value vs it is circular (≈0). Excluded from the headline." };
+          }
+          if (clvRowExcluded(p)) {
+            const why = clvRowFabricated(p)
+              ? "physically impossible (close-implied edge data error)"
+              : "an identical archived line (tautological — re-encodes the pick-time edge)";
+            return { text: "CLV n/a", cls: "neu", val: null, trusted: false,
+              title: "Close-implied CLV is " + why + " — excluded from the proof of edge, exactly like the headline." };
           }
           const v = (Math.exp(Number(p.clv_log)) - 1) * 100;
           const sign = p.beat_close
             ? "Your price beats the de-vigged closing sharp line by this much."
             : "The market moved against you — your price is worse than the de-vigged close.";
+          if (!isSharpClose(p)) {
+            // consensus / soft / null anchor — INDICATIVE, not validated CLV: show
+            // the number but dim (neutral), with a "consensus close" sub-label.
+            return {
+              text: (p.status === "alerted" ? "live " : "") + (v >= 0 ? "+" : "") + v.toFixed(1) + "%",
+              cls: "neu", val: v, trusted: false, sub: "consensus close",
+              title: "INDICATIVE only — this close was anchored by a " + (p.closing_anchor_type || "non-sharp") +
+                " line, not an independent Pinnacle/sharp book. The proof-of-edge headline counts only sharp closes; treat this CLV as unvalidated.",
+            };
+          }
           return {
             text: (p.status === "alerted" ? "live " : "") + (v >= 0 ? "+" : "") + v.toFixed(1) + "%",
-            cls: p.beat_close ? "pos" : "neg", val: v,
-            title: (p.status === "alerted" ? "LIVE/provisional until the close locks. " : "") + sign,
+            cls: p.beat_close ? "pos" : "neg", val: v, trusted: true,
+            title: (p.status === "alerted" ? "LIVE/provisional until the close locks. " : "") + sign +
+              " Trusted: independent sharp (" + p.closing_anchor_type + ") close.",
           };
         }
 
@@ -1087,8 +1145,13 @@
             : p.current_odds != null ? p.current_odds : null;
           const nowO = closeRaw != null ? Number(closeRaw) : null;
           const nowLabel = (p.closing_odds != null || started || p.status === "settled" || p.status === "superseded") ? "close" : "now";
-          const fairProb = p.closing_fair_probability != null ? Number(p.closing_fair_probability)
-            : p.model_probability != null ? Number(p.model_probability) : null;
+          // Audit 2026-06-28 P2: the FAIR marker uses the SAME `reprised` rule as
+          // the "fair %" stat (closing_fair AND a live current_odds → live fair,
+          // else the entry fair model_probability) so the two never disagree on a
+          // partially-repriced pick (closing_fair set, current_odds null).
+          const fairProb = (p.closing_fair_probability != null && p.current_odds != null)
+            ? Number(p.closing_fair_probability)
+            : (p.model_probability != null ? Number(p.model_probability) : null);
           const fairO = fairProb && fairProb > 0 ? 1 / fairProb : null;
 
           const vals = [fill]; if (nowO != null) vals.push(nowO); if (fairO != null) vals.push(fairO);
@@ -1149,6 +1212,15 @@
           clvc.textContent = "CLV " + ci.text.replace(/^live\s*/, "");
           clvc.title = ci.title || "";
           leg.appendChild(clvc);
+          // INDICATIVE (consensus/soft close) sub-label — clearly distinct from a
+          // validated sharp-close CLV so it can't be misread as proof of edge.
+          if (ci.sub) {
+            const sub = document.createElement("span");
+            sub.className = "clv-sub";
+            sub.textContent = ci.sub;
+            sub.title = ci.title || "";
+            leg.appendChild(sub);
+          }
           wrap.appendChild(leg);
           return wrap;
         }
@@ -1536,8 +1608,15 @@
           const bins = [-Infinity, -5, -2, 0, 2, 5, Infinity];
           const counts = new Array(bins.length - 1).fill(0);
           let n = 0;
+          // P3: scope to the active tier filter (consistent with the premium-scoped
+          // hero) rather than the global PICKS set.
+          const tier = $("f-tier").value;
           PICKS.forEach((p) => {
+            if (tier && tierOf(p) !== tier) return;
             if (p.clv_log == null || p.close_independent_of_fill === false) return;
+            // P2: drop fabricated/tautological rows so a fake +76% never lands in
+            // the ">5% beat-close" bin (same guard the aggregate applies).
+            if (clvRowExcluded(p)) return;
             if (!(p.status === "settled" || inClosedTab(p))) return;
             const v = (Math.exp(Number(p.clv_log)) - 1) * 100; n++;
             for (let i = 0; i < counts.length; i++) if (v >= bins[i] && v < bins[i + 1]) { counts[i]++; break; }

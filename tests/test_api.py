@@ -734,6 +734,69 @@ def test_dashboard_per_row_clv_respects_close_independence() -> None:
     assert "self-priced" in text
 
 
+def test_dashboard_per_pick_clv_chip_inherits_sharp_anchor_trust() -> None:
+    """Audit 2026-06-28 P2: the per-pick CLV chip must inherit the headline's
+    SHARP-anchor trust rule. Only a close anchored by a named sharp book
+    (closing_anchor_type in pinnacle/sharp) renders as a trusted (green/red
+    beat-close) CLV; a consensus/soft/null-anchored close renders INDICATIVE
+    (neutral) with a 'consensus close' sub-label, so a RESULTS scan can never
+    misread an untrusted close as validated."""
+    text = TestClient(make_app()).get("/").text
+    # the sharp-anchor allow-list mirrors the backend _SHARP_CLOSE_ANCHORS
+    assert "SHARP_CLOSE_ANCHORS" in text
+    assert '"pinnacle"' in text and '"sharp"' in text
+    # clvInfo consults the close anchor and demotes non-sharp closes to indicative
+    assert "p.closing_anchor_type" in text
+    assert "consensus close" in text
+    # the trusted (green/red) styling is gated behind the sharp-anchor check
+    assert "trusted" in text
+
+
+def test_dashboard_per_pick_clv_applies_fabricated_guard() -> None:
+    """Audit 2026-06-28 P2: the per-pick CLV chip + the beat-close distribution
+    must apply the SAME fabricated/tautological guard the aggregate uses, so a
+    physically-impossible close (close-implied edge > 0.20, or |clv_log| > 0.5)
+    or a tautological identical-line close is dropped/neutralised — never shown
+    green and never counted in the >5% histogram bin."""
+    text = TestClient(make_app()).get("/").text
+    # the guard constants mirror the backend (repositories.py)
+    assert "CLV_IMPLAUSIBLE_CLOSE_EDGE" in text
+    assert "0.2" in text  # the impossible close-implied-edge ceiling
+    assert "CLV_IMPLAUSIBLE_LOG" in text
+    assert "CLV_TAUTOLOGY_EPS" in text
+    # the guard helpers exist and are applied before a chip / a histogram count
+    assert "function clvRowFabricated" in text
+    assert "function clvRowTautological" in text
+    assert "clvRowExcluded(p)" in text
+
+
+def test_dashboard_drift_bar_and_fair_stat_use_same_fair_source() -> None:
+    """Audit 2026-06-28 P2: the drift-bar FAIR marker and the 'fair %' stat must
+    read the SAME fair. Both use the reprised rule (closing_fair_probability AND
+    current_odds present) -> live fair, else the entry fair (model_probability),
+    so a partially-repriced pick (closing_fair set, current_odds null) can never
+    show two different fairs on the same card."""
+    text = TestClient(make_app()).get("/").text
+    # the drift bar's fair source now requires a live PRICE too (current_odds),
+    # exactly like the stat's `reprised` rule — no bare closing_fair ?? model fork
+    assert "p.closing_fair_probability != null && p.current_odds != null" in text
+    # the legacy drift-bar fork that ignored current_odds is gone
+    assert "p.closing_fair_probability != null ? Number(p.closing_fair_probability)" not in text
+
+
+def test_dashboard_distribution_scoped_to_active_tier() -> None:
+    """Audit 2026-06-28 P2 (P3): the beat-close distribution must be scoped to the
+    active tier filter, consistent with the premium-scoped hero — not built from
+    the global PICKS set."""
+    text = TestClient(make_app()).get("/").text
+    # renderDistribution reads the tier filter and scopes rows to it
+    assert "function renderDistribution" in text
+    body = text[text.index("function renderDistribution") :]
+    body = body[: body.index("function ", 1)]
+    assert "f-tier" in body
+    assert "tierOf(p)" in body
+
+
 def test_dashboard_open_card_matches_live_tab() -> None:
     """open-card mismatch: the 'Open picks (premium, verified)' card counts the
     SAME set as the LIVE tab (inLiveTab) so the card and the LIVE (n) badge can
