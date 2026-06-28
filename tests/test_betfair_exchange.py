@@ -1,42 +1,39 @@
-"""Read-only Betfair Exchange BACK-odds capture (OddsPortal DOM row).
+"""Read-only Betfair Exchange BACK-odds capture from OddsPortal's JSON feed.
 
-Pure parser + odds-math tests need no network; the page reader is exercised
-through an INJECTED ``page_loader`` (static token list, no browser/network); the
-price change-gate runs without a DB; the capture_once integration test uses the
-compose Postgres (skip when absent, same pattern as the arcadia/persistence
-tests). NO live network, ever.
+The capture now rides the SAME curl_cffi JSON/HTTP feed the main football scrape
+uses (``app/ingestion/oddsportal_json.py``) instead of the retired Playwright DOM
+reader: per targeted event it GETs the per-market ``.dat`` feed, decrypts it, and
+reads the Betfair Exchange (provider id "44") BACK price + matched ``volume`` for
+the liquidity gate. The pure parser (``parse_betfair_feed``) is exercised with the
+recon's exact decrypted-JSON shapes (no network, no crypto); the reader is driven
+through an INJECTED ``feed_loader`` (no curl_cffi); the price change-gate runs
+without a DB; the capture_once integration test uses the compose Postgres (skip
+when absent). NO live network, ever.
 """
 
-from collections.abc import Awaitable, Callable, Sequence
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.ingestion.base import EventTeams, ScraperProxy
+from app.ingestion.base import EventTeams
 from app.ingestion.betfair_exchange import (
-    _ANCESTOR_WALK_UP,
-    _BASKETBALL_BACK_OUTCOMES,
-    _EXCHANGE_ALT,
-    _ROW_EXTRACT_JS,
-    _ROW_TESTID,
-    _SECTION_TESTID,
+    BETFAIR_PROVIDER_ID,
     BOOKMAKER,
     SPORT_SEGMENTS,
-    BackQuote,
     BetfairExchangeCapture,
-    BetfairExchangeError,
     BetfairExchangeReader,
+    FeedFeasible,
     MatchTarget,
-    _pair_tokens,
-    back_outcomes_for_segment,
-    back_quotes_to_snapshots,
-    extract_back_quotes,
-    fractional_to_decimal,
-    parse_liquidity,
+    feed_markets_for_sport,
+    parse_betfair_feed,
 )
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
@@ -44,593 +41,315 @@ from app.storage.models import Event, OddsSnapshot
 from app.storage.repositories import persist_odds_snapshots
 
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
-NOW = datetime(2026, 6, 19, 18, 0, tzinfo=UTC)
-
-# The Betfair Exchange row text the user verified live (2026-06-19, UK proxy):
-#   "Betfair Exchange ... Back Lay 28/25 (9052) 5/2 (3307) 3/1 (1307) 99.3%
-#    57/50 (11317) 51/20 (41) 31/10 (2683) 100"
-# -> BACK home/draw/away = 28/25, 5/2, 3/1 ; LAY = 57/50, 51/20, 31/10.
-# Our DOM extractor keeps only fractional-odds + parenthesised-liquidity tokens
-# (overround %s are dropped), so the ordered token list it returns is:
-_LIVE_ROW_TOKENS = (
-    "28/25",
-    "(9052)",
-    "5/2",
-    "(3307)",
-    "3/1",
-    "(1307)",
-    "57/50",
-    "(11317)",
-    "51/20",
-    "(41)",
-    "31/10",
-    "(2683)",
-)
-
-# A 2-way BASKETBALL exchange row (moneyline, NO draw): BACK home/away then LAY
-# home/away, each a fraction + parenthesised £ liquidity, overround %s dropped.
-# BACK home=4/5 -> 1.8, away=11/10 -> 2.1 ; LAY home=5/6, away=6/5 (discarded).
-_BASKETBALL_ROW_TOKENS = (
-    "4/5",
-    "(8000)",
-    "11/10",
-    "(7500)",
-    "5/6",
-    "(9000)",
-    "6/5",
-    "(6000)",
-)
+NOW = datetime(2026, 6, 28, 18, 0, tzinfo=UTC)
+# A real provider observation epoch (d.time-base) -> captured_at.
+TIME_BASE = 1782352800
 
 
 # --------------------------------------------------------------------------- #
-# Fractional -> decimal odds math (TDD core: failing test first, then code)
+# Feed payload builders — the EXACT decrypted-JSON shapes the read-only recon
+# proved (soccer 1x2 = 3-way DICT, soccer OU 2.5 = 2-way LIST, basketball
+# moneyline = 2-way LIST), each carrying odds["44"] + volume["44"] for Betfair.
 # --------------------------------------------------------------------------- #
-def test_fractional_to_decimal_user_examples() -> None:
-    # The exact conversions the user quoted from the live row.
-    assert fractional_to_decimal("28/25") == pytest.approx(2.12)
-    assert fractional_to_decimal("5/2") == pytest.approx(3.5)
-    assert fractional_to_decimal("3/1") == pytest.approx(4.0)
-    assert fractional_to_decimal("57/50") == pytest.approx(2.14)
+def _payload(
+    feed_key: str,
+    odds44: Any,
+    volume44: Any | None,
+    *,
+    time_base: int | None = TIME_BASE,
+    extra_books: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    odds: dict[str, Any] = {}
+    if odds44 is not None:
+        odds[BETFAIR_PROVIDER_ID] = odds44
+    if extra_books:
+        odds.update(extra_books)
+    block: dict[str, Any] = {"odds": odds}
+    if volume44 is not None:
+        block["volume"] = {BETFAIR_PROVIDER_ID: volume44}
+    d: dict[str, Any] = {"oddsdata": {"back": {feed_key: block}}}
+    if time_base is not None:
+        d["time-base"] = time_base
+    return {"d": d}
 
 
-def test_fractional_to_decimal_evens_and_odds_on() -> None:
-    assert fractional_to_decimal("1/1") == pytest.approx(2.0)  # evens
-    assert fractional_to_decimal("1/2") == pytest.approx(1.5)  # odds-on
-    assert fractional_to_decimal(" 10/3 ") == pytest.approx(4.3333, abs=1e-3)
+def _soccer_1x2_payload(
+    odds: Mapping[str, float] | None = None,
+    volume: Mapping[str, float] | None = None,
+) -> dict[str, Any]:
+    return _payload(
+        "E-1-2-0-0-0",
+        odds if odds is not None else {"0": 2.12, "1": 3.5, "2": 4.0},
+        volume if volume is not None else {"0": 9052, "1": 3307, "2": 1307},
+    )
 
 
-def test_fractional_to_decimal_rejects_garbage() -> None:
-    for bad in ("", "2.12", "5-2", "abc", "5/", "/2", "(9052)"):
-        assert fractional_to_decimal(bad) is None
+def _soccer_ou_payload() -> dict[str, Any]:
+    return _payload("E-2-2-0-2.5-0", [1.9, 2.0], [5000, 4000])
 
 
-def test_fractional_to_decimal_rejects_zero_denominator() -> None:
-    assert fractional_to_decimal("5/0") is None
+def _basketball_ml_payload() -> dict[str, Any]:
+    return _payload("E-3-1-0-0-0", [1.8, 2.1], [8000, 7500])
 
 
-def test_fractional_to_decimal_always_above_one() -> None:
-    # Even the shortest odds-on price stays a valid decimal (> 1.0).
-    assert (fractional_to_decimal("1/100") or 0.0) > 1.0
-
-
-# --------------------------------------------------------------------------- #
-# Liquidity token parsing
-# --------------------------------------------------------------------------- #
-def test_parse_liquidity_plain_and_thousands() -> None:
-    assert parse_liquidity("(9052)") == 9052.0
-    assert parse_liquidity("(11,317)") == 11317.0
-    assert parse_liquidity(" (41) ") == 41.0
-
-
-def test_parse_liquidity_rejects_non_liquidity() -> None:
-    for bad in ("9052", "28/25", "99.3%", "()", "(abc)", ""):
-        assert parse_liquidity(bad) is None
-
-
-# --------------------------------------------------------------------------- #
-# Token pairing: ordered DOM tokens -> (odds, liquidity) cells
-# --------------------------------------------------------------------------- #
-def test_pair_tokens_back_then_lay() -> None:
-    cells = _pair_tokens(_LIVE_ROW_TOKENS)
-    # 6 cells: 3 BACK then 3 LAY, each (fraction, liquidity).
-    assert cells == [
-        ("28/25", 9052.0),
-        ("5/2", 3307.0),
-        ("3/1", 1307.0),
-        ("57/50", 11317.0),
-        ("51/20", 41.0),
-        ("31/10", 2683.0),
-    ]
-
-
-def test_pair_tokens_odds_without_liquidity_pairs_none() -> None:
-    cells = _pair_tokens(("28/25", "5/2", "(3307)"))
-    assert cells == [("28/25", None), ("5/2", 3307.0)]
-
-
-# --------------------------------------------------------------------------- #
-# BACK-vs-LAY selection + liquidity gate
-# --------------------------------------------------------------------------- #
-def test_extract_back_quotes_takes_back_side_only() -> None:
-    cells = _pair_tokens(_LIVE_ROW_TOKENS)
-    quotes = extract_back_quotes(cells, min_liquidity=0.0)
-    # Exactly the 3 BACK outcomes (home/draw/away) — never the LAY triple.
-    assert [q.designation for q in quotes] == ["home", "draw", "away"]
-    assert [round(q.decimal_odds, 2) for q in quotes] == [2.12, 3.5, 4.0]
-    assert [q.liquidity for q in quotes] == [9052.0, 3307.0, 1307.0]
-    # The LAY prices (57/50 -> 2.14, etc.) must NOT appear.
-    assert all(q.decimal_odds != pytest.approx(2.14) for q in quotes)
-
-
-def test_liquidity_gate_drops_thin_outcomes() -> None:
-    cells = _pair_tokens(_LIVE_ROW_TOKENS)
-    # Floor between the draw (3307) and away (1307) liquidities.
-    quotes = extract_back_quotes(cells, min_liquidity=2000.0)
-    assert [q.designation for q in quotes] == ["home", "draw"]  # away (1307) gated out
-
-
-def test_liquidity_gate_can_empty_a_thin_market() -> None:
-    cells = _pair_tokens(_LIVE_ROW_TOKENS)
-    assert extract_back_quotes(cells, min_liquidity=1_000_000.0) == []
-
-
-# Real obscure-match Betfair Exchange BACK rows, captured live 2026-06-23 via the
-# read-only DOM probe (Brasiliense/Sobradinho and Hafnarfjordur/Valur). These are
-# exactly the U20/lower-division/friendly markets the operator confirmed DO show
-# Betfair odds. Their backable £ liquidity is genuinely small (£12-£23) — that is
-# normal for a small exchange market, NOT a thin/closed one. The default floor
-# must admit them; only the single-major-match £500 probe ever cleared the old
-# 500.0 default, which is why only 22 betfair_soccer events were ever captured.
-_OBSCURE_ROW_TOKENS = (
-    "33/100",
-    "(16)",
-    "7/2",
-    "(16)",
-    "9/2",
-    "(14)",
-)
-
-
-def test_default_floor_admits_real_obscure_market_liquidity() -> None:
-    # REGRESSION (2026-06-23): the £500 default silently dropped every obscure
-    # match's Betfair row (live £12-£23 liquidities) -> only 22 events ever
-    # captured. The default floor must keep these real small-market BACK prices.
-    from app.config import get_settings
-
-    floor = get_settings().betfair_exchange_min_liquidity
-    cells = _pair_tokens(_OBSCURE_ROW_TOKENS)
-    quotes = extract_back_quotes(cells, min_liquidity=floor)
-    assert [q.designation for q in quotes] == ["home", "draw", "away"]
-    assert [q.liquidity for q in quotes] == [16.0, 16.0, 14.0]
-
-
-def test_extract_back_quotes_skips_missing_liquidity() -> None:
-    # An odds cell whose liquidity is absent is dropped even with a 0 floor.
-    cells: list[tuple[str, float | None]] = [("28/25", None), ("5/2", 3307.0), ("3/1", 1307.0)]
-    quotes = extract_back_quotes(cells, min_liquidity=0.0)
-    assert [q.designation for q in quotes] == ["draw", "away"]
-
-
-def test_extract_back_quotes_two_way_outcomes() -> None:
-    # Forward-compat: a 2-way market (tennis) keys home/away only.
-    cells: list[tuple[str, float | None]] = [("5/4", 5000.0), ("13/8", 4000.0)]
-    quotes = extract_back_quotes(cells, outcomes=("home", "away"), min_liquidity=0.0)
-    assert [q.designation for q in quotes] == ["home", "away"]
-
-
-def test_empty_back_cell_dropped_misaligns_selections() -> None:
-    # Bug #5 (audit 2026-06-21): if an EMPTY (suspended) BACK cell is dropped
-    # rather than position-padded, the pairing shifts and away's price wrongly
-    # maps to DRAW — the wrong-odds-to-selection corruption the JS now prevents.
-    cells = _pair_tokens(("2.50", "(1000)", "1.80", "(2000)"))  # draw cell dropped
-    quotes = extract_back_quotes(cells, min_liquidity=500.0)
-    assert [(q.designation, round(q.decimal_odds, 2)) for q in quotes] == [
-        ("home", 2.50),
-        ("draw", 1.80),  # MISALIGNED — away's 1.80 landed on draw
-    ]
-
-
-def test_empty_back_cell_sentinel_keeps_alignment() -> None:
-    # The fix: the row JS emits a '0' sentinel for an empty cell so its POSITION
-    # is preserved. '0' parses to <=1.0 -> dropped, but the surviving selections
-    # keep their RIGHT odds (home=2.50, away=1.80; draw correctly absent).
-    cells = _pair_tokens(("2.50", "(1000)", "0", "1.80", "(2000)"))  # draw sentinel
-    quotes = extract_back_quotes(cells, min_liquidity=500.0)
-    assert [(q.designation, round(q.decimal_odds, 2)) for q in quotes] == [
-        ("home", 2.50),
-        ("away", 1.80),
-    ]
-
-
-# --------------------------------------------------------------------------- #
-# Snapshot construction (selection naming + liquidity carried through)
-# --------------------------------------------------------------------------- #
 def _teams() -> EventTeams:
     return EventTeams(home="Real Madrid", away="Al Hilal", league="FIFA Club World Cup")
 
 
-def test_back_quotes_to_snapshots_names_selections() -> None:
-    quotes = [
-        BackQuote("home", 2.12, 9052.0),
-        BackQuote("draw", 3.5, 3307.0),
-        BackQuote("away", 4.0, 1307.0),
-    ]
-    snaps = back_quotes_to_snapshots("https://op/match", quotes, _teams(), now=NOW)
+def _parse_soccer_1x2(
+    payload: Mapping[str, Any], *, min_liquidity: float = 0.0
+) -> list[OddsSnapshotIn]:
+    return parse_betfair_feed(
+        payload,
+        market_key="1x2",
+        default_bet_id=0,
+        default_scope_id=0,
+        home="Real Madrid",
+        away="Al Hilal",
+        event_id="https://op/match",
+        min_liquidity=min_liquidity,
+        now=NOW,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# parse_betfair_feed — the load-bearing pure parser (recon JSON shapes).
+# --------------------------------------------------------------------------- #
+def test_parse_soccer_1x2_three_way_dict() -> None:
+    snaps = _parse_soccer_1x2(_soccer_1x2_payload())
     assert [s.selection for s in snaps] == ["Real Madrid", "Draw", "Al Hilal"]
     assert all(s.bookmaker == BOOKMAKER for s in snaps)
     assert all(s.market is Market.H2H for s in snaps)
+    assert all(s.market_detail == "1x2" for s in snaps)
     assert [s.decimal_odds for s in snaps] == [2.12, 3.5, 4.0]
     assert [s.liquidity for s in snaps] == [9052.0, 3307.0, 1307.0]
-    assert all(s.captured_at == NOW and s.ingested_at == NOW for s in snaps)
-    # Aware-UTC timestamps (naive would be a bug).
+    # captured_at = the feed's provider observation time (d.time-base), UTC-aware.
+    assert all(s.captured_at == datetime.fromtimestamp(TIME_BASE, tz=UTC) for s in snaps)
     assert all(s.captured_at.tzinfo is not None for s in snaps)
+    assert all(s.ingested_at == NOW for s in snaps)
+
+
+def test_parse_soccer_over_under_two_way_list() -> None:
+    snaps = parse_betfair_feed(
+        _soccer_ou_payload(),
+        market_key="over_under_2_5",
+        default_bet_id=0,
+        default_scope_id=0,
+        home="Real Madrid",
+        away="Al Hilal",
+        event_id="https://op/match",
+        min_liquidity=0.0,
+        now=NOW,
+    )
+    assert [s.selection for s in snaps] == ["Over 2.5", "Under 2.5"]
+    assert all(s.market is Market.TOTALS for s in snaps)
+    assert all(s.market_detail == "over_under_2_5" for s in snaps)
+    assert [s.decimal_odds for s in snaps] == [1.9, 2.0]
+    assert [s.liquidity for s in snaps] == [5000.0, 4000.0]
+
+
+def test_parse_basketball_home_away_two_way_list() -> None:
+    snaps = parse_betfair_feed(
+        _basketball_ml_payload(),
+        market_key="home_away",
+        default_bet_id=3,
+        default_scope_id=1,
+        home="Lakers",
+        away="Celtics",
+        event_id="https://op/bball",
+        min_liquidity=0.0,
+        now=NOW,
+    )
+    assert [s.selection for s in snaps] == ["Lakers", "Celtics"]
+    assert all(s.market is Market.H2H for s in snaps)
+    assert all(s.market_detail == "home_away" for s in snaps)
+    assert [s.decimal_odds for s in snaps] == [1.8, 2.1]
+    assert [s.liquidity for s in snaps] == [8000.0, 7500.0]
+    # No Draw is ever produced for a 2-way market.
+    assert "Draw" not in [s.selection for s in snaps]
+
+
+def test_parse_empty_back_block_is_benign_gap() -> None:
+    # An empty oddsdata/back block -> no rows, no crash (recover next cycle).
+    assert _parse_soccer_1x2({"d": {"oddsdata": {"back": {}}}}) == []
+    assert _parse_soccer_1x2({"d": {}}) == []
+    assert _parse_soccer_1x2({}) == []
+
+
+def test_parse_missing_feed_key_is_benign_gap() -> None:
+    # The feed carries OTHER markets but not this one's key -> benign gap.
+    payload = {"d": {"oddsdata": {"back": {"E-99-9-0-0-0": {"odds": {"44": {"0": 2.0}}}}}}}
+    assert _parse_soccer_1x2(payload) == []
+
+
+def test_parse_totals_feed_without_betfair_id_yields_no_row() -> None:
+    # CONFIRMED NEGATIVE FINDING: basketball totals/handicap feeds carry the
+    # block but NO Betfair id 44 (only ~8 books quote them). The Betfair-only
+    # parser reads odds["44"], finds it absent, and yields NO row — never guesses.
+    payload = _payload("E-3-1-0-0-0", odds44=None, volume44=None, extra_books={"16": [1.9, 1.9]})
+    snaps = parse_betfair_feed(
+        payload,
+        market_key="home_away",
+        default_bet_id=3,
+        default_scope_id=1,
+        home="Lakers",
+        away="Celtics",
+        event_id="https://op/bball",
+        min_liquidity=0.0,
+        now=NOW,
+    )
+    assert snaps == []
+
+
+def test_parse_liquidity_gate_drops_thin_outcomes() -> None:
+    # Floor between the draw (3307) and away (1307) matched volumes.
+    snaps = _parse_soccer_1x2(_soccer_1x2_payload(), min_liquidity=2000.0)
+    assert [s.selection for s in snaps] == ["Real Madrid", "Draw"]  # away gated out
+
+
+def test_parse_liquidity_gate_admits_real_obscure_market() -> None:
+    # REGRESSION parity with the DOM reader: real obscure-match Betfair volumes
+    # are small (£12-£23); the default floor must admit them.
+    from app.config import get_settings
+
+    floor = get_settings().betfair_exchange_min_liquidity
+    payload = _soccer_1x2_payload(
+        odds={"0": 1.33, "1": 4.5, "2": 5.5}, volume={"0": 16, "1": 16, "2": 14}
+    )
+    snaps = _parse_soccer_1x2(payload, min_liquidity=floor)
+    assert [s.selection for s in snaps] == ["Real Madrid", "Draw", "Al Hilal"]
+    assert [s.liquidity for s in snaps] == [16.0, 16.0, 14.0]
+
+
+def test_parse_absent_volume_drops_outcome() -> None:
+    # The liquidity gate is the DOM reader's one unique guarantee: an outcome with
+    # NO matched volume is dropped even at a 0 floor (never an ungated price).
+    payload = _payload("E-1-2-0-0-0", {"0": 2.12, "1": 3.5, "2": 4.0}, volume44=None)
+    assert _parse_soccer_1x2(payload, min_liquidity=0.0) == []
+
+
+def test_parse_partial_volume_keeps_only_funded_outcomes() -> None:
+    # Only the draw carries matched volume -> only the draw survives the gate.
+    payload = _soccer_1x2_payload(volume={"1": 3307})
+    snaps = _parse_soccer_1x2(payload, min_liquidity=0.0)
+    assert [s.selection for s in snaps] == ["Draw"]
+
+
+def test_parse_captured_at_falls_back_to_now_without_time_base() -> None:
+    payload = _payload(
+        "E-1-2-0-0-0",
+        {"0": 2.12, "1": 3.5, "2": 4.0},
+        {"0": 9052, "1": 3307, "2": 1307},
+        time_base=None,
+    )
+    snaps = _parse_soccer_1x2(payload)
+    assert all(s.captured_at == NOW for s in snaps)
+
+
+def test_parse_skips_unbackable_price() -> None:
+    # A price <= 1.0 is not a backable BACK price and is dropped (with its leg).
+    payload = _soccer_1x2_payload(odds={"0": 1.0, "1": 3.5, "2": 4.0})
+    snaps = _parse_soccer_1x2(payload)
+    assert [s.selection for s in snaps] == ["Draw", "Al Hilal"]
 
 
 def test_bookmaker_name_is_a_sharp_book() -> None:
     # The persisted name must normalize to the SHARP_BOOKS / EXCHANGE_COMMISSION
-    # key so the edge engine can ever recognise it (v1 mints nothing, but the
-    # name must stay aligned).
+    # key so the edge engine + CLV anchor can ever recognise it.
     from app.edge.value import EXCHANGE_COMMISSION, SHARP_BOOKS
 
     assert BOOKMAKER.lower() in SHARP_BOOKS
     assert BOOKMAKER.lower() in EXCHANGE_COMMISSION
 
 
-def test_backquote_is_frozen() -> None:
-    q = BackQuote("home", 2.12, 9052.0)
+def test_feed_markets_per_sport() -> None:
+    # The three FEASIBLE Betfair-present feeds: soccer 1x2 + OU 2.5, basketball ML.
+    assert feed_markets_for_sport("soccer") == ("1x2", "over_under_2_5")
+    assert feed_markets_for_sport("basketball") == ("home_away",)
+    assert feed_markets_for_sport("tennis") == ()
+
+
+def test_match_target_is_frozen() -> None:
+    t = MatchTarget(event_id="x", url="x", teams=_teams())
     with pytest.raises(FrozenInstanceError):
-        q.decimal_odds = 9.9  # type: ignore[misc]
+        t.url = "y"  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------- #
-# Reader: injected page_loader -> NO network. End-to-end token -> BACK quote.
+# BetfairExchangeReader — injected feed_loader, NO network / NO curl_cffi.
 # --------------------------------------------------------------------------- #
-def _static_loader(
-    tokens: Sequence[str] | None,
-) -> Callable[..., Awaitable[list[str] | None]]:
-    async def loader(*, url: str, proxy: ScraperProxy | None) -> list[str] | None:  # noqa: ARG001
-        return list(tokens) if tokens is not None else None
+def _feed_loader(
+    feeds_by_sport: Mapping[str, Sequence[FeedFeasible]],
+) -> Callable[..., Awaitable[Sequence[FeedFeasible]]]:
+    async def loader(match_url: str, sport: str) -> Sequence[FeedFeasible]:  # noqa: ARG001
+        return list(feeds_by_sport.get(sport, ()))
 
     return loader
 
 
-@pytest.mark.asyncio
-async def test_reader_parses_live_row_via_injected_loader() -> None:
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
-    quotes = await reader.read_back_quotes("https://op/match")
-    assert [q.designation for q in quotes] == ["home", "draw", "away"]
-    assert [round(q.decimal_odds, 2) for q in quotes] == [2.12, 3.5, 4.0]
-
-
-def test_back_outcomes_for_segment_per_sport() -> None:
-    # The reader's outcome WIDTH is driven by the URL segment: soccer 3-way,
-    # basketball 2-way; an unmapped segment falls back to the 3-way widest read.
-    assert back_outcomes_for_segment("football") == ("home", "draw", "away")
-    assert back_outcomes_for_segment("basketball") == ("home", "away")
-    assert back_outcomes_for_segment("unknown-sport") == ("home", "draw", "away")
-
-
-@pytest.mark.asyncio
-async def test_reader_basketball_two_way_keeps_two_back_discards_lay() -> None:
-    # A 2-way basketball row: the reader keeps exactly 2 BACK quotes (home/away)
-    # and DISCARDS the LAY tail — never a third (no-draw) selection.
-    reader = BetfairExchangeReader(
-        min_liquidity=0.0, page_loader=_static_loader(_BASKETBALL_ROW_TOKENS)
-    )
-    quotes = await reader.read_back_quotes("https://op/bball", outcomes=_BASKETBALL_BACK_OUTCOMES)
-    assert [q.designation for q in quotes] == ["home", "away"]
-    assert [round(q.decimal_odds, 2) for q in quotes] == [1.8, 2.1]
-    assert [q.liquidity for q in quotes] == [8000.0, 7500.0]
-    # The LAY prices (5/6 -> 1.83, 6/5 -> 2.2) must NEVER appear.
-    for lay_dec in (1.83, 2.2):
-        assert all(round(q.decimal_odds, 2) != lay_dec for q in quotes)
-    # No "Draw" designation/selection is ever produced for a 2-way sport.
-    assert "draw" not in [q.designation for q in quotes]
-    snaps = back_quotes_to_snapshots("https://op/bball", quotes, _teams(), now=NOW)
-    assert [s.selection for s in snaps] == ["Real Madrid", "Al Hilal"]
-    assert "Draw" not in [s.selection for s in snaps]
-
-
-@pytest.mark.asyncio
-async def test_reader_no_betfair_row_returns_empty() -> None:
-    # A thin/obscure match with no Betfair Exchange row (loader returns None) is
-    # an expected gap, not an error.
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(None))
-    assert await reader.read_back_quotes("https://op/thin") == []
-
-
-@pytest.mark.asyncio
-async def test_reader_proxy_failover_then_raises() -> None:
-    attempts = {"n": 0}
-
-    async def boom(*, url: str, proxy: ScraperProxy | None) -> list[str] | None:  # noqa: ARG001
-        attempts["n"] += 1
-        raise TimeoutError("transport")
-
-    pool = (
-        ScraperProxy(url="http://h1:1", username="u", password="p"),
-        ScraperProxy(url="http://h2:2", username="u", password="p"),
-    )
-    reader = BetfairExchangeReader(min_liquidity=0.0, proxy_pool=pool, page_loader=boom)
-    with pytest.raises(BetfairExchangeError) as exc:
-        await reader.read_back_quotes("https://op/match")
-    assert attempts["n"] == 2  # tried every proxy
-    # Error message carries the exception TYPE only — never the URL or creds.
-    assert "https://op/match" not in str(exc.value)
-    assert "TimeoutError" in str(exc.value)
-    for secret in ("h1", "h2", "pass", "://u"):
-        assert secret not in str(exc.value)
-
-
-@pytest.mark.asyncio
-async def test_reader_cooldown_skips_a_slot_that_just_timed_out() -> None:
-    # A chronically-slow slot must not be re-probed (burning a full nav timeout)
-    # on the very next read. With a 2-slot pool the cursor oscillates back to
-    # slot 0 every read, so without a cooldown slot 0 is hit — and times out —
-    # on EVERY cycle. The cooldown de-prioritises it for the next reads; the
-    # healthy slot serves the data. Failover stays loud (the WARNING remains).
-    calls: dict[str, int] = {}
-
-    async def loader(*, url: str, proxy: ScraperProxy | None) -> list[str] | None:  # noqa: ARG001
-        key = proxy.url if proxy else "host"
-        calls[key] = calls.get(key, 0) + 1
-        if proxy is not None and proxy.url == "http://bad:1":
-            raise TimeoutError("transport")
-        return list(_LIVE_ROW_TOKENS)
-
-    pool = (
-        ScraperProxy(url="http://bad:1", username="u", password="p"),
-        ScraperProxy(url="http://good:2", username="u", password="p"),
-    )
-    reader = BetfairExchangeReader(min_liquidity=0.0, proxy_pool=pool, page_loader=loader)
-
-    first = await reader.read_back_quotes("https://op/m1")
-    second = await reader.read_back_quotes("https://op/m2")
-
-    assert [q.designation for q in first] == ["home", "draw", "away"]
-    assert [q.designation for q in second] == ["home", "draw", "away"]
-    # Bad slot tried once (first read), then cooled down — NOT re-probed on the
-    # second read; the healthy slot served both.
-    assert calls["http://bad:1"] == 1
-    assert calls["http://good:2"] == 2
-
-
-# --------------------------------------------------------------------------- #
-# DOM extraction against the REAL structure (static HTML, no network).
-#
-# Live matches were 0/10 today (our slate is mostly obscure leagues with no
-# Betfair liquidity / closed markets), so a live read cannot verify the fix.
-# Instead we run the ACTUAL `_ROW_EXTRACT_JS` against a hand-built HTML fixture
-# that mirrors the real ancestor chain the user probed via Playwright:
-#   img[alt="Betfair Exchange"]
-#     -> logo link (A)
-#     -> DIV "...justify-center..."  "Betfair Exchange CLAIM BONUS"  (NO odds)
-#     -> DIV  the betting-exchanges-table-row  logo+"Back"/"Lay"     (NO odds)
-#     -> DIV "w-full"                          "...Back Lay"         (NO odds)
-#     -> DIV "flex"  BACK triple then LAY triple                     (THE ODDS)
-# The odds are odd-container cells ~2 levels ABOVE the testid'd row, so the
-# extractor walks up and stops at the nearest ancestor holding >= 2 of them.
-#
-# This test touches a real headless browser, so it skips cleanly when Playwright
-# or its Chromium build is unavailable (same pattern as the DB tests skipping
-# without compose Postgres) — it is NOT part of the network-free core path.
-# --------------------------------------------------------------------------- #
-
-
-# Odds container holds the BACK triple (home/draw/away) then the LAY triple, each
-# a fraction immediately followed by its parenthesised £ liquidity, with overround
-# %s interleaved (must be dropped). Mirrors the live row text the user captured.
-def _odd_cell(value: str, liq: str) -> str:
-    """One [data-testid="odd-container"] price cell, mirroring the live DOM: the
-    odds VALUE duplicated in a hidden <a> and a visible <p> (responsive
-    show/hide), then the parenthesised £ liquidity as a sibling <div>."""
-    return (
-        '<div data-testid="odd-container">'
-        '<div><div class="flex flex-col items-center">'
-        '<div class="flex flex-row items-center">'
-        f'<a class="hidden underline min-mt:!flex" href="/betslip">{value}</a>'
-        f'<p class="min-mt:!hidden">{value}</p>'
-        "</div>"
-        f'<div class="font-main text-[10px]">{liq}</div>'
-        "</div></div></div>"
-    )
-
-
-def _payout_cell(pct: str) -> str:
-    """A [data-testid="payout-container"] cell — the overround %, which the
-    odd-container-scoped extractor must NEVER pick up as an odds value."""
-    return f'<div data-testid="payout-container"><div><p>{pct}</p></div></div>'
-
-
-def _scroll_el(back: str, lay: str) -> str:
-    """The scroll-el odds block: a BACK row then a LAY row, each three
-    odd-container cells followed by a payout-container, exactly as OddsPortal
-    renders the Betfair exchange row in a SIBLING of the testid row."""
-    return (
-        '<div class="scroll-el flex flex-col"><div class="flex flex-col">'
-        f'<div class="flex h-[50px] border-b">{back}</div>'
-        f'<div class="flex h-[50px]">{lay}</div>'
-        "</div></div>"
-    )
-
-
-# FRACTIONAL render (the UK default a fresh scraper context gets): BACK
-# home/draw/away 28/25, 5/2, 3/1 then the LAY triple, each + £ liquidity. The
-# odd-container-scoped extractor returns the flat _LIVE_ROW_TOKENS sequence.
-_BACK_LAY_ODDS_HTML = _scroll_el(
-    back=(
-        _odd_cell("28/25", "(9052)")
-        + _odd_cell("5/2", "(3307)")
-        + _odd_cell("3/1", "(1307)")
-        + _payout_cell("99.3%")
-    ),
-    lay=(
-        _odd_cell("57/50", "(11317)")
-        + _odd_cell("51/20", "(41)")
-        + _odd_cell("31/10", "(2683)")
-        + _payout_cell("100%")
-    ),
-)
-
-# DECIMAL render (the format the user's logged-in browser served — odds format
-# is a per-visitor cookie). Same structure, decimal values: BACK 6.51/3.61/1.66
-# then LAY 7.32/3.95/1.74. The extractor must read these directly via
-# parse_odds_value, where the old fractional-only reader captured NOTHING.
-_DECIMAL_ODDS_HTML = _scroll_el(
-    back=(
-        _odd_cell("6.51", "(1838)")
-        + _odd_cell("3.61", "(29682)")
-        + _odd_cell("1.66", "(7274)")
-        + _payout_cell("96.7%")
-    ),
-    lay=(
-        _odd_cell("7.32", "(2057)")
-        + _odd_cell("3.95", "(2264)")
-        + _odd_cell("1.74", "(17786)")
-        + _payout_cell("103.5%")
-    ),
-)
-
-
-def _exchange_section_html(odds_block: str = "") -> str:
-    """A betting-exchanges section whose testid row carries ONLY the Betfair
-    logo + Back/Lay header + "CLAIM BONUS" promo (no odds). ``odds_block`` (the
-    scroll-el odd-container cells) sits as a SIBLING ~2 levels ABOVE that row,
-    exactly as the live DOM renders; "" means no odds anywhere (a closed /
-    illiquid market). The logo img[alt] identifies the Betfair row in both."""
-    return f"""
-    <div data-testid="{_SECTION_TESTID}">
-      <div class="w-full">
-        <div class="max-ms:justify-center flex w-full items-center">
-          <a class="logo-link">
-            <img alt="{_EXCHANGE_ALT}" src="bf.png">
-          </a>
-          <span>CLAIM BONUS</span>
-          <div data-testid="{_ROW_TESTID}"
-               class="flex-center min-h-[101px] w-full border-b border-l">
-            <a class="logo-link"><img alt="{_EXCHANGE_ALT}" src="bf.png"></a>
-            <span>Back</span><span>Lay</span>
-          </div>
-          {odds_block}
-        </div>
-      </div>
-    </div>
-    """
-
-
-async def _evaluate_row_extract(html: str) -> list[str] | None:
-    """Run the REAL in-page _ROW_EXTRACT_JS against static HTML via a headless
-    Chromium page.set_content — no network. Skips when Playwright/Chromium is
-    unavailable, mirroring the other browser-touching skips."""
-    async_api = pytest.importorskip("playwright.async_api")
-    try:
-        pw_cm = async_api.async_playwright()
-        pw = await pw_cm.__aenter__()
-    except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"playwright unavailable: {type(exc).__name__}")
-    try:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as exc:  # Chromium not installed
-            pytest.skip(f"chromium not installed: {type(exc).__name__}")
-        try:
-            page = await browser.new_page()
-            await page.set_content(html)
-            raw = await page.evaluate(
-                _ROW_EXTRACT_JS,
-                [_SECTION_TESTID, _ROW_TESTID, _EXCHANGE_ALT, _ANCESTOR_WALK_UP],
-            )
-            return list(raw) if raw else None
-        finally:
-            await browser.close()
-    finally:
-        await pw_cm.__aexit__(None, None, None)
-
-
-@pytest.mark.asyncio
-async def test_row_extract_js_walks_up_to_ancestor_odds() -> None:
-    # The odds live ~2 levels ABOVE the testid row; the extractor must climb to
-    # them and return the BACK triple then LAY triple (overround %s dropped).
-    tokens = await _evaluate_row_extract(_exchange_section_html(_BACK_LAY_ODDS_HTML))
-    assert tokens == list(_LIVE_ROW_TOKENS)
-
-    # tokens -> cells -> gated BACK quotes -> snapshots: BACK 2.12/3.5/4.0 with
-    # liquidity 9052/3307/1307; the LAY triple is discarded.
-    cells = _pair_tokens(tokens)
-    quotes = extract_back_quotes(cells, min_liquidity=0.0)
-    assert [q.designation for q in quotes] == ["home", "draw", "away"]
-    assert [round(q.decimal_odds, 2) for q in quotes] == [2.12, 3.5, 4.0]
-    assert [q.liquidity for q in quotes] == [9052.0, 3307.0, 1307.0]
-
-    snaps = back_quotes_to_snapshots("https://op/match", quotes, _teams(), now=NOW)
-    assert [round(s.decimal_odds, 2) for s in snaps] == [2.12, 3.5, 4.0]
-    assert [s.liquidity for s in snaps] == [9052.0, 3307.0, 1307.0]
-    # The LAY prices (57/50 -> 2.14, 51/20 -> 3.55, 31/10 -> 4.1) never appear.
-    for lay_dec in (2.14, 3.55, 4.1):
-        assert all(round(s.decimal_odds, 2) != lay_dec for s in snaps)
-
-
-@pytest.mark.asyncio
-async def test_row_extract_js_closed_market_returns_none() -> None:
-    # The Betfair row renders (logo + Back/Lay header) but NO odds hydrate
-    # anywhere — a closed / illiquid market. The walk-up finds nothing and the
-    # extractor returns None; the reader maps that to [] (an expected gap).
-    tokens = await _evaluate_row_extract(_exchange_section_html(""))
-    assert tokens is None
-
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(tokens))
-    assert await reader.read_back_quotes("https://op/closed") == []
-
-
-@pytest.mark.asyncio
-async def test_row_extract_js_decimal_format() -> None:
-    # OddsPortal's odds format is a per-visitor cookie: the SAME row can render
-    # DECIMAL ("6.51") instead of fractional. The reader must read both — the old
-    # fractional-only extractor captured NOTHING on a decimal page (the real
-    # 0-capture bug). BACK home/draw/away = 6.51/3.61/1.66.
-    tokens = await _evaluate_row_extract(_exchange_section_html(_DECIMAL_ODDS_HTML))
-    assert tokens == [
-        "6.51",
-        "(1838)",
-        "3.61",
-        "(29682)",
-        "1.66",
-        "(7274)",
-        "7.32",
-        "(2057)",
-        "3.95",
-        "(2264)",
-        "1.74",
-        "(17786)",
-    ]
-    cells = _pair_tokens(tokens)
-    quotes = extract_back_quotes(cells, min_liquidity=0.0)
-    assert [q.designation for q in quotes] == ["home", "draw", "away"]
-    assert [q.decimal_odds for q in quotes] == [6.51, 3.61, 1.66]
-    assert [q.liquidity for q in quotes] == [1838.0, 29682.0, 7274.0]
-    # The LAY decimal prices (7.32/3.95/1.74) are discarded.
-    snaps = back_quotes_to_snapshots("https://op/match", quotes, _teams(), now=NOW)
-    assert [s.decimal_odds for s in snaps] == [6.51, 3.61, 1.66]
-    for lay_dec in (7.32, 3.95, 1.74):
-        assert all(s.decimal_odds != lay_dec for s in snaps)
-
-
-# --------------------------------------------------------------------------- #
-# Capture: price change-gate + isolation (no picks/alerts; betfair_ namespace)
-# --------------------------------------------------------------------------- #
 def _target(url: str = "https://op/rma-hil") -> MatchTarget:
     return MatchTarget(event_id=url, url=url, teams=_teams())
 
 
 @pytest.mark.asyncio
+async def test_reader_reads_all_feasible_soccer_markets() -> None:
+    loader = _feed_loader(
+        {
+            "soccer": (
+                FeedFeasible("1x2", 0, 0, _soccer_1x2_payload()),
+                FeedFeasible("over_under_2_5", 0, 0, _soccer_ou_payload()),
+            )
+        }
+    )
+    reader = BetfairExchangeReader(min_liquidity=0.0, feed_loader=loader)
+    snaps = await reader.read_snapshots(_target(), sport="soccer", now=NOW)
+    assert {s.market_detail for s in snaps} == {"1x2", "over_under_2_5"}
+    assert {s.selection for s in snaps} == {
+        "Real Madrid",
+        "Draw",
+        "Al Hilal",
+        "Over 2.5",
+        "Under 2.5",
+    }
+    assert all(s.bookmaker == BOOKMAKER for s in snaps)
+    assert all(s.event_id == _target().event_id for s in snaps)
+
+
+@pytest.mark.asyncio
+async def test_reader_basketball_moneyline_two_way() -> None:
+    loader = _feed_loader(
+        {"basketball": (FeedFeasible("home_away", 3, 1, _basketball_ml_payload()),)}
+    )
+    reader = BetfairExchangeReader(min_liquidity=0.0, feed_loader=loader)
+    target = MatchTarget(
+        event_id="https://op/lal-bos",
+        url="https://op/lal-bos",
+        teams=EventTeams(home="Lakers", away="Celtics", league="NBA"),
+    )
+    snaps = await reader.read_snapshots(target, sport="basketball", now=NOW)
+    assert [s.selection for s in snaps] == ["Lakers", "Celtics"]
+    assert all(s.market is Market.H2H for s in snaps)
+    assert "Draw" not in [s.selection for s in snaps]
+
+
+@pytest.mark.asyncio
+async def test_reader_empty_feeds_returns_empty() -> None:
+    # No Betfair rows this cycle (loader yields nothing) is a benign gap.
+    reader = BetfairExchangeReader(min_liquidity=0.0, feed_loader=_feed_loader({}))
+    assert await reader.read_snapshots(_target(), sport="soccer", now=NOW) == []
+
+
+# --------------------------------------------------------------------------- #
+# BetfairExchangeCapture — price change-gate + sport gating (no DB).
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
 async def test_capture_change_gate_emits_once_then_on_move() -> None:
-    # Build a reader whose tokens we can swap between cycles.
-    state = {"tokens": list(_LIVE_ROW_TOKENS)}
+    state: dict[str, Any] = {"odds": {"0": 2.12, "1": 3.5, "2": 4.0}}
 
-    async def loader(*, url: str, proxy: ScraperProxy | None) -> list[str]:  # noqa: ARG001
-        return list(state["tokens"])
+    async def loader(match_url: str, sport: str) -> Sequence[FeedFeasible]:  # noqa: ARG001
+        return [FeedFeasible("1x2", 0, 0, _soccer_1x2_payload(odds=dict(state["odds"])))]
 
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=loader)
+    reader = BetfairExchangeReader(min_liquidity=0.0, feed_loader=loader)
     capture = BetfairExchangeCapture(
         reader,
         session_factory=None,  # no DB: exercise the gate only
@@ -640,79 +359,22 @@ async def test_capture_change_gate_emits_once_then_on_move() -> None:
     )
     # First cycle persists nothing (session_factory None) but PRIMES the gate.
     assert await capture.capture_once() == {"soccer": 0}
-    # The gate is keyed on the CANONICAL event_ref now (inline binding, ADR-0015
-    # v2): capture_once primes it under target.event_id, NOT a "betfair:" ref.
     # Re-reading the SAME prices yields no fresh snapshots (all gated).
-    fresh = capture._select_fresh(
-        "soccer",
-        _target().event_id,
-        back_quotes_to_snapshots(
-            _target().event_id,
-            await reader.read_back_quotes(_target().url),
-            _teams(),
-            now=NOW,
-        ),
-    )
-    assert fresh == []
-    # A price move on the home BACK leg (28/25 -> 6/5) re-opens that selection.
-    state["tokens"][0] = "6/5"
-    moved = capture._select_fresh(
-        "soccer",
-        _target().event_id,
-        back_quotes_to_snapshots(
-            _target().event_id,
-            await reader.read_back_quotes(_target().url),
-            _teams(),
-            now=NOW,
-        ),
-    )
+    snaps = await reader.read_snapshots(_target(), sport="soccer", now=NOW)
+    assert capture._select_fresh("soccer", _target().event_id, snaps) == []
+    # A price move on the home BACK leg re-opens that selection only.
+    state["odds"]["0"] = 2.5
+    moved_snaps = await reader.read_snapshots(_target(), sport="soccer", now=NOW)
+    moved = capture._select_fresh("soccer", _target().event_id, moved_snaps)
     assert [s.selection for s in moved] == ["Real Madrid"]
 
 
 @pytest.mark.asyncio
-async def test_capture_accepts_async_targets_fn() -> None:
-    # The production root sources targets from the DB (an ASYNC query); capture
-    # must accept an awaitable-returning targets_fn, not only a sync lambda.
-    # This is the seam the CPU-aware decoupling fix relies on (the DB-sourced
-    # bounded/rotating targets replace last_fetch_event_ids).
-    calls = {"n": 0}
-
-    async def async_targets(sport: str) -> list[MatchTarget]:
-        calls["n"] += 1
-        assert sport == "soccer"
-        return [_target()]
-
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
-    capture = BetfairExchangeCapture(
-        reader,
-        session_factory=None,  # no DB: just prove the async targets_fn is awaited
-        targets_fn=async_targets,
-        sports=("soccer",),
-        now_fn=lambda: NOW,
-    )
-    # session_factory None -> writes nothing, but the async targets_fn must have
-    # been awaited and its one target read (the gate is primed for it).
-    assert await capture.capture_once() == {"soccer": 0}
-    assert calls["n"] == 1
-    # The gate primed under the canonical event_ref from the awaited target.
-    assert (
-        capture._select_fresh(
-            "soccer",
-            _target().event_id,
-            back_quotes_to_snapshots(
-                _target().event_id,
-                await reader.read_back_quotes(_target().url),
-                _teams(),
-                now=NOW,
-            ),
-        )
-        == []
-    )
-
-
-@pytest.mark.asyncio
 async def test_capture_skips_unsupported_sport() -> None:
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
+    reader = BetfairExchangeReader(
+        min_liquidity=0.0,
+        feed_loader=_feed_loader({"soccer": (FeedFeasible("1x2", 0, 0, _soccer_1x2_payload()),)}),
+    )
     capture = BetfairExchangeCapture(
         reader,
         session_factory=None,
@@ -725,10 +387,35 @@ async def test_capture_skips_unsupported_sport() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capture_supports_basketball_sport() -> None:
-    # Basketball IS supported now (2-way moneyline). SPORT_SEGMENTS gates it in.
-    assert SPORT_SEGMENTS["basketball"] == "basketball"
+async def test_capture_supports_soccer_and_basketball() -> None:
     assert SPORT_SEGMENTS["soccer"] == "football"
+    assert SPORT_SEGMENTS["basketball"] == "basketball"
+
+
+@pytest.mark.asyncio
+async def test_capture_accepts_async_targets_fn() -> None:
+    calls = {"n": 0}
+
+    async def async_targets(sport: str) -> list[MatchTarget]:
+        calls["n"] += 1
+        assert sport == "soccer"
+        return [_target()]
+
+    reader = BetfairExchangeReader(
+        min_liquidity=0.0,
+        feed_loader=_feed_loader({"soccer": (FeedFeasible("1x2", 0, 0, _soccer_1x2_payload()),)}),
+    )
+    capture = BetfairExchangeCapture(
+        reader,
+        session_factory=None,
+        targets_fn=async_targets,
+        sports=("soccer",),
+        now_fn=lambda: NOW,
+    )
+    assert await capture.capture_once() == {"soccer": 0}
+    assert calls["n"] == 1
+    snaps = await reader.read_snapshots(_target(), sport="soccer", now=NOW)
+    assert capture._select_fresh("soccer", _target().event_id, snaps) == []
 
 
 @pytest.mark.asyncio
@@ -739,20 +426,28 @@ async def test_capture_none_reader_writes_nothing() -> None:
     assert await capture.capture_once() == {"soccer": 0}
 
 
+@pytest.mark.asyncio
+async def test_capture_isolates_a_failing_read() -> None:
+    # A reader exception for one match is logged (type only) and skipped — never
+    # aborts the cycle.
+    async def boom(match_url: str, sport: str) -> Sequence[FeedFeasible]:  # noqa: ARG001
+        raise RuntimeError("transport")
+
+    reader = BetfairExchangeReader(min_liquidity=0.0, feed_loader=boom)
+    capture = BetfairExchangeCapture(
+        reader,
+        session_factory=None,
+        targets_fn=lambda sport: [_target()],
+        sports=("soccer",),
+        now_fn=lambda: NOW,
+    )
+    assert await capture.capture_once() == {"soccer": 0}
+
+
 # --------------------------------------------------------------------------- #
-# DB integration: rows land under the ISOLATED betfair_<sport> namespace and
-# carry NO picks (capture writes odds_snapshots only). Skipped without Postgres.
-#
-# ISOLATION: these tests run inside ONE transaction on ONE connection that is
-# ROLLED BACK at teardown, so nothing they write is ever COMMITTED to the shared
-# compose Postgres (:5433). Earlier they committed fixture events + snapshots and
-# never cleaned up, accumulating "betfair:https://op/..." pollution that
-# corrupted the coverage report / audits. The capture's persist_odds_snapshots
-# commits, but join_transaction_mode="create_savepoint" turns each commit into a
-# SAVEPOINT release inside the fixture's outer transaction — exactly the
-# tests/test_resolution_db.py + tests/test_betfair_clv_consumption.py pattern.
-# Rows stay visible WITHIN the test (so the re-capture-writes-nothing assertion
-# still holds) and vanish at teardown (assert-no-leftover below proves it).
+# DB integration: rows attach INLINE onto the canonical event (ADR-0015 v2) as
+# bookmaker "Betfair Exchange" with NUMERIC liquidity. Skipped without Postgres.
+# Isolation: one transaction on one connection, rolled back at teardown.
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 async def factory():  # type: ignore[no-untyped-def]
@@ -775,13 +470,15 @@ async def factory():  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
-async def test_capture_persists_inline_onto_canonical_event(factory) -> None:  # type: ignore[no-untyped-def]
-    # INLINE BINDING (ADR-0015 v2): Betfair rows persist onto the CANONICAL event
-    # (external_ref == url), as another bookmaker, with NUMERIC liquidity; a
-    # re-capture of the SAME prices writes nothing (change-gate + the append-only
-    # unique key both hold). uuid keeps the ref unique within the rolled-back tx.
-    url = f"https://op/betfair-iso-{uuid4()}"
+def _soccer_reader() -> BetfairExchangeReader:
+    return BetfairExchangeReader(
+        min_liquidity=0.0,
+        feed_loader=_feed_loader({"soccer": (FeedFeasible("1x2", 0, 0, _soccer_1x2_payload()),)}),
+    )
 
+
+async def test_capture_persists_inline_onto_canonical_event(factory) -> None:  # type: ignore[no-untyped-def]
+    url = f"https://op/betfair-iso-{uuid4()}"
     # The MAIN scrape creates the canonical event first; Betfair attaches inline.
     await persist_odds_snapshots(
         factory,
@@ -801,9 +498,8 @@ async def test_capture_persists_inline_onto_canonical_event(factory) -> None:  #
         default_league="Club WC",
     )
 
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
     capture = BetfairExchangeCapture(
-        reader,
+        _soccer_reader(),
         session_factory=factory,
         targets_fn=lambda sport: [_target(url)],
         sports=("soccer",),
@@ -822,102 +518,23 @@ async def test_capture_persists_inline_onto_canonical_event(factory) -> None:  #
         assert len(rows) == 3
         assert {r.bookmaker for r in rows} == {BOOKMAKER}
         assert {r.selection for r in rows} == {"Real Madrid", "Draw", "Al Hilal"}
-        # Liquidity persisted as NUMERIC (Decimal at the boundary).
-        assert all(r.liquidity is not None for r in rows)
-        # Exactly one canonical event row; the Betfair capture never minted one.
+        assert all(r.liquidity is not None for r in rows)  # NUMERIC liquidity persisted
         event_count = await session.scalar(
             select(func.count()).select_from(Event).where(Event.external_ref == url)
         )
-        assert event_count == 1
-        # No legacy "betfair:" event was created.
+        assert event_count == 1  # exactly one canonical event; capture minted none
         legacy = await session.scalar(
             select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
         )
         assert legacy == 0
-    # Re-capture with the SAME prices writes nothing new (change-gate + the
-    # append-only unique key both hold) — visible within the same transaction.
+    # Re-capture with the SAME prices writes nothing new (change-gate + append-only key).
     assert (await capture.capture_once())["soccer"] == 0
 
 
-async def test_capture_binds_inline_onto_existing_canonical_event(factory) -> None:  # type: ignore[no-untyped-def]
-    # INLINE BINDING (ADR-0015 v2): Betfair rows land on the CANONICAL event the
-    # main scrape already created (same external_ref == the match URL,
-    # bookmaker="Betfair Exchange") — NOT a separate "betfair:"-prefixed event.
-    # Betfair becomes just another bookmaker on the canonical event, so no
-    # cross-source matching is needed for any Betfair-priced game.
-    url = f"https://op/betfair-inline-{uuid4()}"
-    teams = EventTeams(home="Real Madrid", away="Al Hilal", league="Club WC")
-
-    # The MAIN scrape creates the canonical soccer event first (a soft book).
-    soft = OddsSnapshotIn(
-        event_id=url,
-        bookmaker="bet365",
-        market=Market.H2H,
-        selection="Real Madrid",
-        decimal_odds=2.0,
-        captured_at=NOW,
-        ingested_at=NOW,
-    )
-    await persist_odds_snapshots(
-        factory, [soft], {url: teams}, sport="soccer", default_league="Club WC"
-    )
-
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
-    capture = BetfairExchangeCapture(
-        reader,
-        session_factory=factory,
-        targets_fn=lambda sport: [_target(url)],
-        sports=("soccer",),
-        now_fn=lambda: NOW,
-    )
-    written = await capture.capture_once()
-    assert written["soccer"] == 3  # home/draw/away BACK rows
-    async with factory() as session:
-        # All books — soft + Betfair — sit on the SAME canonical event.
-        books = (
-            (
-                await session.execute(
-                    select(OddsSnapshot.bookmaker)
-                    .join(Event, Event.id == OddsSnapshot.event_id)
-                    .where(Event.external_ref == url)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        assert set(books) == {"bet365", BOOKMAKER}
-        assert books.count(BOOKMAKER) == 3
-        # The Betfair selections + NUMERIC liquidity rode onto the canonical event.
-        bf_rows = (
-            await session.execute(
-                select(OddsSnapshot.selection, OddsSnapshot.liquidity)
-                .join(Event, Event.id == OddsSnapshot.event_id)
-                .where(Event.external_ref == url, OddsSnapshot.bookmaker == BOOKMAKER)
-            )
-        ).all()
-        assert {r.selection for r in bf_rows} == {"Real Madrid", "Draw", "Al Hilal"}
-        assert all(r.liquidity is not None for r in bf_rows)
-        # Exactly ONE canonical event; NO legacy "betfair:" event was created.
-        canonical = await session.scalar(
-            select(func.count()).select_from(Event).where(Event.external_ref == url)
-        )
-        legacy = await session.scalar(
-            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
-        )
-        assert canonical == 1
-        assert legacy == 0
-
-
 async def test_capture_does_not_create_event_when_canonical_absent(factory) -> None:  # type: ignore[no-untyped-def]
-    # SAFETY: when the MAIN scrape has NOT yet created the canonical event, the
-    # Betfair capture must NOT mint one (attach-only). The cycle writes nothing
-    # for that fixture and no event row exists under EITHER the canonical ref or
-    # the legacy "betfair:" ref — it simply attaches on a later cycle.
     url = f"https://op/betfair-noevent-{uuid4()}"
-
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
     capture = BetfairExchangeCapture(
-        reader,
+        _soccer_reader(),
         session_factory=factory,
         targets_fn=lambda sport: [_target(url)],
         sports=("soccer",),
@@ -929,95 +546,17 @@ async def test_capture_does_not_create_event_when_canonical_absent(factory) -> N
         canonical = await session.scalar(
             select(func.count()).select_from(Event).where(Event.external_ref == url)
         )
-        legacy = await session.scalar(
-            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
-        )
         snaps = await session.scalar(
             select(func.count())
             .select_from(OddsSnapshot)
             .join(Event, Event.id == OddsSnapshot.event_id)
-            .where(Event.external_ref.in_([url, f"betfair:{url}"]))
+            .where(Event.external_ref == url)
         )
-        assert canonical == 0  # the capture never minted a canonical event
-        assert legacy == 0  # nor a legacy namespaced one
+        assert canonical == 0
         assert snaps == 0
 
 
-async def test_capture_binds_betfair_inline_onto_the_canonical_event(factory) -> None:  # type: ignore[no-untyped-def]
-    # INLINE-BIND contract (commit 882bb42): Betfair BACK odds are read from the
-    # SAME OddsPortal match page as the soft books, so the capture binds them onto
-    # the CANONICAL event (external_ref == the match URL) as just another
-    # bookmaker — dropping the legacy "betfair:" prefix / betfair_<sport>
-    # namespace. NO cross-source matching, NO wrong-game risk: same-URL IS the same
-    # fixture. (This supersedes the old isolation test, which asserted a separate
-    # "betfair:" event; that pre-inline-bind contract was deliberately abandoned.)
-    url = f"https://op/betfair-collision-{uuid4()}"
-    teams = EventTeams(home="Real Madrid", away="Al Hilal", league="Club WC")
-
-    soft = OddsSnapshotIn(
-        event_id=url,
-        bookmaker="bet365",
-        market=Market.H2H,
-        selection="Real Madrid",
-        decimal_odds=2.0,
-        captured_at=NOW,
-        ingested_at=NOW,
-    )
-    await persist_odds_snapshots(
-        factory, [soft], {url: teams}, sport="soccer", default_league="Club WC"
-    )
-
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
-    capture = BetfairExchangeCapture(
-        reader,
-        session_factory=factory,
-        targets_fn=lambda sport: [_target(url)],
-        sports=("soccer",),
-        now_fn=lambda: NOW,
-    )
-    written = await capture.capture_once()
-    assert written["soccer"] == 3
-    async with factory() as session:
-        canonical_books = (
-            (
-                await session.execute(
-                    select(OddsSnapshot.bookmaker)
-                    .join(Event, Event.id == OddsSnapshot.event_id)
-                    .where(Event.external_ref == url)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        # Betfair binds INLINE onto the canonical event alongside the soft book.
-        assert set(canonical_books) == {"bet365", BOOKMAKER}
-        assert sum(1 for b in canonical_books if b == BOOKMAKER) == 3  # full 1X2 BACK
-        # No legacy "betfair:"-namespaced event is minted anymore.
-        legacy_snaps = await session.scalar(
-            select(func.count())
-            .select_from(OddsSnapshot)
-            .join(Event, Event.id == OddsSnapshot.event_id)
-            .where(Event.external_ref == f"betfair:{url}")
-        )
-        assert legacy_snaps == 0
-        live_event_count = await session.scalar(
-            select(func.count()).select_from(Event).where(Event.external_ref == url)
-        )
-        betfair_event_count = await session.scalar(
-            select(func.count()).select_from(Event).where(Event.external_ref == f"betfair:{url}")
-        )
-        assert live_event_count == 1
-        assert betfair_event_count == 0  # inline-bound, no separate event
-
-
 async def test_db_tests_leave_no_committed_pollution() -> None:
-    # The isolation fixture rolls back, so a row a test wrote inside it must NOT
-    # survive into a FRESH connection (a separate engine = a separate session,
-    # outside the fixture's rolled-back transaction). This drives the same
-    # capture against its OWN savepoint transaction, asserts the rows exist
-    # within it, rolls back, then probes from a clean engine and asserts ZERO
-    # leftover — exactly the cleanup the maintainer's one-time DELETE addresses
-    # for pre-existing pollution.
     probe_engine = create_async_engine(DB_URL)
     try:
         async with probe_engine.connect() as probe:
@@ -1026,12 +565,7 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
         await probe_engine.dispose()
         pytest.skip("compose Postgres not reachable on :5433")
 
-    # INLINE-BIND (882bb42): the capture attaches ONLY to an existing canonical
-    # event, so seed it first; Betfair then binds inline onto ``url`` (no separate
-    # "betfair:" event). Isolation is still what we pin: rows written inside the
-    # rolled-back transaction must NOT survive into a fresh connection.
     url = f"https://op/betfair-leak-{uuid4()}"
-    teams = EventTeams(home="Real Madrid", away="Al Hilal", league="Club WC")
     soft = OddsSnapshotIn(
         event_id=url,
         bookmaker="bet365",
@@ -1041,7 +575,6 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
         captured_at=NOW,
         ingested_at=NOW,
     )
-    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
 
     inner_engine = create_async_engine(DB_URL)
     try:
@@ -1051,10 +584,10 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
                 bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
             )
             await persist_odds_snapshots(
-                maker, [soft], {url: teams}, sport="soccer", default_league="Club WC"
+                maker, [soft], {url: _teams()}, sport="soccer", default_league="Club WC"
             )
             capture = BetfairExchangeCapture(
-                reader,
+                _soccer_reader(),
                 session_factory=maker,
                 targets_fn=lambda sport: [_target(url)],
                 sports=("soccer",),
@@ -1068,12 +601,11 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
                     .join(Event, Event.id == OddsSnapshot.event_id)
                     .where(Event.external_ref == url, OddsSnapshot.bookmaker == BOOKMAKER)
                 )
-                assert seen == 3  # inline Betfair rows visible inside the transaction
-            await trans.rollback()  # teardown: discard everything
+                assert seen == 3
+            await trans.rollback()
     finally:
         await inner_engine.dispose()
 
-    # Fresh engine = outside the rolled-back transaction: nothing must remain.
     try:
         async with async_sessionmaker(probe_engine, expire_on_commit=False)() as session:
             leftover_events = await session.scalar(
@@ -1089,109 +621,3 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
             assert leftover_snaps == 0
     finally:
         await probe_engine.dispose()
-
-
-# --------------------------------------------------------------------------- #
-# Review nits: parse_odds_value boundary contract + a DECIMAL basketball (2-way)
-# extraction test (the per-visitor odds-format cookie applies to every sport).
-# --------------------------------------------------------------------------- #
-
-# A 2-way basketball moneyline rendered DECIMAL: BACK home/away 1.80/2.10 then
-# LAY home/away, each + parenthesised £ liquidity. No draw cell.
-_BASKETBALL_DECIMAL_HTML = _scroll_el(
-    back=(_odd_cell("1.80", "(5000)") + _odd_cell("2.10", "(4200)") + _payout_cell("99.0%")),
-    lay=(_odd_cell("1.83", "(900)") + _odd_cell("2.16", "(1200)") + _payout_cell("101.0%")),
-)
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("6.51", 6.51),
-        ("1.66", 1.66),
-        ("100", 100.0),  # integer-format decimal (extreme underdog) is valid
-        ("2", 2.0),
-        ("28/25", 2.12),
-        ("3/1", 4.0),
-        ("0", None),
-        ("1", None),  # <= 1.0 is not a backable price
-        ("1.00", None),
-        ("(1838)", None),  # a liquidity token must never parse as an odds value
-        ("99.3%", None),  # a payout % must never parse as an odds value
-        ("", None),
-    ],
-)
-def test_parse_odds_value_decimal_and_fractional(raw: str, expected: "float | None") -> None:
-    from app.ingestion.betfair_exchange import parse_odds_value
-
-    result = parse_odds_value(raw)
-    if expected is None:
-        assert result is None
-    else:
-        assert result == pytest.approx(expected, abs=1e-9)
-
-
-@pytest.mark.asyncio
-async def test_row_extract_js_basketball_decimal() -> None:
-    # The per-visitor odds-format cookie applies to basketball too: a 2-way
-    # moneyline can render DECIMAL. With outcomes=("home","away") the reader keeps
-    # the leading TWO BACK cells (1.80/2.10) and discards the LAY tail.
-    tokens = await _evaluate_row_extract(_exchange_section_html(_BASKETBALL_DECIMAL_HTML))
-    assert tokens == ["1.80", "(5000)", "2.10", "(4200)", "1.83", "(900)", "2.16", "(1200)"]
-    cells = _pair_tokens(tokens)
-    quotes = extract_back_quotes(cells, outcomes=("home", "away"), min_liquidity=0.0)
-    assert [q.designation for q in quotes] == ["home", "away"]
-    assert [q.decimal_odds for q in quotes] == [1.80, 2.10]
-    assert [q.liquidity for q in quotes] == [5000.0, 4200.0]
-
-
-def test_bs4_extractor_matches_js_tokens_on_real_fixture() -> None:
-    # The bs4 HTML extractor reproduces the in-page JS tokens TOKEN-FOR-TOKEN on a
-    # REAL captured betting-exchanges-section (Lanus v River, 2026-06-27). Proves
-    # the unit-testable parser is a faithful, browser-free mirror of the JS path.
-    from pathlib import Path
-
-    from app.ingestion.betfair_exchange import extract_betfair_tokens_from_section_html
-
-    html = (Path(__file__).parent / "fixtures" / "betfair_section_soccer.html").read_text()
-    assert extract_betfair_tokens_from_section_html(html) == [
-        "33/50",
-        "(23)",
-        "57/20",
-        "(24)",
-        "21/5",
-        "(13)",
-        "39/50",
-        "(12)",
-        "17/5",
-        "(17)",
-        "26/5",
-        "(28)",
-    ]
-
-
-def test_bs4_extracted_back_quotes_align_to_1x2_outcomes() -> None:
-    # End-to-end through the existing pairer + gate: BACK triple -> home/draw/away.
-    from pathlib import Path
-
-    from app.ingestion.betfair_exchange import (
-        _pair_tokens,
-        extract_back_quotes,
-        extract_betfair_tokens_from_section_html,
-    )
-
-    html = (Path(__file__).parent / "fixtures" / "betfair_section_soccer.html").read_text()
-    tokens = extract_betfair_tokens_from_section_html(html)
-    assert tokens is not None
-    quotes = extract_back_quotes(
-        _pair_tokens(tokens), outcomes=("home", "draw", "away"), min_liquidity=0.0
-    )
-    assert [q.designation for q in quotes] == ["home", "draw", "away"]
-    assert abs(quotes[0].decimal_odds - 1.66) < 1e-9  # 33/50
-    assert quotes[0].liquidity == 23.0
-
-
-def test_bs4_extractor_returns_none_without_betfair_row() -> None:
-    from app.ingestion.betfair_exchange import extract_betfair_tokens_from_section_html
-
-    assert extract_betfair_tokens_from_section_html("<div><p>no exchange here</p></div>") is None
