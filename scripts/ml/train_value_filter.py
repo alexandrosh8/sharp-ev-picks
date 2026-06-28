@@ -215,6 +215,24 @@ def load_candidates(path: Path) -> pd.DataFrame:
     return df
 
 
+def load_btb_calib(path: Path, cal_df: pd.DataFrame) -> pd.DataFrame:
+    """Load BeatTheBookie consensus rows for CALIBRATION-ONLY augmentation.
+
+    These rows (scripts/ml/build_value_dataset.py --source beatthebookie) carry
+    a clv_max label vs the CONSENSUS close. They never enter model fitting,
+    model selection, the operating-point sweep, or the holdout — only the final
+    calibrator fit, where extra samples cross the isotonic n>=1000 threshold.
+    The two sharp-only numeric features (pinn_price, overround_pinn) are
+    structurally null here (no Pinnacle); they are imputed with the
+    football-data calibration-set medians so the fitted model can score the
+    rows. Decision-support only."""
+    df = pd.read_parquet(path)
+    df = df[df["clv_max"].notna()].copy()
+    for col in ("pinn_price", "overround_pinn"):
+        df[col] = df[col].fillna(float(cal_df[col].median()))
+    return _normalize_keys(df)
+
+
 def build_full_pool(
     cache_dir: Path, leagues: Sequence[str], seasons: Sequence[str]
 ) -> pd.DataFrame:
@@ -718,6 +736,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="run the ONE-SHOT holdout evaluation (consultation #4, declared final)",
     )
+    ap.add_argument(
+        "--btb-calib-parquet",
+        type=Path,
+        default=None,
+        help="opt-in: augment ONLY the final calibrator fit with BeatTheBookie "
+        "consensus rows (more samples -> isotonic n>=1000); never enters model "
+        "fit, model selection, the operating-point sweep, or the holdout",
+    )
     ap.add_argument("--n-boot-train", type=int, default=500)
     ap.add_argument("--n-boot-final", type=int, default=2000)
     ap.add_argument("--out-dir", type=Path, default=REPO_ROOT / "data/ml")
@@ -850,13 +876,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     cal_df = train_cand[(train_cand["season"] == tail) & train_cand["y"].notna()]
     x_fit, cats = prepare_matrix(fit_df)
     final_model = fit_model(best_spec, x_fit, fit_df["y"].to_numpy(dtype=int))
-    cal_kind, cal_obj = fit_calibrator(
-        predict_raw(final_model, prepare_matrix(cal_df, cats)[0]),
-        cal_df["y"].to_numpy(dtype=int),
-    )
+    cal_p = predict_raw(final_model, prepare_matrix(cal_df, cats)[0])
+    cal_y = cal_df["y"].to_numpy(dtype=int)
+    n_btb = 0
+    if args.btb_calib_parquet is not None and args.btb_calib_parquet.exists():
+        btb = load_btb_calib(args.btb_calib_parquet, cal_df)
+        if not btb.empty:
+            bp = predict_raw(final_model, prepare_matrix(btb, cats)[0])
+            by = (btb["clv_max"] > 0).to_numpy(dtype=int)
+            cal_p = np.concatenate([cal_p, bp])
+            cal_y = np.concatenate([cal_y, by])
+            n_btb = len(btb)
+    cal_kind, cal_obj = fit_calibrator(cal_p, cal_y)
+    btb_note = f" + {n_btb} BeatTheBookie consensus rows" if n_btb else ""
     print(
         f"\nFINAL MODEL: {best_spec.name}, fit on {TRAIN_SEASONS[:-1]}, "
-        f"{cal_kind} calibration on {tail} (n={len(cal_df)})"
+        f"{cal_kind} calibration on {tail} (n={len(cal_df)}{btb_note}, "
+        f"calib_total={len(cal_y)})"
     )
 
     print("\nFEATURE IMPORTANCES (final model):")

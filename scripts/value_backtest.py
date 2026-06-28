@@ -26,10 +26,13 @@ import csv
 import io
 import math
 from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
 
 import httpx
 
 from app.backtesting.clv import clv_log
+from app.ingestion.beatthebookie_series import load_series_dir, to_fd_row
 from app.ingestion.football_data import fetch_season_csv
 from app.probabilities.devig import DevigMethod, devig
 
@@ -212,8 +215,137 @@ def _fmt(stats: Stats, label: str, baseline: Stats | None = None) -> str:
     )
 
 
+def _sweep_and_eval(
+    train_rows: list[dict],
+    test_rows: list[dict],
+    markets: tuple[str, ...],
+    min_odds: float,
+    max_odds: float,
+    devig_methods: tuple[DevigMethod, ...],
+    thresholds: tuple[float, ...],
+    *,
+    train_label: str,
+    test_label: str,
+) -> None:
+    """Shared TRAIN-sweep -> single-shot HELD-OUT evaluation (one bet per
+    match/market). Used by both the football-data and BeatTheBookie paths so
+    the methodology (baseline null, train-only selection, computed verdict)
+    is identical."""
+    print(f"{train_label}: {len(train_rows)} matches | {test_label}: {len(test_rows)} matches\n")
+    print("TRAIN sweep (thr=0.000 rows are the BASELINE null — bet everything):")
+    sweep: list[tuple[DevigMethod, float, Stats]] = []
+    baselines: dict[DevigMethod, Stats] = {}
+    for dm in devig_methods:
+        baselines[dm] = Stats.from_bets(bets_for(train_rows, 0.0, dm, markets, min_odds, max_odds))
+        print(_fmt(baselines[dm], f"{dm.value[:5]}/0.000"))
+        for thr in thresholds:
+            s = Stats.from_bets(bets_for(train_rows, thr, dm, markets, min_odds, max_odds))
+            sweep.append((dm, thr, s))
+            print(_fmt(s, f"{dm.value[:5]}/{thr:.3f}", baselines[dm]))
+
+    viable = [(d, t, s) for d, t, s in sweep if s.n >= 150]
+    if not viable:
+        print("\nNo viable combo (n>=150) on train — verdict: NO PROVEN EDGE.")
+        return
+    best_dm, best_thr, best_train = max(viable, key=lambda x: x[2].roi)
+    print(
+        f"\nchosen on TRAIN: devig={best_dm.value} thr={best_thr} "
+        f"(ROI {best_train.roi * 100:+.2f}%, n={best_train.n})"
+    )
+
+    print("\nHELD-OUT TEST evaluation (single shot, never tuned on):")
+    baseline_test = Stats.from_bets(bets_for(test_rows, 0.0, best_dm, markets, min_odds, max_odds))
+    test = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, markets, min_odds, max_odds))
+    print(_fmt(baseline_test, "0.000"))
+    print(_fmt(test, f"{best_thr:.3f}", baseline_test))
+    for market in markets:
+        m_stats = Stats.from_bets(
+            bets_for(test_rows, best_thr, best_dm, (market,), min_odds, max_odds)
+        )
+        print(_fmt(m_stats, f"  {market}", baseline_test))
+
+
+async def run_beatthebookie(args: argparse.Namespace) -> None:
+    """BeatTheBookie odds_series backtest (worldwide-league breadth sanity check).
+
+    HONEST SCOPE: this source has NO sharp book — the "anchor" is the market
+    CONSENSUS (mean across ~32 soft books) and the bet is the best (Max) line.
+    CLV here is measured vs the consensus/Max CLOSE, NOT a sharp close, so a
+    positive edge mostly reflects the best-of-N best-price premium. Read every
+    number against the thr=0 bet-everything baseline; the binding sharp-CLV
+    proof lives in scripts/value_backtest.py's football-data (Pinnacle) path.
+    Train/test split is by kick-off DATE (odds_series ends, odds_series_b
+    begins, ~2016-03-01) — there are no football-data season codes here.
+    """
+    dirs = [Path(d.strip()) for d in args.btb_dir.split(",") if d.strip()]
+    missing = [str(d) for d in dirs if not d.is_dir()]
+    if missing:
+        print("BeatTheBookie data not found. Operator must place the unzipped")
+        print("odds_series / odds_series_b per-game .txt files at, e.g.:")
+        for d in dirs:
+            print(f"    {d}")
+        print("Download (Dropbox links in the upstream README): odds_series.zip,")
+        print("odds_series_b.zip from github.com/Lisandro79/BeatTheBookie")
+        print(f"(missing: {', '.join(missing)}). Read-only; this script places no bets.")
+        return
+    matches = [m for d in dirs for m in load_series_dir(d)]
+    split = date.fromisoformat(args.btb_split_date)
+    markets = ("1x2",)  # this source carries 1x2 only (no OU/AH series)
+    min_odds, max_odds = args.min_odds, args.max_odds
+
+    print(f"\nBEAT-THE-BOOKIE BACKTEST — {len(matches)} matches from {len(dirs)} dir(s)")
+    print("SOFT/CONSENSUS data: anchor = consensus(mean of ~32 books), bet = best(Max).")
+    print("CLV is vs the CONSENSUS close, NOT a sharp close (breadth, not proof).")
+    print(f"market 1x2 only | min_odds {min_odds} | split by kickoff date {split.isoformat()}\n")
+    if not matches:
+        print("No usable matches parsed. Operator must place data files; places no bets.")
+        return
+
+    train_rows = [to_fd_row(m) for m in matches if m.kickoff_utc.date() < split]
+    test_rows = [to_fd_row(m) for m in matches if m.kickoff_utc.date() >= split]
+    devig_methods = (
+        DevigMethod.POWER,
+        DevigMethod.SHIN,
+        DevigMethod.MULTIPLICATIVE,
+        DevigMethod.ODDS_RATIO,
+    )
+    thresholds = (0.005, 0.010, 0.020, 0.030, 0.050)
+    _sweep_and_eval(
+        train_rows,
+        test_rows,
+        markets,
+        min_odds,
+        max_odds,
+        devig_methods,
+        thresholds,
+        train_label="train (odds_series)",
+        test_label="test (odds_series_b)",
+    )
+    print(
+        "\nCaveat: consensus close is NOT a sharp reference; the best-price premium "
+        "inflates apparent edge. Worldwide-league breadth only. Manual review "
+        "required. This system does not place bets."
+    )
+
+
 async def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--source",
+        choices=("football-data", "beatthebookie"),
+        default="football-data",
+        help="football-data.co.uk (Pinnacle, default) or BeatTheBookie odds_series",
+    )
+    p.add_argument(
+        "--btb-dir",
+        default="data/beatthebookie/odds_series,data/beatthebookie/odds_series_b",
+        help="comma-separated dirs of operator-placed BeatTheBookie match_*.txt files",
+    )
+    p.add_argument(
+        "--btb-split-date",
+        default="2016-03-01",
+        help="train/test split by kickoff date (odds_series | odds_series_b boundary)",
+    )
     p.add_argument("--leagues", default="E0,E1,E2,E3,SC0,D1,D2,I1,I2,SP1,SP2,F1,F2,N1,B1,P1,T1,G1")
     # 2019/20+ is the maximal window with full PSH+Max+PSC+MaxC coverage
     # (Max/Avg columns replaced BetBrain in 2019/20; Pinnacle closing too).
@@ -225,6 +357,9 @@ async def main() -> None:
         "--max-odds", type=float, default=1000.0, help="odds ceiling — kill longshots (P2)"
     )
     args = p.parse_args()
+    if args.source == "beatthebookie":
+        await run_beatthebookie(args)
+        return
     leagues = [x.strip() for x in args.leagues.split(",") if x.strip()]
     train_s = [x.strip() for x in args.train_seasons.split(",") if x.strip()]
     test_s = [x.strip() for x in args.test_seasons.split(",") if x.strip()]

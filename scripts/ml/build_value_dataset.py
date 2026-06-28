@@ -124,6 +124,7 @@ import httpx
 import pandas as pd
 
 from app.backtesting.clv import clv_log
+from app.ingestion.beatthebookie_series import SeriesMatch, load_series_dir
 from app.ingestion.football_data import LEAGUES, fetch_season_csv
 from app.probabilities.devig import DevigMethod, devig
 
@@ -145,7 +146,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_DEFAULT_V1 = REPO_ROOT / "data" / "ml" / "value_candidates.parquet"
 OUT_DEFAULT_V2 = REPO_ROOT / "data" / "ml" / "value_candidates_v2.parquet"
 OUT_DEFAULT_V3 = REPO_ROOT / "data" / "ml" / "value_candidates_v3.parquet"
+OUT_DEFAULT_BTB = REPO_ROOT / "data" / "ml" / "value_candidates_btb.parquet"
 OUT_DEFAULT = OUT_DEFAULT_V1  # back-compat alias (v1 artifact path)
+# Operator-placed BeatTheBookie odds_series dirs (see app/ingestion/beatthebookie_series)
+BTB_DIR_DEFAULT = REPO_ROOT / "data" / "beatthebookie"
 CACHE_DEFAULT = REPO_ROOT / "data" / "ml" / "cache"
 
 # ---------------------------------------------------------------------------
@@ -1308,6 +1312,68 @@ def candidates_from_rows(
 
 
 # --------------------------------------------------------------------------
+# BeatTheBookie odds_series source (worldwide-league CALIBRATION breadth).
+# HONEST SCOPE: this source has NO sharp book — the anchor is the market
+# CONSENSUS (mean across ~32 soft books), tagged anchor_type='consensus', and
+# every Pinnacle-specific column (pinn_price/overround_pinn/price_ratio/
+# prob_gap) is null because no sharp price exists. The close labels
+# (pinn_close_fair, clv_pinn) are computed against the CONSENSUS close, NOT a
+# sharp close — they add calibration sample size (crossing isotonic n>=1000),
+# never sharp-CLV proof. league='BTB' keeps these rows OUT of the trainer's
+# frozen LEAGUES_18 evaluation universe by construction.
+# --------------------------------------------------------------------------
+def _btb_season(dt: datetime) -> str:
+    """Football-style season code from a UTC kickoff (Jul-Jun season)."""
+    start = dt.year if dt.month >= 7 else dt.year - 1
+    return f"{start % 100:02d}{(start + 1) % 100:02d}"
+
+
+def btb_candidates(
+    matches: Sequence[SeriesMatch], min_edge: float = MIN_EDGE_DEFAULT
+) -> list[Candidate]:
+    """Consensus-anchored 1x2 candidates from BeatTheBookie odds_series matches.
+
+    Reuses _market_candidates with anchor_type=consensus and ps=None so the
+    schema is filled identically to the live consensus-anchor path; book_count
+    is then set to the real per-snapshot book count. Pure: no IO."""
+    spec = MARKETS["1x2"]
+    feats: dict[str, float | None] = {
+        **_form_kwargs(_EMPTY_FORM, _EMPTY_FORM),
+        **_xg_kwargs(_EMPTY_XG, _EMPTY_XG),
+    }
+    out: list[Candidate] = []
+    for m in matches:
+        d = m.kickoff_utc.date()
+        season = _btb_season(m.kickoff_utc)
+        row = {"FTR": m.result, "FTHG": str(m.home_score), "FTAG": str(m.away_score)}
+        close_p = devig(list(m.close_consensus), method=CANONICAL_DEVIG)
+        close_m = devig(list(m.close_best), method=CANONICAL_DEVIG)
+        cands = _market_candidates(
+            row,
+            "BTB",
+            season,
+            d,
+            m.kickoff_utc,
+            f"m{m.match_id}_home",  # per-game files carry no team names (only id)
+            f"m{m.match_id}_away",
+            "1x2",
+            spec,
+            "maxavg",  # best-price era analog (Max line present)
+            list(m.open_best),
+            ANCHOR_CONSENSUS,
+            list(m.open_consensus),
+            None,  # ps: no sharp book -> all Pinnacle-specific columns null
+            close_p,
+            close_m,
+            min_edge,
+            False,  # consulted_before: fresh worldwide domain
+            feats,
+        )
+        out.extend(dataclasses.replace(c, book_count=m.n_books_open) for c in cands)
+    return out
+
+
+# --------------------------------------------------------------------------
 # IO: cached, paced, read-only GETs (reuses the tenacity-wrapped fetcher)
 # --------------------------------------------------------------------------
 async def _load_csv(
@@ -1562,8 +1628,56 @@ def _v3_quality_report(df: pd.DataFrame) -> None:
         assert ((ah["ah_line"] * 2) % 2 != 0).all(), "non-half-line AH row leaked"
 
 
+def _build_btb(btb_dirs: list[Path], min_edge: float, out: Path) -> int:
+    """Assemble the BeatTheBookie consensus-anchored calibration parquet.
+
+    Separate artifact (value_candidates_btb.parquet); never touches the v1/v2/v3
+    football-data outputs. Read-only over operator-placed files."""
+    assert_no_label_leak()
+    found = [d for d in btb_dirs if d.is_dir()]
+    if not found:
+        print("BeatTheBookie data not found. Operator must unzip odds_series.zip /")
+        print("odds_series_b.zip (Dropbox links in github.com/Lisandro79/BeatTheBookie")
+        print("README) into per-game match_*.txt dirs, e.g.:")
+        for d in btb_dirs:
+            print(f"    {d}")
+        print("Read-only academic data (GPL-3.0; cite arXiv:1710.02824). Places no bets.")
+        return 1
+    matches = [m for d in found for m in load_series_dir(d)]
+    print(f"BeatTheBookie: {len(matches)} matches from {len(found)} dir(s), min_edge {min_edge}")
+    cands = btb_candidates(matches, min_edge)
+    df = _to_dataframe(cands, schema_version=3)  # consensus rows need anchor_type
+    if df.empty:
+        print("DATA-QUALITY ALERT: zero BeatTheBookie candidates assembled (no usable matches)")
+    else:
+        n = len(df)
+        lbl = int(df["clv_pinn"].notna().sum())
+        print(f"  {n} consensus candidate rows; clv (vs consensus close) present: {lbl}/{n}")
+        print(f"  isotonic-eligible (n>=1000): {n >= 1000}")
+        assert (df["anchor_type"] == ANCHOR_CONSENSUS).all(), "BTB rows must be consensus-anchored"
+        assert df["pinn_price"].isna().all(), "BTB has no sharp price — pinn_price must be null"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out, engine="pyarrow", index=False)
+    print(f"\nwrote {len(df)} rows -> {out}")
+    print("HONEST SCOPE: consensus anchor + consensus close (NOT sharp). Calibration")
+    print("breadth only; sharp-CLV proof stays with the football-data Pinnacle path.")
+    print("Decision-support only — nothing here places bets.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--source",
+        choices=("football-data", "beatthebookie"),
+        default="football-data",
+        help="football-data.co.uk (default) or BeatTheBookie odds_series (consensus breadth)",
+    )
+    p.add_argument(
+        "--btb-dir",
+        default=f"{BTB_DIR_DEFAULT / 'odds_series'},{BTB_DIR_DEFAULT / 'odds_series_b'}",
+        help="comma-separated dirs of operator-placed BeatTheBookie match_*.txt files",
+    )
     p.add_argument("--leagues", default=None, help="default: all LEAGUES (v2) / V1_LEAGUES (--v1)")
     p.add_argument("--seasons", default=",".join(SEASONS_ALL))
     p.add_argument("--min-edge", type=float, default=MIN_EDGE_DEFAULT)
@@ -1590,6 +1704,10 @@ def main(argv: list[str] | None = None) -> int:
         help="v3: ALSO emit Asian-handicap half-line candidates (market='ah')",
     )
     args = p.parse_args(argv)
+    if args.source == "beatthebookie":
+        btb_dirs = [Path(d.strip()) for d in args.btb_dir.split(",") if d.strip()]
+        out_btb: Path = args.out or OUT_DEFAULT_BTB
+        return _build_btb(btb_dirs, args.min_edge, out_btb)
     v3 = args.anchor_consensus or args.ah
     if args.v1 and v3:
         p.error("--v1 cannot combine with the v3 flags (--anchor-consensus/--ah)")
