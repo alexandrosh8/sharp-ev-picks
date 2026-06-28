@@ -860,17 +860,20 @@ async def test_basketball_totals_and_handicap_games_markets_parse() -> None:
 
 
 async def test_proxy_pool_rotates_and_fails_over() -> None:
-    # Proxy #0 returns 0 matches (the throttle signature) -> failover to #1,
-    # which returns the slate. Credentials must travel via the separate
-    # proxy_user/proxy_pass kwargs, NEVER embedded in proxy_url.
+    # Proxy #0 RAISES (network / anti-bot / timeout — the real failover trigger)
+    # -> failover to #1, which returns the slate. (A clean EMPTY listing is NOT a
+    # failover trigger any more — see test_proxy_clean_empty_listing_is_final.)
+    # Credentials must travel via the separate proxy_user/proxy_pass kwargs,
+    # NEVER embedded in proxy_url.
     from app.ingestion.base import ScraperProxy
 
     calls: list[dict[str, Any]] = []
 
     async def fake_scrape(**kwargs: Any) -> Any:
         calls.append(kwargs)
-        success = [] if len(calls) == 1 else [MATCH]
-        return SimpleNamespace(success=success, failed=[], partial=[])
+        if len(calls) == 1:
+            raise TimeoutError("proxy #0 hung")  # real transport failure
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
 
     pool = (
         ScraperProxy(url="http://h0:1", username="u0", password="p0"),
@@ -890,6 +893,34 @@ async def test_proxy_pool_rotates_and_fails_over() -> None:
     assert "u0" not in calls[0]["proxy_url"]  # creds never live in the URL
     assert calls[1]["proxy_url"] == "http://h1:2"
     assert snapshots  # the 2nd proxy's slate was parsed
+
+
+async def test_proxy_clean_empty_listing_is_final_no_relaunch() -> None:
+    # CYCLE-COST FIX (2026-06-28): a clean, exception-free listing of ZERO matches
+    # is a genuine empty slate (off-season sport / empty slug), NOT a throttle —
+    # so it is FINAL and the browser is NOT relaunched across the pool. Relaunching
+    # Chromium up to _MAX_PROXY_FAILOVER× per empty sport/date was wasted
+    # wall-clock that helped overrun the odds-freshness window.
+    from app.ingestion.base import ScraperProxy
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[], failed=[], partial=[])  # always empty
+
+    pool = tuple(
+        ScraperProxy(url=f"http://h{i}:1", username=f"u{i}", password=f"p{i}") for i in range(8)
+    )
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=fake_scrape,
+        proxy_pool=pool,
+    )
+    snaps = await loader.fetch_odds("soccer")
+    assert snaps == []
+    assert len(calls) == 1  # ONE browser launch — no relaunch on a clean empty slate
 
 
 async def test_empty_pool_scrapes_without_proxy_kwargs() -> None:
@@ -912,10 +943,10 @@ async def test_empty_pool_scrapes_without_proxy_kwargs() -> None:
     assert "proxy_pass" not in call
 
 
-async def test_proxy_failover_capped_on_empty_slate() -> None:
-    # A genuinely-empty slate (every proxy returns 0 matches) must NOT burn the
-    # whole pool — the failover sweep is capped so empty/slow sports can't starve
-    # the rest of the scrape cycle.
+async def test_proxy_failover_capped_on_dead_proxies() -> None:
+    # When EVERY proxy RAISES (all dead / all blocked), the failover sweep must NOT
+    # burn the whole pool — it is capped at _MAX_PROXY_FAILOVER so a bad run can't
+    # starve the rest of the scrape cycle.
     from app.ingestion.base import ScraperProxy
     from app.ingestion.oddsportal import _MAX_PROXY_FAILOVER
 
@@ -923,7 +954,7 @@ async def test_proxy_failover_capped_on_empty_slate() -> None:
 
     async def fake_scrape(**kwargs: Any) -> Any:
         calls.append(kwargs)
-        return SimpleNamespace(success=[], failed=[], partial=[])  # always empty
+        raise TimeoutError("proxy dead")  # every proxy fails -> real failover trigger
 
     pool = tuple(
         ScraperProxy(url=f"http://h{i}:1", username=f"u{i}", password=f"p{i}") for i in range(8)

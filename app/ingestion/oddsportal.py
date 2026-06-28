@@ -1301,13 +1301,28 @@ class OddsPortalLoader:
     async def _scrape_with_failover(
         self, *, scrape_fn: ScrapeFn | None = None, **kwargs: Any
     ) -> Any:
-        """Scrape via the proxy pool, rotating with failover: on an exception OR
-        a zero-match result (the throttle signature), retry with the NEXT proxy.
+        """Scrape via the proxy pool, failing over to the NEXT proxy ONLY on an
+        EXCEPTION (network / anti-bot / timeout). A clean, exception-free return —
+        even one listing ZERO matches — is FINAL and returned immediately.
+
+        WHY (cycle-cost root-cause 2026-06-28): each `_default_listing_scrape` call
+        launches+tears-down a Chromium browser. The old code treated a zero-match
+        result as a "throttle signature" and relaunched the browser across up to
+        ``_MAX_PROXY_FAILOVER`` proxies. But a clean empty LISTING almost always
+        means "no fixtures for this sport/date" (an off-season sport such as NFL in
+        June, or an empty league slug), NOT a throttle — the codebase's real
+        anti-bot signature is "matches LISTED but 0 ODDS parsed" (see `fetch_odds`
+        + upstream gotcha §6), and a hard listing block RAISES (nav timeout) and so
+        still fails over here. Relaunching Chromium 3× per genuinely-empty
+        sport/date was pure wasted wall-clock that helped overrun the freshness
+        window. Trade-off: a rare SILENT soft-block that returns HTTP 200 + zero
+        rows is no longer retried this cycle (it recovers next cycle), in exchange
+        for never paying 2 extra browser launches per empty sport/date.
+
         Empty pool -> a single direct call (host IP, default). Credentials go via
         separate proxy_user/proxy_pass kwargs (never in the URL); logging is
-        index-only so nothing leaks. The sweep is CAPPED at ``_MAX_PROXY_FAILOVER``
-        proxies so a genuinely-empty slate (no games that day) can't burn the whole
-        pool and starve later sports in the cycle.
+        index-only so nothing leaks. The EXCEPTION sweep is still CAPPED at
+        ``_MAX_PROXY_FAILOVER`` so a dead-proxy run can't burn the whole pool.
 
         ``scrape_fn`` selects the scrape coroutine (default `self._scrape`); the
         JSON path injects `self._listing_scrape` (listing-only, URLs only)."""
@@ -1328,7 +1343,7 @@ class OddsPortalLoader:
                     proxy_user=proxy.username,
                     proxy_pass=proxy.password,
                 )
-            except Exception as exc:  # network / anti-bot / timeout
+            except Exception as exc:  # network / anti-bot / timeout -> try next proxy
                 logger.warning(
                     "oddsportal scrape via proxy #%d failed (%s); trying next",
                     idx,
@@ -1336,11 +1351,16 @@ class OddsPortalLoader:
                 )
                 result = None
                 continue
-            if getattr(result, "success", None):
-                self._proxy_cursor = (idx + 1) % n  # advance past the winner
-                return result
-            logger.info("oddsportal scrape via proxy #%d returned 0 matches; trying next", idx)
-        self._proxy_cursor = (self._proxy_cursor + tries) % n  # skip the ones just tried
+            # No exception => FINAL, even when the listing is empty (no relaunch).
+            if not getattr(result, "success", None):
+                logger.info(
+                    "oddsportal scrape via proxy #%d listed 0 matches — empty slate "
+                    "(no relaunch; recovers next cycle if this was a soft block)",
+                    idx,
+                )
+            self._proxy_cursor = (idx + 1) % n  # advance past the proxy that answered
+            return result
+        self._proxy_cursor = (self._proxy_cursor + tries) % n  # skip the dead proxies
         return result
 
     async def fetch_odds(self, sport_key: str) -> list[OddsSnapshotIn]:
