@@ -35,6 +35,7 @@ from app.backtesting.clv import clv_log
 from app.ingestion.beatthebookie_series import load_series_dir, to_fd_row
 from app.ingestion.betfair_bsp import attach_betfair_close, load_betfair_dir
 from app.ingestion.football_data import fetch_season_csv
+from app.ingestion.tennis_data import TennisMatchRow, load_tennis_dir
 from app.probabilities.devig import DevigMethod, devig
 from app.resolution.matching import default_aliases
 
@@ -114,6 +115,18 @@ def _won_ou25(r: dict, i: int) -> bool | None:
     return (goals >= 3) if i == 0 else (goals <= 2)
 
 
+def _won_h2h(r: dict, i: int) -> bool | None:
+    """2-way tennis match-winner settlement. ``H2HWIN`` is the side index (0/1)
+    that actually won AFTER the leak-safe side randomization in
+    ``_tennis_to_rows`` — it is NOT fixed at 0 (the source lists odds
+    winner-first; leaving the winner permanently on side 0 would leak the
+    outcome into selection)."""
+    w = r.get("H2HWIN")
+    if w not in ("0", "1"):
+        return None
+    return int(w) == i
+
+
 MARKETS = {
     "1x2": (
         ("PSH", "PSD", "PSA"),
@@ -131,6 +144,23 @@ MARKETS = {
     ),
 }
 
+# Tennis 2-way match winner (H2H). Kept SEPARATE from MARKETS on purpose: MARKETS
+# is parity-locked against the production evaluate_staking.MARKETS (football
+# 1x2/ou25 only), so the tennis market lives in its own map and is threaded into
+# bets_for/_sweep_and_eval via `markets_map`. Pinnacle pre-match = sharp; Max
+# pre-match = soft; the closing columns (PSCH*/MaxCH*) are DELIBERATELY absent
+# from a tennis row -> devig(close) is None -> CLV is n/a (tennis-data has NO
+# close).
+TENNIS_MARKETS = {
+    "h2h": (
+        ("PSH0", "PSH1"),
+        ("MaxH0", "MaxH1"),
+        ("PSCH0", "PSCH1"),
+        ("MaxCH0", "MaxCH1"),
+        _won_h2h,
+    ),
+}
+
 
 def bets_for(
     rows: list[dict],
@@ -139,12 +169,17 @@ def bets_for(
     markets: tuple[str, ...] = ("1x2",),
     min_odds: float = 1.0,
     max_odds: float = 1000.0,
+    markets_map: dict | None = None,
 ) -> list[VBet]:
-    """One bet per (match, market): the highest-edge selection >= threshold."""
+    """One bet per (match, market): the highest-edge selection >= threshold.
+
+    ``markets_map`` defaults to the football MARKETS dict; the tennis path passes
+    TENNIS_MARKETS so the parity-locked MARKETS stays football-only."""
+    mkts = MARKETS if markets_map is None else markets_map
     out: list[VBet] = []
     for r in rows:
         for market in markets:
-            ps_c, mx_c, psc_c, mxc_c, won_fn = MARKETS[market]
+            ps_c, mx_c, psc_c, mxc_c, won_fn = mkts[market]
             ps = [_f(r.get(c)) for c in ps_c]
             mx = [_f(r.get(c)) for c in mx_c]
             psc = [_f(r.get(c)) for c in psc_c]
@@ -228,20 +263,26 @@ def _sweep_and_eval(
     *,
     train_label: str,
     test_label: str,
+    markets_map: dict | None = None,
 ) -> None:
     """Shared TRAIN-sweep -> single-shot HELD-OUT evaluation (one bet per
-    match/market). Used by both the football-data and BeatTheBookie paths so
-    the methodology (baseline null, train-only selection, computed verdict)
-    is identical."""
+    match/market). Used by the football-data, BeatTheBookie, Betfair-BSP and
+    tennis-data paths so the methodology (baseline null, train-only selection,
+    computed verdict) is identical. ``markets_map`` lets the tennis path supply
+    TENNIS_MARKETS without polluting the parity-locked MARKETS."""
     print(f"{train_label}: {len(train_rows)} matches | {test_label}: {len(test_rows)} matches\n")
     print("TRAIN sweep (thr=0.000 rows are the BASELINE null — bet everything):")
     sweep: list[tuple[DevigMethod, float, Stats]] = []
     baselines: dict[DevigMethod, Stats] = {}
     for dm in devig_methods:
-        baselines[dm] = Stats.from_bets(bets_for(train_rows, 0.0, dm, markets, min_odds, max_odds))
+        baselines[dm] = Stats.from_bets(
+            bets_for(train_rows, 0.0, dm, markets, min_odds, max_odds, markets_map)
+        )
         print(_fmt(baselines[dm], f"{dm.value[:5]}/0.000"))
         for thr in thresholds:
-            s = Stats.from_bets(bets_for(train_rows, thr, dm, markets, min_odds, max_odds))
+            s = Stats.from_bets(
+                bets_for(train_rows, thr, dm, markets, min_odds, max_odds, markets_map)
+            )
             sweep.append((dm, thr, s))
             print(_fmt(s, f"{dm.value[:5]}/{thr:.3f}", baselines[dm]))
 
@@ -256,13 +297,17 @@ def _sweep_and_eval(
     )
 
     print("\nHELD-OUT TEST evaluation (single shot, never tuned on):")
-    baseline_test = Stats.from_bets(bets_for(test_rows, 0.0, best_dm, markets, min_odds, max_odds))
-    test = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, markets, min_odds, max_odds))
+    baseline_test = Stats.from_bets(
+        bets_for(test_rows, 0.0, best_dm, markets, min_odds, max_odds, markets_map)
+    )
+    test = Stats.from_bets(
+        bets_for(test_rows, best_thr, best_dm, markets, min_odds, max_odds, markets_map)
+    )
     print(_fmt(baseline_test, "0.000"))
     print(_fmt(test, f"{best_thr:.3f}", baseline_test))
     for market in markets:
         m_stats = Stats.from_bets(
-            bets_for(test_rows, best_thr, best_dm, (market,), min_odds, max_odds)
+            bets_for(test_rows, best_thr, best_dm, (market,), min_odds, max_odds, markets_map)
         )
         print(_fmt(m_stats, f"  {market}", baseline_test))
 
@@ -406,16 +451,158 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
     )
 
 
+def _tennis_to_rows(matches: list[TennisMatchRow], *, seed: str) -> list[dict]:
+    """Convert completed, fully-priced tennis matches to h2h backtest rows.
+
+    LEAK GUARD: tennis-data lists every odds column winner-first (PSW/PSL,
+    MaxW/MaxL), so a fixed [winner, loser] layout would make the eventual winner
+    ALWAYS side 0 — the selector would then settle any side-0 pick as a
+    guaranteed win, leaking the outcome into ROI. We flip a SEEDED coin per match
+    (deterministic, reproducible, independent of the result) so the side order is
+    uncorrelated with the outcome; ``H2HWIN`` records which side actually won.
+    No closing columns are written — tennis-data has none."""
+    import random
+
+    rng = random.Random(seed)
+    out: list[dict] = []
+    for m in matches:
+        if not m.completed:
+            continue  # quarantine Retired / Walkover / Awarded
+        if m.psw is None or m.psl is None or m.maxw is None or m.maxl is None:
+            continue  # need both sharp + soft prices on both sides
+        if rng.random() < 0.5:  # swap: loser's odds sit on side 0
+            ps0, ps1, mx0, mx1, win = m.psl, m.psw, m.maxl, m.maxw, 1
+        else:
+            ps0, ps1, mx0, mx1, win = m.psw, m.psl, m.maxw, m.maxl, 0
+        out.append(
+            {
+                "PSH0": str(ps0),
+                "PSH1": str(ps1),
+                "MaxH0": str(mx0),
+                "MaxH1": str(mx1),
+                "H2HWIN": str(win),
+                "Date": m.match_date.strftime("%d/%m/%Y"),
+            }
+        )
+    return out
+
+
+def _tennis_rows_for_years(matches: list[TennisMatchRow], years: set[int]) -> list[dict]:
+    """Build h2h rows for the matches whose calendar year is in ``years``.
+
+    Seeds the leak-guard coin PER CALENDAR YEAR (stable across runs and
+    independent of the train/test assignment), mirroring the per-tour-year
+    seeding in scripts/sports/tennis_backtest.py."""
+    rows: list[dict] = []
+    for y in sorted(years):
+        group = [m for m in matches if m.match_date.year == y]
+        rows.extend(_tennis_to_rows(group, seed=f"tennis-h2h-{y}"))
+    return rows
+
+
+async def run_tennis_data(args: argparse.Namespace) -> None:
+    """Pre-match VALUE backtest for TENNIS (tennis-data.co.uk; ATP + WTA).
+
+    HONEST SCOPE — PRE-MATCH ONLY, NO CLOSING LINE. tennis-data publishes
+    Pinnacle PRE-MATCH (PSW/PSL) + Max-of-books PRE-MATCH (MaxW/MaxL) + the
+    result, but it has NO closing column (unlike football-data's PSC*). So this
+    path reports the held-out pre-match EDGE distribution and ROI only; CLV vs a
+    close is UNDEFINED and prints as ``n/a``. Under doctrine a sport with no
+    measurable closing-line CLV stays VISIBILITY-ONLY no matter how good ROI
+    looks. To measure a tennis CLOSE this source must be paired with a
+    Betfair-BSP tennis loader — which does not exist yet (betfair_bsp.py parses
+    soccer/basketball MATCH_ODDS only, eventTypeId 1/7522, no tennis parser), so
+    that join is a documented FUTURE hook, not wired here. Data is
+    OPERATOR-PLACED on disk; when the dir is absent we print the operator
+    instruction and place no bets.
+
+    For the full TRAIN-sweep / one-shot held-out methodology with bootstrap CIs
+    clustered by match, see scripts/sports/tennis_backtest.py; this is the
+    additive value_backtest.py entry over the same source.
+    """
+    tdir = Path(args.tennis_dir)
+    matches = load_tennis_dir(tdir)
+    if not matches:
+        print("tennis-data.co.uk season files not found. Operator must place the")
+        print("per-season workbooks (one .xlsx per tour-year, or operator-exported")
+        print(f".csv) at, e.g.:\n    {tdir}/atp_2023.xlsx\n    {tdir}/wta_2023.xlsx")
+        print("Source (free, public): http://www.tennis-data.co.uk/alldata.php —")
+        print("ATP {y}/{y}.xlsx (2001+), WTA {y}w/{y}.xlsx (2007+). Read-only GET;")
+        print("this script never authenticates and places no bets.")
+        return
+
+    train_years = {int(y) for y in args.tennis_train_years.split(",") if y.strip()}
+    test_years = {int(y) for y in args.tennis_test_years.split(",") if y.strip()}
+    min_odds, max_odds = args.min_odds, args.max_odds
+    completed = sum(1 for m in matches if m.completed)
+
+    print("\nTENNIS-DATA BACKTEST — sharp(Pinnacle) vs best-of-books, PRE-MATCH ONLY")
+    print(f"{len(matches)} matches ({completed} completed) from {tdir}")
+    print("2-way match winner (H2H); one bet per match; settle on real Winner/Loser.")
+    print("NOTE: tennis-data has NO closing line -> CLV vs close is UNDEFINED (n/a);")
+    print("      the >2 SE CLV doctrine gate CANNOT be cleared -> VISIBILITY-ONLY.")
+    print("      (A Betfair-BSP tennis close loader would be needed; none exists yet.)\n")
+
+    train_rows = _tennis_rows_for_years(matches, train_years)
+    test_rows = _tennis_rows_for_years(matches, test_years)
+    if not train_rows or not test_rows:
+        print(f"Too few rows after the year split (train years {sorted(train_years)},")
+        print(f"test years {sorted(test_years)}). Place more season files; places no bets.")
+        return
+
+    devig_methods = (
+        DevigMethod.POWER,
+        DevigMethod.SHIN,
+        DevigMethod.MULTIPLICATIVE,
+        DevigMethod.ODDS_RATIO,
+    )
+    thresholds = (0.005, 0.010, 0.020, 0.030, 0.050)
+    _sweep_and_eval(
+        train_rows,
+        test_rows,
+        ("h2h",),
+        min_odds,
+        max_odds,
+        devig_methods,
+        thresholds,
+        train_label=f"train {sorted(train_years)}",
+        test_label=f"test {sorted(test_years)}",
+        markets_map=TENNIS_MARKETS,
+    )
+    print(
+        "\nVERDICT (computed): VISIBILITY-ONLY — no closing line in this source, so the "
+        "incremental-CLV-vs-close gate is unevaluable regardless of held-out ROI above. "
+        "Max line assumes line-shopping every book at the pre-match snapshot; soft books "
+        "limit winners. Manual review required. This system does not place bets."
+    )
+
+
 async def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--source",
-        choices=("football-data", "beatthebookie", "betfair-bsp"),
+        choices=("football-data", "beatthebookie", "betfair-bsp", "tennis-data"),
         default="football-data",
         help=(
             "football-data.co.uk (Pinnacle, default), BeatTheBookie odds_series "
-            "(consensus breadth), or betfair-bsp (sharp close joined to fd Max)"
+            "(consensus breadth), betfair-bsp (sharp close joined to fd Max), or "
+            "tennis-data (ATP/WTA pre-match only, no close -> visibility-only)"
         ),
+    )
+    p.add_argument(
+        "--tennis-dir",
+        default="data/tennis",
+        help="dir of operator-placed tennis-data.co.uk season files (.xlsx/.csv)",
+    )
+    p.add_argument(
+        "--tennis-train-years",
+        default="2019,2020,2021,2022,2023",
+        help="calendar years used for the tennis TRAIN sweep",
+    )
+    p.add_argument(
+        "--tennis-test-years",
+        default="2024,2025,2026",
+        help="calendar years used for the tennis held-out TEST (one shot)",
     )
     p.add_argument(
         "--betfair-bsp-dir",
@@ -448,6 +635,9 @@ async def main() -> None:
         return
     if args.source == "betfair-bsp":
         await run_betfair_bsp(args)
+        return
+    if args.source == "tennis-data":
+        await run_tennis_data(args)
         return
     leagues = [x.strip() for x in args.leagues.split(",") if x.strip()]
     train_s = [x.strip() for x in args.train_seasons.split(",") if x.strip()]
