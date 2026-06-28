@@ -833,10 +833,11 @@ async def finalize_closing_from_snapshots(
         # close anchors the fair (value.SHARP_BOOKS[0]=="pinnacle"). No match -> [].
         sharp_snaps.extend(await _pinnacle_archive_close(session, pick, external_ref, kickoff))
     if use_betfair_exchange:
-        # Captured Betfair Exchange BACK close (EXACT-match: betfair ref is
-        # deterministically "betfair:"+ref). No betfair event / no close -> [].
-        # Both flags may be on: event_fair_probs prefers Pinnacle (SHARP_BOOKS[0])
-        # over Betfair (index 2), so Pinnacle wins when both price the market.
+        # Captured Betfair Exchange BACK close: the dedicated rows live on the
+        # CANONICAL event (bookmaker "Betfair Exchange"), resolved + filtered to the
+        # Betfair book. No canonical event / no Betfair close -> []. Both flags may be
+        # on: event_fair_probs prefers Pinnacle (SHARP_BOOKS[0]) over Betfair (index
+        # 2), so Pinnacle wins when both price the market.
         sharp_snaps.extend(await _betfair_exchange_close(session, pick, external_ref, kickoff))
     sharp_last = max(
         (s.captured_at for s in sharp_snaps if s.captured_at is not None), default=None
@@ -995,27 +996,35 @@ async def _pinnacle_archive_close(
 async def resolve_betfair_back_snaps(
     session: "AsyncSession", external_ref: str, kickoff: datetime
 ) -> list[OddsSnapshotIn]:
-    """Captured Betfair Exchange BACK snapshots for an event, re-keyed to its own
-    external_ref, or []. EXACT resolution (no fuzzy/alias): the Betfair capture
-    persists under external_ref ``"betfair:" + ref`` (betfair_exchange.
-    _namespace_event_ref), globally unique, so one deterministic lookup finds it.
-    Re-keys rows off the "betfair:" namespace to ``external_ref`` so they group
-    with that event's market in event_fair_probs. Used BOTH at settlement (the
-    close) and at PICK TIME (the live sharp anchor). Each row carries captured_at,
-    so a pick-time caller can gate freshness on the event's most-recent row.
-    """
-    from app.ingestion.betfair_exchange import _namespace_event_ref
+    """Captured Betfair Exchange BACK CLOSE snapshots for an event, or [].
 
-    betfair_ref = _namespace_event_ref(external_ref)
-    betfair_event_id = await session.scalar(
-        select(Event.id).where(Event.external_ref == betfair_ref)
-    )
-    if betfair_event_id is None:
+    ADR-0015 v2 (inline binding): the dedicated Betfair capture persists its rows
+    on the CANONICAL event — ``Event.external_ref == external_ref`` (the OddsPortal
+    match URL), ``bookmaker == "Betfair Exchange"`` — the SAME ref the main scrape's
+    soft-book rows use (betfair_exchange.capture_once, attach_only_to_existing).
+    So resolution is a canonical-event lookup whose snapshots are FILTERED to the
+    Betfair book, NOT a lookup of the legacy ``"betfair:" + ref`` namespace — a DEAD
+    namespace no current capture writes (audit 2026-06-28: the producer moved to the
+    canonical ref but this resolver still keyed the old prefix, so every current/
+    future pick resolved [] and orphaned the flowing Betfair rows).
+
+    ``closing_odds_from_snapshots`` already keys each close row to ``external_ref``
+    and applies the change-only close semantics (last row at-or-before kickoff per
+    book), so no re-keying is needed; we only narrow to the dedicated Betfair source
+    (``bookmaker`` normalized ``betfair%`` — the higher-quality liquidity-gated sharp
+    BACK price), never the soft-book / other rows that also live on the canonical
+    event. Used BOTH at settlement (the close) and at PICK TIME (the live sharp
+    anchor). Each row carries captured_at, so a pick-time caller can gate freshness
+    on the source's most-recent row.
+    """
+    event_id = await session.scalar(select(Event.id).where(Event.external_ref == external_ref))
+    if event_id is None:
         return []
-    snaps, _last = await closing_odds_from_snapshots(
-        session, betfair_event_id, betfair_ref, kickoff
-    )
-    return [snap.model_copy(update={"event_id": external_ref}) for snap in snaps]
+    snaps, _last = await closing_odds_from_snapshots(session, event_id, external_ref, kickoff)
+    # Dedicated source contract: ONLY the Betfair Exchange BACK rows (equivalent to
+    # SQL ``bookmaker ILIKE 'betfair%'``); the canonical event also carries soft-book
+    # and possibly other sharp rows the main pipeline handles separately.
+    return [snap for snap in snaps if snap.bookmaker.strip().lower().startswith("betfair")]
 
 
 async def _betfair_exchange_close(
