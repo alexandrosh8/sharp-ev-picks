@@ -923,6 +923,39 @@ async def test_proxy_clean_empty_listing_is_final_no_relaunch() -> None:
     assert len(calls) == 1  # ONE browser launch — no relaunch on a clean empty slate
 
 
+async def test_match_fetch_empty_fails_over_across_proxies() -> None:
+    # CORRECTION to the #135 empty-is-final change: it is right ONLY for the dated
+    # LISTING path (empty = no fixtures). The per-match / finished-score path
+    # (fetch_match_odds, e.g. score_only settlement capture) routes a SPECIFIC
+    # stored match URL through the SAME helper, where a 0-result means the match
+    # page didn't parse / was blocked — NOT an empty listing. So it MUST still fail
+    # over (pre-#135 behavior), capped at _MAX_PROXY_FAILOVER, or one bad proxy
+    # leaves finished scores uncaptured.
+    from app.ingestion.base import ScraperProxy
+    from app.ingestion.oddsportal import _MAX_PROXY_FAILOVER
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[], failed=[], partial=[])  # always empty
+
+    pool = tuple(
+        ScraperProxy(url=f"http://h{i}:1", username=f"u{i}", password=f"p{i}") for i in range(8)
+    )
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=fake_scrape,
+        proxy_pool=pool,
+    )
+    snaps = await loader.fetch_match_odds(
+        "soccer", ["https://www.oddsportal.com/football/x/y/a-b-Ab12/"], score_only=True
+    )
+    assert snaps == []
+    assert len(calls) == _MAX_PROXY_FAILOVER  # failover RESTORED for the match path
+
+
 async def test_empty_pool_scrapes_without_proxy_kwargs() -> None:
     # Default (no pool) -> exactly one scrape, no proxy_* kwargs (host IP).
     calls: list[dict[str, Any]] = []

@@ -313,6 +313,51 @@ async def test_json_cycle_first_sighting_unknown_kickoff_leads_head() -> None:
     assert seen == [brand_new, known_soon]
 
 
+async def test_json_cycle_date_only_midnight_kickoff_stays_in_head() -> None:
+    """A DATE-ONLY MIDNIGHT sentinel (00:00:00 UTC — OddsPortal's date-only fixtures
+    like Puerto Rico BSN / some WNBA) is NOT a real kickoff: it must be treated as
+    UNKNOWN and stay in the HEAD, never sorted into the fresh TAIL ahead of a
+    genuinely-soon betable game. (Descending freshness sort would otherwise place
+    00:00 — the earliest same-day time — LAST, displacing the real game.)"""
+    from datetime import UTC, datetime
+
+    from app.ingestion.base import EventTeams, is_date_only_midnight
+
+    directory = EventDirectory()
+    day = datetime(2026, 6, 28, tzinfo=UTC)
+    assert is_date_only_midnight(day)  # guard: 00:00:00 IS the sentinel
+    real = "https://www.oddsportal.com/f/real-1500/"
+    midnight = "https://www.oddsportal.com/f/date-only-midnight/"
+    directory.register(
+        real, EventTeams(home="H", away="A", league="L", starts_at=day.replace(hour=15))
+    )
+    directory.register(
+        midnight,
+        EventTeams(home="H2", away="A2", league="L", starts_at=day),  # 00:00 sentinel
+    )
+    # Listing puts the REAL game first, so only the sort can fix the order.
+    matches = [{"match_link": real}, {"match_link": midnight}]
+    seen: list[str] = []
+
+    async def scrape_match(match_url: str, **kwargs: Any) -> list[Any]:
+        seen.append(match_url)
+        return []
+
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        markets=("1x2",),
+        scrape_fn=_listing_scrape(matches),
+        use_json_feed=True,
+        json_scrape_fn=scrape_match,
+        json_concurrency=1,
+    )
+    await loader.fetch_odds("soccer")
+
+    # date-only midnight (treated unknown) in the HEAD; the real 15:00 kickoff LAST.
+    assert seen == [midnight, real]
+
+
 async def test_json_listing_requests_no_markets_so_no_per_match_playwright() -> None:
     """SAVINGS INVARIANT: with JSON on, the dated LISTING scrape is invoked with
     an EMPTY markets list, so OddsHarvester does NOT run the expensive per-match

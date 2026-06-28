@@ -22,7 +22,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from app.ingestion.base import EventDirectory, EventTeams, ScraperProxy
+from app.ingestion.base import (
+    EventDirectory,
+    EventTeams,
+    ScraperProxy,
+    is_date_only_midnight,
+)
 
 # Pinned browser-TLS impersonation for the curl_cffi JSON path (F1): a fixed
 # chrome version, not bare "chrome" (which would drift with a curl_cffi upgrade).
@@ -1022,15 +1027,25 @@ class OddsPortalLoader:
         from the EventDirectory (registered by a PRIOR cycle's scrape). The
         Playwright listing dict additionally carries ``match_date``, used as a
         same-cycle fallback. None when the kickoff is not yet known (a
-        first-sighting match) — we never guess one."""
+        first-sighting match) — we never guess one.
+
+        A DATE-ONLY MIDNIGHT sentinel (00:00:00 UTC — what OddsPortal serves for
+        date-only fixtures, see ``is_date_only_midnight``) is NOT a real kickoff and
+        is returned as None (UNKNOWN). Otherwise the descending freshness sort would
+        treat 00:00 as the earliest same-day time and place a date-only/TBD row in
+        the fresh TAIL, displacing the genuinely-soon betable games the ordering
+        exists to protect."""
         home = str(match.get("home_team") or "").strip()
         away = str(match.get("away_team") or "").strip()
         link = str(match.get("match_link") or "")
         event_id = normalize_match_link(link or f"{home}|{away}|{match.get('match_date', '')}")
         teams = self._directory.lookup(event_id)
-        if teams is not None and teams.starts_at is not None:
-            return teams.starts_at
-        return _parse_ts(match.get("match_date"))
+        kickoff = teams.starts_at if teams is not None else None
+        if kickoff is None:
+            kickoff = _parse_ts(match.get("match_date"))
+        if is_date_only_midnight(kickoff):
+            return None  # date-only/TBD -> UNKNOWN, stays in the head (not the tail)
+        return kickoff
 
     def _order_for_freshness(self, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Reorder a cycle's listed matches so the SOONEST-to-kick-off games are
@@ -1268,7 +1283,9 @@ class OddsPortalLoader:
             self._prev_cycle_rows[sport_key] = len(outcome.snapshots)
         return outcome.snapshots
 
-    async def _scrape_bounded(self, *, scrape_fn: ScrapeFn | None = None, **kwargs: Any) -> Any:
+    async def _scrape_bounded(
+        self, *, scrape_fn: ScrapeFn | None = None, empty_is_final: bool = False, **kwargs: Any
+    ) -> Any:
         """`_scrape_with_failover` under the per-cycle watchdog.
 
         On timeout the underlying scrape coroutine is cancelled (asyncio.wait_for
@@ -1279,13 +1296,21 @@ class OddsPortalLoader:
 
         ``scrape_fn`` selects the underlying scrape (defaults to the full
         Playwright `self._scrape`); the JSON path passes `self._listing_scrape`
-        so the dated pass enumerates URLs WITHOUT per-match renders."""
+        so the dated pass enumerates URLs WITHOUT per-match renders.
+        ``empty_is_final`` is forwarded to `_scrape_with_failover` — True only for
+        the dated LISTING (empty = no fixtures, no relaunch); the per-match/score
+        path keeps the default False (empty = fail over)."""
         timeout = self._cycle_timeout_seconds
         if timeout is None:
-            return await self._scrape_with_failover(scrape_fn=scrape_fn, **kwargs)
+            return await self._scrape_with_failover(
+                scrape_fn=scrape_fn, empty_is_final=empty_is_final, **kwargs
+            )
         try:
             return await asyncio.wait_for(
-                self._scrape_with_failover(scrape_fn=scrape_fn, **kwargs), timeout=timeout
+                self._scrape_with_failover(
+                    scrape_fn=scrape_fn, empty_is_final=empty_is_final, **kwargs
+                ),
+                timeout=timeout,
             )
         except TimeoutError:
             # asyncio.wait_for raises the builtin TimeoutError (3.11+).
@@ -1299,30 +1324,36 @@ class OddsPortalLoader:
             return None
 
     async def _scrape_with_failover(
-        self, *, scrape_fn: ScrapeFn | None = None, **kwargs: Any
+        self, *, scrape_fn: ScrapeFn | None = None, empty_is_final: bool = False, **kwargs: Any
     ) -> Any:
-        """Scrape via the proxy pool, failing over to the NEXT proxy ONLY on an
-        EXCEPTION (network / anti-bot / timeout). A clean, exception-free return —
-        even one listing ZERO matches — is FINAL and returned immediately.
+        """Scrape via the proxy pool, failing over to the NEXT proxy on an EXCEPTION
+        (network / anti-bot / timeout). How a clean, exception-free ZERO-result is
+        treated depends on ``empty_is_final`` — because "0 results" means different
+        things on the two callers:
 
-        WHY (cycle-cost root-cause 2026-06-28): each `_default_listing_scrape` call
-        launches+tears-down a Chromium browser. The old code treated a zero-match
-        result as a "throttle signature" and relaunched the browser across up to
-        ``_MAX_PROXY_FAILOVER`` proxies. But a clean empty LISTING almost always
-        means "no fixtures for this sport/date" (an off-season sport such as NFL in
-        June, or an empty league slug), NOT a throttle — the codebase's real
-        anti-bot signature is "matches LISTED but 0 ODDS parsed" (see `fetch_odds`
-        + upstream gotcha §6), and a hard listing block RAISES (nav timeout) and so
-        still fails over here. Relaunching Chromium 3× per genuinely-empty
-        sport/date was pure wasted wall-clock that helped overrun the freshness
-        window. Trade-off: a rare SILENT soft-block that returns HTTP 200 + zero
-        rows is no longer retried this cycle (it recovers next cycle), in exchange
-        for never paying 2 extra browser launches per empty sport/date.
+        * ``empty_is_final=True`` — the dated LISTING path (`fetch_odds`). A clean
+          empty listing almost always means "no fixtures for this sport/date" (an
+          off-season sport such as NFL in June, or an empty league slug), NOT a
+          throttle: the real anti-bot signature is "matches LISTED but 0 ODDS
+          parsed" (see `fetch_odds` + gotcha §6), and a hard block RAISES and still
+          fails over. So an empty listing is FINAL — no browser relaunch. Each
+          `_default_listing_scrape` launches a Chromium browser, so relaunching it
+          ``_MAX_PROXY_FAILOVER``× per genuinely-empty sport/date was pure wasted
+          wall-clock that helped overrun the freshness window (cycle-cost fix
+          2026-06-28). Trade: a rare silent HTTP-200 soft-block isn't retried this
+          cycle (recovers next).
+
+        * ``empty_is_final=False`` (DEFAULT) — the per-match / finished-SCORE path
+          (`fetch_match_odds`, incl. `score_only` settlement capture via
+          clv_trueup). There a 0-result is for ONE SPECIFIC stored match URL and
+          means that page didn't parse / was blocked — NOT an empty listing. So it
+          MUST fail over to the next proxy (the pre-2026-06-28 behavior), or one bad
+          proxy leaves finished scores uncaptured.
 
         Empty pool -> a single direct call (host IP, default). Credentials go via
         separate proxy_user/proxy_pass kwargs (never in the URL); logging is
-        index-only so nothing leaks. The EXCEPTION sweep is still CAPPED at
-        ``_MAX_PROXY_FAILOVER`` so a dead-proxy run can't burn the whole pool.
+        index-only so nothing leaks. Both sweeps are CAPPED at
+        ``_MAX_PROXY_FAILOVER`` so a bad run can't burn the whole pool.
 
         ``scrape_fn`` selects the scrape coroutine (default `self._scrape`); the
         JSON path injects `self._listing_scrape` (listing-only, URLs only)."""
@@ -1351,16 +1382,24 @@ class OddsPortalLoader:
                 )
                 result = None
                 continue
-            # No exception => FINAL, even when the listing is empty (no relaunch).
-            if not getattr(result, "success", None):
+            if getattr(result, "success", None):
+                self._proxy_cursor = (idx + 1) % n  # advance past the winner
+                return result
+            # Exception-free 0-result.
+            if empty_is_final:
+                # LISTING path: genuine empty slate — FINAL, no browser relaunch.
                 logger.info(
                     "oddsportal scrape via proxy #%d listed 0 matches — empty slate "
                     "(no relaunch; recovers next cycle if this was a soft block)",
                     idx,
                 )
-            self._proxy_cursor = (idx + 1) % n  # advance past the proxy that answered
-            return result
-        self._proxy_cursor = (self._proxy_cursor + tries) % n  # skip the dead proxies
+                self._proxy_cursor = (idx + 1) % n  # advance past the proxy that answered
+                return result
+            # MATCH/score path: 0 results for a specific page -> fail over to next proxy.
+            logger.info(
+                "oddsportal match scrape via proxy #%d returned 0 results; trying next", idx
+            )
+        self._proxy_cursor = (self._proxy_cursor + tries) % n  # skip the proxies just tried
         return result
 
     async def fetch_odds(self, sport_key: str) -> list[OddsSnapshotIn]:
@@ -1402,6 +1441,10 @@ class OddsPortalLoader:
             # already-collected matches (incremental progress, prod fix).
             result = await self._scrape_bounded(
                 scrape_fn=listing_scrape,
+                # LISTING path: a clean empty result = no fixtures this sport/date,
+                # so it is FINAL (no Chromium relaunch). The per-match/score path
+                # keeps the default (fail over on empty). See _scrape_with_failover.
+                empty_is_final=True,
                 sport=sport,
                 date=scrape_date,
                 leagues=scrape_leagues,
