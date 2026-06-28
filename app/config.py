@@ -572,6 +572,18 @@ class Settings(BaseSettings):
     # exceed responsible pacing for a free source.
     oddsportal_concurrency: int = Field(default=3, ge=1, le=64)
     oddsportal_request_delay: float = Field(default=1.0, ge=0.5)
+    # Dated-LISTING fan-out width: how many (date, league) listing units run
+    # CONCURRENTLY, each PINNED to a distinct rotating proxy. The per-match JSON
+    # odds fetch is already parallel; the bottleneck is the Playwright dated
+    # LISTING running SERIALLY behind ONE proxy (utilization 1/N). Spreading the
+    # SAME navigations across N proxies cuts listing wall-clock ~N× AND drops the
+    # per-proxy request rate ~N× — the CLAUDE.md-sanctioned low-ban lever (spread
+    # the rotating pool; never hammer one IP). DEFAULT 1 = today's serial,
+    # single-proxy behaviour, BIT-IDENTICAL (strictly opt-in). Effective width is
+    # min(this, pool size) — you cannot pin more concurrent units than proxies.
+    # le=8 because each unit is a short-lived Chromium context (~250MB) on a
+    # CPU-bound box; raising it past the proxy count buys nothing.
+    oddsportal_listing_concurrency: int = Field(default=1, ge=1, le=8)
     # OddsHarvester hardcodes a 15s match-page navigation (Page.goto) timeout
     # that is NOT env-configurable upstream; on OddsPortal's heavy pages a slow
     # load trips "Timeout 15000ms exceeded" and that one match is skipped (it is

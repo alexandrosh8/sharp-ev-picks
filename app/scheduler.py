@@ -297,6 +297,11 @@ def build_scheduler(
             # dated scrapes (today..today+N UTC) — the actionable slate only
             days_ahead=settings.oddsportal_days_ahead,
             concurrency_tasks=settings.oddsportal_concurrency,
+            # Spread the SERIAL dated-LISTING across the proxy pool: each
+            # (date, league) unit pinned to a distinct rotating proxy, run
+            # concurrently (effective width = min(pool, knob)). DEFAULT 1 =
+            # legacy serial, single-proxy listing (opt-in throughput lever).
+            listing_concurrency=settings.oddsportal_listing_concurrency,
             request_delay=settings.oddsportal_request_delay,
             locale=settings.oddsportal_locale,
             proxy_pool=settings.scraper_proxies(),

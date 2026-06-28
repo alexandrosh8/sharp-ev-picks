@@ -916,6 +916,7 @@ class OddsPortalLoader:
         json_scrape_fn: JsonScrapeFn | None = None,
         listing_scrape_fn: ScrapeFn | None = None,
         json_concurrency: int = 8,
+        listing_concurrency: int = 1,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -1013,6 +1014,14 @@ class OddsPortalLoader:
         # JSON per-match fan-out width (F3 bounded semaphore). The shared session's
         # max_clients must be >= this or curl_cffi serialises the surplus handles.
         self._json_concurrency = json_concurrency
+        # Dated-LISTING fan-out width (throughput fix 2026-06-28). 1 (DEFAULT) =
+        # the legacy serial path, BIT-IDENTICAL: one Chromium context per date
+        # with ALL leagues, behind one proxy. >1 splits the (date, league) units
+        # across the pool — each unit its OWN short-lived context PINNED to a
+        # distinct proxy, run under a bounded gather (effective width is
+        # min(this, pool size); an empty/size-1 pool can't parallelise so it
+        # stays serial). Opt-in only — never changes behaviour unless raised.
+        self._listing_concurrency = listing_concurrency
         # Per-sport previous-cycle row count, the R3 completeness-gate baseline.
         # Updated only after a COMPLETE cycle so a degraded one can't lower the bar.
         self._prev_cycle_rows: dict[str, int] = {}
@@ -1283,6 +1292,29 @@ class OddsPortalLoader:
             self._prev_cycle_rows[sport_key] = len(outcome.snapshots)
         return outcome.snapshots
 
+    def _merge_listing(
+        self,
+        result: Any,
+        matches: list[dict[str, Any]],
+        seen_links: set[str],
+    ) -> None:
+        """Merge ONE listing pass's discovered matches into the running set,
+        deduping on the normalized match URL. Shared by the serial and the
+        parallel fan-out paths so dedup semantics (first occurrence wins —
+        same fixture on adjacent date pages or its in-play fork is dropped)
+        are identical regardless of concurrency. ``None`` (a timed-out /
+        failed-over-to-empty pass) contributes nothing."""
+        for match in getattr(result, "success", None) or []:
+            home = str(match.get("home_team") or "").strip()
+            away = str(match.get("away_team") or "").strip()
+            link = normalize_match_link(
+                str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
+            )
+            if link in seen_links:
+                continue  # same fixture on adjacent date pages OR its in-play fork
+            seen_links.add(link)
+            matches.append(match)
+
     async def _scrape_bounded(
         self, *, scrape_fn: ScrapeFn | None = None, empty_is_final: bool = False, **kwargs: Any
     ) -> Any:
@@ -1324,7 +1356,12 @@ class OddsPortalLoader:
             return None
 
     async def _scrape_with_failover(
-        self, *, scrape_fn: ScrapeFn | None = None, empty_is_final: bool = False, **kwargs: Any
+        self,
+        *,
+        scrape_fn: ScrapeFn | None = None,
+        empty_is_final: bool = False,
+        proxy_start_index: int | None = None,
+        **kwargs: Any,
     ) -> Any:
         """Scrape via the proxy pool, failing over to the NEXT proxy on an EXCEPTION
         (network / anti-bot / timeout). How a clean, exception-free ZERO-result is
@@ -1356,16 +1393,27 @@ class OddsPortalLoader:
         ``_MAX_PROXY_FAILOVER`` so a bad run can't burn the whole pool.
 
         ``scrape_fn`` selects the scrape coroutine (default `self._scrape`); the
-        JSON path injects `self._listing_scrape` (listing-only, URLs only)."""
+        JSON path injects `self._listing_scrape` (listing-only, URLs only).
+
+        ``proxy_start_index`` PINS this call to a caller-chosen proxy (the
+        parallel dated-listing fan-out gives each concurrent unit a distinct
+        ``pool[(cursor + i) % n]`` so the N units exit N distinct IPs). In this
+        PINNED mode the shared ``_proxy_cursor`` is NOT read or mutated (the
+        concurrent units would otherwise race on it incoherently — the fan-out
+        advances the cursor ONCE, deterministically, after the gather). On
+        failure the pinned call still fails over from its start index. ``None``
+        (DEFAULT) = the legacy shared-cursor rotation, BIT-IDENTICAL to before."""
         scrape = scrape_fn or self._scrape
         pool = self._proxy_pool
         if not pool:
             return await scrape(**kwargs)
         n = len(pool)
         tries = min(n, _MAX_PROXY_FAILOVER)
+        pinned = proxy_start_index is not None
+        base = self._proxy_cursor if proxy_start_index is None else proxy_start_index
         result: Any = None
         for attempt in range(tries):
-            idx = (self._proxy_cursor + attempt) % n
+            idx = (base + attempt) % n
             proxy = pool[idx]
             try:
                 result = await scrape(
@@ -1383,7 +1431,8 @@ class OddsPortalLoader:
                 result = None
                 continue
             if getattr(result, "success", None):
-                self._proxy_cursor = (idx + 1) % n  # advance past the winner
+                if not pinned:
+                    self._proxy_cursor = (idx + 1) % n  # advance past the winner
                 return result
             # Exception-free 0-result.
             if empty_is_final:
@@ -1393,13 +1442,15 @@ class OddsPortalLoader:
                     "(no relaunch; recovers next cycle if this was a soft block)",
                     idx,
                 )
-                self._proxy_cursor = (idx + 1) % n  # advance past the proxy that answered
+                if not pinned:
+                    self._proxy_cursor = (idx + 1) % n  # advance past the proxy that answered
                 return result
             # MATCH/score path: 0 results for a specific page -> fail over to next proxy.
             logger.info(
                 "oddsportal match scrape via proxy #%d returned 0 results; trying next", idx
             )
-        self._proxy_cursor = (self._proxy_cursor + tries) % n  # skip the proxies just tried
+        if not pinned:
+            self._proxy_cursor = (self._proxy_cursor + tries) % n  # skip the proxies just tried
         return result
 
     async def fetch_odds(self, sport_key: str) -> list[OddsSnapshotIn]:
@@ -1436,41 +1487,81 @@ class OddsPortalLoader:
         )
         matches: list[dict[str, Any]] = []
         seen_links: set[str] = set()
-        for scrape_date in dates:
-            # Per-DATE bound: a late date hanging never discards earlier dates'
-            # already-collected matches (incremental progress, prod fix).
-            result = await self._scrape_bounded(
-                scrape_fn=listing_scrape,
-                # LISTING path: a clean empty result = no fixtures this sport/date,
-                # so it is FINAL (no Chromium relaunch). The per-match/score path
-                # keeps the default (fail over on empty). See _scrape_with_failover.
-                empty_is_final=True,
-                sport=sport,
-                date=scrape_date,
-                leagues=scrape_leagues,
-                markets=listing_markets,
-                headless=self._headless,
-                max_pages=self._max_pages,  # historic-only upstream; no-op here
-                # CRITICAL: oddsportal embeds timestamps shifted to the
-                # BROWSER's timezone; without this, kickoffs/capture times
-                # inherit the host offset (observed +3h on a Cyprus-time Mac)
-                # while labeled UTC. Also keeps dated pages aligned to the
-                # UTC dates computed above (upstream gotcha doc §10).
-                browser_timezone_id="UTC",
-                browser_locale_timezone=self._locale,  # playwright locale
-                concurrency_tasks=self._concurrency_tasks,
-                request_delay=self._request_delay,
-            )
-            for match in getattr(result, "success", None) or []:
-                home = str(match.get("home_team") or "").strip()
-                away = str(match.get("away_team") or "").strip()
-                link = normalize_match_link(
-                    str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
+        # Shared per-LISTING-unit kwargs (everything except date/league/proxy).
+        listing_kwargs: dict[str, Any] = {
+            "scrape_fn": listing_scrape,
+            # LISTING path: a clean empty result = no fixtures this sport/date,
+            # so it is FINAL (no Chromium relaunch). The per-match/score path
+            # keeps the default (fail over on empty). See _scrape_with_failover.
+            "empty_is_final": True,
+            "sport": sport,
+            "markets": listing_markets,
+            "headless": self._headless,
+            "max_pages": self._max_pages,  # historic-only upstream; no-op here
+            # CRITICAL: oddsportal embeds timestamps shifted to the BROWSER's
+            # timezone; without this, kickoffs/capture times inherit the host
+            # offset (observed +3h on a Cyprus-time Mac) while labeled UTC. Also
+            # keeps dated pages aligned to the UTC dates computed above (upstream
+            # gotcha doc §10).
+            "browser_timezone_id": "UTC",
+            "browser_locale_timezone": self._locale,  # playwright locale
+            "concurrency_tasks": self._concurrency_tasks,
+            # PER-PROXY politeness: ODDSPORTAL_REQUEST_DELAY stays per-proxy —
+            # pinning distinct proxies LOWERS each IP's rate, it never raises it.
+            "request_delay": self._request_delay,
+        }
+        # THROUGHPUT FIX (2026-06-28): the dated LISTING is the serial bottleneck
+        # (one Playwright nav per (date, league) behind ONE proxy at utilization
+        # 1/N). Spread the SAME (date, league) navigations across the pool —
+        # concurrency = min(pool size, knob), each unit PINNED to a distinct
+        # proxy. Cuts listing wall-clock ~N× and drops per-proxy rate ~N× (the
+        # CLAUDE.md low-ban lever). Effective width 1 (DEFAULT, or empty/size-1
+        # pool) keeps the legacy serial path BIT-IDENTICAL: one context per date,
+        # all leagues, one proxy via the shared cursor.
+        pool_size = len(self._proxy_pool)
+        effective = max(1, min(pool_size, self._listing_concurrency))
+        if effective <= 1:
+            for scrape_date in dates:
+                # Per-DATE bound: a late date hanging never discards earlier
+                # dates' already-collected matches (incremental progress).
+                result = await self._scrape_bounded(
+                    date=scrape_date,
+                    leagues=scrape_leagues,
+                    **listing_kwargs,
                 )
-                if link in seen_links:
-                    continue  # same fixture on adjacent date pages OR its in-play fork
-                seen_links.add(link)
-                matches.append(match)
+                self._merge_listing(result, matches, seen_links)
+        else:
+            # One unit per (date, league). leagues=["all"] -> league-less daily
+            # page (a single None-league unit per date). Each unit opens its OWN
+            # short-lived Chromium context, PINNED to pool[(cursor + i) % n].
+            league_units: list[str | None] = list(scrape_leagues) if scrape_leagues else [None]
+            units = [(d, lg) for d in dates for lg in league_units]
+            base = self._proxy_cursor
+            n = pool_size
+            sem = asyncio.Semaphore(effective)
+
+            async def _run_unit(i: int, scrape_date: str | None, league: str | None) -> Any:
+                async with sem:
+                    return await self._scrape_bounded(
+                        date=scrape_date,
+                        # single-league listing per unit (None = daily page);
+                        # the discovered URLs are merged + deduped across units.
+                        leagues=[league] if league is not None else None,
+                        # PIN this unit to a distinct proxy so the N concurrent
+                        # units exit N distinct IPs (no shared-cursor race).
+                        proxy_start_index=(base + i) % n,
+                        **listing_kwargs,
+                    )
+
+            results = await asyncio.gather(
+                *(_run_unit(i, d, lg) for i, (d, lg) in enumerate(units))
+            )
+            # Advance the shared cursor PAST every proxy this fan-out pinned, once
+            # and deterministically (the concurrent units pin explicitly and never
+            # touch the cursor), so the next cycle/sport starts on a fresh IP.
+            self._proxy_cursor = (base + len(units)) % n
+            for result in results:
+                self._merge_listing(result, matches, seen_links)
 
         # KICKOFF-PRIORITIZED ORDER: scrape soonest-to-kick-off LAST so the betable
         # window lands in the cycle's freshness-surviving TAIL (see

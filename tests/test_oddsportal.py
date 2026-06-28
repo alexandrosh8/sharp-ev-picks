@@ -3,6 +3,7 @@
 Uses an injected fake scrape_fn — no oddsharvester import, no network.
 """
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -1001,6 +1002,179 @@ async def test_proxy_failover_capped_on_dead_proxies() -> None:
     snaps = await loader.fetch_odds("soccer")
     assert snaps == []
     assert len(calls) == _MAX_PROXY_FAILOVER  # capped, NOT all 8 proxies
+
+
+# ---------------------------------------------------------------------------
+# Parallel dated-LISTING fan-out across the proxy pool (throughput fix
+# 2026-06-28). DEFAULT 1 = today's serial single-proxy listing, bit-identical;
+# knob>1 spreads the (date, league) units across distinct proxies concurrently.
+# ---------------------------------------------------------------------------
+
+
+def _league_match(league: str) -> dict[str, Any]:
+    """A unique listed match per league slug (distinct match_link so the
+    cross-unit dedup keeps one per league)."""
+    return {
+        "home_team": f"{league} Home",
+        "away_team": f"{league} Away",
+        "match_date": "2026-06-11",
+        "match_link": f"https://www.oddsportal.com/football/{league}/{league}-game/",
+        "1x2_market": [
+            {"1": "2.10", "X": "3.40", "2": "3.60", "bookmaker_name": "B", "period": "FullTime"}
+        ],
+    }
+
+
+async def test_listing_concurrency_default_one_is_serial_single_proxy() -> None:
+    # DEFAULT (knob unset) MUST reproduce the legacy serial behaviour EXACTLY:
+    # ONE Chromium context for the whole date with ALL leagues passed together,
+    # behind ONE proxy (the cursor's first). No per-league split, no extra
+    # contexts — strictly opt-in concurrency.
+    from app.ingestion.base import ScraperProxy
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+
+    pool = tuple(
+        ScraperProxy(url=f"http://h{i}:1", username=f"u{i}", password=f"p{i}") for i in range(4)
+    )
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["alpha", "beta", "gamma"])},
+        scrape_fn=fake_scrape,
+        proxy_pool=pool,
+        # listing_concurrency defaults to 1
+    )
+    await loader.fetch_odds("soccer")
+    assert len(calls) == 1  # single context, no per-league split
+    assert calls[0]["leagues"] == ["alpha", "beta", "gamma"]  # all leagues in ONE call
+    assert calls[0]["proxy_url"] == "http://h0:1"  # one proxy
+    assert "proxy_start_index" not in calls[0]  # legacy path untouched
+
+
+async def test_listing_concurrency_pins_distinct_proxies_and_runs_concurrently() -> None:
+    # knob=N: each (date, league) unit runs in its OWN context, PINNED to a
+    # distinct proxy (round-robin), and the N units overlap in flight (true
+    # concurrency, not serial).
+    from app.ingestion.base import ScraperProxy
+
+    calls: list[dict[str, Any]] = []
+    in_flight = 0
+    peak = 0
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        nonlocal in_flight, peak
+        calls.append(kwargs)
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            # yield twice so siblings can enter before any returns
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            league = (kwargs.get("leagues") or [None])[0]
+            return SimpleNamespace(success=[_league_match(str(league))], failed=[], partial=[])
+        finally:
+            in_flight -= 1
+
+    leagues = ["alpha", "beta", "gamma", "delta"]
+    pool = tuple(
+        ScraperProxy(url=f"http://h{i}:1", username=f"u{i}", password=f"p{i}") for i in range(4)
+    )
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", leagues)},
+        scrape_fn=fake_scrape,
+        proxy_pool=pool,
+        listing_concurrency=4,
+    )
+    snaps = await loader.fetch_odds("soccer")
+    # one unit per league, each a single-league listing call
+    assert len(calls) == 4
+    assert sorted((c["leagues"] or [None])[0] for c in calls) == sorted(leagues)
+    # each unit pinned to a DISTINCT proxy (all four IPs used exactly once)
+    assert sorted(c["proxy_url"] for c in calls) == [f"http://h{i}:1" for i in range(4)]
+    # creds travel via separate kwargs, never embedded in the URL
+    assert all(c["proxy_user"] not in c["proxy_url"] for c in calls)
+    # the four units overlapped in flight — proves concurrency, not serial
+    assert peak == 4
+    # every league's match survived the merge/dedupe
+    assert {s.event_id for s in snaps}  # non-empty
+    assert loader.last_fetch_matches["soccer"] == 4
+
+
+async def test_listing_concurrency_clamped_to_pool_size() -> None:
+    # effective concurrency = min(pool_size, knob): a knob bigger than the pool
+    # never exceeds the pool (you cannot pin more concurrent units than IPs).
+    from app.ingestion.base import ScraperProxy
+
+    in_flight = 0
+    peak = 0
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            league = (kwargs.get("leagues") or [None])[0]
+            return SimpleNamespace(success=[_league_match(str(league))], failed=[], partial=[])
+        finally:
+            in_flight -= 1
+
+    leagues = ["alpha", "beta", "gamma", "delta"]
+    pool = tuple(
+        ScraperProxy(url=f"http://h{i}:1", username=f"u{i}", password=f"p{i}") for i in range(2)
+    )
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", leagues)},
+        scrape_fn=fake_scrape,
+        proxy_pool=pool,
+        listing_concurrency=8,  # > pool size
+    )
+    snaps = await loader.fetch_odds("soccer")
+    assert loader.last_fetch_matches["soccer"] == 4  # all leagues covered
+    assert peak <= 2  # never more concurrent units than proxies
+    assert snaps
+
+
+async def test_listing_concurrency_failing_unit_fails_over_without_sinking_batch() -> None:
+    # A unit whose PINNED proxy raises must fail over to the next proxy and still
+    # return its slate — and one failing unit must NOT sink the whole batch.
+    from app.ingestion.base import ScraperProxy
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        await asyncio.sleep(0)
+        # proxy #1 is "dead": every GET through it raises (real transport failure)
+        if kwargs["proxy_url"] == "http://h1:1":
+            raise TimeoutError("proxy #1 hung")
+        league = (kwargs.get("leagues") or [None])[0]
+        return SimpleNamespace(success=[_league_match(str(league))], failed=[], partial=[])
+
+    leagues = ["alpha", "beta"]  # unit0 pins h0 (ok), unit1 pins h1 (dead -> failover)
+    pool = tuple(
+        ScraperProxy(url=f"http://h{i}:1", username=f"u{i}", password=f"p{i}") for i in range(4)
+    )
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", leagues)},
+        scrape_fn=fake_scrape,
+        proxy_pool=pool,
+        listing_concurrency=2,
+    )
+    snaps = await loader.fetch_odds("soccer")
+    # BOTH leagues survived: the dead-proxy unit failed over to the next IP
+    assert loader.last_fetch_matches["soccer"] == 2
+    assert snaps
+    # the dead proxy was actually attempted (and then failed over)
+    assert any(c["proxy_url"] == "http://h1:1" for c in calls)
 
 
 # ---------------------------------------------------------------------------
