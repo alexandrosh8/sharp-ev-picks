@@ -15,6 +15,7 @@ from app.edge.gates import GatePolicy
 from app.edge.steam import SteamPolicy
 from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import ScraperProxy
+from app.probabilities.devig import DevigMethod
 from app.risk.exposure import DailyExposureLedger
 from app.risk.staking import StakePolicy
 
@@ -79,6 +80,26 @@ def parse_market_min_books(raw: str) -> tuple[tuple[str, int], ...]:
         if count < 1:
             raise ValueError(f"VALUE_MIN_BOOKS_PER_MARKET[{key}]={count} must be >= 1")
         out.append((key, count))
+    return tuple(out)
+
+
+def parse_market_devig(raw: str) -> tuple[tuple[str, DevigMethod], ...]:
+    """VALUE_DEVIG_PER_MARKET entries as (market_key, DevigMethod) pairs.
+
+    Fails FAST (like the other premium knobs) on a method name that is not one
+    of the 8 known DevigMethod values, so a typo in .env can never silently
+    fall through to the global method on the affected markets."""
+    out: list[tuple[str, DevigMethod]] = []
+    for key, value in _parse_market_map(raw, "VALUE_DEVIG_PER_MARKET"):
+        try:
+            method = DevigMethod(value)
+        except ValueError:
+            valid = ", ".join(m.value for m in DevigMethod)
+            raise ValueError(
+                f"VALUE_DEVIG_PER_MARKET[{key}]: {value!r} is not a known devig method "
+                f"(valid: {valid})"
+            ) from None
+        out.append((key, method))
     return tuple(out)
 
 
@@ -355,6 +376,24 @@ class Settings(BaseSettings):
     # so it stops obscure-league bleed (~37% sharp coverage is structural, see
     # .claude/memory/pitfalls.md 2026-06-20) without any per-season list upkeep.
     value_require_sharp_anchor: bool = False
+    # Per-market-type devig override (ADR-0006), csv of "market_key:method" —
+    # e.g. "over_under_2_5:probit,asian_handicap_-1_5:probit,1x2:shin". Keys are
+    # the line-qualified source market (market_detail) or the market family
+    # ("h2h","totals",...); most specific wins; unlisted markets keep the global
+    # VALUE_DEVIG. Method names are validated against the 8 DevigMethod values at
+    # startup (a typo fails fast). Empty = DISABLED — every market devigs with
+    # VALUE_DEVIG (current behavior, the non-breaking default). The same override
+    # flows to the CLV true-up + settlement close pricing so fill and close are
+    # ALWAYS devigged with the identical per-market method (no CLV method-mix).
+    value_devig_per_market: str = ""
+    # CONSENSUS-fallback anchor as a log-odds (logit) POOL across full-market
+    # books instead of the median-of-prices consensus. False = median (current
+    # behavior, the non-breaking default). SCOPE: only the consensus fallback
+    # fair value changes (no genuine sharp book priced the market); with
+    # VALUE_REQUIRE_SHARP_ANCHOR=true those picks are already volume-tier, so
+    # this sharpens the SHADOW tier's fair value + consensus-vs-median
+    # comparisons, NOT premium pricing. (build #1 — app/edge/value.py.)
+    value_consensus_logit_pool: bool = False
 
     # --- Line-movement / steam-awareness gate (app/edge/steam.py) ------------
     # Guards the dominant soft-book FALSE POSITIVE: a phantom edge from a moving
@@ -949,6 +988,9 @@ class Settings(BaseSettings):
                     "premium floor under the volume floor inverts the tiers."
                 )
         parse_market_min_books(self.value_min_books_per_market)
+        # Per-market devig override: a bad method name must fail fast at startup,
+        # never silently fall through to the global method on those markets.
+        parse_market_devig(self.value_devig_per_market)
         for lo, hi in parse_odds_bands(self.value_odds_bands):
             if hi < self.value_min_odds:
                 raise ValueError(
@@ -1046,6 +1088,8 @@ def value_policy(settings: Settings) -> ValuePolicy:
         major_leagues=parse_major_leagues(settings.value_major_leagues),
         require_sharp_anchor=settings.value_require_sharp_anchor,
         max_edge=settings.value_max_edge,
+        devig_by_market=parse_market_devig(settings.value_devig_per_market),
+        consensus_logit_pool=settings.value_consensus_logit_pool,
     )
 
 

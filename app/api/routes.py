@@ -853,6 +853,7 @@ async def settle_event(
     # settle, like the auto path, enters the sharp-CLV subset. Resolve the devig
     # the same way run_settlement_cycle does.
     from app.config import get_settings
+    from app.config import value_policy as build_value_policy
     from app.probabilities.devig import DevigMethod
 
     settings = get_settings()
@@ -870,6 +871,7 @@ async def settle_event(
         devig_method=devig,
         use_pinnacle_archive=settings.clv_use_pinnacle_archive,
         use_betfair_exchange=settings.clv_use_betfair_exchange,
+        value_policy=build_value_policy(settings),
     )
     await session.commit()
     return {"settled": settled, "skipped": skipped}
@@ -954,6 +956,7 @@ async def record_result(
         if event is not None and event.starts_at is not None and fresh_pick is not None:
             from app.clv_trueup import finalize_closing_from_snapshots
             from app.config import get_settings
+            from app.config import value_policy as build_value_policy
             from app.probabilities.devig import DevigMethod
 
             settings = get_settings()
@@ -970,6 +973,7 @@ async def record_result(
                 devig,
                 use_pinnacle_archive=settings.clv_use_pinnacle_archive,
                 use_betfair_exchange=settings.clv_use_betfair_exchange,
+                value_policy=build_value_policy(settings),
             )
             await session.commit()
     except Exception as exc:

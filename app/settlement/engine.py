@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.edge.value_policy import ValuePolicy
 from app.probabilities.devig import DevigMethod
 from app.schemas.base import Outcome
 from app.settlement.outcomes import pick_pnl, pick_roi, settle_selection
@@ -40,6 +41,10 @@ SCORE_WINDOW = timedelta(days=14)
 # Full time + stoppage + a buffer for the results CSVs to update. Scores are
 # matched by date anyway; the delay just avoids settling in-play fixtures.
 SETTLE_DELAY = timedelta(hours=2)
+
+# Shared frozen no-op policy for the default-OFF path (ruff B008: no call in a
+# function default). ValuePolicy is immutable, so one instance is safe to share.
+_EMPTY_VALUE_POLICY = ValuePolicy()
 
 # Picks on events whose kickoff was NEVER reported (starts_at NULL, "TBD")
 # can neither auto-settle (settle_open_picks filters NULL out) nor stop
@@ -193,6 +198,7 @@ async def settle_open_picks(
     devig_method: DevigMethod | None = None,
     use_pinnacle_archive: bool = False,
     use_betfair_exchange: bool = False,
+    value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> int:
     """Settle every alerted pick whose event finished and has a known score.
 
@@ -249,6 +255,7 @@ async def settle_open_picks(
                     devig_method,
                     use_pinnacle_archive=use_pinnacle_archive,
                     use_betfair_exchange=use_betfair_exchange,
+                    value_policy=value_policy,
                 )
     if settled:
         await session.flush()  # status flips visible to the caller's transaction
@@ -266,6 +273,7 @@ async def settle_event_picks(
     devig_method: DevigMethod | None = None,
     use_pinnacle_archive: bool = False,
     use_betfair_exchange: bool = False,
+    value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> tuple[int, int]:
     """Settle every open pick of one event from a user-entered final score
     (the manual path for leagues without a free results feed).
@@ -305,6 +313,7 @@ async def settle_event_picks(
                     devig_method,
                     use_pinnacle_archive=use_pinnacle_archive,
                     use_betfair_exchange=use_betfair_exchange,
+                    value_policy=value_policy,
                 )
         else:
             skipped += 1
@@ -446,6 +455,12 @@ async def run_settlement_cycle(
             if settings.pick_strategy == "value"
             else DevigMethod.POWER
         )
+    # Same composition-root policy the pick pipeline uses (per-market devig +
+    # logit-pool consensus), so the snapshot close is devigged with the
+    # IDENTICAL per-market method as the fill — never a CLV method mismatch.
+    from app.config import value_policy as build_value_policy
+
+    settlement_value_policy = build_value_policy(settings)
     # Stale-TBD voiding runs FIRST and independently of the score feed: a
     # feed outage must not keep dead picks burning revalidation slots.
     async with session_factory() as session:
@@ -491,6 +506,7 @@ async def run_settlement_cycle(
                 devig_method=devig_method,
                 use_pinnacle_archive=use_pinnacle_archive,
                 use_betfair_exchange=use_betfair_exchange,
+                value_policy=settlement_value_policy,
             )
         if scraped:  # second pass: only feed-missed picks remain open (idempotent)
             settled += await settle_open_picks(
@@ -500,6 +516,7 @@ async def run_settlement_cycle(
                 devig_method=devig_method,
                 use_pinnacle_archive=use_pinnacle_archive,
                 use_betfair_exchange=use_betfair_exchange,
+                value_policy=settlement_value_policy,
             )
         await session.commit()
     return settled

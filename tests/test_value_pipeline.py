@@ -972,6 +972,77 @@ def test_event_fair_probs_expanded_markets_devig_per_line_and_derive_dc() -> Non
     assert sum(dc_fair.values()) == pytest.approx(2.0)
 
 
+def test_event_fair_probs_routes_per_market_devig_override() -> None:
+    """FEATURE A: a per-market devig override changes ONLY the targeted market's
+    fair value; every other market keeps the global method (CLV-safe: the same
+    map flows to the close path, so fill and close share one method)."""
+    from app.edge.value_policy import ValuePolicy
+    from app.pipeline import event_fair_probs, group_market_prices
+    from app.probabilities.devig import DevigMethod, devig
+
+    snaps = [
+        # overround 1X2 book — power and multiplicative give DIFFERENT fair
+        _detail_snap("Pinnacle", Market.H2H, "Home FC", 2.50, None),
+        _detail_snap("Pinnacle", Market.H2H, "Draw", 3.30, None),
+        _detail_snap("Pinnacle", Market.H2H, "Away FC", 3.10, None),
+        # asymmetric overround totals line — method choice is observable
+        _detail_snap("Pinnacle", Market.TOTALS, "Over 2.5", 1.80, "over_under_2_5"),
+        _detail_snap("Pinnacle", Market.TOTALS, "Under 2.5", 2.05, "over_under_2_5"),
+    ]
+    grouped = group_market_prices(snaps)
+
+    base = event_fair_probs(grouped, DevigMethod.MULTIPLICATIVE)
+    # override ONLY the totals line to POWER; h2h keeps the global multiplicative
+    policy = ValuePolicy(devig_by_market=(("over_under_2_5", DevigMethod.POWER),))
+    routed = event_fair_probs(grouped, DevigMethod.MULTIPLICATIVE, policy)
+
+    # h2h untouched by the totals override
+    h2h_base = base[("evt-1", Market.H2H, None)][1]
+    h2h_routed = routed[("evt-1", Market.H2H, None)][1]
+    for sel in h2h_base:
+        assert h2h_routed[sel] == pytest.approx(h2h_base[sel], abs=1e-12)
+
+    # totals line now devigged with POWER, not the global multiplicative
+    tot_routed = routed[("evt-1", Market.TOTALS, "over_under_2_5")][1]
+    expected_power = devig([1.80, 2.05], method=DevigMethod.POWER)
+    assert tot_routed["Over 2.5"] == pytest.approx(expected_power[0], abs=1e-12)
+    # and it genuinely differs from the global-method result
+    tot_base = base[("evt-1", Market.TOTALS, "over_under_2_5")][1]
+    assert abs(tot_routed["Over 2.5"] - tot_base["Over 2.5"]) > 1e-6
+    assert sum(tot_routed.values()) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_event_fair_probs_threads_consensus_logit_pool_flag() -> None:
+    """FEATURE B: the consensus_logit_pool flag reaches anchor_fair_probs through
+    event_fair_probs. On a consensus-anchored market (no sharp book) with
+    cross-book spread, the pooled fair differs from the median consensus."""
+    from app.edge.value_policy import ValuePolicy
+    from app.pipeline import event_fair_probs, group_market_prices
+    from app.probabilities.devig import DevigMethod
+
+    # three SOFT books (no sharp anchor) with spread on a heavy favourite
+    snaps = [
+        _detail_snap("SoftA", Market.H2H, "Home FC", 1.45, None),
+        _detail_snap("SoftA", Market.H2H, "Draw", 4.20, None),
+        _detail_snap("SoftA", Market.H2H, "Away FC", 7.00, None),
+        _detail_snap("SoftB", Market.H2H, "Home FC", 1.50, None),
+        _detail_snap("SoftB", Market.H2H, "Draw", 4.00, None),
+        _detail_snap("SoftB", Market.H2H, "Away FC", 6.50, None),
+        _detail_snap("SoftC", Market.H2H, "Home FC", 1.40, None),
+        _detail_snap("SoftC", Market.H2H, "Draw", 4.50, None),
+        _detail_snap("SoftC", Market.H2H, "Away FC", 7.50, None),
+    ]
+    grouped = group_market_prices(snaps)
+    median = event_fair_probs(grouped, DevigMethod.POWER)[("evt-1", Market.H2H, None)][1]
+    pooled = event_fair_probs(grouped, DevigMethod.POWER, ValuePolicy(consensus_logit_pool=True))[
+        ("evt-1", Market.H2H, None)
+    ][1]
+
+    assert sum(pooled.values()) == pytest.approx(1.0, abs=1e-9)
+    assert pooled["Home FC"] > pooled["Draw"] > pooled["Away FC"]  # order preserved
+    assert any(abs(pooled[s] - median[s]) > 1e-4 for s in median)  # flag took effect
+
+
 def test_event_fair_probs_skips_dc_when_h2h_middle_outcome_is_not_the_draw() -> None:
     """DC fair = pairwise sums of the 1X2 anchor, valid ONLY for the canonical
     home/Draw/away order. If a feed/label reorder (cf. the 1X2 Draw<->away swap)

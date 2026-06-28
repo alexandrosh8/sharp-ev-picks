@@ -635,6 +635,35 @@ def test_logit_pool_consensus_is_valid_and_differs_on_spread() -> None:
     assert any(abs(fair[s] - std[1][s]) > 1e-4 for s in prices)  # genuinely different pool
 
 
+def test_logit_consensus_anchor_returns_novig_order_preserving_prices() -> None:
+    # build #1: the private pool returns SYNTHETIC prices that are (a) all > 1.0
+    # (so the shared downstream devig accepts them), (b) no-vig by construction
+    # (overround ~ 0), and (c) order-preserving (favourite cheapest). Exercises a
+    # strongly skewed favourite where a linear price mean would under-confidence.
+    from app.edge.value import (
+        CONSENSUS_ANCHOR,
+        _logit_consensus_anchor,
+        _overround,
+    )
+    from app.probabilities.devig import DevigMethod
+
+    prices = {
+        "H": {"B1": 1.20, "B2": 1.22, "B3": 1.18},
+        "D": {"B1": 7.00, "B2": 6.50, "B3": 7.50},
+        "A": {"B1": 15.0, "B2": 14.0, "B3": 16.0},
+    }
+    selections = list(prices.keys())
+    anchor, synth = _logit_consensus_anchor(
+        prices, selections, {}, 0.12, DevigMethod.MULTIPLICATIVE
+    )
+    assert anchor == CONSENSUS_ANCHOR
+    assert synth is not None
+    assert all(o > 1.0 for o in synth)  # every synthetic price is bettable-shaped
+    assert _overround(synth) == pytest.approx(0.0, abs=1e-9)  # no-vig by construction
+    # cheapest synthetic price == biggest implied prob == the favourite
+    assert synth[0] < synth[1] < synth[2]  # H favourite, A longshot — order preserved
+
+
 _EX_PRICES = {
     "H": {"betfair exchange": 1.50, "SoftA": 1.55, "SoftB": 1.52},
     "D": {"betfair exchange": 4.00, "SoftA": 4.10, "SoftB": 4.05},

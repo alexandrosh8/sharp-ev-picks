@@ -3,6 +3,7 @@ match the line-qualified market key first, then the market family."""
 
 from app.edge.value_policy import (
     ValuePolicy,
+    devig_method_for,
     distinct_book_count,
     is_major_league,
     market_lookup_keys,
@@ -11,6 +12,7 @@ from app.edge.value_policy import (
     normalize_league,
     odds_in_bands,
 )
+from app.probabilities.devig import DevigMethod
 
 
 def test_empty_policy_is_a_strict_noop() -> None:
@@ -48,6 +50,39 @@ def test_min_books_lookup_mirrors_min_edge_lookup() -> None:
     assert min_books_for(policy, "totals", "over_under_1_5") == 5
     assert min_books_for(policy, "totals", "over_under_3_5") == 3
     assert min_books_for(policy, "h2h", "1x2") == 0
+
+
+def test_devig_method_empty_policy_always_returns_global_default() -> None:
+    # FEATURE A: empty map => every market keeps the global VALUE_DEVIG (no-op).
+    policy = ValuePolicy()
+    for market, detail in (("h2h", "1x2"), ("totals", "over_under_2_5"), ("h2h", None)):
+        assert (
+            devig_method_for(policy, market, detail, DevigMethod.DIFFERENTIAL_MARGIN)
+            is DevigMethod.DIFFERENTIAL_MARGIN
+        )
+
+
+def test_devig_method_override_routes_detail_before_family() -> None:
+    policy = ValuePolicy(
+        devig_by_market=(
+            ("totals", DevigMethod.PROBIT),
+            ("over_under_2_5", DevigMethod.SHIN),
+            ("h2h", DevigMethod.MULTIPLICATIVE),
+        )
+    )
+    # most specific (line detail) wins
+    assert (
+        devig_method_for(policy, "totals", "over_under_2_5", DevigMethod.POWER) is DevigMethod.SHIN
+    )
+    # a different line of the same family falls back to the family entry
+    assert (
+        devig_method_for(policy, "totals", "over_under_3_5", DevigMethod.POWER)
+        is DevigMethod.PROBIT
+    )
+    # 2-way market routes to its own override
+    assert devig_method_for(policy, "h2h", "1x2", DevigMethod.POWER) is DevigMethod.MULTIPLICATIVE
+    # an unlisted market keeps the global default
+    assert devig_method_for(policy, "btts", None, DevigMethod.POWER) is DevigMethod.POWER
 
 
 def test_odds_bands_are_inclusive_and_unioned() -> None:

@@ -24,6 +24,7 @@ from app.edge.steam import (
 )
 from app.edge.value_policy import (
     ValuePolicy,
+    devig_method_for,
     distinct_book_count,
     is_major_league,
     min_books_for,
@@ -834,7 +835,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 len(extra),
             )
     grouped = group_market_prices(anchor_snapshots)
-    fair = event_fair_probs(grouped, deps.devig_method)
+    fair = event_fair_probs(grouped, deps.devig_method, deps.value_policy)
     await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
 
@@ -1205,6 +1206,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 anchor_snapshots,
                 deps.devig_method,
                 record_drift=deps.clv_record_drift,
+                value_policy=deps.value_policy,
             )
             await revalidate_offwindow_picks(
                 deps.loader,
@@ -1212,6 +1214,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 sport_key,
                 covered_event_ids={s.event_id for s in snapshots},
                 devig_method=deps.devig_method,
+                value_policy=deps.value_policy,
             )
         except Exception as exc:  # revalidation must never break picking
             logger.error("open-pick revalidation failed: %s", type(exc).__name__)
@@ -1344,19 +1347,36 @@ _DIRECT_MARKETS = frozenset({Market.H2H, Market.TOTALS, Market.BTTS, Market.DNB,
 
 EventFairProbs = dict[tuple[str, Market, str | None], tuple[str, dict[str, float]]]
 
+# Shared frozen no-op policy for the default-OFF path (ruff B008: no call in a
+# function default). ValuePolicy is immutable, so one instance is safe to share.
+_EMPTY_VALUE_POLICY = ValuePolicy()
 
-def event_fair_probs(grouped: GroupedMarkets, devig_method: DevigMethod) -> EventFairProbs:
+
+def event_fair_probs(
+    grouped: GroupedMarkets,
+    devig_method: DevigMethod,
+    value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
+) -> EventFairProbs:
     """Trustworthy (anchor_book, selection->fair) per (event, market, line).
 
     Shared by the live value pipeline and the CLV true-up so picks and their
-    closing-line values are priced by the SAME rules."""
+    closing-line values are priced by the SAME rules. ``value_policy`` carries
+    the optional per-market devig override (``devig_by_market``) and the
+    consensus logit-pool flag (``consensus_logit_pool``); the default empty
+    policy reproduces the global-method, median-consensus behavior exactly.
+    Both knobs flow through this single chokepoint so the pick pipeline and the
+    CLV true-up always price fill and close with the identical method."""
     from app.edge.value import anchor_fair_probs, double_chance_fair
 
     out: EventFairProbs = {}
     h2h_3way: dict[str, tuple[tuple[str, dict[str, float]], list[str]]] = {}
     for (event_id, market, detail), (prices, _) in grouped.items():
         if market in _DIRECT_MARKETS:
-            anchored = anchor_fair_probs(prices, devig_method=devig_method)
+            anchored = anchor_fair_probs(
+                prices,
+                devig_method=devig_method_for(value_policy, str(market), detail, devig_method),
+                consensus_logit_pool=value_policy.consensus_logit_pool,
+            )
             if anchored is not None:
                 out[(event_id, market, detail)] = anchored
                 if market is Market.H2H and len(prices) == 3:

@@ -25,6 +25,8 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from app.probabilities.devig import DevigMethod
+
 
 @dataclass(frozen=True)
 class ValuePolicy:
@@ -74,6 +76,31 @@ class ValuePolicy:
     # liquid market, so the value scan rejects it (a feed defect can't mint a
     # phantom +EV pick). Default math.inf = OFF; set from Settings.value_max_edge.
     max_edge: float = math.inf
+    # (market_key, DevigMethod): per-market-type devig override (ADR-0006 —
+    # method selection is a config policy, never hardcoded in pipeline code).
+    # Markets without an entry use the GLOBAL devig method passed alongside
+    # this policy (Settings.value_devig). Empty () = DISABLED — every market
+    # devigs with the global method (current behavior, the non-breaking
+    # default). Keys are matched line-detail-first then family, exactly like
+    # min_edge_by_market (most specific wins). Names are validated against the
+    # 8 DevigMethod values at the composition root (Settings); a bad name fails
+    # fast there, never reaching this frozen policy. Different market STRUCTURES
+    # devig best with different methods (e.g. probit on symmetric totals/AH;
+    # shin/multiplicative on 2-way) — but WHICH method per market is folklore
+    # until learned on nested walk-forward CV (<= 2324), so the default leaves
+    # the validated global method in force everywhere.
+    devig_by_market: tuple[tuple[str, DevigMethod], ...] = ()
+    # When True, the CONSENSUS FALLBACK anchor (used only when NO genuine sharp
+    # book priced the full market) is a log-odds (logit) POOL across full-market
+    # books instead of the median-of-prices consensus — non-extremizing and
+    # tail-preserving on heavy favourites/longshots (Gneiting & Ranjan 2010).
+    # False = median consensus (current behavior, the non-breaking default).
+    # SCOPE: this only changes the CONSENSUS fallback fair value; when
+    # require_sharp_anchor=True, consensus picks are already demoted to the
+    # volume (shadow) tier, so this improves the shadow tier's fair value and
+    # the consensus-vs-median comparisons, NOT premium (sharp-anchored) pricing.
+    # See app/edge/value._logit_consensus_anchor (the pure implementation).
+    consensus_logit_pool: bool = False
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:
@@ -96,6 +123,24 @@ def min_edge_for(
         value = by_key.get(key)
         if value is not None:
             return value
+    return default
+
+
+def devig_method_for(
+    policy: ValuePolicy, market: str, market_detail: str | None, default: DevigMethod
+) -> DevigMethod:
+    """Per-market devig method: a configured override or the global default.
+
+    Mirrors ``min_edge_for`` — line-detail key first, then market family; most
+    specific wins. An empty ``policy.devig_by_market`` (the default) always
+    returns ``default`` (the global Settings.value_devig), so every market keeps
+    the validated global method unless an override is explicitly configured.
+    """
+    by_key = dict(policy.devig_by_market)
+    for key in market_lookup_keys(market, market_detail):
+        method = by_key.get(key)
+        if method is not None:
+            return method
     return default
 
 

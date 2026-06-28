@@ -432,6 +432,38 @@ def test_value_policy_parses_market_maps_and_bands() -> None:
     assert policy.min_books_by_market == (("over_under_1_5", 5),)
 
 
+def test_value_devig_per_market_and_logit_pool_default_off() -> None:
+    # FEATURE A + B: both default OFF => the built policy keeps the no-op values.
+    s = make_settings()
+    assert s.value_devig_per_market == ""
+    assert s.value_consensus_logit_pool is False
+    policy = value_policy(s)
+    assert policy.devig_by_market == ()
+    assert policy.consensus_logit_pool is False
+
+
+def test_value_devig_per_market_parses_and_validates_methods() -> None:
+    from app.probabilities.devig import DevigMethod
+
+    s = make_settings(
+        value_devig_per_market="over_under_2_5:probit, 1X2:shin",
+        value_consensus_logit_pool=True,
+    )
+    policy = value_policy(s)
+    assert policy.devig_by_market == (
+        ("over_under_2_5", DevigMethod.PROBIT),
+        ("1x2", DevigMethod.SHIN),
+    )
+    assert policy.consensus_logit_pool is True
+
+
+def test_value_devig_per_market_rejects_unknown_method() -> None:
+    # A typo'd method name must fail FAST at startup (like the other knobs),
+    # never silently fall through to the global VALUE_DEVIG on those markets.
+    with pytest.raises(ValidationError, match="not a known devig method"):
+        make_settings(value_devig_per_market="1x2:not_a_method")
+
+
 def test_value_policy_parses_major_leagues() -> None:
     s = make_settings(value_major_leagues="Premier League, LaLiga , Serie A,")
     # names kept as given (normalized only at compare time), blanks dropped

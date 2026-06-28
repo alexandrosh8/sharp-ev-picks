@@ -34,6 +34,7 @@ from app.edge.value import (
     effective_odds,
     persisted_close_independent,
 )
+from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import EventDirectory, OddsLoader
 from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
@@ -47,6 +48,10 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = logging.getLogger(__name__)
+
+# Shared frozen no-op policy for the default-OFF path (ruff B008: no call in a
+# function default). ValuePolicy is immutable, so one instance is safe to share.
+_EMPTY_VALUE_POLICY = ValuePolicy()
 
 
 def _best_soft_book(books: dict[str, float]) -> tuple[str | None, float | None]:
@@ -100,6 +105,7 @@ async def revalidate_open_picks(
     devig_method: DevigMethod,
     *,
     record_drift: bool = False,
+    value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> int:
     """Refresh closing-fair/CLV and current-odds/edge on open picks from
     already-scraped snapshots. Returns rows updated.
@@ -121,7 +127,7 @@ async def revalidate_open_picks(
     fair_by_key: dict[tuple[str, str, str], float] = {}
     anchor_by_key: dict[tuple[str, str, str], str] = {}
     for (event_id, market, _detail), (book, fair) in event_fair_probs(
-        grouped, devig_method
+        grouped, devig_method, value_policy
     ).items():
         for sel, p in fair.items():
             fair_by_key[(event_id, str(market), sel)] = p
@@ -415,6 +421,7 @@ async def revalidate_offwindow_picks(
     sport_key: str,
     covered_event_ids: set[str],
     devig_method: DevigMethod = DevigMethod.SHIN,
+    value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> int:
     """Re-price open picks whose games were NOT in this cycle's scrape
     (taken weeks ahead of kickoff): scrape their match pages directly.
@@ -492,9 +499,12 @@ async def revalidate_offwindow_picks(
             .values(revalidation_attempted_at=attempted_at)
         )
         await session.commit()
-    # Same devig as the live pipeline (passed from the composition root) so
-    # off-window re-pricing stays comparable to in-window CLV numbers.
-    return await revalidate_open_picks(session_factory, snapshots, devig_method)
+    # Same devig + value policy as the live pipeline (passed from the
+    # composition root) so off-window re-pricing stays comparable to in-window
+    # CLV numbers — fill and close share the identical per-market method.
+    return await revalidate_open_picks(
+        session_factory, snapshots, devig_method, value_policy=value_policy
+    )
 
 
 #: Terminal Event.status once a final score is captured. Event.status was
@@ -790,6 +800,7 @@ async def finalize_closing_from_snapshots(
     *,
     use_pinnacle_archive: bool = False,
     use_betfair_exchange: bool = False,
+    value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> bool:
     """Recompute the pick's closing fair/CLV from our own odds_snapshots
     history instead of trusting the last pre-kickoff re-scrape write.
@@ -869,7 +880,7 @@ async def finalize_closing_from_snapshots(
     fair_by_key: dict[tuple[str, str], float] = {}
     anchor_by_key: dict[tuple[str, str], str] = {}
     for (_event, market, _detail), (anchor, fair_by_sel) in event_fair_probs(
-        grouped, devig_method
+        grouped, devig_method, value_policy
     ).items():
         for sel, p in fair_by_sel.items():
             fair_by_key[(str(market), sel)] = p
@@ -1151,6 +1162,7 @@ async def true_up_clv(
     session_factory: "async_sessionmaker",
     sport_keys: Sequence[str],
     devig_method: DevigMethod = DevigMethod.SHIN,
+    value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> int:
     """Standalone fetch + revalidate (used when no fresh snapshots exist)."""
     updated = 0
@@ -1160,5 +1172,7 @@ async def true_up_clv(
         except Exception as exc:
             logger.error("clv true-up fetch failed for %s: %s", sport_key, type(exc).__name__)
             continue
-        updated += await revalidate_open_picks(session_factory, snapshots, devig_method)
+        updated += await revalidate_open_picks(
+            session_factory, snapshots, devig_method, value_policy=value_policy
+        )
     return updated
