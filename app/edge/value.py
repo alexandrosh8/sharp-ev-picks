@@ -153,6 +153,57 @@ def close_is_independent_of_fill(
     )
 
 
+# Pick-time fair vs close-time fair must DIFFER by more than this (probability
+# units) for the close to be independent CLV evidence. When closing_fair ==
+# pick_fair (the SAME archived sharp line reused at pick-time and close-time),
+# clv_log = ln(fill_eff * closing_fair) just re-encodes the pick-time edge — a
+# TAUTOLOGY, not a verdict (live audit 2026-06-28: 133/272 settled picks had
+# round(model_probability,4) == round(closing_fair_probability,4) yet carried a
+# nonzero clv_log). 1e-3 mirrors the 4-dp archived-line resolution.
+CLV_TAUTOLOGY_EPS = 1e-3
+
+
+def close_moved_from_pick_fair(pick_fair: float | None, closing_fair: float) -> bool:
+    """Whether the CLOSE fair MOVED from the pick-time fair by more than a
+    de-minimis epsilon (``CLV_TAUTOLOGY_EPS``).
+
+    An UNMOVED close (``closing_fair == pick_fair``) is the identical-archived-line
+    TAUTOLOGY: clv_log = ln(fill_eff * closing_fair) merely re-encodes the pick-time
+    edge (= pick_fair - 1/fill_eff), so it is NOT independent close evidence. A close
+    is real CLV only if the line moved. ``pick_fair is None`` (unknowable pick-time
+    fair) cannot prove movement => treated as NOT moved (conservative: no fake CLV).
+    Pure function; the CLV true-up persists its AND with the fill-book check."""
+    if pick_fair is None:
+        return False
+    return abs(closing_fair - pick_fair) > CLV_TAUTOLOGY_EPS
+
+
+def persisted_close_independent(
+    *,
+    close_anchor_book: str,
+    fill_book: str,
+    pick_fair: float | None,
+    closing_fair: float,
+) -> bool:
+    """The value persisted to ``picks.close_independent_of_fill`` (audit 2026-06-28).
+
+    A close is INDEPENDENT (trustworthy CLV) only when BOTH hold:
+      (1) it is NOT anchored by the pick's OWN fill book — a book pricing its own
+          close is circular (``close_is_independent_of_fill``); AND
+      (2) the close fair MOVED from the pick-time fair (``close_moved_from_pick_fair``)
+          — an identical archived line makes clv_log a tautology.
+
+    Gating (2) on the VALUE DELTA, not on the anchor BOOK NAME, is the fix: it
+    RECOVERS a legitimate same-book MOVED-line close (e.g. a Pinnacle pick validated
+    by a later, moved Pinnacle close — Betfair 0.471->0.516) that the old book-name
+    same-source test structurally dropped (Pinnacle is SHARP_BOOKS[0] for both pick
+    and close, so every Pinnacle-anchored pick was excluded), while still rejecting
+    the identical-line tautology that the book test let through. Pure function."""
+    if not close_is_independent_of_fill(close_anchor_book, fill_book):
+        return False
+    return close_moved_from_pick_fair(pick_fair, closing_fair)
+
+
 @dataclass(frozen=True)
 class ValueBet:
     selection: str

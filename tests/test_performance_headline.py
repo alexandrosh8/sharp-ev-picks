@@ -30,12 +30,14 @@ def _row(
     has_snapshot_close: bool | None = True,
     decimal_odds: float | None = 2.0,
     closing_fair_probability: float | None = None,
+    model_probability: float | None = None,
 ) -> tuple[object, ...]:
     # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
     #  close_independent, has_snapshot_close, decimal_odds,
-    #  closing_fair_probability) — the tuple shape performance_report._tier_rows
-    #  builds. decimal_odds + closing_fair_probability feed the CLV-1 implausible
-    #  close-implied-edge guard (defaults to a benign small edge / unknown).
+    #  closing_fair_probability, model_probability) — the tuple shape
+    #  performance_report._tier_rows builds. decimal_odds + closing_fair_probability
+    #  feed the CLV-1 implausible close-implied-edge guard; closing_fair_probability +
+    #  model_probability feed the TAUTOLOGY guard (both default unknown -> benign).
     return (
         outcome,
         Decimal(str(pnl)),
@@ -48,6 +50,7 @@ def _row(
         has_snapshot_close,
         Decimal(str(decimal_odds)) if decimal_odds is not None else None,
         Decimal(str(closing_fair_probability)) if closing_fair_probability is not None else None,
+        Decimal(str(model_probability)) if model_probability is not None else None,
     )
 
 
@@ -258,3 +261,73 @@ def test_sharp_subset_gated_on_its_own_n_not_n_settled() -> None:
     assert agg["sharp_status"] == "insufficient"
     assert agg["sharp_stake_weighted_clv_log"] is None
     assert agg["sharp_beat_close_rate"] is None
+
+
+def test_tautological_close_excluded_from_blended_and_trusted() -> None:
+    # Audit 2026-06-28 P2: a row whose close fair EQUALS its pick-time fair
+    # (model_probability == closing_fair_probability — the SAME archived sharp line
+    # reused at pick-time and close-time) carries a clv_log that merely re-encodes
+    # the pick-time edge: a TAUTOLOGY. It must be dropped from BOTH the blended
+    # headline AND the trusted sharp subset, even though it is a sharp-anchored,
+    # independent, genuine snapshot close.
+    honest = [
+        _row(
+            closing_anchor="pinnacle",
+            clv_log=0.04,
+            decimal_odds=2.0,
+            closing_fair_probability=0.51,
+            model_probability=0.46,  # close MOVED from pick fair -> real CLV
+            close_independent=True,
+            has_snapshot_close=True,
+        )
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    tautology = [
+        _row(
+            closing_anchor="pinnacle",
+            clv_log=0.30,  # would flatter both aggregates if admitted
+            decimal_odds=2.0,
+            closing_fair_probability=0.50,
+            model_probability=0.5004,  # identical archived line (delta 0.0004 <= 1e-3)
+            close_independent=True,
+            has_snapshot_close=True,
+        )
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg = _aggregate_settled(honest + tautology)
+    # Tautological rows stay real settled picks (honest denominator) ...
+    assert agg["n_settled"] == 2 * MIN_HEADLINE_N
+    # ... but contribute to NEITHER the trusted subset ...
+    assert agg["n_sharp_close"] == MIN_HEADLINE_N
+    assert agg["sharp_stake_weighted_clv_log"] == "0.04"
+    # ... NOR the blended headline CLV (only the honest 0.04 rows remain).
+    assert agg["stake_weighted_clv_log"] == "0.04"
+
+
+def test_null_independence_excluded_from_trusted_subset() -> None:
+    # Audit 2026-06-28 P2: the trusted subset now requires close_independent_of_fill
+    # IS TRUE (not merely "IS NOT FALSE"). A NULL/unknown independence (pre-column or
+    # un-stamped row) is no longer admitted — unproven independence is not trusted.
+    null_indep = [
+        _row(
+            closing_anchor="pinnacle",
+            clv_log=0.04,
+            close_independent=None,  # unknown independence
+            has_snapshot_close=True,
+        )
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg_null = _aggregate_settled(null_indep)
+    assert agg_null["n_sharp_close"] == 0  # NULL no longer leaks into the trusted subset
+
+    true_indep = [
+        _row(
+            closing_anchor="pinnacle",
+            clv_log=0.04,
+            close_independent=True,
+            has_snapshot_close=True,
+        )
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg_true = _aggregate_settled(true_indep)
+    assert agg_true["n_sharp_close"] == MIN_HEADLINE_N  # only definite True counts

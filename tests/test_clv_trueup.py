@@ -58,7 +58,12 @@ def closing_snapshots(
     return rows
 
 
-def make_pick(event_id: str, bookmaker: str = "SoftBook", tier: str = "premium") -> PickOut:
+def make_pick(
+    event_id: str,
+    bookmaker: str = "SoftBook",
+    tier: str = "premium",
+    model_probability: float = 0.45,
+) -> PickOut:
     return PickOut(
         pick_id="p-clv",
         sport="soccer",
@@ -70,7 +75,7 @@ def make_pick(event_id: str, bookmaker: str = "SoftBook", tier: str = "premium")
         bookmaker=bookmaker,
         tier=tier,
         decimal_odds=2.50,  # we got 2.50; close fair will be shorter -> +CLV
-        model_probability=0.45,
+        model_probability=model_probability,
         fair_probability=0.40,
         edge=0.05,
         ev=0.125,
@@ -154,6 +159,41 @@ async def test_true_up_fills_clv_fields(factory) -> None:  # type: ignore[no-unt
         assert pick.beat_close is True
         # Close-anchor provenance: the close fair was anchored by Pinnacle.
         assert pick.closing_anchor_type == "pinnacle"
+        # Independence (audit 2026-06-28): close fair ~0.435 MOVED from the pick-time
+        # fair (model_probability=0.45), and Pinnacle (close anchor) != SoftBook (fill)
+        # -> a genuine, independent close.
+        assert pick.close_independent_of_fill is True
+
+
+async def test_true_up_marks_identical_archived_line_close_circular(factory) -> None:  # type: ignore[no-untyped-def]
+    # Audit 2026-06-28 P1: when the close fair equals the pick-time fair (the SAME
+    # archived sharp line reused), clv_log is a TAUTOLOGY — the persisted
+    # close_independent_of_fill must be False so the trusted subset excludes it, even
+    # though the close is Pinnacle-anchored and not fill-self-priced.
+    event_id = "evt-clv-tautology"
+    async with factory() as session:
+        # Pin the pick-time fair to the devigged (SHIN) Pinnacle CLOSE fair (0.43600,
+        # the true_up_clv default method) so |closing_fair - model_probability| <= 1e-3
+        # (identical archived line).
+        await persist_pick(
+            session,
+            make_pick(event_id, model_probability=0.4360),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    loader = FakeLoader(closing_snapshots(event_id))
+    updated = await true_up_clv(loader, factory, ["soccer"])
+    assert updated == 1
+
+    async with factory() as session:
+        stored = await session.scalar(select(Pick).where(Pick.reason_summary == "clv true-up test"))
+        assert stored is not None
+        assert stored.closing_anchor_type == "pinnacle"  # sharp-anchored close ...
+        # ... but the identical archived line makes it a tautology -> NOT independent.
+        assert stored.close_independent_of_fill is False
 
 
 async def test_true_up_includes_volume_tier_picks(factory) -> None:  # type: ignore[no-untyped-def]
