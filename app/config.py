@@ -735,10 +735,13 @@ class Settings(BaseSettings):
     betfair_html_parser: bool = False
     # csv of sport keys to capture. "soccer" (the 3-way 1X2 BACK row) and
     # "basketball" (the 2-way moneyline BACK row) are supported; the default
-    # stays "soccer" (committed) but "soccer,basketball" works end-to-end. A
-    # basketball capture only sees fixtures when the basketball scrape is also
-    # enabled (ODDSPORTAL_BASKETBALL_LEAGUES). Unsupported sport keys are skipped.
-    betfair_exchange_sports: str = "soccer"
+    # DEFAULT "soccer,basketball" (2026-06-28): the capture rides the fast curl_cffi
+    # JSON feed (Betfair provider id 44) for soccer 1x2 + over_under_2_5 and basketball
+    # home_away — all feasibility-proven present in the feed (basketball totals/handicaps
+    # are NOT — Betfair doesn't price them on OddsPortal). A basketball capture only sees
+    # fixtures when the basketball scrape is also enabled (ODDSPORTAL_BASKETBALL_LEAGUES).
+    # Unsupported sport keys are skipped.
+    betfair_exchange_sports: str = "soccer,basketball"
     # Capture cadence. Change-gated on the per-selection BACK price, so a short
     # interval just tracks repricings; near kickoff is what matters. The >=30s
     # floor blocks hammering-by-typo on a free scraped source.
@@ -752,10 +755,11 @@ class Settings(BaseSettings):
     # majors). Each capture cycle opens at most this many match pages, so the
     # reader can NEVER try all ~91 pages at once and worsen the CPU overload.
     # Ordered never-captured-first then stalest-Betfair-capture, so a small bound
-    # ROTATES through the whole slate over successive cycles. Per-cycle page-load
-    # cost == min(this, eligible events). 20 pages / 300s ≈ one page every 15s —
-    # gentle on a CPU-bound box; raise only if the box has spare headroom.
-    betfair_exchange_max_targets_per_cycle: int = Field(default=20, ge=1, le=200)
+    # ROTATES through the whole slate over successive cycles. Per-cycle cost ==
+    # min(this, eligible events). DEFAULT 35 (2026-06-28): the curl_cffi JSON feed
+    # is far lighter than the retired Playwright reader, so a higher bound is cheap
+    # and covers soccer+basketball without cannibalizing soccer coverage.
+    betfair_exchange_max_targets_per_cycle: int = Field(default=35, ge=1, le=200)
     # Only events kicking off within this many hours ahead are eligible targets
     # (and only those NOT yet started). Bounds the candidate set to the
     # actionable near slate — far-future fixtures carry thin/!absent exchange
