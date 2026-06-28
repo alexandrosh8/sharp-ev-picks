@@ -1,17 +1,21 @@
-"""Gated Betfair Exchange BACK close consumption for closing CLV (ADR-0015).
+"""Gated Betfair Exchange BACK close consumption for closing CLV (ADR-0015 v2).
 
 CLV_USE_BETFAIR_EXCHANGE (default OFF) lets the captured Betfair Exchange BACK
-close anchor a pick's closing fair, mirroring CLV_USE_PINNACLE_ARCHIVE but with
-EXACT resolution: the betfair event's external_ref is deterministically
-"betfair:"+pick_ref (app/ingestion/betfair_exchange._namespace_event_ref), so the
-lookup is a single unique-key match — no alias table, no kickoff fuzz.
+close anchor a pick's closing fair, mirroring CLV_USE_PINNACLE_ARCHIVE. ADR-0015
+v2 INLINE BINDING: the dedicated capture persists its rows on the CANONICAL event
+(``Event.external_ref == ref``, ``bookmaker="Betfair Exchange"``) — the same ref
+the main scrape uses — NOT a separate ``"betfair:"+ref`` namespace. So the resolver
+(resolve_betfair_back_snaps) is a canonical-event lookup FILTERED to the Betfair
+book; the legacy ``"betfair:"`` namespace is DEAD (audit 2026-06-28: the producer
+moved to the canonical ref but the resolver still keyed the old prefix, orphaning
+every current/future pick's Betfair rows).
 
-Proves: (a) _betfair_exchange_close returns the betfair BACK snaps when a
-betfair:<ref> event with a close exists, [] when absent; (b) finalize_closing
-with use_betfair_exchange=True injects them and the closing fair/CLV anchors on
-the commission-netted Betfair price, vs =False leaving behaviour unchanged;
-(c) the no-betfair-event case changes nothing. Compose-Postgres fixture (:5433);
-skips when the DB is absent. No live network.
+Proves: (a) _betfair_exchange_close returns the canonical Betfair BACK snaps when
+the canonical event carries them, [] when it has none, and IGNORES a stray
+``"betfair:"``-namespaced event; (b) finalize_closing with use_betfair_exchange=True
+anchors the closing fair/CLV on the commission-netted Betfair price; (c) the
+no-Betfair case falls back unchanged. Compose-Postgres fixture (:5433); skips when
+the DB is absent. No live network.
 """
 
 import math
@@ -141,8 +145,24 @@ def _betfair_snaps(event_ref: str, odds: tuple[float, float, float]) -> list[Odd
 async def seed_betfair_event(  # type: ignore[no-untyped-def]
     maker, pick_ref: str, odds: tuple[float, float, float] = BETFAIR_CLOSE
 ) -> None:
-    """Create the ISOLATED betfair:<ref> event with Betfair Exchange BACK snaps,
-    exactly as BetfairExchangeCapture persists it (namespaced external_ref)."""
+    """ATTACH Betfair Exchange BACK snaps onto the CANONICAL event (external_ref ==
+    pick_ref), exactly as BetfairExchangeCapture persists them under ADR-0015 v2
+    inline binding (attach_only_to_existing — the main scrape's event, bookmaker
+    "Betfair Exchange"). The pick's canonical event must already exist (seed_pick)."""
+    snaps = _betfair_snaps(pick_ref, odds)
+    teams = {pick_ref: EventTeams(home=HOME, away=AWAY, league=LEAGUE, starts_at=KICKOFF)}
+    written = await persist_odds_snapshots(
+        maker, snaps, teams, "soccer", "soccer", attach_only_to_existing=True
+    )
+    assert written == 3
+
+
+async def seed_dead_namespace_betfair_event(  # type: ignore[no-untyped-def]
+    maker, pick_ref: str, odds: tuple[float, float, float] = BETFAIR_CLOSE
+) -> None:
+    """Create a STRAY legacy ``"betfair:"+ref`` event with Betfair BACK snaps (the
+    pre-ADR-0015-v2 namespace). Nothing current writes this; the resolver must
+    IGNORE it (it keys the canonical event), so it exists only to prove non-use."""
     betfair_ref = f"betfair:{pick_ref}"
     snaps = _betfair_snaps(betfair_ref, odds)
     teams = {
@@ -177,14 +197,14 @@ async def seed_soft_close(session: AsyncSession, pick: Pick) -> None:
 async def test_betfair_close_returns_back_snaps_when_event_exists(factory) -> None:  # type: ignore[no-untyped-def]
     ref = "evt-betfair-present"
     pick_id = await seed_pick(factory, ref)
-    await seed_betfair_event(factory, ref)
+    await seed_betfair_event(factory, ref)  # Betfair rows on the CANONICAL event
     async with factory() as session:
         pick = await session.get(Pick, pick_id)
         assert pick is not None
         snaps = await _betfair_exchange_close(session, pick, ref, KICKOFF)
     assert len(snaps) == 3
-    # Re-keyed to the PICK's external_ref (the "betfair:" prefix stripped) so the
-    # close groups with the pick's own market, not a namespaced one.
+    # Resolved off the CANONICAL event (external_ref == ref), filtered to the
+    # Betfair book — grouped with the pick's own market, no namespace.
     assert {s.event_id for s in snaps} == {ref}
     assert all(s.bookmaker == "Betfair Exchange" for s in snaps)
     assert all(s.market is Market.H2H for s in snaps)
@@ -194,14 +214,32 @@ async def test_betfair_close_returns_back_snaps_when_event_exists(factory) -> No
     assert by_sel[AWAY] == pytest.approx(3.30)
 
 
-async def test_betfair_close_returns_empty_when_no_event(factory) -> None:  # type: ignore[no-untyped-def]
+async def test_betfair_close_filters_out_non_betfair_rows(factory) -> None:  # type: ignore[no-untyped-def]
+    # The canonical event also carries the soft-book close; the dedicated resolver
+    # returns ONLY the Betfair Exchange rows (bookmaker ILIKE 'betfair%'), never the
+    # soft rows the main pipeline handles separately. Soft-only canonical -> [].
     ref = "evt-betfair-absent"
-    pick_id = await seed_pick(factory, ref)  # NO betfair:<ref> event seeded
+    pick_id = await seed_pick(factory, ref)  # canonical event exists, NO Betfair rows
+    async with factory() as session:
+        pick = await session.get(Pick, pick_id)
+        assert pick is not None
+        await seed_soft_close(session, pick)  # only soft rows on the canonical event
+        snaps = await _betfair_exchange_close(session, pick, ref, KICKOFF)
+    assert snaps == []
+
+
+async def test_betfair_close_ignores_dead_betfair_namespace(factory) -> None:  # type: ignore[no-untyped-def]
+    # REGRESSION (audit 2026-06-28): a stray legacy "betfair:"+ref event carrying a
+    # full Betfair BACK close must be IGNORED — the resolver keys the CANONICAL event,
+    # which here has NO Betfair rows. The dead namespace must never resurface a close.
+    ref = "evt-betfair-dead-namespace"
+    pick_id = await seed_pick(factory, ref)
+    await seed_dead_namespace_betfair_event(factory, ref)  # ONLY on the dead namespace
     async with factory() as session:
         pick = await session.get(Pick, pick_id)
         assert pick is not None
         snaps = await _betfair_exchange_close(session, pick, ref, KICKOFF)
-    assert snaps == []
+    assert snaps == []  # canonical event has no Betfair rows -> the stray is ignored
 
 
 # --- finalize_closing_from_snapshots gating -----------------------------------
@@ -241,13 +279,16 @@ async def test_flag_on_anchors_on_betfair_close(factory) -> None:  # type: ignor
         assert pick.closing_odds == Decimal("2.3000")
 
 
-async def test_flag_off_leaves_behaviour_unchanged(factory) -> None:  # type: ignore[no-untyped-def]
-    # SAME seed as the flag-ON case, but use_betfair_exchange=False: the betfair
-    # close is NOT injected, the pick's own event has no anchorable close, so
-    # finalize falls back (returns False) and writes nothing.
+async def test_flag_off_with_soft_only_close_falls_back(factory) -> None:  # type: ignore[no-untyped-def]
+    # Default OFF + the pick's canonical event has only a (single soft book)
+    # close: the dedicated Betfair resolver is NOT invoked and the soft-only close
+    # is unanchorable, so finalize falls back (returns False) and writes nothing.
+    # NOTE (audit 2026-06-28): under ADR-0015 v2 inline binding, Betfair rows live ON
+    # the canonical event, so the MAIN close read (closing_odds_from_snapshots) would
+    # anchor on them irrespective of this flag — the flag only gates the EXTRA
+    # pick-time resolver injection. This test therefore seeds NO Betfair rows.
     ref = "evt-betfair-off"
     pick_id = await seed_pick(factory, ref)
-    await seed_betfair_event(factory, ref)
     async with factory() as session:
         pick = await session.get(Pick, pick_id)
         assert pick is not None
@@ -256,15 +297,15 @@ async def test_flag_off_leaves_behaviour_unchanged(factory) -> None:  # type: ig
             session, pick, ref, KICKOFF, DevigMethod.SHIN, use_betfair_exchange=False
         )
         assert applied is False
-        # Default OFF -> no behaviour change: nothing was written.
+        # Unanchorable soft-only close -> nothing written.
         assert pick.closing_fair_probability is None
         assert pick.clv_log is None
         assert pick.closing_odds is None
 
 
 async def test_flag_on_but_no_betfair_event_is_neutral(factory) -> None:  # type: ignore[no-untyped-def]
-    # Flag ON but NO betfair:<ref> event captured: _betfair_exchange_close -> []
-    # -> nothing injected -> same outcome as flag OFF (the pick's own soft-only
+    # Flag ON but the canonical event has NO Betfair rows: resolve_betfair_back_snaps
+    # -> [] -> nothing injected -> same outcome as flag OFF (the pick's own soft-only
     # close is unanchorable, so finalize falls back).
     ref = "evt-betfair-on-nomatch"
     pick_id = await seed_pick(factory, ref)  # NO betfair event
@@ -310,25 +351,21 @@ def _betfair_bball_snaps(event_ref: str, odds: tuple[float, float]) -> list[Odds
 
 
 async def test_flag_on_anchors_on_betfair_basketball_two_way_close(factory) -> None:  # type: ignore[no-untyped-def]
-    # The EXACT betfair:<ref> bridge is sport-agnostic: a basketball pick whose
-    # captured Betfair close is a 2-way (home/away) market anchors the closing
-    # fair on the commission-netted Betfair devig — no "Draw" leg required. This
-    # proves _betfair_exchange_close + event_fair_probs handle a 2-way H2H close.
+    # The CANONICAL-event bridge is sport-agnostic: a pick whose captured Betfair
+    # close is a 2-way (home/away) market anchors the closing fair on the
+    # commission-netted Betfair devig — no "Draw" leg required. Proves
+    # _betfair_exchange_close + event_fair_probs handle a 2-way H2H close.
     ref = "evt-betfair-bball"
     pick_id = await seed_pick(factory, ref)  # SoftBook pick on HOME @ 2.50
-    # Seed the 2-way betfair event (home/away) under the namespaced ref.
-    betfair_ref = f"betfair:{ref}"
-    teams = {
-        betfair_ref: EventTeams(
-            home=HOME, away=AWAY, league="betfair_basketball", starts_at=KICKOFF
-        )
-    }
+    # ATTACH the 2-way Betfair close (home/away) onto the CANONICAL event.
+    teams = {ref: EventTeams(home=HOME, away=AWAY, league=LEAGUE, starts_at=KICKOFF)}
     written = await persist_odds_snapshots(
         factory,
-        _betfair_bball_snaps(betfair_ref, BETFAIR_BBALL_CLOSE),
+        _betfair_bball_snaps(ref, BETFAIR_BBALL_CLOSE),
         teams,
-        "betfair_basketball",
-        "betfair_basketball",
+        "soccer",
+        "soccer",
+        attach_only_to_existing=True,
     )
     assert written == 2  # home/away only, NO draw
     async with factory() as session:
@@ -362,15 +399,14 @@ async def test_flag_on_anchors_on_betfair_basketball_two_way_close(factory) -> N
         assert float(pick.clv_log) == pytest.approx(math.log(2.50 * fair), abs=1e-5)
 
 
-async def test_fresh_sharp_close_rescues_coverage_when_soft_scrape_dropped(factory) -> None:  # type: ignore[no-untyped-def]
-    # clv-2: the pick's own event FELL OUT of the soft OddsPortal scrape (no soft
-    # close snapshot at all), so the soft-coverage gate is NOT satisfied. But a
-    # FRESH matched Betfair sharp close exists. Coverage must be satisfied by the
-    # sharp side alone — finalize anchors on the Betfair close and returns True
-    # (the OLD gate returned False before ever resolving the sharp archive).
+async def test_betfair_sharp_only_close_anchors_with_no_soft_book(factory) -> None:  # type: ignore[no-untyped-def]
+    # ADR-0015 v2: the canonical event carries ONLY the Betfair Exchange BACK close
+    # (no soft book quoted it). Coverage is satisfied by that genuine sharp snapshot
+    # close, which anchors the fair; closing_odds (the soft DISPLAY price) stays NULL
+    # while the trusted-CLV markers are set — exactly the clv-1 sharp-only-close case.
     ref = "evt-sharp-rescues"
     pick_id = await seed_pick(factory, ref)
-    await seed_betfair_event(factory, ref)  # fresh Betfair close, NO soft close seeded
+    await seed_betfair_event(factory, ref)  # Betfair close on canonical, NO soft close
     async with factory() as session:
         pick = await session.get(Pick, pick_id)
         assert pick is not None
@@ -405,12 +441,12 @@ async def test_loader_drops_stale_pinnacle_but_keeps_fresh_betfair_per_source(fa
     ref = "evt-mixed-freshness"
     home, away = "Mixed Home FC", "Mixed Away FC"
 
-    # FRESH Betfair close (1h old) under the namespaced betfair:<ref> event.
-    bref = f"betfair:{ref}"
+    # FRESH Betfair close (1h old) on the CANONICAL event (external_ref == ref) —
+    # ADR-0015 v2 inline binding, the same ref the live scrape + directory use.
     fresh = now - timedelta(hours=1)
     betfair_snaps = [
         OddsSnapshotIn(
-            event_id=bref,
+            event_id=ref,
             bookmaker="Betfair Exchange",
             market=Market.H2H,
             selection=sel,
@@ -423,16 +459,18 @@ async def test_loader_drops_stale_pinnacle_but_keeps_fresh_betfair_per_source(fa
     await persist_odds_snapshots(
         factory,
         betfair_snaps,
-        {bref: EventTeams(home=home, away=away, starts_at=kickoff)},
-        "betfair_soccer",
-        "betfair_soccer",
+        {ref: EventTeams(home=home, away=away, starts_at=kickoff)},
+        "soccer",
+        "soccer",
     )
-    # STALE Pinnacle archive (10h old) under pinnacle_soccer, EXACT team names so the
-    # strict matcher resolves it without relying on the alias table.
+    # STALE Pinnacle archive (10h old) on its OWN disjoint pinnacle_soccer event
+    # (matched by NAME, not ref — mirrors arcadia's disjoint id-space), EXACT team
+    # names so the strict matcher resolves it without relying on the alias table.
     stale = now - timedelta(hours=10)
+    pinnacle_ref = f"pinnacle-arc-{ref}"
     pinnacle_snaps = [
         OddsSnapshotIn(
-            event_id=ref,
+            event_id=pinnacle_ref,
             bookmaker="Pinnacle",
             market=Market.H2H,
             selection=sel,
@@ -445,7 +483,7 @@ async def test_loader_drops_stale_pinnacle_but_keeps_fresh_betfair_per_source(fa
     await persist_odds_snapshots(
         factory,
         pinnacle_snaps,
-        {ref: EventTeams(home=home, away=away, starts_at=kickoff)},
+        {pinnacle_ref: EventTeams(home=home, away=away, starts_at=kickoff)},
         "pinnacle_soccer",
         "pinnacle_soccer",
     )
@@ -485,10 +523,10 @@ async def test_sharp_anchor_loader_event_wide_freshness(factory) -> None:  # typ
     kickoff = now + timedelta(hours=2)
 
     async def seed(ref: str, captured: datetime) -> None:
-        bref = f"betfair:{ref}"
+        # Betfair rows on the CANONICAL event (external_ref == ref) — ADR-0015 v2.
         snaps = [
             OddsSnapshotIn(
-                event_id=bref,
+                event_id=ref,
                 bookmaker="Betfair Exchange",
                 market=Market.H2H,
                 selection=sel,
@@ -498,8 +536,8 @@ async def test_sharp_anchor_loader_event_wide_freshness(factory) -> None:  # typ
             )
             for sel, o in (("Home FC", 2.40), ("Draw", 3.50), ("Away FC", 3.20))
         ]
-        teams = {bref: EventTeams(home="Home FC", away="Away FC", starts_at=kickoff)}
-        await persist_odds_snapshots(factory, snaps, teams, "betfair_soccer", "betfair_soccer")
+        teams = {ref: EventTeams(home="Home FC", away="Away FC", starts_at=kickoff)}
+        await persist_odds_snapshots(factory, snaps, teams, "soccer", "soccer")
 
     await seed("evt-fresh", now - timedelta(hours=1))  # still being captured
     await seed("evt-stale", now - timedelta(hours=10))  # fell out of capture
