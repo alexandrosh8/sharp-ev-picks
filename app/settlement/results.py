@@ -7,7 +7,10 @@ those sources and indexes scores by normalized team names + date so picks
 
 Matching is deterministic: exact normalized names first, then a containment
 fallback ("flamengo" ~ "flamengo rj") that must be UNIQUE on the date —
-ambiguity returns no match (the pick stays open for manual settlement).
+ambiguity returns no match (the pick stays open for manual settlement). The
+containment fallback is wrong-game-vetoed by the strict resolution matcher's
+distinguishing markers (women/youth/reserve/B): a men's pick can never settle
+from a women's/youth/reserve score that merely contains its base name.
 """
 
 import logging
@@ -30,6 +33,7 @@ from app.ingestion.international_results import (
     fetch_results_csv,
     parse_results,
 )
+from app.resolution.matching import distinguishing_markers
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +98,17 @@ def _names_match(ours: str, theirs: str) -> bool:
     return ours == theirs or ours in theirs or theirs in ours
 
 
+def _markers_agree(ours: str, theirs: str) -> bool:
+    """WRONG-GAME VETO. Reject a containment bind when the two RAW names disagree
+    on a women/youth/reserve/B distinguishing marker (one present, the other
+    absent, or different). Reuses the strict CLV matcher's marker set so the
+    highest-stakes operation (settlement) is never weaker than the close matcher:
+    "Arsenal" must not settle from "Arsenal Women"/"Arsenal U21"/"Arsenal B".
+    Senior-vs-senior containment ("Flamengo" ~ "Flamengo RJ") is untouched —
+    neither side carries a marker, so the sets are equal."""
+    return distinguishing_markers(ours) == distinguishing_markers(theirs)
+
+
 class ScoreBook:
     """Final scores indexed for lookup by (team names, kickoff datetime)."""
 
@@ -125,6 +140,8 @@ class ScoreBook:
             for score in self._by_date.get(d, [])
             if _names_match(h, normalize_team(score.home_team))
             and _names_match(a, normalize_team(score.away_team))
+            and _markers_agree(home, score.home_team)
+            and _markers_agree(away, score.away_team)
         ]
         if len(candidates) == 1:
             return candidates[0]
