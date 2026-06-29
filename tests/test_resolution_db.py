@@ -315,6 +315,111 @@ async def test_resolver_caps_cutoff_at_arcadia_kickoff(factory) -> None:  # type
     assert by_sel["Alpha"].decimal_odds == pytest.approx(2.10)
 
 
+# --- PER-MARKET re-key: H2H re-keys by OUTCOME (team name); TOTALS/SPREADS are
+# source-keyed and must pass through so a totals/spreads pick can get a Pinnacle
+# anchor (funnel: ~31 picks/week). The team-name selection_map ALONE silently
+# drops Over/Under + Asian-handicap selections (cardinal coverage bug). ---
+
+
+def _pin_snap_mkt(
+    selection: str, odds: float, event: str, market: Market, detail: str | None
+) -> OddsSnapshotIn:
+    return OddsSnapshotIn(
+        event_id=event,
+        bookmaker="Pinnacle",
+        market=market,
+        selection=selection,
+        decimal_odds=odds,
+        captured_at=CAPTURED,
+        ingested_at=CAPTURED,
+        market_detail=detail,
+    )
+
+
+async def _seed_pinnacle_multimarket(factory, ref: str, home: str, away: str) -> None:  # type: ignore[no-untyped-def]
+    """One arcadia event carrying H2H + totals (Over/Under 2.5) + Asian-handicap
+    (home -1.5 / away +1.5), in OddsPortal's EXACT selection vocabulary, plus a
+    STRAY h2h selection that maps to neither side (must stay dropped)."""
+    snaps = [
+        # H2H (team-named outcomes)
+        _pin_snap(home, 2.10, ref),
+        _pin_snap("Draw", 3.40, ref),
+        _pin_snap(away, 3.60, ref),
+        _pin_snap("Unrelated FC", 5.00, ref),  # unknown h2h vocabulary -> must DROP
+        # totals — source-independent vocabulary (line on text + market_detail)
+        _pin_snap_mkt("Over 2.5", 1.95, ref, Market.TOTALS, "over_under_2_5"),
+        _pin_snap_mkt("Under 2.5", 1.90, ref, Market.TOTALS, "over_under_2_5"),
+        # Asian handicap — "{team} {signed}"; market_detail keyed on the HOME handicap
+        _pin_snap_mkt(f"{home} -1.5", 2.05, ref, Market.SPREADS, "asian_handicap_-1_5"),
+        _pin_snap_mkt(f"{away} +1.5", 1.80, ref, Market.SPREADS, "asian_handicap_-1_5"),
+    ]
+    teams = {ref: EventTeams(home=home, away=away, league="pin", starts_at=KO)}
+    await persist_odds_snapshots(factory, snaps, teams, "pinnacle_soccer", "pinnacle_soccer")
+
+
+async def test_resolver_passes_through_totals_and_ah_and_rekeys_h2h(factory) -> None:  # type: ignore[no-untyped-def]
+    await _seed_pinnacle_multimarket(factory, "pin-mu-che-multi", "Manchester United", "Chelsea")
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_soccer",
+            pick_external_ref="evt-pick",
+            home="Man Utd",  # OddsPortal-style abbreviation -> alias -> Manchester United
+            away="Chelsea",
+            kickoff=KO,
+        )
+    keyed = {(str(s.market), s.market_detail, s.selection): s for s in out}
+    # every row re-keyed to the pick event; bookmaker stays Pinnacle
+    assert all(s.event_id == "evt-pick" and s.bookmaker == "Pinnacle" for s in out)
+
+    # H2H: re-keyed to the PICK's selection vocabulary (home collapses to "Man Utd")
+    assert ("h2h", None, "Man Utd") in keyed
+    assert ("h2h", None, "Draw") in keyed
+    assert ("h2h", None, "Chelsea") in keyed
+    assert keyed[("h2h", None, "Man Utd")].decimal_odds == pytest.approx(2.10)
+    # unknown h2h selection still dropped (safe default preserved)
+    assert all(s.selection != "Unrelated FC" for s in out)
+
+    # TOTALS: source-independent vocabulary passes through with market+line+selection
+    assert ("totals", "over_under_2_5", "Over 2.5") in keyed
+    assert ("totals", "over_under_2_5", "Under 2.5") in keyed
+    assert keyed[("totals", "over_under_2_5", "Over 2.5")].decimal_odds == pytest.approx(1.95)
+    assert keyed[("totals", "over_under_2_5", "Under 2.5")].decimal_odds == pytest.approx(1.90)
+
+    # SPREADS/AH: team-name re-keyed to the pick vocabulary, signed handicap + line
+    # preserved; NO side swap (home -1.5 -> home, away +1.5 -> away).
+    assert ("spreads", "asian_handicap_-1_5", "Man Utd -1.5") in keyed
+    assert ("spreads", "asian_handicap_-1_5", "Chelsea +1.5") in keyed
+    assert keyed[("spreads", "asian_handicap_-1_5", "Man Utd -1.5")].decimal_odds == pytest.approx(
+        2.05
+    )
+    # and the AH home price never lands on the away selection (no wrong-side mapping)
+    assert ("spreads", "asian_handicap_-1_5", "Chelsea -1.5") not in keyed
+    assert ("spreads", "asian_handicap_-1_5", "Man Utd +1.5") not in keyed
+
+
+async def test_resolver_h2h_only_output_unchanged_byte_for_byte(factory) -> None:  # type: ignore[no-untyped-def]
+    """REGRESSION LOCK: an H2H-only arcadia event must re-key to EXACTLY the three
+    pick outcomes and nothing else — the per-market branch must not alter the H2H
+    path (CLV-shared; byte-for-byte identical to the pre-fix behavior)."""
+    await _seed_pinnacle_event(factory, "pin-h2h-lock", "Manchester United", "Chelsea")
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_soccer",
+            pick_external_ref="evt-pick",
+            home="Man Utd",
+            away="Chelsea",
+            kickoff=KO,
+        )
+    by_sel = {s.selection: s for s in out}
+    assert set(by_sel) == {"Man Utd", "Draw", "Chelsea"}
+    assert all(s.market == Market.H2H and s.market_detail is None for s in out)
+    assert by_sel["Man Utd"].decimal_odds == pytest.approx(2.10)
+    assert by_sel["Draw"].decimal_odds == pytest.approx(3.40)
+    assert by_sel["Chelsea"].decimal_odds == pytest.approx(3.60)
+
+
 # A league key unique to this test so the shadow runner's outcomes can be
 # isolated from any committed warehouse picks (the DB is real; only THIS
 # transaction's writes roll back).

@@ -1745,15 +1745,43 @@ async def resolve_pinnacle_close_snaps(
     # ordered events, but defend the re-key directly for the unordered path too.)
     if normalize_name(pin_home) == normalize_name(pin_away):
         return []
-    # Re-key arcadia selections (its own team names / "Draw") to the pick's
-    # selection vocabulary BY OUTCOME so the close groups with the pick's market.
+    # Re-key arcadia selections to the pick's selection vocabulary PER MARKET, so
+    # the close groups with the pick's market/line. The selection vocabulary is
+    # team-named only for H2H (1X2/moneyline); for the source-keyed markets
+    # (totals, Asian handicap) the selection is ALREADY in the pick's vocabulary,
+    # so re-keying those through the team-name map would silently DROP every
+    # Over/Under and handicap close (a cardinal coverage bug — totals/spreads picks
+    # could never get a Pinnacle anchor). market + market_detail (the line) are
+    # preserved by model_copy; only event_id and the team-named part of selection
+    # are re-keyed.
     selection_map = {normalize_name(pin_home): home, normalize_name(pin_away): away}
     out: list[OddsSnapshotIn] = []
     for snap in snaps:
-        if snap.selection == "Draw":
-            mapped_selection: str | None = "Draw"
+        mapped_selection: str | None
+        if snap.market == Market.H2H:
+            # Team-named 1X2/moneyline outcomes — UNCHANGED re-key. "Draw" is
+            # source-independent; an unmappable team name is dropped, never guessed.
+            if snap.selection == "Draw":
+                mapped_selection = "Draw"
+            else:
+                mapped_selection = selection_map.get(normalize_name(snap.selection))
+        elif snap.market == Market.TOTALS:
+            # Over/Under vocabulary is SOURCE-INDEPENDENT (the line rides both the
+            # selection text "Over 2.5" and market_detail "over_under_2_5"), so it is
+            # already in the pick's vocabulary -> identity (preserve selection + line).
+            mapped_selection = snap.selection
+        elif snap.market == Market.SPREADS:
+            # Asian handicap selection is "{team} {signed}". Re-key ONLY the team-name
+            # prefix via the SAME outcome map (home->home, away->away; NEVER swapped),
+            # preserving the signed handicap suffix and the line (market_detail). A
+            # prefix matching neither side is dropped (safe) — never mis-attached.
+            team_part, sep, suffix = snap.selection.rpartition(" ")
+            mapped_team = selection_map.get(normalize_name(team_part)) if sep else None
+            mapped_selection = f"{mapped_team} {suffix}" if mapped_team is not None else None
         else:
-            mapped_selection = selection_map.get(normalize_name(snap.selection))
+            # Any other market's selection vocabulary is not provably source-
+            # independent here -> drop (the safe default; never guess a mapping).
+            mapped_selection = None
         if mapped_selection is None:
             continue  # a selection we cannot confidently map -> drop (safe)
         out.append(
