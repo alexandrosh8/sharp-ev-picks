@@ -40,17 +40,23 @@ directory of ``*.txt`` files. The on-disk parse mirrors
 
 from __future__ import annotations
 
+import csv
+import gzip
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 
 logger = logging.getLogger(__name__)
 
 N_HOURS = 72
 N_OUTCOMES = 3  # HOME, DRAW, AWAY
 N_COLS = N_HOURS * N_OUTCOMES  # 216
+N_BOOKS = 32  # fixed bookmaker count (see BOOKIES); also the CSV b1..b32 width
 
 # Bookmaker row order (index -> name), verbatim from the upstream
 # ``$bookie_name_to_index`` map in generate_odds_series_csv.php. Pinnacle is
@@ -120,6 +126,10 @@ class SeriesMatch:
     close_best: Triple
     n_books_open: int
     n_books_close: int
+    # Worldwide league label (e.g. "Chile: Primera Division"). Only the Kaggle
+    # CSV path carries it (joined from the *_matches metadata); the per-game
+    # .txt path has no league in the filename, so it stays None there.
+    league: str | None = None
 
 
 def parse_match_filename(name: str) -> tuple[int, datetime, int, int] | None:
@@ -212,17 +222,19 @@ def _result(home_score: int, away_score: int) -> str:
     return "D"
 
 
-def parse_series_match(filename: str, text: str) -> SeriesMatch | None:
-    """Parse one per-game file into a SeriesMatch, or None if unusable.
+def build_series_match(
+    match_id: int,
+    kickoff_utc: datetime,
+    home_score: int,
+    away_score: int,
+    matrix: list[list[float | None]],
+    league: str | None = None,
+) -> SeriesMatch | None:
+    """Derive a SeriesMatch from a parsed 32x216 odds matrix (shared by the
+    per-game .txt and the Kaggle-CSV paths so they produce IDENTICAL shapes).
 
-    Skips: unparseable filename; a matrix with no book quoting a coherent 1x2
-    triple at the open OR at the close (cannot price both sides of CLV)."""
-    parsed = parse_match_filename(filename)
-    if parsed is None:
-        logger.warning("skip btb file with bad name: %s", filename)
-        return None
-    match_id, kickoff, home_score, away_score = parsed
-    matrix = parse_odds_matrix(text)
+    Returns None when no book quoted a coherent 1x2 triple at the open OR at
+    the close (cannot price both sides of CLV)."""
     opens: list[Triple] = []
     closes: list[Triple] = []
     for row in matrix:
@@ -238,7 +250,7 @@ def parse_series_match(filename: str, text: str) -> SeriesMatch | None:
     close_consensus, close_best = _aggregate(closes)
     return SeriesMatch(
         match_id=match_id,
-        kickoff_utc=kickoff,
+        kickoff_utc=kickoff_utc,
         home_score=home_score,
         away_score=away_score,
         result=_result(home_score, away_score),
@@ -248,7 +260,22 @@ def parse_series_match(filename: str, text: str) -> SeriesMatch | None:
         close_best=close_best,
         n_books_open=len(opens),
         n_books_close=len(closes),
+        league=league,
     )
+
+
+def parse_series_match(filename: str, text: str) -> SeriesMatch | None:
+    """Parse one per-game file into a SeriesMatch, or None if unusable.
+
+    Skips: unparseable filename; a matrix with no book quoting a coherent 1x2
+    triple at the open OR at the close (cannot price both sides of CLV)."""
+    parsed = parse_match_filename(filename)
+    if parsed is None:
+        logger.warning("skip btb file with bad name: %s", filename)
+        return None
+    match_id, kickoff, home_score, away_score = parsed
+    matrix = parse_odds_matrix(text)
+    return build_series_match(match_id, kickoff, home_score, away_score, matrix)
 
 
 def to_fd_row(m: SeriesMatch) -> dict[str, str]:
@@ -283,18 +310,211 @@ def to_fd_row(m: SeriesMatch) -> dict[str, str]:
         # context (ignored by bets_for, useful for splitting/inspection)
         "Date": m.kickoff_utc.date().isoformat(),
         "BtbMatchId": str(m.match_id),
+        "BtbLeague": m.league or "",
     }
 
 
-def load_series_dir(path: Path) -> list[SeriesMatch]:
+def load_series_dir(path: Path | str) -> list[SeriesMatch]:
     """Read-only: parse every ``match_*.txt`` file in ``path`` into
     SeriesMatch objects, sorted by (kickoff, id) for determinism. Unparseable
-    files are skipped with a log line (no fuzzy recovery)."""
+    files are skipped with a log line (no fuzzy recovery).
+
+    If the directory holds no per-game ``match_*.txt`` files but DOES hold the
+    Kaggle wide CSVs (``odds_series*.csv[.gz]``), it transparently falls back
+    to the CSV path so pointing this loader at ``data/beatthebookie/`` works
+    for either on-disk layout."""
+    path = Path(path)
+    txt_files = sorted(path.glob("match_*.txt"))
+    if not txt_files:
+        csv_matches = [
+            m for c in _csv_odds_files(path) for m in load_series_csv(c, _derive_matches_csv(c))
+        ]
+        if csv_matches:
+            csv_matches.sort(key=lambda m: (m.kickoff_utc, m.match_id))
+            return csv_matches
     matches: list[SeriesMatch] = []
-    for f in sorted(path.glob("match_*.txt")):
+    for f in txt_files:
         text = f.read_text(encoding="utf-8", errors="replace")
         parsed = parse_series_match(f.name, text)
         if parsed is not None:
             matches.append(parsed)
     matches.sort(key=lambda m: (m.kickoff_utc, m.match_id))
     return matches
+
+
+def _csv_odds_files(path: Path) -> list[Path]:
+    """Wide odds CSVs in ``path`` (``odds_series*.csv[.gz]``), excluding the
+    ``*_matches`` metadata siblings. Sorted for deterministic load order."""
+    found: list[Path] = []
+    for pattern in ("odds_series*.csv", "odds_series*.csv.gz"):
+        for f in path.glob(pattern):
+            if "_matches" not in f.name:
+                found.append(f)
+    return sorted(found)
+
+
+# ---------------------------------------------------------------------------
+# Kaggle CSV path: the same odds_series data shipped as two gzipped CSVs
+# instead of one .txt per match. The wide odds CSV flattens the 32x216 matrix
+# into ``{home,draw,away}_b{1..32}_{0..71}`` columns. The layout is BOOK-MAJOR:
+# each book b occupies a contiguous 216-col block laid out exactly like a
+# matrix row ([72 HOME | 72 DRAW | 72 AWAY]), so ``draw_b1_0`` sits at offset
+# 72 (NOT after all 32 home columns). A sibling ``*_matches`` CSV carries the
+# league + result + kick-off, joined by ``match_id``. Same SeriesMatch shape.
+# ---------------------------------------------------------------------------
+
+_CSV_DATA_START = 5  # match_id, match_date, match_time, score_home, score_away
+_CSV_N_COLS = _CSV_DATA_START + N_BOOKS * N_COLS  # 5 + 32*216 = 6917
+
+
+@contextmanager
+def _open_text(path: Path) -> Iterator[TextIO]:
+    """Open a UTF-8 text stream, gunzipping transparently for ``*.gz``."""
+    if path.suffix == ".gz":
+        fh: TextIO = gzip.open(path, mode="rt", encoding="utf-8", errors="replace")  # noqa: SIM115 (closed in finally)
+    else:
+        fh = path.open(encoding="utf-8", errors="replace")  # noqa: SIM115 (closed in finally)
+    try:
+        yield fh
+    finally:
+        fh.close()
+
+
+def parse_score(score: str) -> tuple[int, int] | None:
+    """Metadata ``score`` cell ``"H:A"`` -> (home, away), or None if malformed."""
+    parts = score.strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def parse_match_datetime(value: str) -> datetime | None:
+    """Metadata ``match_datetime`` ``"YYYY-MM-DD HH:MM:SS"`` -> tz-aware UTC.
+
+    The upstream generator fixes the timezone to UTC, so we attach UTC rather
+    than guess a local zone (naive datetimes are a bug in this stack)."""
+    try:
+        dt = datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _MatchMeta:
+    league: str
+    home_score: int
+    away_score: int
+    kickoff_utc: datetime
+
+
+def _load_matches_meta(matches_csv: Path) -> dict[int, _MatchMeta]:
+    """Read the ``*_matches`` metadata CSV into ``{match_id: _MatchMeta}``.
+
+    Header has a space after each comma; ``skipinitialspace`` strips it from
+    both header names and values. Rows missing match_id/score/datetime are
+    skipped (quarantined) with a log line — no fuzzy recovery."""
+    meta: dict[int, _MatchMeta] = {}
+    with _open_text(matches_csv) as fh:
+        reader = csv.DictReader(fh, skipinitialspace=True)
+        for raw in reader:
+            mid_s = (raw.get("match_id") or "").strip()
+            try:
+                match_id = int(mid_s)
+            except ValueError:
+                continue
+            scores = parse_score(raw.get("score") or "")
+            kickoff = parse_match_datetime(raw.get("match_datetime") or "")
+            if scores is None or kickoff is None:
+                logger.warning("skip btb meta %s: bad score/datetime", mid_s)
+                continue
+            meta[match_id] = _MatchMeta(
+                league=(raw.get("league") or "").strip(),
+                home_score=scores[0],
+                away_score=scores[1],
+                kickoff_utc=kickoff,
+            )
+    return meta
+
+
+def _matrix_from_csv_values(values: list[str]) -> list[list[float | None]]:
+    """Reshape one wide-CSV data row's odds cells into the 32x216 matrix the
+    matrix parser produces. The CSV is BOOK-MAJOR: book ``b`` occupies the
+    216-col slice ``[5 + b*216, 5 + (b+1)*216)`` already laid out exactly as a
+    matrix row ([72 HOME | 72 DRAW | 72 AWAY]), so each row is a direct slice."""
+    matrix: list[list[float | None]] = []
+    for b in range(N_BOOKS):
+        base = _CSV_DATA_START + b * N_COLS
+        cells = values[base : base + N_COLS]
+        row: list[float | None] = [_cell(c) for c in cells]
+        if len(row) < N_COLS:  # tolerate a short/truncated final row
+            row.extend([None] * (N_COLS - len(row)))
+        matrix.append(row)
+    return matrix
+
+
+def load_series_csv(odds_csv: Path, matches_csv: Path) -> list[SeriesMatch]:
+    """Read-only: join the wide odds CSV to its ``*_matches`` metadata CSV and
+    produce SeriesMatch objects (same shape/aggregation as ``load_series_dir``).
+
+    Result, kick-off, and league come from the metadata join (authoritative);
+    odds rows whose ``match_id`` is absent from the metadata are quarantined
+    with a log line (no fuzzy auto-merge). Sorted by (kickoff, id)."""
+    meta = _load_matches_meta(matches_csv)
+    matches: list[SeriesMatch] = []
+    skipped_unjoined = 0
+    with _open_text(odds_csv) as fh:
+        reader = csv.reader(fh)
+        next(reader, None)  # header
+        for values in reader:
+            if not values:
+                continue
+            try:
+                match_id = int(values[0].strip())
+            except (IndexError, ValueError):
+                continue
+            m = meta.get(match_id)
+            if m is None:
+                skipped_unjoined += 1
+                continue
+            matrix = _matrix_from_csv_values(values)
+            sm = build_series_match(
+                match_id,
+                m.kickoff_utc,
+                m.home_score,
+                m.away_score,
+                matrix,
+                league=m.league,
+            )
+            if sm is not None:
+                matches.append(sm)
+    if skipped_unjoined:
+        logger.warning(
+            "btb csv %s: %d odds rows had no metadata join (quarantined)",
+            odds_csv.name,
+            skipped_unjoined,
+        )
+    matches.sort(key=lambda mm: (mm.kickoff_utc, mm.match_id))
+    return matches
+
+
+def _derive_matches_csv(odds_csv: Path) -> Path:
+    """``odds_series.csv[.gz]`` -> sibling ``odds_series_matches.csv[.gz]``."""
+    name = odds_csv.name
+    for suffix in (".csv.gz", ".csv"):
+        if name.endswith(suffix):
+            stem = name[: -len(suffix)]
+            return odds_csv.with_name(f"{stem}_matches{suffix}")
+    return odds_csv.with_name(f"{odds_csv.stem}_matches{odds_csv.suffix}")
+
+
+def load_series_any(path: Path) -> list[SeriesMatch]:
+    """Auto-detect the source layout: a directory -> the per-game ``*.txt``
+    matrix parser; a ``*.csv`` / ``*.csv.gz`` file -> the Kaggle CSV path
+    (the ``*_matches`` metadata sibling is derived by filename convention)."""
+    if path.is_dir():
+        return load_series_dir(path)
+    return load_series_csv(path, _derive_matches_csv(path))
