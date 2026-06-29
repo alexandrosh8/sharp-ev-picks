@@ -86,6 +86,16 @@ _MONEYLINE_KEY = "s;0;m"
 _TOTAL_PREFIX = "s;0;ou;"
 _SPREAD_PREFIX = "s;0;s;"
 
+# Sports whose totals/spreads must use the OddsPortal SOFT source's "_games"
+# market_detail namespace so a Pinnacle snapshot GROUPS WITH — and anchors —
+# the soft pick. Basketball's soft loader (app/ingestion/oddsportal.py +
+# oddsportal_json.py) emits over_under_games_<line> / asian_handicap_games_<line>;
+# emitting the BARE over_under_/asian_handicap_ namespace here grouped the sharp
+# snapshot APART from the basketball pick (same market+selection, different
+# market_detail), so it never anchored (~16 picks). Soccer's soft source emits
+# the BARE namespace, so soccer must stay bare — adding it here would un-anchor it.
+_GAMES_DETAIL_SPORTS: frozenset[str] = frozenset({"basketball"})
+
 
 class PinnacleArcadiaError(Exception):
     """Non-retryable fetch failure. Message never contains the URL or key."""
@@ -295,6 +305,17 @@ def _signed_token(line: float) -> str:
     return f"{'-' if line < 0 else '+'}{_line_token(line)}"
 
 
+def _games_line_token(line: float) -> str:
+    """OddsPortal SOFT "_games" line token — mirrors the JSON feed's market_detail
+    EXACTLY: ``f"{line:g}"`` with '.'->'_', a leading '-' for negatives and NO '+'
+    for positives (220.5->'220_5', -7.5->'-7_5', 7.5->'7_5'). Distinct from
+    ``_signed_token`` (which adds a '+'): the soft feed key is ``(-?\\d+...)`` so
+    a positive line carries no sign. Used so Arcadia basketball totals/spreads
+    share the soft pick's (market, market_detail) devig group; the signed line is
+    preserved verbatim (never abs / never flipped)."""
+    return f"{line:g}".replace(".", "_")
+
+
 def _fmt_signed(line: float) -> str:
     """Human selection suffix for a handicap: -1.5->'-1.5', 1.5->'+1.5', 0->'0'."""
     return "0" if line == 0 else f"{line:+g}"
@@ -387,14 +408,20 @@ def extract_total_quotes(
     markets: Sequence[Mapping[str, Any]],
     *,
     now: datetime,
+    sport: str = "",
 ) -> list[MarketQuote]:
     """Period-0 over/under (``s;0;ou;<line>``) MAIN-line quotes -> Market.TOTALS.
 
     Alternates (``isAlternate``) are excluded — the main line is the sharp
     anchor; alternates carry wider margin and would pollute the devig. The line
-    rides BOTH the selection text ("Over 2.5") and market_detail
-    ("over_under_2_5") so distinct lines never collapse into one devig group.
+    rides BOTH the selection text ("Over 2.5") and market_detail so distinct
+    lines never collapse into one devig group.
+
+    ``sport`` selects the market_detail namespace so the snapshot groups with the
+    matching soft pick: basketball uses the soft "_games" namespace
+    ("over_under_games_220_5"); soccer/other keep the bare "over_under_2_5".
     """
+    games_ns = sport in _GAMES_DETAIL_SPORTS
     quotes: list[MarketQuote] = []
     for market in markets:
         if not str(market.get("key") or "").startswith(_TOTAL_PREFIX):
@@ -420,6 +447,11 @@ def extract_total_quotes(
                 continue
             line = float(points)
             label = "Over" if designation == "over" else "Under"
+            market_detail = (
+                f"over_under_games_{_games_line_token(line)}"
+                if games_ns
+                else f"over_under_{_line_token(line)}"
+            )
             snapshots.append(
                 OddsSnapshotIn(
                     event_id=event_id,
@@ -429,7 +461,7 @@ def extract_total_quotes(
                     decimal_odds=decimal_odds,
                     captured_at=now,
                     ingested_at=now,
-                    market_detail=f"over_under_{_line_token(line)}",
+                    market_detail=market_detail,
                 )
             )
         quote = _finalize_quote(market, event_id, str(market.get("key")), snapshots)
@@ -443,11 +475,18 @@ def extract_spread_quotes(
     markets: Sequence[Mapping[str, Any]],
     *,
     now: datetime,
+    sport: str = "",
 ) -> list[MarketQuote]:
     """Period-0 spread / Asian-handicap (``s;0;s;<line>``) MAIN-line quotes ->
     Market.SPREADS. Alternates excluded. market_detail is keyed on the HOME
     handicap (the OddsPortal AH convention) so home -1.5 / away +1.5 group as
-    one line; the per-side signed handicap rides the selection text."""
+    one line; the per-side signed handicap rides the selection text.
+
+    ``sport`` selects the market_detail namespace so the snapshot groups with the
+    matching soft pick: basketball uses the soft "_games" namespace
+    ("asian_handicap_games_-7_5", positive lines carry NO '+'); soccer/other keep
+    the bare "asian_handicap_-1_5" (positive lines carry a '+')."""
+    games_ns = sport in _GAMES_DETAIL_SPORTS
     quotes: list[MarketQuote] = []
     for market in markets:
         if not str(market.get("key") or "").startswith(_SPREAD_PREFIX):
@@ -471,7 +510,11 @@ def extract_spread_quotes(
         )
         if home_line is None:
             continue  # cannot key the line without the home handicap
-        market_detail = f"asian_handicap_{_signed_token(home_line)}"
+        market_detail = (
+            f"asian_handicap_games_{_games_line_token(home_line)}"
+            if games_ns
+            else f"asian_handicap_{_signed_token(home_line)}"
+        )
         snapshots: list[OddsSnapshotIn] = []
         for price in prices:
             designation = price.get("designation")
@@ -508,14 +551,20 @@ def extract_market_quotes(
     markets: Sequence[Mapping[str, Any]],
     *,
     now: datetime,
+    sport: str = "",
 ) -> list[MarketQuote]:
     """All capturable period-0 sharp markets: moneyline + MAIN-line total +
     MAIN-line spread (Asian handicap). The sharp closing anchor across H2H /
-    TOTALS / SPREADS for the archive."""
+    TOTALS / SPREADS for the archive.
+
+    ``sport`` threads to the totals/spread extractors so their market_detail
+    namespace matches the matching soft pick (basketball -> soft "_games"
+    namespace; soccer/other -> the bare namespace, unchanged). Moneyline (H2H)
+    carries no market_detail, so it is namespace-agnostic."""
     return [
         *extract_moneyline_quotes(matchups, markets, now=now),
-        *extract_total_quotes(matchups, markets, now=now),
-        *extract_spread_quotes(matchups, markets, now=now),
+        *extract_total_quotes(matchups, markets, now=now, sport=sport),
+        *extract_spread_quotes(matchups, markets, now=now, sport=sport),
     ]
 
 
@@ -834,7 +883,7 @@ class PinnacleArcadiaCapture:
                 continue
             self._fetch_warned.discard(sport)  # fetch recovered -> allow re-warn later
             matchups = parse_matchups(raw_matchups, now=now, horizon_end=horizon_end)
-            quotes = extract_market_quotes(matchups, raw_markets, now=now)
+            quotes = extract_market_quotes(matchups, raw_markets, now=now, sport=sport)
             fresh, teams = self._select_fresh(quotes, matchups, sport)
             if not fresh or self._session_factory is None:
                 written[sport] = 0

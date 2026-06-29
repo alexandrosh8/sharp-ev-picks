@@ -347,6 +347,98 @@ def test_extract_spread_quotes_signed_handicap_shared_detail() -> None:
     assert home.decimal_odds == pytest.approx(american_to_decimal(-115))
 
 
+def _basketball_matchup(mid: int = 900) -> dict:
+    return {
+        "id": mid,
+        "type": "matchup",
+        "parentId": None,
+        "participants": [
+            {"alignment": "home", "name": "Lakers"},
+            {"alignment": "away", "name": "Celtics"},
+        ],
+        "startTime": "2026-06-17T18:00:00Z",
+        "league": {"name": "NBA"},
+    }
+
+
+def test_extract_total_quotes_basketball_uses_games_namespace() -> None:
+    # BUG FIX: basketball totals must share the OddsPortal SOFT source's "_games"
+    # market_detail (over_under_games_<line>) so the sharp Pinnacle snapshot
+    # GROUPS WITH — and anchors — the basketball soft pick. The bare
+    # over_under_<line> namespace grouped them apart -> no Pinnacle anchor.
+    matchups = parse_matchups([_basketball_matchup()], now=NOW, horizon_end=HORIZON_END)
+    quotes = extract_total_quotes(
+        matchups, [_total_market(900, 220.5, over=-105, under=-115)], now=NOW, sport="basketball"
+    )
+    assert len(quotes) == 1
+    by_sel = {s.selection: s for s in quotes[0].snapshots}
+    # Side preserved (Over stays Over, Under stays Under); line preserved.
+    assert set(by_sel) == {"Over 220.5", "Under 220.5"}
+    over = by_sel["Over 220.5"]
+    assert over.market == Market.TOTALS
+    # EXACT soft vocabulary: over_under_games_<token>, token = "220_5".
+    assert over.market_detail == "over_under_games_220_5"
+    assert by_sel["Under 220.5"].market_detail == "over_under_games_220_5"
+    assert over.decimal_odds == pytest.approx(american_to_decimal(-105))
+
+
+def test_extract_spread_quotes_basketball_uses_games_namespace() -> None:
+    matchups = parse_matchups([_basketball_matchup()], now=NOW, horizon_end=HORIZON_END)
+    quotes = extract_spread_quotes(
+        matchups, [_spread_market(900, -7.5, home=-115, away=-105)], now=NOW, sport="basketball"
+    )
+    assert len(quotes) == 1
+    by_sel = {s.selection: s for s in quotes[0].snapshots}
+    # Side preserved (home keeps its negative handicap, away its mirror positive).
+    assert set(by_sel) == {"Lakers -7.5", "Celtics +7.5"}
+    home = by_sel["Lakers -7.5"]
+    assert home.market == Market.SPREADS
+    # EXACT soft vocabulary: asian_handicap_games_<signed-token>, "-" kept, no "+".
+    assert home.market_detail == "asian_handicap_games_-7_5"
+    assert by_sel["Celtics +7.5"].market_detail == "asian_handicap_games_-7_5"
+    assert home.decimal_odds == pytest.approx(american_to_decimal(-115))
+
+
+def test_extract_spread_quotes_basketball_positive_home_line_has_no_plus() -> None:
+    # CRITICAL: the soft "_games" token signs negatives with "-" but positives
+    # carry NO "+" (the feed key is `(-?\d+...)`). A home UNDERDOG line (+7.5)
+    # must therefore key as asian_handicap_games_7_5 — NOT _+7_5 — or it groups
+    # apart from the soft pick and never anchors. (Arcadia's bare-namespace
+    # _signed_token adds a "+"; basketball must not.)
+    matchups = parse_matchups([_basketball_matchup()], now=NOW, horizon_end=HORIZON_END)
+    quotes = extract_spread_quotes(
+        matchups, [_spread_market(900, 7.5)], now=NOW, sport="basketball"
+    )
+    by_sel = {s.selection: s for s in quotes[0].snapshots}
+    assert set(by_sel) == {"Lakers +7.5", "Celtics -7.5"}
+    assert by_sel["Lakers +7.5"].market_detail == "asian_handicap_games_7_5"
+    assert by_sel["Celtics -7.5"].market_detail == "asian_handicap_games_7_5"
+
+
+def test_extract_soccer_detail_unchanged_with_explicit_sport() -> None:
+    # SOCCER must stay on the BARE namespace exactly as shipped — its soft source
+    # emits over_under_<line> / asian_handicap_<signed+plus> — even when sport is
+    # passed explicitly. (Regression guard against the basketball fix leaking.)
+    matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
+    totals = extract_total_quotes(matchups, [_total_market(555, 2.5)], now=NOW, sport="soccer")
+    assert all(s.market_detail == "over_under_2_5" for s in totals[0].snapshots)
+    spreads = extract_spread_quotes(matchups, [_spread_market(555, -1.5)], now=NOW, sport="soccer")
+    assert all(s.market_detail == "asian_handicap_-1_5" for s in spreads[0].snapshots)
+    # Positive soccer home line keeps the bare-namespace "+" (_signed_token).
+    pos = extract_spread_quotes(matchups, [_spread_market(555, 0.5)], now=NOW, sport="soccer")
+    assert all(s.market_detail == "asian_handicap_+0_5" for s in pos[0].snapshots)
+
+
+def test_extract_market_quotes_basketball_threads_games_namespace() -> None:
+    # The public combiner must thread the sport so a basketball capture cycle
+    # gets the "_games" details end-to-end.
+    matchups = parse_matchups([_basketball_matchup()], now=NOW, horizon_end=HORIZON_END)
+    markets = [_total_market(900, 220.5), _spread_market(900, -7.5)]
+    quotes = extract_market_quotes(matchups, markets, now=NOW, sport="basketball")
+    details = {s.market_detail for q in quotes for s in q.snapshots}
+    assert details == {"over_under_games_220_5", "asian_handicap_games_-7_5"}
+
+
 def test_extract_skips_alternate_and_period_total_spread() -> None:
     matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
     markets = [
