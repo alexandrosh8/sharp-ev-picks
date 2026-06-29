@@ -32,7 +32,7 @@ from pathlib import Path
 import httpx
 
 from app.backtesting.clv import clv_log
-from app.ingestion.beatthebookie_series import load_series_dir, to_fd_row
+from app.ingestion.beatthebookie_series import load_series_any, to_fd_row
 from app.ingestion.betfair_bsp import attach_betfair_close, load_betfair_dir
 from app.ingestion.football_data import fetch_season_csv
 from app.ingestion.oddspapi import OddsPapiGame, load_oddspapi_dir
@@ -351,23 +351,25 @@ async def run_beatthebookie(args: argparse.Namespace) -> None:
     Train/test split is by kick-off DATE (odds_series ends, odds_series_b
     begins, ~2016-03-01) — there are no football-data season codes here.
     """
-    dirs = [Path(d.strip()) for d in args.btb_dir.split(",") if d.strip()]
-    missing = [str(d) for d in dirs if not d.is_dir()]
+    paths = [Path(d.strip()) for d in args.btb_dir.split(",") if d.strip()]
+    missing = [str(p) for p in paths if not p.exists()]
     if missing:
-        print("BeatTheBookie data not found. Operator must place the unzipped")
-        print("odds_series / odds_series_b per-game .txt files at, e.g.:")
-        for d in dirs:
-            print(f"    {d}")
+        print("BeatTheBookie data not found. Operator must place either the")
+        print("per-game .txt match dirs OR the Kaggle wide CSVs, e.g.:")
+        for p in paths:
+            print(f"    {p}")
         print("Download (Dropbox links in the upstream README): odds_series.zip,")
         print("odds_series_b.zip from github.com/Lisandro79/BeatTheBookie")
         print(f"(missing: {', '.join(missing)}). Read-only; this script places no bets.")
         return
-    matches = [m for d in dirs for m in load_series_dir(d)]
+    # Auto-detect per entry: a directory -> per-game .txt parser; a *.csv[.gz]
+    # file -> the Kaggle wide-CSV path (its *_matches sibling is derived).
+    matches = [m for p in paths for m in load_series_any(p)]
     split = date.fromisoformat(args.btb_split_date)
     markets = ("1x2",)  # this source carries 1x2 only (no OU/AH series)
     min_odds, max_odds = args.min_odds, args.max_odds
 
-    print(f"\nBEAT-THE-BOOKIE BACKTEST — {len(matches)} matches from {len(dirs)} dir(s)")
+    print(f"\nBEAT-THE-BOOKIE BACKTEST — {len(matches)} matches from {len(paths)} source(s)")
     print("SOFT/CONSENSUS data: anchor = consensus(mean of ~32 books), bet = best(Max).")
     print("CLV is vs the CONSENSUS close, NOT a sharp close (breadth, not proof).")
     print(f"market 1x2 only | min_odds {min_odds} | split by kickoff date {split.isoformat()}\n")
@@ -842,8 +844,11 @@ async def main() -> None:
     )
     p.add_argument(
         "--btb-dir",
-        default="data/beatthebookie/odds_series,data/beatthebookie/odds_series_b",
-        help="comma-separated dirs of operator-placed BeatTheBookie match_*.txt files",
+        default="data/beatthebookie/odds_series.csv.gz,data/beatthebookie/odds_series_b.csv.gz",
+        help=(
+            "comma-separated BeatTheBookie sources: either per-game match_*.txt "
+            "dirs or the Kaggle wide CSVs (*.csv/.csv.gz; *_matches sibling auto-joined)"
+        ),
     )
     p.add_argument(
         "--btb-split-date",

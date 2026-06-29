@@ -9,6 +9,7 @@ bad-row skipping.
 
 from __future__ import annotations
 
+import gzip
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,11 +17,17 @@ import pytest
 
 from app.ingestion.beatthebookie_series import (
     BOOKIES,
+    N_BOOKS,
     N_COLS,
+    N_HOURS,
     SeriesMatch,
+    load_series_any,
+    load_series_csv,
     load_series_dir,
+    parse_match_datetime,
     parse_match_filename,
     parse_odds_matrix,
+    parse_score,
     parse_series_match,
     to_fd_row,
 )
@@ -169,3 +176,167 @@ def test_load_series_dir(tmp_path: Path) -> None:
     assert {mm.match_id for mm in matches} == {879672, 2}
     # deterministic order: by kickoff then id
     assert [mm.match_id for mm in matches] == [879672, 2]
+
+
+# ---------------------------------------------------------------------------
+# Kaggle CSV format: wide odds CSV + match-metadata CSV joined by match_id.
+# The flattened matrix is {home,draw,away}_b{1..32}_{0..71}, BOOK-MAJOR: each
+# book occupies a contiguous 216-col block laid out [72 HOME | 72 DRAW | 72
+# AWAY] (so draw_b1_0 sits at offset 72, NOT after all 32 home columns), then
+# the next book. nan = missing. Mirrors the real Kaggle files.
+# ---------------------------------------------------------------------------
+
+_N_CSV_COLS = 5 + N_BOOKS * N_COLS  # 6917
+
+
+def _csv_idx(outcome: str, book0: int, t: int) -> int:
+    """Index of cell {outcome}_b{book0+1}_{t} in a wide-CSV data row."""
+    within = {"home": 0, "draw": N_HOURS, "away": 2 * N_HOURS}[outcome]
+    return 5 + book0 * N_COLS + within + t
+
+
+def _csv_header() -> list[str]:
+    cols = ["match_id", "match_date", "match_time", "score_home", "score_away"]
+    for b in range(1, N_BOOKS + 1):
+        for outcome in ("home", "draw", "away"):
+            for t in range(N_HOURS):
+                cols.append(f"{outcome}_b{b}_{t}")
+    return cols
+
+
+def _sample_csv_row(match_id: int = 879672) -> list[str]:
+    """Mirror _sample_matrix() exactly: book0 opens t10/closes t71, book1
+    opens t5/closes t70. Same prices -> same consensus/best as the matrix
+    sample test, so the two parsers are proven to agree."""
+    cells = ["nan"] * _N_CSV_COLS
+    cells[0] = str(match_id)
+    cells[1] = "2015-09-12"
+    cells[2] = "14:30:00"
+    cells[3] = "9"  # ignored: result comes from the metadata join
+    cells[4] = "9"
+
+    def setc(outcome: str, book0: int, t: int, v: float) -> None:
+        cells[_csv_idx(outcome, book0, t)] = f"{v:.4f}"
+
+    # book 0
+    setc("home", 0, 10, 2.00)
+    setc("draw", 0, 10, 3.30)
+    setc("away", 0, 10, 3.50)
+    setc("home", 0, 71, 2.10)
+    setc("draw", 0, 71, 3.40)
+    setc("away", 0, 71, 3.60)
+    # book 1
+    setc("home", 1, 5, 2.20)
+    setc("draw", 1, 5, 3.10)
+    setc("away", 1, 5, 3.40)
+    setc("home", 1, 70, 2.05)
+    setc("draw", 1, 70, 3.20)
+    setc("away", 1, 70, 3.70)
+    return cells
+
+
+_META_HEADER = "match_id, league, home_team, away_team, score, detailed_score, match_datetime"
+
+
+def _write_csv(path: Path, rows: list[list[str]], gz: bool = False) -> None:
+    body = ",".join(_csv_header()) + "\n"
+    body += "\n".join(",".join(r) for r in rows) + "\n"
+    if gz:
+        path.write_bytes(gzip.compress(body.encode("utf-8")))
+    else:
+        path.write_text(body, encoding="utf-8")
+
+
+def _write_meta(path: Path, lines: list[str], gz: bool = False) -> None:
+    body = _META_HEADER + "\n" + "\n".join(lines) + "\n"
+    if gz:
+        path.write_bytes(gzip.compress(body.encode("utf-8")))
+    else:
+        path.write_text(body, encoding="utf-8")
+
+
+def test_parse_score() -> None:
+    assert parse_score("3:1") == (3, 1)
+    assert parse_score(" 0:0 ") == (0, 0)
+    assert parse_score("bad") is None
+    assert parse_score("3:1:2") is None
+
+
+def test_parse_match_datetime_is_utc_aware() -> None:
+    dt = parse_match_datetime("2015-09-12 14:30:00")
+    assert dt == datetime(2015, 9, 12, 14, 30, 0, tzinfo=UTC)
+    assert dt is not None and dt.tzinfo is not None  # never naive
+    assert parse_match_datetime("nonsense") is None
+
+
+def test_load_series_csv_matches_matrix_parser(tmp_path: Path) -> None:
+    odds = tmp_path / "odds_series.csv"
+    meta = tmp_path / "odds_series_matches.csv"
+    _write_csv(odds, [_sample_csv_row(879672)])
+    # result + kickoff + league come from the metadata join, NOT the odds row
+    _write_meta(meta, ["879672, Test: League,Home FC,Away FC,2:1,(1:0; 2:1),2015-09-12 14:30:00"])
+
+    matches = load_series_csv(odds, meta)
+    assert len(matches) == 1
+    m = matches[0]
+    assert isinstance(m, SeriesMatch)
+    assert m.match_id == 879672
+    assert m.kickoff_utc == datetime(2015, 9, 12, 14, 30, 0, tzinfo=UTC)
+    assert m.result == "H"  # 2:1 from metadata join (NOT the 9:9 odds-row score)
+    assert m.home_score == 2 and m.away_score == 1
+    assert m.league == "Test: League"
+    assert m.n_books_open == 2 and m.n_books_close == 2
+    # IDENTICAL aggregation to test_parse_series_match_open_close_consensus_and_best
+    assert m.open_consensus == pytest.approx((2.10, 3.20, 3.45))
+    assert m.open_best == pytest.approx((2.20, 3.30, 3.50))
+    assert m.close_consensus == pytest.approx((2.075, 3.30, 3.65))
+    assert m.close_best == pytest.approx((2.10, 3.40, 3.70))
+    # the row adapter still produces football-data columns + league context
+    row = to_fd_row(m)
+    assert float(row["PSH"]) == 2.10
+    assert float(row["MaxCA"]) == 3.70
+    assert row["FTR"] == "H"
+    assert row["BtbLeague"] == "Test: League"
+
+
+def test_load_series_csv_quarantines_unjoined_match(tmp_path: Path) -> None:
+    odds = tmp_path / "odds_series.csv"
+    meta = tmp_path / "odds_series_matches.csv"
+    # two odds rows, but metadata only carries one -> the other is skipped
+    _write_csv(odds, [_sample_csv_row(879672), _sample_csv_row(111111)])
+    _write_meta(meta, ["879672, Test: League,Home FC,Away FC,2:1,(1:0; 2:1),2015-09-12 14:30:00"])
+    matches = load_series_csv(odds, meta)
+    assert [m.match_id for m in matches] == [879672]
+
+
+def test_load_series_csv_gzip_transparent(tmp_path: Path) -> None:
+    odds = tmp_path / "odds_series.csv.gz"
+    meta = tmp_path / "odds_series_matches.csv.gz"
+    _write_csv(odds, [_sample_csv_row(879672)], gz=True)
+    _write_meta(
+        meta,
+        ["879672, Test: League,Home FC,Away FC,0:2,(0:1; 0:2),2015-09-12 14:30:00"],
+        gz=True,
+    )
+    matches = load_series_csv(odds, meta)
+    assert len(matches) == 1
+    assert matches[0].result == "A"  # 0:2
+
+
+def test_load_series_any_autodetects_csv_and_dir(tmp_path: Path) -> None:
+    # CSV file -> derives the *_matches sibling automatically
+    odds = tmp_path / "odds_series.csv"
+    meta = tmp_path / "odds_series_matches.csv"
+    _write_csv(odds, [_sample_csv_row(879672)])
+    _write_meta(meta, ["879672, Test: League,Home FC,Away FC,1:1,(0:0; 1:1),2015-09-12 14:30:00"])
+    csv_matches = load_series_any(odds)
+    assert len(csv_matches) == 1
+    assert csv_matches[0].result == "D"
+
+    # directory -> matrix .txt parser
+    d = tmp_path / "matrix_dir"
+    d.mkdir()
+    (d / FNAME).write_text(_sample_matrix())
+    dir_matches = load_series_any(d)
+    assert len(dir_matches) == 1
+    assert dir_matches[0].match_id == 879672
