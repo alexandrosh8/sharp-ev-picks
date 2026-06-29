@@ -26,7 +26,7 @@ import csv
 import io
 import math
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
@@ -35,6 +35,8 @@ from app.backtesting.clv import clv_log
 from app.ingestion.beatthebookie_series import load_series_dir, to_fd_row
 from app.ingestion.betfair_bsp import attach_betfair_close, load_betfair_dir
 from app.ingestion.football_data import fetch_season_csv
+from app.ingestion.oddspapi import OddsPapiGame, load_oddspapi_dir
+from app.ingestion.sbr_nba import load_sbr_nba_dir
 from app.ingestion.tennis_data import TennisMatchRow, load_tennis_dir
 from app.probabilities.devig import DevigMethod, devig
 from app.resolution.matching import default_aliases
@@ -158,6 +160,31 @@ TENNIS_MARKETS = {
         ("PSCH0", "PSCH1"),
         ("MaxCH0", "MaxCH1"),
         _won_h2h,
+    ),
+}
+
+
+def _won_nba_ml(r: dict, i: int) -> bool | None:
+    """2-way NBA moneyline settlement. Side 0 = HOME, side 1 = AWAY (a FIXED
+    orientation independent of the result — unlike tennis there is no winner-first
+    leak, so no side randomization is needed). ``NBARES`` is the real H/A result."""
+    res = r.get("NBARES")
+    if res not in ("H", "A"):
+        return None
+    return (res == "H") if i == 0 else (res == "A")
+
+
+# NBA moneyline (OddsPapi): Pinnacle pre-match OPEN = sharp anchor (PSH*); best
+# soft pre-match OPEN = takeable bet price (MaxH*); Pinnacle CLOSE = CLV reference
+# (PSCH*); best soft CLOSE = stricter CLV ref (MaxCH*). Kept out of the parity-
+# locked MARKETS (football only) and threaded via ``markets_map`` like tennis.
+NBA_MARKETS = {
+    "ml": (
+        ("PSH0", "PSH1"),
+        ("MaxH0", "MaxH1"),
+        ("PSCH0", "PSCH1"),
+        ("MaxCH0", "MaxCH1"),
+        _won_nba_ml,
     ),
 }
 
@@ -577,16 +604,220 @@ async def run_tennis_data(args: argparse.Namespace) -> None:
     )
 
 
+def _d(x: object) -> float | None:
+    """Decimal/None -> float for arithmetic, or None (NUMERIC stays at the boundary)."""
+    return float(x) if x is not None else None  # type: ignore[arg-type]
+
+
+async def run_sbr_nba(args: argparse.Namespace) -> None:
+    """sportsbookreviewsonline NBA archive — CONSENSUS-CLOSE descriptive sanity.
+
+    HONEST SCOPE: this source carries the consensus market CLOSE (closing
+    moneyline + opening/closing spread & total) plus the real result. It has NO
+    pre-match takeable price of its own (no opening moneyline, no sharp anchor), so
+    the sharp-vs-soft VALUE framework CANNOT run on it — there is nothing pre-match
+    to bet against the close. This path therefore prints a per-season CONSENSUS
+    sanity report (game counts, home/favourite hit-rates, mean closing overround,
+    bet-everything baselines at the consensus close), NOT a +EV proof. Its real
+    role is breadth: a consensus close + settled result to JOIN onto a pre-match
+    NBA source (e.g. --source oddspapi-nba) for genuine CLV. Data is operator-
+    placed; absent dir => clean skip. This system does not place bets.
+    """
+    sbr_dir = Path(args.sbr_nba_dir)
+    games = load_sbr_nba_dir(sbr_dir)
+    if not games:
+        print("SBR NBA archive not found. Operator must place the season files at, e.g.:")
+        print(f"    {sbr_dir}/nba-odds-2022-23.html")
+        print("Download (free, public): https://www.sportsbookreviewsonline.com/")
+        print("scoresoddsarchives/nba/nbaoddsarchives.htm — save each season page (or its")
+        print(".xlsx/.csv export) keeping the 'nba-odds-YYYY-YY' name. Read-only GET; this")
+        print("script never authenticates and places no bets.")
+        return
+
+    print("\nSBR-NBA CONSENSUS-CLOSE REPORT — NOT a +EV backtest (no pre-match price).")
+    print(f"{len(games)} games from {sbr_dir} | CONSENSUS market close, NOT a sharp anchor.")
+    print("Role: a consensus close + result to join onto a PRE-MATCH NBA source for CLV.\n")
+    print(
+        f"{'season':>8} | {'games':>6} | {'home%':>6} | {'fav%':>6} | {'overround':>9} | "
+        f"{'ROIhome':>8} | {'ROIfav':>7}"
+    )
+    seasons = sorted({g.season for g in games})
+    for season in seasons:
+        sg = [g for g in games if g.season == season]
+        n = len(sg)
+        home_wins = sum(1 for g in sg if g.result == "H")
+        # favourite = the side with the lower (more negative) American closing ML
+        priced = [
+            g for g in sg if g.home_close_ml_us is not None and g.away_close_ml_us is not None
+        ]
+        fav_correct = sum(
+            1
+            for g in priced
+            if (g.result == "H") == (g.home_close_ml_us < g.away_close_ml_us)  # type: ignore[operator]
+        )
+        # mean closing overround (2-way book margin) and bet-everything ROIs
+        overrounds: list[float] = []
+        roi_home: list[float] = []
+        roi_fav: list[float] = []
+        for g in sg:
+            hc, ac = _d(g.home_close_ml), _d(g.away_close_ml)
+            if hc and ac and hc > 1 and ac > 1:
+                overrounds.append(1.0 / hc + 1.0 / ac - 1.0)
+                roi_home.append((hc - 1.0) if g.result == "H" else -1.0)
+                if g.home_close_ml_us is not None and g.away_close_ml_us is not None:
+                    fav_home = g.home_close_ml_us < g.away_close_ml_us
+                    fav_odds = hc if fav_home else ac
+                    fav_won = (g.result == "H") == fav_home
+                    roi_fav.append((fav_odds - 1.0) if fav_won else -1.0)
+
+        def _pct(num: int, den: int) -> str:
+            return f"{num / den * 100:5.1f}%" if den else "   n/a"
+
+        def _mean_pct(xs: list[float]) -> str:
+            return f"{sum(xs) / len(xs) * 100:+6.2f}%" if xs else "   n/a"
+
+        ov = f"{sum(overrounds) / len(overrounds) * 100:8.2f}%" if overrounds else "     n/a"
+        print(
+            f"{season:>8} | {n:>6d} | {_pct(home_wins, n)} | {_pct(fav_correct, len(priced))} | "
+            f"{ov} | {_mean_pct(roi_home)} | {_mean_pct(roi_fav)}"
+        )
+    print(
+        "\nNOTE (computed scope): the close is a CONSENSUS market close, NOT Pinnacle/sharp, "
+        "and there is no pre-match price -> the >2 SE incremental-CLV-vs-close gate is "
+        "UNEVALUABLE here (VISIBILITY/JOIN-ONLY). Favourite ROI ~ the book's hold; it is the "
+        "bet-everything null, not an edge. Manual review required. This system places no bets."
+    )
+
+
+def _oddspapi_to_rows(games: list[OddsPapiGame]) -> list[dict]:
+    """Adapt OddsPapi NBA games to 2-way h2h backtest rows (side 0 = home).
+
+    Pinnacle OPEN -> the sharp anchor (PSH*); best soft OPEN -> the takeable bet
+    price (MaxH*), falling back to the Pinnacle open when no soft book is present
+    (shallow free tier — then edge vs its own fair is ~ -vig and rarely triggers,
+    an honest reflection of having no soft line to shop). Pinnacle CLOSE -> the CLV
+    reference (PSCH*); best soft CLOSE -> the stricter ref (MaxCH*). Rows missing
+    the anchor or the result are dropped (no fake price, no fake CLV)."""
+    rows: list[dict] = []
+    for g in games:
+        if g.result not in ("H", "A") or g.commence_utc is None:
+            continue
+        if g.home_pinnacle_open is None or g.away_pinnacle_open is None:
+            continue  # need both sides of the sharp anchor to devig
+        bet_home = (
+            g.home_best_soft_open if g.home_best_soft_open is not None else g.home_pinnacle_open
+        )
+        bet_away = (
+            g.away_best_soft_open if g.away_best_soft_open is not None else g.away_pinnacle_open
+        )
+        row: dict = {
+            "PSH0": str(g.home_pinnacle_open),
+            "PSH1": str(g.away_pinnacle_open),
+            "MaxH0": str(bet_home),
+            "MaxH1": str(bet_away),
+            "NBARES": g.result,
+            "Date": g.commence_utc.strftime("%d/%m/%Y"),
+        }
+        if g.home_pinnacle_close is not None and g.away_pinnacle_close is not None:
+            row["PSCH0"] = str(g.home_pinnacle_close)
+            row["PSCH1"] = str(g.away_pinnacle_close)
+        if g.home_best_soft_close is not None and g.away_best_soft_close is not None:
+            row["MaxCH0"] = str(g.home_best_soft_close)
+            row["MaxCH1"] = str(g.away_best_soft_close)
+        rows.append(row)
+    return rows
+
+
+async def run_oddspapi(args: argparse.Namespace) -> None:
+    """OddsPapi NBA — Pinnacle sharp pre-match anchor + sharp close (free tier).
+
+    HONEST SCOPE: with Pinnacle in the slug list this is a genuine sharp-anchor
+    value setup — devig(Pinnacle OPEN) is the fair, the best soft OPEN is the
+    takeable bet, and the Pinnacle CLOSE is the CLV reference. BUT the free tier is
+    shallow (limited depth/coverage/books), so expect thin samples and many rows
+    with no soft line. The key is OPERATOR-PROVIDED (env ``ODDSPAPI_KEY``,
+    optional) and the assembled fixture bundles are operator-placed on disk; when
+    BOTH are absent we print the signup + key steps and place no bets.
+    """
+    import os
+
+    odir = Path(args.oddspapi_dir)
+    soft = tuple(s.strip() for s in args.oddspapi_soft.split(",") if s.strip())
+    games = load_oddspapi_dir(odir, sharp="pinnacle", soft=soft)
+    has_key = bool(os.environ.get("ODDSPAPI_KEY"))
+    if not games:
+        print("OddsPapi NBA bundles not found. Operator setup (free tier):")
+        print("  1. Sign up at https://oddspapi.io/ and copy the API key from the account page.")
+        print("  2. Put it in .env as ODDSPAPI_KEY=... (gitignored; never commit the key).")
+        print("  3. Export per-fixture bundles (resolve fixtureId + the moneyline marketId/")
+        print("     outcomeIds, then GET /v4/historical-odds?bookmakers=pinnacle,bet365) as")
+        print(f"     one JSON each into:\n       {odir}")
+        print(f"  (ODDSPAPI_KEY currently {'SET' if has_key else 'absent'}.) Read-only GET; the")
+        print("  key rides the query string and is never logged. This script places no bets.")
+        return
+
+    print("\nODDSPAPI-NBA BACKTEST — sharp anchor = Pinnacle OPEN, CLV vs Pinnacle CLOSE")
+    print(f"{len(games)} operator-placed fixtures | best soft OPEN = takeable bet | soft={soft}")
+    print("Free tier is SHALLOW: thin samples and missing soft lines are expected.\n")
+
+    rows = _oddspapi_to_rows(games)
+    split = datetime.fromisoformat(args.nba_split_date).replace(tzinfo=UTC)
+    # Split by the row's own commence Date (a dropped row never drifts the split).
+    train_rows = [
+        r for r in rows if datetime.strptime(r["Date"], "%d/%m/%Y").replace(tzinfo=UTC) < split
+    ]
+    test_rows = [
+        r for r in rows if datetime.strptime(r["Date"], "%d/%m/%Y").replace(tzinfo=UTC) >= split
+    ]
+    if not train_rows or not test_rows:
+        print(f"Too few rows after the {split.date().isoformat()} split (train {len(train_rows)},")
+        print(f"test {len(test_rows)}). Place more fixtures spanning the split; places no bets.")
+        return
+
+    devig_methods = (
+        DevigMethod.POWER,
+        DevigMethod.SHIN,
+        DevigMethod.MULTIPLICATIVE,
+        DevigMethod.ODDS_RATIO,
+    )
+    thresholds = (0.005, 0.010, 0.020, 0.030, 0.050)
+    _sweep_and_eval(
+        train_rows,
+        test_rows,
+        ("ml",),
+        args.min_odds,
+        args.max_odds,
+        devig_methods,
+        thresholds,
+        train_label=f"train (< {split.date().isoformat()})",
+        test_label=f"test (>= {split.date().isoformat()})",
+        markets_map=NBA_MARKETS,
+    )
+    print(
+        "\nNote: 'CLVpinn' is CLV vs the Pinnacle CLOSE (a real sharp close). Free-tier depth "
+        "is shallow, so treat the sample size with caution. Manual review required; no bets."
+    )
+
+
 async def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--source",
-        choices=("football-data", "beatthebookie", "betfair-bsp", "tennis-data"),
+        choices=(
+            "football-data",
+            "beatthebookie",
+            "betfair-bsp",
+            "tennis-data",
+            "sbr-nba",
+            "oddspapi-nba",
+        ),
         default="football-data",
         help=(
             "football-data.co.uk (Pinnacle, default), BeatTheBookie odds_series "
-            "(consensus breadth), betfair-bsp (sharp close joined to fd Max), or "
-            "tennis-data (ATP/WTA pre-match only, no close -> visibility-only)"
+            "(consensus breadth), betfair-bsp (sharp close joined to fd Max), "
+            "tennis-data (ATP/WTA pre-match only, no close -> visibility-only), "
+            "sbr-nba (NBA consensus close, descriptive/join-only), or oddspapi-nba "
+            "(NBA Pinnacle sharp open + close, free-tier shallow)"
         ),
     )
     p.add_argument(
@@ -619,6 +850,26 @@ async def main() -> None:
         default="2016-03-01",
         help="train/test split by kickoff date (odds_series | odds_series_b boundary)",
     )
+    p.add_argument(
+        "--sbr-nba-dir",
+        default="data/sbr_nba",
+        help="dir of operator-placed SBR NBA season files (nba-odds-YYYY-YY.html/.csv/.xlsx)",
+    )
+    p.add_argument(
+        "--oddspapi-dir",
+        default="data/oddspapi",
+        help="dir of operator-placed OddsPapi per-fixture bundle JSON files",
+    )
+    p.add_argument(
+        "--oddspapi-soft",
+        default="bet365",
+        help="comma-separated soft bookmaker slugs to line-shop against the Pinnacle anchor",
+    )
+    p.add_argument(
+        "--nba-split-date",
+        default="2024-01-01",
+        help="train/test split by commence date for the oddspapi-nba path (UTC)",
+    )
     p.add_argument("--leagues", default="E0,E1,E2,E3,SC0,D1,D2,I1,I2,SP1,SP2,F1,F2,N1,B1,P1,T1,G1")
     # 2019/20+ is the maximal window with full PSH+Max+PSC+MaxC coverage
     # (Max/Avg columns replaced BetBrain in 2019/20; Pinnacle closing too).
@@ -632,6 +883,12 @@ async def main() -> None:
     args = p.parse_args()
     if args.source == "beatthebookie":
         await run_beatthebookie(args)
+        return
+    if args.source == "sbr-nba":
+        await run_sbr_nba(args)
+        return
+    if args.source == "oddspapi-nba":
+        await run_oddspapi(args)
         return
     if args.source == "betfair-bsp":
         await run_betfair_bsp(args)
