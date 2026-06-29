@@ -2398,6 +2398,10 @@ async def persist_pick(
             # CLV-3: the concrete pick-time anchor BOOK (behind anchor_type) so the CLV
             # close can test BOOK independence, not just anchor-type equality.
             anchor_book=pick.anchor_book,
+            # H3: the live policy regime that minted this pick — so CLV is scoped to
+            # the exact policy, never mixed across config changes. None for the model
+            # strategy (which sets no fingerprint).
+            policy_fingerprint=pick.policy_fingerprint,
             created_at=datetime.now(tz=UTC),
         )
         .on_conflict_do_nothing(constraint="uq_picks_event_market_selection_model")
@@ -2451,6 +2455,10 @@ async def persist_pick(
         # the alert the operator acts on
         existing.anchor_type = pick.anchor_type
         existing.anchor_book = pick.anchor_book
+        # the promoting detection's policy regime replaces the shadow row's: the
+        # row now describes the premium alert the operator acts on, so its CLV must
+        # attribute to the policy that promoted it (H3).
+        existing.policy_fingerprint = pick.policy_fingerprint
         # created_at advances to the upgrade moment: it is when the pick
         # became an actionable premium alert AND when its exposure was
         # reserved — seed_exposure_ledger (premium-scoped, created_at within

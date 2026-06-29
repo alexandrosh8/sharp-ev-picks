@@ -6,6 +6,7 @@ joins in roadmap phase 2 alongside event/entity resolution.
 """
 
 import logging
+import math
 import uuid
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
@@ -791,6 +792,54 @@ async def _reserve_for_outcome(
     return pick
 
 
+# Schema tag for the policy fingerprint encoding — bump if the field set or the
+# format ever changes so a stored string is never ambiguous about its scheme.
+POLICY_FINGERPRINT_SCHEMA = "p1"
+
+
+def policy_fingerprint(
+    *,
+    value_min_edge: float,
+    value_volume_min_edge: float,
+    value_min_odds: float,
+    devig_method: DevigMethod,
+    require_sharp_anchor: bool,
+    max_edge: float,
+    ml_manifest_created_utc: str | None = None,
+    ml_threshold: float | None = None,
+) -> str:
+    """Compact, human-debuggable encoding of the live value-strategy policy that
+    minted a pick (H3) — so CLV attribution can SCOPE rows to their exact policy
+    regime instead of mixing regimes across config changes, and a pick can be
+    replayed against the policy that made it.
+
+    Pure + deterministic: identical inputs -> identical string; ANY change to a
+    threshold, the devig method, the require-sharp-anchor gate, the data-error
+    ceiling, or the enforced ML manifest -> a different string. Decoded by eye::
+
+        p1|me=0.0150|vme=0.0150|mo=1.30|dv=power|rsa=0|mxe=inf|ml=off
+
+    ``ml`` is ``off`` unless the value-filter is ENFORCING (not shadow), in which
+    case it carries the manifest identity ``<created_utc>@<q*>`` — a newer
+    manifest (different created_utc) or a moved operating point is a new regime.
+    """
+    ceiling = "inf" if math.isinf(max_edge) else f"{max_edge:.4f}"
+    if ml_manifest_created_utc is not None and ml_threshold is not None:
+        ml = f"{ml_manifest_created_utc}@{ml_threshold:.3f}"
+    else:
+        ml = "off"
+    return (
+        f"{POLICY_FINGERPRINT_SCHEMA}"
+        f"|me={value_min_edge:.4f}"
+        f"|vme={value_volume_min_edge:.4f}"
+        f"|mo={value_min_odds:.2f}"
+        f"|dv={devig_method.value}"
+        f"|rsa={int(require_sharp_anchor)}"
+        f"|mxe={ceiling}"
+        f"|ml={ml}"
+    )
+
+
 async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
     """One polling cycle of the VALIDATED strategy (sharp-vs-soft value,
     docs/backtesting/value-findings.md): group multi-book odds per market,
@@ -936,6 +985,31 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         deps.value_volume_min_edge,
         deps.value_min_edge,
         *(edge for _, edge in deps.value_policy.min_edge_by_market),
+    )
+    # Stamp the LIVE policy regime once per cycle (constant across this cycle's
+    # candidates) so every minted pick records the exact thresholds/devig/anchor-
+    # gate/ML-manifest that produced it (H3). The ML manifest identity rides the
+    # fingerprint ONLY when enforcement is actually on (flag set + a loaded,
+    # non-shadow model) — a shadow/annotation-only manifest changes no behavior,
+    # so it must not change the regime tag.
+    ml_created_utc: str | None = None
+    ml_threshold: float | None = None
+    if (
+        deps.value_ml_filter_enabled
+        and deps.value_filter is not None
+        and not deps.value_filter.shadow
+    ):
+        ml_created_utc = deps.value_filter.manifest_created_utc
+        ml_threshold = deps.value_filter.threshold
+    fingerprint = policy_fingerprint(
+        value_min_edge=deps.value_min_edge,
+        value_volume_min_edge=deps.value_volume_min_edge,
+        value_min_odds=deps.value_min_odds,
+        devig_method=deps.devig_method,
+        require_sharp_anchor=deps.value_policy.require_sharp_anchor,
+        max_edge=deps.value_policy.max_edge,
+        ml_manifest_created_utc=ml_created_utc,
+        ml_threshold=ml_threshold,
     )
     for (event_id, market, detail), (prices, captured) in grouped.items():
         if event_id in started:
@@ -1226,6 +1300,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 # CLV close can test BOOK independence (a Smarkets-anchored pick vs a
                 # Betfair-exchange close is independent though both are 'sharp').
                 anchor_book=v.sharp_book,
+                # H3: the live policy regime that minted this pick (thresholds,
+                # devig, sharp-anchor gate, ceiling, enforced ML manifest) so CLV
+                # is never attributed across mixed regimes.
+                policy_fingerprint=fingerprint,
                 created_at=now,
             )
             # Persist FIRST (kr-1 ordering), then reserve only on a genuinely

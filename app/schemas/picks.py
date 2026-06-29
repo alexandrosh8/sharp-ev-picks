@@ -76,6 +76,16 @@ class PickOut(InternalModel):
     # SETTLED view; /picks serializes the repo dict, so this keeps the contract
     # model in step with the served payload.
     score: str | None = None
+    # Compact, human-debuggable POLICY FINGERPRINT of the live value-strategy
+    # policy that minted this pick (H3): the active thresholds (value_min_edge /
+    # value_volume_min_edge / value_min_odds), the devig method, require-sharp-
+    # anchor on/off, the data-error edge ceiling, and the ML value-filter manifest
+    # identity (manifest created_utc @ q*) WHEN enforcement is on. Lets CLV
+    # attribution SCOPE each row to the exact policy regime that produced it,
+    # instead of silently mixing regimes across config changes, and lets a pick be
+    # replayed against the policy that made it. None = model-strategy pick or a
+    # pre-column row (nullable + tolerated everywhere it is read).
+    policy_fingerprint: str | None = None
     created_at: datetime
     risk_warning: str = "Betting involves risk. Nothing here is guaranteed profit."
     manual_betting_reminder: str = MANUAL_BETTING_REMINDER

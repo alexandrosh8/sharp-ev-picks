@@ -15,13 +15,21 @@ from collections.abc import Iterator
 
 import pytest
 
-from app.scheduler import _PollSkipNoiseFilter
+from app.scheduler import _HUNG_CYCLE_SKIP_THRESHOLD, _PollSkipNoiseFilter
 
 _SKIP_MSG = (
     'Execution of job "build_scheduler.<locals>.poll_odds '
     '(trigger: interval[0:01:00], next run at: 2026-06-11 15:32:29 EEST)" '
     "skipped: maximum number of running instances reached (1)"
 )
+
+
+def _skip_msg_for(job: str) -> str:
+    return (
+        f'Execution of job "build_scheduler.<locals>.{job} '
+        '(trigger: interval[0:01:00], next run at: 2026-06-11 15:32:29 EEST)" '
+        "skipped: maximum number of running instances reached (1)"
+    )
 
 
 def _rec(msg: str) -> logging.LogRecord:
@@ -93,3 +101,61 @@ def test_keeps_other_job_skips_and_other_warnings_at_warning(
     missed = _rec("Run time of job poll_odds was missed by 0:00:05")
     assert f.filter(missed)
     assert missed.levelno == logging.WARNING
+
+
+def test_single_coalesce_skip_stays_info(scheduler_logger: logging.Logger) -> None:
+    # A one-off coalesce (count == 1) is by-design and must NOT escalate.
+    scheduler_logger.setLevel(logging.INFO)
+    f = _PollSkipNoiseFilter()
+    record = _rec(_SKIP_MSG)
+    assert f.filter(record)
+    assert record.levelno == logging.INFO
+    assert "HUNG" not in record.getMessage()
+
+
+def test_sustained_skips_escalate_to_warning(scheduler_logger: logging.Logger) -> None:
+    # K consecutive skips of the SAME job (no completion between them) is a
+    # genuine hang — the K-th skip ESCALATES to WARNING and names the run length.
+    scheduler_logger.setLevel(logging.WARNING)
+    f = _PollSkipNoiseFilter()
+    # The first K-1 skips are benign coalesces (INFO, suppressed at WARNING level).
+    for _ in range(_HUNG_CYCLE_SKIP_THRESHOLD - 1):
+        rec = _rec(_SKIP_MSG)
+        assert not f.filter(rec)  # downgraded to INFO -> denied under WARNING
+        assert rec.levelno == logging.INFO
+
+    hung = _rec(_SKIP_MSG)
+    assert f.filter(hung)  # emitted (it IS a real WARNING now)
+    assert hung.levelno == logging.WARNING
+    assert hung.levelname == "WARNING"
+    message = hung.getMessage()
+    assert "HUNG" in message
+    assert str(_HUNG_CYCLE_SKIP_THRESHOLD) in message  # the consecutive count
+
+
+def test_reset_returns_job_to_info(scheduler_logger: logging.Logger) -> None:
+    # A successful submission (cycle restarted) clears the counter, so the next
+    # one-off coalesce is INFO again — one-offs never accumulate across cycles.
+    scheduler_logger.setLevel(logging.INFO)
+    f = _PollSkipNoiseFilter()
+    for _ in range(_HUNG_CYCLE_SKIP_THRESHOLD):
+        f.filter(_rec(_SKIP_MSG))
+    f.reset("poll_odds")
+
+    after = _rec(_SKIP_MSG)
+    assert f.filter(after)
+    assert after.levelno == logging.INFO
+    assert "HUNG" not in after.getMessage()
+
+
+def test_per_job_skip_counters_are_independent(scheduler_logger: logging.Logger) -> None:
+    # One job hanging must not push an unrelated job's single coalesce to WARNING.
+    scheduler_logger.setLevel(logging.INFO)
+    f = _PollSkipNoiseFilter()
+    for _ in range(_HUNG_CYCLE_SKIP_THRESHOLD):
+        f.filter(_rec(_skip_msg_for("poll_odds")))  # poll_odds now HUNG
+
+    other = _rec(_skip_msg_for("capture_betfair_exchange"))
+    assert f.filter(other)
+    assert other.levelno == logging.INFO  # its own counter is still 1
+    assert "HUNG" not in other.getMessage()

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
+from apscheduler.events import EVENT_JOB_SUBMITTED, JobSubmissionEvent
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -72,31 +73,67 @@ _CONTINUOUS_POLL_JOBS = (
     "capture_finished_scores",
 )
 
+#: Consecutive max-instances skips of the SAME continuous-poll job (with no
+#: successful submission resetting the counter in between) at or above which the
+#: skip stops being a benign coalesce and becomes evidence of a genuinely HUNG
+#: cycle — escalated back to WARNING so the alert layer can see it. A single
+#: coalesce (count 1) stays INFO.
+_HUNG_CYCLE_SKIP_THRESHOLD = 3
+
 
 class _PollSkipNoiseFilter(logging.Filter):
     """Downgrade apscheduler's max-instances skip warning for the interval-poll
-    capture jobs (poll_odds, capture_pinnacle_arcadia, capture_betfair_exchange).
+    capture jobs (poll_odds, capture_pinnacle_arcadia, capture_betfair_exchange),
+    BUT escalate a sustained run of skips back to WARNING.
 
     The short interval + max_instances=1 + coalesce is the documented
     continuous-polling design: while a long capture cycle runs, every interval
-    slot is skipped by design. Downgraded to INFO (not dropped) — the skip is the
-    only scheduler-side evidence of a HUNG cycle. Skips of any OTHER (cron) job
-    remain warnings.
+    slot is skipped by design. A ONE-OFF coalesce is downgraded to INFO (not
+    dropped) — the skip is the only scheduler-side evidence of a hung cycle.
+
+    A SUSTAINED run, however, is a real hang: ``_HUNG_CYCLE_SKIP_THRESHOLD``
+    consecutive skips of the SAME job with no successful submission in between
+    means the prior cycle never finished across that many intervals. That stays
+    a WARNING (message rewritten to name the run length) so it is observable to
+    the alert layer. ``reset(job_id)`` clears a job's counter and is wired to
+    apscheduler's EVENT_JOB_SUBMITTED (a fresh submission == the cycle
+    (re)started), so one-off coalesces never accumulate across cycles. Skips of
+    any OTHER (cron) job remain warnings.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._consecutive_skips: dict[str, int] = {}
+
+    def reset(self, job_id: str) -> None:
+        """Clear the consecutive-skip counter for a job (its cycle (re)started)."""
+        self._consecutive_skips.pop(job_id, None)
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        if "maximum number of running instances reached" in msg and any(
-            job in msg for job in _CONTINUOUS_POLL_JOBS
-        ):
-            record.levelno = logging.INFO
-            record.levelname = "INFO"
-            # The logger's level gate already passed at WARNING before filters
-            # ran; without re-checking, the downgraded line would still emit
-            # under LOG_LEVEL=WARNING. Honour the effective level for the NEW
-            # severity: emit at INFO, suppress at WARNING+.
+        if "maximum number of running instances reached" not in msg:
+            return True
+        job = next((j for j in _CONTINUOUS_POLL_JOBS if j in msg), None)
+        if job is None:
+            # A non-continuous (cron) job skip is a real signal — stays WARNING.
+            return True
+        count = self._consecutive_skips.get(job, 0) + 1
+        self._consecutive_skips[job] = count
+        if count >= _HUNG_CYCLE_SKIP_THRESHOLD:
+            # SUSTAINED skips: the prior cycle is not completing across K
+            # intervals — escalate so it is not silently buried at INFO.
+            record.msg = "poll cycle HUNG: %d consecutive %s skips (>= %d) — prior cycle stuck"
+            record.args = (count, job, _HUNG_CYCLE_SKIP_THRESHOLD)
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
             return logging.getLogger(record.name).isEnabledFor(record.levelno)
-        return True
+        record.levelno = logging.INFO
+        record.levelname = "INFO"
+        # The logger's level gate already passed at WARNING before filters ran;
+        # without re-checking, the downgraded line would still emit under
+        # LOG_LEVEL=WARNING. Honour the effective level for the NEW severity:
+        # emit at INFO, suppress at WARNING+.
+        return logging.getLogger(record.name).isEnabledFor(record.levelno)
 
 
 _POLL_SKIP_FILTER = _PollSkipNoiseFilter()
@@ -508,6 +545,16 @@ def build_scheduler(
         # so the per-slot skip warnings are noise; addFilter is idempotent
         # for the same instance.
         logging.getLogger("apscheduler.scheduler").addFilter(_POLL_SKIP_FILTER)
+
+        # A successful submission means the prior cycle finished and a new one
+        # started — clear that job's consecutive-skip counter so isolated
+        # coalesces never accumulate into a false "HUNG" escalation. Only a
+        # genuine, uninterrupted run of skips (no submission resetting it)
+        # crosses _HUNG_CYCLE_SKIP_THRESHOLD.
+        def _reset_poll_skip_counter(event: JobSubmissionEvent) -> None:
+            _POLL_SKIP_FILTER.reset(event.job_id)
+
+        scheduler.add_listener(_reset_poll_skip_counter, EVENT_JOB_SUBMITTED)
 
         # CLV true-up + current-odds revalidation now run INSIDE every poll
         # cycle on the cycle's own snapshots (app/pipeline.py) — a separate

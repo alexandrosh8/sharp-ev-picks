@@ -270,6 +270,15 @@ class Pick(Base):
     # finding CLV-3) is possible without re-deriving it. NULL = model-strategy
     # pick or pre-column row.
     anchor_book: Mapped[str | None] = mapped_column(String(64))
+    # Compact, human-debuggable POLICY FINGERPRINT of the live value-strategy
+    # policy that minted this pick (H3): active thresholds (value_min_edge /
+    # volume_min_edge / min_odds), devig method, require-sharp-anchor on/off, the
+    # data-error edge ceiling, and the enforced ML value-filter manifest identity
+    # (created_utc @ q*). Lets CLV attribution SCOPE each row to its exact policy
+    # regime instead of mixing regimes across config changes, and lets a pick be
+    # replayed against the policy that made it. NULL = model-strategy pick or a
+    # pre-column row (additive + nullable; historical rows stay NULL).
+    policy_fingerprint: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     # --- CLV (filled at/after market close) ---------------------------------
     closing_odds: Mapped[Decimal | None] = mapped_column(ODDS)

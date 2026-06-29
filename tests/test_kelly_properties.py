@@ -117,7 +117,13 @@ def _no_edge_inputs(draw: st.DrawFn) -> tuple[float, float]:
     """A probability strictly at/below the break-even prob 1/d -> no +EV edge."""
     decimal_odds = draw(_ODDS)
     breakeven = 1.0 / decimal_odds
-    probability = draw(st.floats(0.0, breakeven, allow_nan=False, allow_infinity=False))
+    # Draw STRICTLY below break-even (1/d) by a small relative margin so the edge is
+    # GENUINELY negative. Drawing p == 1/d for arbitrary d can float-round to a sub-ULP
+    # POSITIVE edge (e.g. 1.19e-19) and thus a numerically-zero-but-nonzero stake — a
+    # boundary artifact, not a property violation. The exact break-even boundary is
+    # covered explicitly by the clean @example cases on the test below.
+    upper = breakeven * (1.0 - 1e-9)
+    probability = draw(st.floats(0.0, upper, allow_nan=False, allow_infinity=False))
     return probability, decimal_odds
 
 

@@ -194,6 +194,40 @@ async def test_load_scores_survives_a_failing_source() -> None:
     assert {s.home_team for s in scores} == {"Flamengo", "Santos"}
 
 
+async def test_load_scores_survives_a_malformed_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A PARSE error on one source (not just an HTTP error) must be isolated:
+    # one malformed CSV cannot abort the whole settlement load. The Brazil
+    # parser raises csv.Error mid-iteration; the international source must still
+    # load.
+    import csv as _csv
+
+    from app.settlement import results as results_mod
+
+    def _boom(_text: str) -> list[object]:
+        raise _csv.Error("unterminated quote in CSV")
+
+    monkeypatch.setattr(results_mod, "parse_new_league_csv", _boom)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "international_results" in str(request.url):
+            return httpx.Response(200, text=INTL_CSV)
+        if request.url.path.endswith("/new/BRA.csv"):
+            return httpx.Response(200, text=NEW_LEAGUE_CSV)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        scores = await results_mod.load_scores(
+            client,
+            slugs=["world-cup", "brazil-serie-a"],
+            seasons=[],
+            on_or_after=date(2026, 6, 1),
+        )
+    # international survived; the malformed Brazil source was skipped, not fatal
+    assert {s.home_team for s in scores} == {"Atlantis"}
+
+
 def test_league_score_sources_all_expands_to_every_source() -> None:
     # leagues="all" (league-less daily scraping) -> settlement must load
     # every free results source it knows, not zero.

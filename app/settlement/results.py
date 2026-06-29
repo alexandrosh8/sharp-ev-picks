@@ -13,6 +13,7 @@ distinguishing markers (women/youth/reserve/B): a men's pick can never settle
 from a women's/youth/reserve score that merely contains its base name.
 """
 
+import csv
 import logging
 import unicodedata
 from collections.abc import Iterable, Sequence
@@ -224,4 +225,11 @@ async def load_scores(
                     scores.extend(scores_from_match_rows(parse_season_csv(text)))
         except httpx.HTTPError as exc:
             logger.error("results source %s failed: %s", source.kind, type(exc).__name__)
+        except (csv.Error, ValueError, UnicodeError) as exc:
+            # A malformed/undecodable CSV on ONE source must not abort the whole
+            # settlement load — log the type (never the payload) and skip it so
+            # the remaining sources still load. Scoped to parse/decode/value
+            # errors (UnicodeError ⊂, but kept explicit); real programming bugs
+            # (TypeError, AttributeError, ...) still propagate.
+            logger.error("results source %s unparseable: %s", source.kind, type(exc).__name__)
     return [s for s in scores if s.match_date >= on_or_after]
