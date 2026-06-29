@@ -157,12 +157,38 @@ def parse_major_leagues(raw: str) -> tuple[str, ...]:
 def parse_visibility_only_markets(raw: str) -> tuple[str, ...]:
     """VALUE_VISIBILITY_ONLY_MARKETS csv of market keys CAPPED at the volume tier.
 
-    Each entry is a line-qualified market key ("asian_handicap_-1_5"), a market
-    family ("spreads"), or an AH/totals family stem ("asian_handicap" — caps every
-    line at once; see value_policy.is_visibility_only_market). Empty = NO-OP (no
-    market capped, the default). Lowercased + de-blanked; matched case-insensitively.
+    Each entry is either SPORT-QUALIFIED ("soccer:asian_handicap" — caps that
+    market only for that sport) or a plain market key ("asian_handicap" — caps
+    the market for ANY sport, the backward-compatible shape). A market key is a
+    line-qualified detail ("asian_handicap_-1_5"), a market family ("spreads"),
+    or an AH/totals family stem ("asian_handicap" — caps every line at once; see
+    value_policy.is_visibility_only_market). The sport prefix matches the
+    pipeline's ``sport_key`` case-insensitively and also scopes more specific
+    keys under it ("soccer" -> "soccer", "soccer_epl"). Empty = NO-OP (no market
+    capped, the default). Lowercased + de-blanked; matched case-insensitively.
+
+    A malformed sport-qualified key (empty sport, empty market, or more than one
+    colon) FAILS FAST here at the composition root so it never reaches the frozen
+    policy.
     """
-    return tuple(key.strip().lower() for key in raw.split(",") if key.strip())
+    out: list[str] = []
+    for raw_key in raw.split(","):
+        key = raw_key.strip().lower()
+        if not key:
+            continue
+        if ":" in key:
+            sport, _, market = key.partition(":")
+            sport = sport.strip()
+            market = market.strip()
+            if not sport or not market or ":" in market:
+                raise ValueError(
+                    "VALUE_VISIBILITY_ONLY_MARKETS: malformed key "
+                    f"{raw_key.strip()!r}; expected '<sport>:<market>' or '<market>'"
+                )
+            out.append(f"{sport}:{market}")
+        else:
+            out.append(key)
+    return tuple(out)
 
 
 def parse_proxy_urls(raw: str, env_name: str = "ARCADIA_PROXY_URLS") -> tuple[str, ...]:

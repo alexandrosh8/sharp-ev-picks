@@ -239,16 +239,63 @@ def is_major_league(policy: ValuePolicy, league_name: str) -> bool:
     return norm in {normalize_league(major) for major in policy.major_leagues}
 
 
-def is_visibility_only_market(policy: ValuePolicy, market: str, market_detail: str | None) -> bool:
+def _split_sport_market(entry: str) -> tuple[str | None, str]:
+    """Split one visibility key into ``(sport_or_none, market)``.
+
+    ``"soccer:asian_handicap"`` -> ``("soccer", "asian_handicap")`` (caps the
+    market for that sport only); ``"asian_handicap"`` -> ``(None,
+    "asian_handicap")`` (caps the market for ANY sport — the backward-compatible
+    shape). Only the FIRST colon separates sport from market; both sides are
+    lowercased/stripped. A blank market yields ``(sport, "")`` and is ignored by
+    the caller.
+    """
+    key = entry.strip().lower()
+    if ":" in key:
+        sport, _, market = key.partition(":")
+        sport = sport.strip()
+        return (sport or None), market.strip()
+    return None, key
+
+
+def _sport_in_scope(entry_sport: str | None, candidate_sport: str) -> bool:
+    """Whether a key's sport prefix applies to the candidate's sport.
+
+    ``entry_sport is None`` (an unqualified key) applies to EVERY sport. A
+    qualified prefix applies when the candidate sport equals it or is a more
+    specific key under it (``"soccer"`` scopes ``"soccer"`` and ``"soccer_epl"``).
+    A qualified key is INERT when no candidate sport is known.
+    """
+    if entry_sport is None:
+        return True
+    if not candidate_sport:
+        return False
+    return candidate_sport == entry_sport or candidate_sport.startswith(f"{entry_sport}_")
+
+
+def is_visibility_only_market(
+    policy: ValuePolicy,
+    market: str,
+    market_detail: str | None,
+    sport: str | None = None,
+) -> bool:
     """Whether this market is CAPPED at the volume (shadow) tier — never premium.
 
     Empty ``policy.visibility_only_markets`` DISABLES the cap — no market is
-    capped (current behavior, the bit-identical default). When configured, a
-    market matches if any configured entry equals (case-insensitively):
+    capped (current behavior, the bit-identical default). Each configured entry
+    is SPORT-QUALIFIED ("soccer:asian_handicap" — caps that market only for that
+    sport) or a plain market key ("asian_handicap" — caps the market for ANY
+    sport, the backward-compatible shape). The candidate's ``sport`` (the
+    pipeline's ``sport_key``, e.g. "soccer"/"basketball") is matched
+    case-insensitively, and a sport prefix also scopes more specific keys under
+    it ("soccer" -> "soccer", "soccer_epl"). A plain key still matches with no
+    ``sport`` supplied (the pre-existing call shape).
+
+    Given an in-scope sport, an entry's MARKET matches if it equals
+    (case-insensitively):
       * the line-qualified market_detail ("asian_handicap_-1_5"), OR
       * the market family ``str(Market)`` ("spreads"), OR
-      * a FAMILY STEM of the detail — entry E matches when the detail equals E or
-        starts with ``E + "_"`` ("asian_handicap" caps every
+      * a FAMILY STEM of the detail — entry market E matches when the detail
+        equals E or starts with ``E + "_"`` ("asian_handicap" caps every
         "asian_handicap_<line>" at once).
     Most-specific-first is preserved (detail/family exact match before the stem
     prefix), mirroring the other per-market policies while letting one family key
@@ -256,13 +303,20 @@ def is_visibility_only_market(policy: ValuePolicy, market: str, market_detail: s
     """
     if not policy.visibility_only_markets:
         return False
-    members = {m.strip().lower() for m in policy.visibility_only_markets if m.strip()}
-    if not members:
-        return False
-    if any(key in members for key in market_lookup_keys(market, market_detail)):
-        return True
+    candidate_sport = (sport or "").strip().lower()
+    keys = market_lookup_keys(market, market_detail)
     detail = (market_detail or "").strip().lower()
-    return any(detail == m or detail.startswith(f"{m}_") for m in members)
+    for entry in policy.visibility_only_markets:
+        entry_sport, entry_market = _split_sport_market(entry)
+        if not entry_market:
+            continue
+        if not _sport_in_scope(entry_sport, candidate_sport):
+            continue
+        if entry_market in keys:
+            return True
+        if detail and (detail == entry_market or detail.startswith(f"{entry_market}_")):
+            return True
+    return False
 
 
 def odds_in_bands(odds: float, bands: tuple[tuple[float, float], ...]) -> bool:

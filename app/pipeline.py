@@ -975,7 +975,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # "premium"` guards). Never a silent drop — surfaced on the pick + logged.
             visibility_note = ""
             if tier == "premium" and is_visibility_only_market(
-                deps.value_policy, str(market), detail
+                deps.value_policy, str(market), detail, sport_key
             ):
                 tier = "volume"
                 n_visibility_capped += 1

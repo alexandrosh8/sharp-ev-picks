@@ -631,3 +631,25 @@ def test_arcadia_effective_proxy_urls_falls_back_to_scraper_pool() -> None:
 def test_arcadia_effective_proxy_urls_empty_when_both_unset() -> None:
     s = make_settings(arcadia_proxy_urls="", scraper_proxy_pool="")
     assert s.arcadia_effective_proxy_urls() == ()
+
+
+def test_parse_visibility_only_markets_plain_and_sport_qualified() -> None:
+    from app.config import parse_visibility_only_markets
+
+    # plain market key (any sport) and a sport-qualified key coexist; lowercased,
+    # de-blanked, order preserved.
+    assert parse_visibility_only_markets(
+        " Asian_Handicap , SOCCER:Asian_Handicap ,, totals "
+    ) == ("asian_handicap", "soccer:asian_handicap", "totals")
+    assert parse_visibility_only_markets("") == ()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [":asian_handicap", "soccer:", "soccer:ah:extra", "  :  "],
+)
+def test_parse_visibility_only_markets_malformed_keys_fail_fast(raw: str) -> None:
+    from app.config import parse_visibility_only_markets
+
+    with pytest.raises(ValueError, match="VALUE_VISIBILITY_ONLY_MARKETS"):
+        parse_visibility_only_markets(raw)

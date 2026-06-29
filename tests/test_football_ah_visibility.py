@@ -171,6 +171,49 @@ def test_visibility_only_matches_exact_line_detail_and_family() -> None:
     assert is_visibility_only_market(by_family, str(Market.SPREADS), "asian_handicap_-1_5")
 
 
+def test_visibility_only_sport_qualified_caps_only_that_sport() -> None:
+    # "soccer:asian_handicap" caps FOOTBALL AH but leaves BASKETBALL AH
+    # (asian_handicap_games_*) premium-eligible — the family stem alone would
+    # have caught both, so the sport prefix is what scopes the cap.
+    pol = ValuePolicy(visibility_only_markets=("soccer:asian_handicap",))
+    assert is_visibility_only_market(
+        pol, str(Market.SPREADS), "asian_handicap_-1_5", sport="soccer"
+    )
+    assert not is_visibility_only_market(
+        pol, str(Market.SPREADS), "asian_handicap_games_-7_5", sport="basketball"
+    )
+    # sport match is case-insensitive
+    assert is_visibility_only_market(
+        pol, str(Market.SPREADS), "asian_handicap_-1_5", sport="SOCCER"
+    )
+    # a sport-scoped key is INERT when no sport is supplied (can't confirm scope)
+    assert not is_visibility_only_market(pol, str(Market.SPREADS), "asian_handicap_-1_5")
+
+
+def test_visibility_only_sport_prefix_matches_subkeyed_sport() -> None:
+    # "soccer:..." also matches a more specific sport_key like "soccer_epl".
+    pol = ValuePolicy(visibility_only_markets=("soccer:asian_handicap",))
+    assert is_visibility_only_market(
+        pol, str(Market.SPREADS), "asian_handicap_-1_5", sport="soccer_epl"
+    )
+    assert not is_visibility_only_market(
+        pol, str(Market.SPREADS), "asian_handicap_games_-7_5", sport="basketball_nba"
+    )
+
+
+def test_visibility_only_plain_key_caps_all_sports() -> None:
+    # Backward-compatible: an unqualified key caps the market for EVERY sport.
+    pol = ValuePolicy(visibility_only_markets=("asian_handicap",))
+    assert is_visibility_only_market(
+        pol, str(Market.SPREADS), "asian_handicap_-1_5", sport="soccer"
+    )
+    assert is_visibility_only_market(
+        pol, str(Market.SPREADS), "asian_handicap_games_-7_5", sport="basketball"
+    )
+    # ...and still matches with NO sport supplied (the pre-existing call shape).
+    assert is_visibility_only_market(pol, str(Market.SPREADS), "asian_handicap_-1_5")
+
+
 def test_pick_tier_premium_then_visibility_cap_demotes_to_volume() -> None:
     # An AH candidate with a premium-level edge still caps at 'volume'.
     pol = ValuePolicy(visibility_only_markets=("asian_handicap",))
@@ -311,6 +354,75 @@ async def test_pipeline_ah_guard_rejects_sentinel_no_pick() -> None:
     assert sink.sent == []
     assert LAST_POLL["soccer"]["picks"] == 0
     assert LAST_POLL["soccer"]["volume_picks"] == 0
+
+
+def _ah_snap_detail(book: str, sel: str, odds: float, detail: str) -> OddsSnapshotIn:
+    now = datetime.now(tz=UTC)
+    return OddsSnapshotIn(
+        event_id="evt-ah",
+        bookmaker=book,
+        market=Market.SPREADS,
+        selection=sel,
+        decimal_odds=odds,
+        captured_at=now - timedelta(seconds=20),
+        ingested_at=now,
+        market_detail=detail,
+    )
+
+
+def _basketball_ah_market(home_soft: float) -> list[OddsSnapshotIn]:
+    # Basketball AH games line: detail "asian_handicap_games_*" — its family stem
+    # is "asian_handicap", so a PLAIN "asian_handicap" key would catch it too.
+    detail = "asian_handicap_games_-7_5"
+    return [
+        _ah_snap_detail("Pinnacle", "Home FC -7.5", 2.00, detail),
+        _ah_snap_detail("Pinnacle", "Away FC +7.5", 1.85, detail),
+        _ah_snap_detail("SoftBook", "Home FC -7.5", home_soft, detail),
+        _ah_snap_detail("SoftBook", "Away FC +7.5", 1.75, detail),
+    ]
+
+
+async def test_pipeline_soccer_scoped_cap_demotes_football_ah_only() -> None:
+    # VALUE_VISIBILITY_ONLY_MARKETS=soccer:asian_handicap caps FOOTBALL AH to
+    # the volume (shadow) tier — no alert, zero premium picks.
+    sink = _Sink()
+    deps = _ah_deps(
+        sink,
+        _Loader(_ah_market(home_soft=2.30)),
+        ValuePolicy(visibility_only_markets=("soccer:asian_handicap",)),
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []
+    assert LAST_POLL["soccer"]["picks"] == 0
+
+
+async def test_pipeline_soccer_scoped_cap_leaves_basketball_ah_premium() -> None:
+    # The SAME sport-scoped key leaves BASKETBALL AH premium-eligible: a genuine
+    # premium-edge basketball AH pick is alerted as a premium pick. Proves the
+    # cap is scoped to football AH and basketball AH reverts to prior behavior.
+    sink = _Sink()
+    deps = _ah_deps(
+        sink,
+        _Loader(_basketball_ah_market(home_soft=2.30)),
+        ValuePolicy(visibility_only_markets=("soccer:asian_handicap",)),
+    )
+    await run_value_pipeline(deps, "basketball")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["basketball"]["picks"] == 1
+
+
+async def test_pipeline_plain_key_caps_basketball_ah_too() -> None:
+    # Backward-compat control: the UNqualified "asian_handicap" key caps
+    # basketball AH as well (the pre-existing all-sports behavior).
+    sink = _Sink()
+    deps = _ah_deps(
+        sink,
+        _Loader(_basketball_ah_market(home_soft=2.30)),
+        ValuePolicy(visibility_only_markets=("asian_handicap",)),
+    )
+    await run_value_pipeline(deps, "basketball")
+    assert sink.sent == []
+    assert LAST_POLL["basketball"]["picks"] == 0
 
 
 def _h2h_snap(book: str, sel: str, odds: float) -> OddsSnapshotIn:
