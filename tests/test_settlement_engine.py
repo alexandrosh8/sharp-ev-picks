@@ -175,6 +175,56 @@ async def test_lost_pick_settles_negative(session) -> None:  # type: ignore[no-u
     assert row.pnl == Decimal("-20.00")
 
 
+async def test_settles_football_ah_volume_pick(session) -> None:  # type: ignore[no-untyped-def]
+    # A football Asian-Handicap volume/shadow pick (commit 706f87e) persists as
+    # market=spreads, selection "<home> -1.5" (the _selections form). It must
+    # settle through the SAME path as 1x2/totals — outcome + pnl + roi +
+    # settled_at — so its realized result and CLV accrue (the one missing piece).
+    pick = await seed_pick(
+        session, "evt-ah-1", market=Market.SPREADS, selection=f"{HOME} -1.5", tier="volume"
+    )
+    assert await settle_open_picks(session, book_with_score(3, 1), NOW) == 1  # margin +2
+    await session.refresh(pick)
+    assert pick.status == "settled"
+    assert pick.tier == "volume"  # never promoted by settlement
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "won"
+    assert row.pnl == Decimal("22.00")  # 20 @ 2.10
+    assert row.roi == Decimal("1.1")
+    assert row.settled_at == NOW
+
+
+async def test_settles_football_ah_quarter_line_half_win(session) -> None:  # type: ignore[no-untyped-def]
+    # Quarter line -0.75 with a 1-goal home win = HALF_WON: half the stake wins
+    # at full odds, half is returned. The split-stake P&L must flow through
+    # _settle_one/pick_pnl, not collapse to a plain win.
+    pick = await seed_pick(
+        session, "evt-ah-2", market=Market.SPREADS, selection=f"{HOME} -0.75", tier="volume"
+    )
+    assert (
+        await settle_open_picks(session, book_with_score(2, 1), NOW) == 1
+    )  # -0.5 wins / -1.0 push
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "half_won"
+    assert row.pnl == Decimal("11.00")  # half of 20 @ 2.10 -> 10 * 1.10
+    assert row.settled_at == NOW
+
+
+async def test_football_ah_unparseable_selection_skipped(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # A spreads selection with no signed line cannot be graded -> skipped, not
+    # guessed (refusal discipline); the pick stays open for manual settlement.
+    pick = await seed_pick(
+        session, "evt-ah-3", market=Market.SPREADS, selection=HOME, tier="volume"
+    )
+    with caplog.at_level("WARNING"):
+        assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 0
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+    assert any("not settleable" in r.message for r in caplog.records)
+
+
 async def test_future_kickoff_stays_open(session) -> None:  # type: ignore[no-untyped-def]
     teams = EventTeams(
         home=HOME, away=AWAY, league="test-league-settlement", starts_at=NOW + timedelta(hours=3)

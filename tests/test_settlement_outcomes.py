@@ -231,3 +231,95 @@ def test_provisional_result_outcome_without_stake_has_no_pnl() -> None:
     outcome, pnl = provisional_result("h2h", AWAY, HOME, AWAY, 0, 2)
     assert outcome == "won"
     assert pnl is None
+
+
+# --- football Asian Handicap (visibility-only volume market, commit 706f87e) ---
+#
+# A football AH pick persists with market=spreads and the human-readable
+# selection app/ingestion/oddsportal.py::_selections emits — "Arsenal -1.5"
+# (home, feed idx0) / "Chelsea +1.5" (away, feed idx1, the NEGATED line) — NOT
+# the raw feed label "team1_handicap". These lock that the settlement engine
+# grades that exact persisted form so the new volume/shadow AH picks realise an
+# outcome + P&L and their CLV accrues. The grading reuses the SPREADS
+# quarter-line split-stake path the rows above already exercise.
+
+AH_HOME = "Arsenal"
+AH_AWAY = "Chelsea"
+
+
+def ah(selection: str, hs: int, as_: int) -> Outcome:
+    return settle_selection("spreads", selection, AH_HOME, AH_AWAY, hs, as_)
+
+
+def test_football_ah_home_half_line_settles() -> None:
+    assert ah(f"{AH_HOME} -1.5", 3, 1) is Outcome.WON  # margin +2 beats -1.5
+    assert ah(f"{AH_HOME} -1.5", 2, 1) is Outcome.LOST  # margin +1 short of -1.5
+    assert ah(f"{AH_HOME} +0.5", 1, 1) is Outcome.WON  # tie covered by +0.5
+
+
+def test_football_ah_away_half_line_settles() -> None:
+    # away idx1 persists the negated line: a home -1.5 line is "Chelsea +1.5".
+    assert ah(f"{AH_AWAY} +1.5", 2, 1) is Outcome.WON
+    assert ah(f"{AH_AWAY} +1.5", 3, 1) is Outcome.LOST
+    assert ah(f"{AH_AWAY} +0.5", 1, 1) is Outcome.WON
+
+
+def test_football_ah_quarter_line_split_stake_both_sides() -> None:
+    # home -0.75 = half stake at -0.5 + half at -1.0
+    assert ah(f"{AH_HOME} -0.75", 2, 1) is Outcome.HALF_WON  # -0.5 wins, -1.0 pushes
+    assert ah(f"{AH_HOME} -0.75", 3, 1) is Outcome.WON
+    assert ah(f"{AH_HOME} -0.75", 1, 1) is Outcome.LOST
+    # away +0.25 = half at 0.0 + half at +0.5
+    assert ah(f"{AH_AWAY} +0.25", 1, 1) is Outcome.HALF_WON  # 0.0 pushes, +0.5 wins
+    assert ah(f"{AH_AWAY} -0.25", 1, 1) is Outcome.HALF_LOST  # 0.0 pushes, -0.5 loses
+
+
+def test_football_ah_missing_or_unparseable_line_refused() -> None:
+    # No signed line / a non-numeric line / a bad score must RAISE so the
+    # settler skips + logs (never silently grades a wrong outcome).
+    with pytest.raises(ValueError):
+        ah(AH_HOME, 2, 1)  # bare team, no handicap
+    with pytest.raises(ValueError):
+        ah(f"{AH_HOME} x", 2, 1)  # non-numeric handicap
+    with pytest.raises(ValueError):
+        settle_selection("spreads", f"{AH_HOME} -1.5", AH_HOME, AH_AWAY, -1, 0)  # negative score
+
+
+def _ref_settle_ah(result: int, handicap: float, odds: float) -> float:
+    """Verified standalone reference (scratchpad ah_backtest.py::settle_ah):
+    profit per 1u for a bet whose goal margin is `result` at `handicap`.
+    Quarter lines split the stake across the two adjacent half/whole lines;
+    push/half handled. The engine's outcome->P&L MUST match this for every
+    half/quarter line on both sides — that parity is the AH settlement
+    contract, so this reference is embedded here as the oracle."""
+    if abs(handicap * 2 - round(handicap * 2)) > 1e-9:  # quarter line
+        return 0.5 * _ref_settle_ah(result, handicap - 0.25, odds) + 0.5 * _ref_settle_ah(
+            result, handicap + 0.25, odds
+        )
+    net = result + handicap
+    if net > 1e-9:
+        return odds - 1.0
+    if net < -1e-9:
+        return -1.0
+    return 0.0  # push
+
+
+def test_football_ah_engine_matches_verified_reference() -> None:
+    # Half + quarter lines only — the loader rejects integer (PUSH) Asian lines,
+    # so those never reach a pick; whole lines that DO appear are European
+    # handicaps (3-way), graded separately above. Both sides, goal margins 0..5
+    # each way. Zero mismatches == the engine reproduces the audited backtest.
+    odds = Decimal("2.0")
+    stake = Decimal("1")
+    lines = [s * 0.25 for s in range(-20, 21) if abs(s * 0.25 - round(s * 0.25)) > 1e-9]
+    checked = 0
+    for line in lines:
+        for hs in range(6):
+            for as_ in range(6):
+                margin = hs - as_
+                home_pnl = float(pick_pnl(ah(f"{AH_HOME} {line:+g}", hs, as_), stake, odds))
+                assert abs(home_pnl - _ref_settle_ah(margin, line, 2.0)) < 1e-9
+                away_pnl = float(pick_pnl(ah(f"{AH_AWAY} {-line:+g}", hs, as_), stake, odds))
+                assert abs(away_pnl - _ref_settle_ah(-margin, -line, 2.0)) < 1e-9
+                checked += 2
+    assert checked == len(lines) * 36 * 2
