@@ -254,6 +254,24 @@ async def test_fetch_match_odds_joins_catalogue_and_book() -> None:
     assert odds[0].home_back == 2.5 and odds[0].draw_back == 3.6
 
 
+async def test_list_market_book_backs_batches_under_weight_cap() -> None:
+    # Betfair listMarketBook caps at 200 weight-points/request; a single all-markets
+    # call returns TOO_MUCH_DATA. 60 markets must split into <=25-market calls.
+    mock = MockBetfair(rpc_results={"listMarketBook": {"result": []}})
+    client = make_client(mock)
+    await client.login()
+    ids = [f"1.{i:06d}" for i in range(60)]
+    await client.list_market_book_backs(ids)
+    book_batches = [
+        json.loads(content)["params"]["marketIds"]
+        for (url, _headers, content) in mock.requests
+        if url == JSON_RPC_URL and json.loads(content)["method"].endswith("listMarketBook")
+    ]
+    assert len(book_batches) == 3  # 25 + 25 + 10
+    assert all(len(b) <= 25 for b in book_batches)
+    assert sum(len(b) for b in book_batches) == 60
+
+
 # --- error hygiene ---------------------------------------------------------- #
 async def test_rpc_http_error_has_no_url_or_token() -> None:
     def handler(request: httpx.Request) -> httpx.Response:

@@ -73,6 +73,9 @@ _OP_LIST_COMPETITIONS = "listCompetitions"
 _OP_LIST_EVENTS = "listEvents"
 _OP_LIST_MARKET_CATALOGUE = "listMarketCatalogue"
 _OP_LIST_MARKET_BOOK = "listMarketBook"
+# listMarketBook caps at 200 weight-points/request; EX_BEST_OFFERS ~5/market, so
+# batch <=25 markets/call (~125 weight) to stay under the cap (else TOO_MUCH_DATA).
+_MARKET_BOOK_BATCH = 25
 
 # Soccer event type; basketball ("7522") can be added later (req #1).
 EVENT_TYPE_SOCCER = "1"
@@ -507,16 +510,24 @@ class BetfairApiClient:
     async def list_market_book_backs(
         self, market_ids: Sequence[str]
     ) -> dict[str, dict[int, float]]:
+        # Betfair caps listMarketBook at 200 weight-points/request; EX_BEST_OFFERS is
+        # ~5/market, so request in batches of <=25 markets (~125 weight) to stay safely
+        # under the cap (a single all-markets call returns TOO_MUCH_DATA). Read-only.
         if not market_ids:
             return {}
-        result = await self._rpc(
-            _OP_LIST_MARKET_BOOK,
-            {
-                "marketIds": list(market_ids),
-                "priceProjection": {"priceData": ["EX_BEST_OFFERS"]},
-            },
-        )
-        return parse_market_book_backs(result if isinstance(result, list) else [])
+        ids = list(market_ids)
+        out: dict[str, dict[int, float]] = {}
+        for start in range(0, len(ids), _MARKET_BOOK_BATCH):
+            batch = ids[start : start + _MARKET_BOOK_BATCH]
+            result = await self._rpc(
+                _OP_LIST_MARKET_BOOK,
+                {
+                    "marketIds": batch,
+                    "priceProjection": {"priceData": ["EX_BEST_OFFERS"]},
+                },
+            )
+            out.update(parse_market_book_backs(result if isinstance(result, list) else []))
+        return out
 
     async def fetch_match_odds(
         self,
