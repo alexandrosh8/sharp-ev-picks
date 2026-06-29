@@ -18,22 +18,31 @@ import pytest
 
 from app.edge.value import SHARP_BOOKS
 from app.ingestion import betfair_api
+from app.ingestion.base import EventTeams
 from app.ingestion.betfair_api import (
     IDENTITY_KEEPALIVE_URL,
     IDENTITY_LOGIN_URL,
     IDENTITY_LOGOUT_URL,
     JSON_RPC_URL,
+    PROMOTED_BOOKMAKER,
     SHADOW_BOOKMAKER,
     BetfairApiClient,
     BetfairApiError,
     BetfairApiShadowCapture,
     BetfairAuthError,
+    BetfairMatchOdds,
+    ComparisonAggregate,
+    ReferenceOdds,
+    betfair_tick_size,
     build_shadow_capture,
+    compare_event,
     join_match_odds,
     parse_market_book_backs,
     parse_market_catalogue,
+    within_one_tick,
 )
 from app.resolution.matching import EventCandidate, default_aliases
+from app.schemas.odds import OddsSnapshotIn
 
 APP_KEY = "appkey-test-123"
 USERNAME = "punter@example.test"
@@ -402,6 +411,221 @@ def test_build_shadow_capture_inert_when_disabled() -> None:
         is None
     )
     assert calls == []  # nothing ran
+
+
+# --- price comparison math (pure, mock pairs) ------------------------------- #
+def test_betfair_tick_size_ladder() -> None:
+    # Betfair price-increment ladder: the tick widens as the price climbs.
+    assert betfair_tick_size(1.50) == 0.01
+    assert betfair_tick_size(2.50) == 0.02
+    assert betfair_tick_size(3.50) == 0.05
+    assert betfair_tick_size(5.00) == 0.10
+    assert betfair_tick_size(8.00) == 0.20
+    assert betfair_tick_size(15.0) == 0.50
+    assert betfair_tick_size(25.0) == 1.00
+    assert betfair_tick_size(40.0) == 2.00
+    assert betfair_tick_size(75.0) == 5.00
+    assert betfair_tick_size(500.0) == 10.0
+
+
+def test_within_one_tick_uses_the_coarser_of_the_two_prices() -> None:
+    assert within_one_tick(2.50, 2.52) is True  # one 0.02 tick apart
+    assert within_one_tick(2.50, 2.56) is False  # three ticks
+    assert within_one_tick(2.50, 2.50) is True  # identical
+    # missing price on either side -> undefined (None), never a false "agree"
+    assert within_one_tick(2.50, None) is None
+    assert within_one_tick(None, 2.50) is None
+
+
+def test_compare_event_computes_per_selection_delta_and_freshness() -> None:
+    api_captured = datetime(2026, 6, 30, 12, 0, tzinfo=UTC)
+    ref_captured = datetime(2026, 6, 30, 11, 30, tzinfo=UTC)  # scrape 30 min older
+    odds = BetfairMatchOdds(
+        market_id="1.1",
+        event_id="30001",
+        competition="EPL",
+        kickoff=KICKOFF,
+        home="Alpha FC",
+        away="Beta United",
+        home_back=2.50,
+        away_back=3.10,
+        draw_back=3.60,
+    )
+    ref = ReferenceOdds(home_back=2.48, draw_back=3.55, away_back=3.10, captured_at=ref_captured)
+    cmp = compare_event(odds, ref, api_captured_at=api_captured, event_ref="evt-1")
+    assert cmp.event_ref == "evt-1"
+    assert cmp.home.delta == pytest.approx(0.02)
+    assert cmp.away.delta == pytest.approx(0.0)
+    assert cmp.draw.delta == pytest.approx(0.05)
+    assert cmp.home.within_tick is True
+    assert cmp.draw.within_tick is True
+    # API read is newer than the scrape anchor -> positive gap, api_fresher True.
+    assert cmp.freshness_gap_seconds == pytest.approx(1800.0)
+    assert cmp.api_fresher is True
+
+
+def test_comparison_aggregate_over_mock_pairs() -> None:
+    api_captured = datetime(2026, 6, 30, 12, 0, tzinfo=UTC)
+    older = datetime(2026, 6, 30, 11, 0, tzinfo=UTC)
+    newer = datetime(2026, 6, 30, 12, 30, tzinfo=UTC)  # ref NEWER than api -> not fresher
+    base = dict(
+        market_id="1.1",
+        event_id="e",
+        competition="EPL",
+        kickoff=KICKOFF,
+        home="H",
+        away="A",
+    )
+    odds = BetfairMatchOdds(home_back=2.50, away_back=3.10, draw_back=3.60, **base)
+    # Event 1: all within one tick, api fresher.
+    c1 = compare_event(
+        odds,
+        ReferenceOdds(home_back=2.50, draw_back=3.60, away_back=3.10, captured_at=older),
+        api_captured_at=api_captured,
+        event_ref="e1",
+    )
+    # Event 2: home off by many ticks, ref is newer (api NOT fresher).
+    c2 = compare_event(
+        odds,
+        ReferenceOdds(home_back=2.00, draw_back=3.60, away_back=3.10, captured_at=newer),
+        api_captured_at=api_captured,
+        event_ref="e2",
+    )
+    agg = ComparisonAggregate.from_events([c1, c2])
+    assert agg.compared == 2
+    # 6 present selection pairs total; only home of c2 disagrees -> 5/6 within tick.
+    assert agg.pct_within_one_tick == pytest.approx(100.0 * 5 / 6)
+    # 1 of 2 events has the api fresher.
+    assert agg.pct_api_fresher == pytest.approx(50.0)
+    assert agg.mean_abs_delta is not None and agg.mean_abs_delta > 0.0
+
+
+def test_comparison_aggregate_empty_is_none_fields() -> None:
+    agg = ComparisonAggregate.from_events([])
+    assert agg.compared == 0
+    assert agg.mean_abs_delta is None
+    assert agg.pct_within_one_tick is None
+    assert agg.pct_api_fresher is None
+
+
+# --- comparison wired into the shadow cycle --------------------------------- #
+async def test_shadow_logs_comparison_when_reference_supplied() -> None:
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    ref = ReferenceOdds(
+        home_back=2.48,
+        draw_back=3.55,
+        away_back=3.10,
+        captured_at=KICKOFF - timedelta(hours=12),
+    )
+    client = make_client(_full_odds_mock())
+    capture = BetfairApiShadowCapture(
+        client,
+        candidates_fn=lambda: candidates,
+        window=timedelta(hours=72),
+        aliases=default_aliases(),
+        now_fn=lambda: KICKOFF - timedelta(hours=6),
+        reference_odds_fn=lambda ref_id: ref,
+    )
+    report = await capture.capture_once()
+    assert report.matched == 1
+    assert report.comparison is not None
+    assert report.comparison.compared == 1
+    # API captured at the cycle 'now' (6h pre-KO) is fresher than the 12h-old scrape.
+    assert report.comparison.pct_api_fresher == pytest.approx(100.0)
+    # Default capture stays NON-SHARP + nothing promoted.
+    assert report.promoted is False
+    assert all(s.bookmaker == SHADOW_BOOKMAKER for s in report.snapshots)
+
+
+async def test_reference_none_keeps_today_behavior() -> None:
+    # No reference_odds_fn -> no comparison object, identical to today's shadow run.
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    report = await _shadow_capture(_full_odds_mock(), candidates).capture_once()
+    assert report.comparison is None
+    assert report.promoted is False
+
+
+# --- promotion path (flag-gated, default-OFF) ------------------------------- #
+async def test_promote_off_tags_non_sharp_and_calls_no_sink() -> None:
+    sink_calls: list[int] = []
+
+    async def sink(snaps: Any, teams: Any) -> int:
+        sink_calls.append(len(list(snaps)))
+        return 0
+
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    client = make_client(_full_odds_mock())
+    capture = BetfairApiShadowCapture(
+        client,
+        candidates_fn=lambda: candidates,
+        window=timedelta(hours=72),
+        aliases=default_aliases(),
+        now_fn=lambda: KICKOFF - timedelta(hours=6),
+        promote=False,  # default; the sink must NEVER be called
+        promote_sink=sink,
+    )
+    report = await capture.capture_once()
+    assert report.promoted is False
+    assert all(s.bookmaker == SHADOW_BOOKMAKER for s in report.snapshots)
+    assert SHADOW_BOOKMAKER not in {b.lower() for b in SHARP_BOOKS}
+    assert sink_calls == []  # inert: promotion OFF never persists
+
+
+async def test_promote_on_routes_sharp_tagged_rows_to_sink() -> None:
+    sunk: list[OddsSnapshotIn] = []
+    sunk_teams: list[EventTeams] = []
+
+    async def sink(snaps: Any, teams: Any) -> int:
+        rows = list(snaps)
+        sunk.extend(rows)
+        sunk_teams.extend(teams.values())
+        return len(rows)
+
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    client = make_client(_full_odds_mock())
+    capture = BetfairApiShadowCapture(
+        client,
+        candidates_fn=lambda: candidates,
+        window=timedelta(hours=72),
+        aliases=default_aliases(),
+        now_fn=lambda: KICKOFF - timedelta(hours=6),
+        promote=True,
+        promote_sink=sink,
+    )
+    report = await capture.capture_once()
+    assert report.promoted is True
+    # PROMOTED rows carry the LIVE sharp anchor name (a SHARP_BOOKS member).
+    assert PROMOTED_BOOKMAKER.lower() in {b.lower() for b in SHARP_BOOKS}
+    assert all(s.bookmaker == PROMOTED_BOOKMAKER for s in report.snapshots)
+    assert len(sunk) == 3  # home/away/draw routed to the anchor sink
+    assert {s.event_id for s in sunk} == {"evt-canonical-1"}
+    assert sunk_teams and sunk_teams[0].home == "Alpha FC"
+
+
+def test_build_shadow_capture_threads_promote_and_reference_defaults_inert() -> None:
+    # Default build (no promote/reference args) is byte-equivalent to today: a
+    # capture whose promote flag is OFF.
+    def no_network(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("no network at build time")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(no_network))
+    capture = build_shadow_capture(
+        enabled=True,
+        credentials=(APP_KEY, USERNAME, PASSWORD),
+        window_hours=72,
+        http_client=client,
+        candidates_fn=lambda: [],
+    )
+    assert capture is not None
+    assert capture.promote is False
 
 
 # --- structural safety ------------------------------------------------------ #

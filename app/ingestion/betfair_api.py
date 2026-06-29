@@ -48,6 +48,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
+from app.ingestion.base import EventTeams
 from app.resolution.matching import (
     AliasTable,
     EventCandidate,
@@ -92,7 +93,164 @@ _SESSION_EXPIRY_CODES = frozenset({"INVALID_SESSION_INFORMATION", "NO_SESSION"})
 # or replace the OddsPortal-sourced exchange price.
 SHADOW_BOOKMAKER = "betfair exchange (api-shadow)"
 
+# PROMOTION tag (req #2). When VALUE_BETFAIR_API_PROMOTE is enabled the API rows
+# carry the LIVE sharp-anchor name ("betfair exchange", a member of
+# app.edge.value.SHARP_BOOKS) so they feed the sharp anchor INSTEAD of the scrape.
+# DEFAULT OFF: the capture only ever emits this name when promote=True is passed
+# explicitly — until then every row stays SHADOW_BOOKMAKER (non-sharp). Promotion
+# must be evidence-gated on the comparison below, never flipped blind.
+PROMOTED_BOOKMAKER = "betfair exchange"
+
 _TIMEOUT = 20.0
+
+
+# --- price-comparison math (PURE: numpy/stdlib-free, no IO) ------------------ #
+# The Betfair price-increment ("tick") ladder. The minimum quotable gap widens as
+# the price climbs; "within one tick" uses the COARSER (higher) of the two prices
+# so a near-agreement is never overstated. Source: Betfair price increments table.
+_TICK_LADDER: tuple[tuple[float, float], ...] = (
+    (2.0, 0.01),
+    (3.0, 0.02),
+    (4.0, 0.05),
+    (6.0, 0.10),
+    (10.0, 0.20),
+    (20.0, 0.50),
+    (30.0, 1.00),
+    (50.0, 2.00),
+    (100.0, 5.00),
+    (1000.0, 10.0),
+)
+
+
+def betfair_tick_size(price: float) -> float:
+    """The Betfair minimum price increment at ``price`` (the exchange tick)."""
+    for upper, tick in _TICK_LADDER:
+        if price < upper:
+            return tick
+    return 10.0
+
+
+def within_one_tick(a: float | None, b: float | None) -> bool | None:
+    """True when two BACK prices are within one exchange tick of each other.
+
+    None when EITHER price is missing — an absent price is undefined, never a
+    silent "agree". The tick is taken at the coarser (higher) price so the test
+    is conservative (a wider band never inflates the agreement rate)."""
+    if a is None or b is None:
+        return None
+    tick = betfair_tick_size(max(a, b))
+    return abs(a - b) <= tick + 1e-9
+
+
+@dataclass(frozen=True)
+class ReferenceOdds:
+    """The EXISTING (OddsPortal-sourced) "betfair exchange" anchor for one event,
+    resolved by ROLE (home/draw/away) + the anchor's capture time. Built at the
+    composition root from the snapshot store (no DB coupling in this module)."""
+
+    home_back: float | None
+    draw_back: float | None
+    away_back: float | None
+    captured_at: datetime | None
+
+
+@dataclass(frozen=True)
+class SelectionComparison:
+    """API-vs-reference price for one selection (role)."""
+
+    selection: str
+    api_price: float | None
+    ref_price: float | None
+
+    @property
+    def delta(self) -> float | None:
+        """API price minus reference price, or None when either is absent."""
+        if self.api_price is None or self.ref_price is None:
+            return None
+        return self.api_price - self.ref_price
+
+    @property
+    def within_tick(self) -> bool | None:
+        return within_one_tick(self.api_price, self.ref_price)
+
+
+@dataclass(frozen=True)
+class EventComparison:
+    """One matched event's API-vs-OddsPortal-Betfair comparison."""
+
+    event_ref: str
+    home: SelectionComparison
+    draw: SelectionComparison
+    away: SelectionComparison
+    freshness_gap_seconds: float | None
+
+    @property
+    def selections(self) -> tuple[SelectionComparison, ...]:
+        return (self.home, self.draw, self.away)
+
+    @property
+    def api_fresher(self) -> bool | None:
+        """True when the API read is newer than the scrape anchor (gap > 0)."""
+        if self.freshness_gap_seconds is None:
+            return None
+        return self.freshness_gap_seconds > 0.0
+
+    def abs_deltas(self) -> list[float]:
+        return [abs(s.delta) for s in self.selections if s.delta is not None]
+
+    def tick_flags(self) -> list[bool]:
+        return [s.within_tick for s in self.selections if s.within_tick is not None]
+
+
+def compare_event(
+    odds: BetfairMatchOdds,
+    reference: ReferenceOdds,
+    *,
+    api_captured_at: datetime,
+    event_ref: str,
+) -> EventComparison:
+    """Pure per-event comparison of the Betfair-API BACK prices against the
+    existing OddsPortal-sourced "betfair exchange" anchor (by role), plus the
+    capture-time freshness gap (api_captured_at - reference.captured_at)."""
+    gap: float | None = None
+    if reference.captured_at is not None:
+        gap = (api_captured_at - reference.captured_at).total_seconds()
+    return EventComparison(
+        event_ref=event_ref,
+        home=SelectionComparison("home", odds.home_back, reference.home_back),
+        draw=SelectionComparison("draw", odds.draw_back, reference.draw_back),
+        away=SelectionComparison("away", odds.away_back, reference.away_back),
+        freshness_gap_seconds=gap,
+    )
+
+
+@dataclass(frozen=True)
+class ComparisonAggregate:
+    """Per-cycle roll-up of the per-event comparisons (measurement only)."""
+
+    compared: int
+    mean_abs_delta: float | None
+    pct_within_one_tick: float | None
+    pct_api_fresher: float | None
+
+    @classmethod
+    def from_events(cls, events: Sequence[EventComparison]) -> ComparisonAggregate:
+        if not events:
+            return cls(
+                compared=0, mean_abs_delta=None, pct_within_one_tick=None, pct_api_fresher=None
+            )
+        abs_deltas = [d for e in events for d in e.abs_deltas()]
+        tick_flags = [f for e in events for f in e.tick_flags()]
+        fresh_flags = [e.api_fresher for e in events if e.api_fresher is not None]
+        mean_abs = sum(abs_deltas) / len(abs_deltas) if abs_deltas else None
+        pct_tick = 100.0 * sum(tick_flags) / len(tick_flags) if tick_flags else None
+        pct_fresh = 100.0 * sum(fresh_flags) / len(fresh_flags) if fresh_flags else None
+        return cls(
+            compared=len(events),
+            mean_abs_delta=mean_abs,
+            pct_within_one_tick=pct_tick,
+            pct_api_fresher=pct_fresh,
+        )
 
 
 class BetfairApiError(Exception):
@@ -573,6 +731,19 @@ def _build_filter(
     return market_filter
 
 
+def _fmt_num(value: float | None, fmt: str = "%.3f") -> str:
+    """Safe log formatter: ``n/a`` when the metric is undefined (None)."""
+    return "n/a" if value is None else fmt % value
+
+
+def _fmt_delta(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:+.3f}"
+
+
+def _fmt_gap(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.0f}"
+
+
 def _iso_z(value: datetime) -> str:
     """UTC ISO-8601 with a trailing Z (Betfair's expected time format)."""
     aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
@@ -600,18 +771,34 @@ def _error_code(body: Any) -> str:
 
 # --- shadow capture ---------------------------------------------------------- #
 CandidatesFn = Callable[[], Sequence[EventCandidate] | Awaitable[Sequence[EventCandidate]]]
+# Resolves a matched canonical event_ref -> the EXISTING OddsPortal-sourced
+# "betfair exchange" anchor (by role) for the price comparison, or None when the
+# event has no such anchor yet. Built at the composition root (the snapshot store
+# lives there); this module never opens a session. Sync or async.
+ReferenceOddsFn = Callable[[str], ReferenceOdds | None | Awaitable[ReferenceOdds | None]]
+# PROMOTION sink (req #2): persists the API-sourced sharp rows so they feed the
+# live "betfair exchange" anchor. Wired ONLY when promotion is enabled; default
+# OFF means it is never constructed and never called (provably inert).
+PromoteSink = Callable[[Sequence[OddsSnapshotIn], Mapping[str, EventTeams]], Awaitable[int]]
 
 
 @dataclass(frozen=True)
 class BetfairApiShadowReport:
     """One shadow cycle's outcome: how many Betfair markets were fetched, how many
-    matched a canonical event, how many did not, and the would-be anchor rows
-    (tagged with the SHADOW bookmaker — written nowhere)."""
+    matched a canonical event, how many did not, and the would-be anchor rows.
+
+    ``comparison`` is the per-cycle API-vs-OddsPortal-Betfair price roll-up (None
+    when no reference loader is wired). ``promoted`` is True only when the
+    default-OFF promotion flag is enabled — then the rows carry the SHARP
+    ``PROMOTED_BOOKMAKER`` name; otherwise they stay the non-sharp
+    ``SHADOW_BOOKMAKER`` and nothing is persisted."""
 
     markets_fetched: int
     matched: int
     unmatched: int
     snapshots: tuple[OddsSnapshotIn, ...]
+    comparison: ComparisonAggregate | None = None
+    promoted: bool = False
 
     @property
     def match_rate(self) -> float:
@@ -632,6 +819,9 @@ class BetfairApiShadowCapture:
         aliases: AliasTable | None = None,
         event_type_ids: Sequence[str] = (EVENT_TYPE_SOCCER,),
         now_fn: Callable[[], datetime] | None = None,
+        reference_odds_fn: ReferenceOddsFn | None = None,
+        promote: bool = False,
+        promote_sink: PromoteSink | None = None,
     ) -> None:
         self._client = client
         self._candidates_fn = candidates_fn
@@ -639,12 +829,32 @@ class BetfairApiShadowCapture:
         self._aliases = aliases or default_aliases()
         self._event_type_ids = tuple(event_type_ids)
         self._now_fn = now_fn or _utc_now
+        self._reference_odds_fn = reference_odds_fn
+        # PROMOTION is default-OFF. When OFF the rows are tagged the NON-SHARP
+        # SHADOW_BOOKMAKER and the sink is never invoked — byte-equivalent to the
+        # measurement-only shadow. The sharp PROMOTED_BOOKMAKER is emitted ONLY
+        # when promote=True is passed explicitly (evidence-gated by the operator).
+        self._promote = promote
+        self._promote_sink = promote_sink
+        self._bookmaker = PROMOTED_BOOKMAKER if promote else SHADOW_BOOKMAKER
+
+    @property
+    def promote(self) -> bool:
+        return self._promote
 
     async def _candidates(self) -> Sequence[EventCandidate]:
         candidates = self._candidates_fn()
         if inspect.isawaitable(candidates):
             candidates = await candidates
         return candidates
+
+    async def _reference(self, event_ref: str) -> ReferenceOdds | None:
+        if self._reference_odds_fn is None:
+            return None
+        result = self._reference_odds_fn(event_ref)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
     def _snapshots_for(
         self, odds: BetfairMatchOdds, event_ref: str, now: datetime
@@ -660,7 +870,7 @@ class BetfairApiShadowCapture:
             rows.append(
                 OddsSnapshotIn(
                     event_id=event_ref,
-                    bookmaker=SHADOW_BOOKMAKER,
+                    bookmaker=self._bookmaker,
                     market=Market.H2H,
                     selection=selection,
                     decimal_odds=price,
@@ -673,7 +883,13 @@ class BetfairApiShadowCapture:
     async def capture_once(self) -> BetfairApiShadowReport:
         """Run one shadow cycle. RPC/auth errors propagate to the caller (the
         scheduler logs type-only and skips) — never swallowed as a silent
-        success. An empty Betfair window yields an honest zero report."""
+        success. An empty Betfair window yields an honest zero report.
+
+        When a reference loader is wired, each MATCHED event is compared against
+        the existing OddsPortal-sourced "betfair exchange" anchor (per-selection
+        delta + freshness gap) and the per-cycle roll-up is logged. When the
+        default-OFF promotion flag is enabled, the sharp-tagged rows are routed to
+        the anchor sink; otherwise nothing is persisted (measurement only)."""
         now = self._now_fn()
         odds = await self._client.fetch_match_odds(
             market_start_from=now,
@@ -684,6 +900,8 @@ class BetfairApiShadowCapture:
         matched = 0
         unmatched = 0
         snapshots: list[OddsSnapshotIn] = []
+        teams_by_event: dict[str, EventTeams] = {}
+        matched_pairs: list[tuple[BetfairMatchOdds, str]] = []
         for market in odds:
             if not market.home or not market.away or market.kickoff is None:
                 unmatched += 1
@@ -707,22 +925,93 @@ class BetfairApiShadowCapture:
                 continue
             matched += 1
             snapshots.extend(self._snapshots_for(market, hit.ref, now))
+            # Teams for the (only-when-promoting) attach-only persist; sourced from
+            # the matched canonical candidate, never the Betfair competition name.
+            teams_by_event[hit.ref] = EventTeams(
+                home=hit.home, away=hit.away, starts_at=hit.kickoff
+            )
+            matched_pairs.append((market, hit.ref))
+
+        comparison = await self._compare(matched_pairs, now)
         report = BetfairApiShadowReport(
             markets_fetched=len(odds),
             matched=matched,
             unmatched=unmatched,
             snapshots=tuple(snapshots),
+            comparison=comparison,
+            promoted=self._promote,
         )
+        await self._maybe_promote(snapshots, teams_by_event)
+        self._log(report)
+        return report
+
+    async def _compare(
+        self, matched_pairs: Sequence[tuple[BetfairMatchOdds, str]], now: datetime
+    ) -> ComparisonAggregate | None:
+        if self._reference_odds_fn is None or not matched_pairs:
+            return None
+        events: list[EventComparison] = []
+        for market, ref in matched_pairs:
+            reference = await self._reference(ref)
+            if reference is None:
+                continue  # no existing anchor yet — nothing to compare against
+            cmp = compare_event(market, reference, api_captured_at=now, event_ref=ref)
+            events.append(cmp)
+            logger.info(
+                "betfair api COMPARE %s: dHome=%s dDraw=%s dAway=%s fresh_gap=%ss",
+                ref,
+                _fmt_delta(cmp.home.delta),
+                _fmt_delta(cmp.draw.delta),
+                _fmt_delta(cmp.away.delta),
+                _fmt_gap(cmp.freshness_gap_seconds),
+            )
+        return ComparisonAggregate.from_events(events)
+
+    async def _maybe_promote(
+        self, snapshots: Sequence[OddsSnapshotIn], teams_by_event: Mapping[str, EventTeams]
+    ) -> int:
+        # INERT unless promotion is explicitly enabled AND a sink is wired.
+        if not self._promote or self._promote_sink is None or not snapshots:
+            return 0
+        written = await self._promote_sink(snapshots, teams_by_event)
+        logger.info(
+            "betfair api PROMOTE: routed %d API rows to the live '%s' sharp anchor (%d new)",
+            len(snapshots),
+            PROMOTED_BOOKMAKER,
+            written,
+        )
+        return written
+
+    def _log(self, report: BetfairApiShadowReport) -> None:
+        persisted = "promoted to the live sharp anchor" if report.promoted else "persisted nothing"
+        cmp = report.comparison
+        if cmp is not None and cmp.compared:
+            logger.info(
+                "betfair api SHADOW: fetched=%d matched=%d unmatched=%d match_rate=%.1f%% "
+                "would-be-anchor-rows=%d | COMPARE compared=%d mean|delta|=%s within1tick=%s%% "
+                "api_fresher=%s%% (%s — measure before trusting)",
+                report.markets_fetched,
+                report.matched,
+                report.unmatched,
+                report.match_rate * 100.0,
+                len(report.snapshots),
+                cmp.compared,
+                _fmt_num(cmp.mean_abs_delta),
+                _fmt_num(cmp.pct_within_one_tick, "%.0f"),
+                _fmt_num(cmp.pct_api_fresher, "%.0f"),
+                persisted,
+            )
+            return
         logger.info(
             "betfair api SHADOW: fetched=%d matched=%d unmatched=%d match_rate=%.1f%% "
-            "would-be-anchor-rows=%d (persisted nothing — measure before trusting)",
+            "would-be-anchor-rows=%d (%s — measure before trusting)",
             report.markets_fetched,
             report.matched,
             report.unmatched,
             report.match_rate * 100.0,
             len(report.snapshots),
+            persisted,
         )
-        return report
 
 
 def build_shadow_capture(
@@ -735,10 +1024,18 @@ def build_shadow_capture(
     aliases: AliasTable | None = None,
     event_type_ids: Sequence[str] = (EVENT_TYPE_SOCCER,),
     now_fn: Callable[[], datetime] | None = None,
+    reference_odds_fn: ReferenceOddsFn | None = None,
+    promote: bool = False,
+    promote_sink: PromoteSink | None = None,
 ) -> BetfairApiShadowCapture | None:
     """Build the shadow capture, or None when the integration is INERT — i.e.
     disabled OR any credential blank. None means the scheduler adds NO job and no
-    login/network ever happens (req #3)."""
+    login/network ever happens (req #3).
+
+    ``reference_odds_fn`` (optional) wires the price comparison against the
+    existing OddsPortal-sourced "betfair exchange" anchor. ``promote`` is the
+    DEFAULT-OFF promotion flag; when false the capture is a measurement-only
+    shadow (non-sharp rows, nothing persisted) and ``promote_sink`` is ignored."""
     if not enabled or credentials is None:
         return None
     app_key, username, password = credentials
@@ -752,4 +1049,7 @@ def build_shadow_capture(
         aliases=aliases,
         event_type_ids=event_type_ids,
         now_fn=now_fn,
+        reference_odds_fn=reference_odds_fn,
+        promote=promote,
+        promote_sink=promote_sink,
     )

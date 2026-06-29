@@ -887,6 +887,16 @@ class Settings(BaseSettings):
     # INERT when this flag is false OR any credential below is blank: no login, no
     # network call, no scheduler job.
     value_betfair_api_enabled: bool = False
+    # PROMOTION flag (evidence-gated, DEFAULT OFF). When false the Betfair-API
+    # capture stays a measurement-only SHADOW: it tags rows with the NON-SHARP
+    # "betfair exchange (api-shadow)" name and persists nothing. When true the API
+    # rows carry the LIVE sharp-anchor name ("betfair exchange") and are routed
+    # (attach-only) into the snapshot store, so the API — not the OddsPortal scrape
+    # — feeds the Betfair sharp anchor. DO NOT flip this without the shadow
+    # price-comparison first showing agreement + freshness (see the per-cycle
+    # "betfair api COMPARE/SHADOW" logs: mean|delta|, %within-1-tick, %api-fresher).
+    # Inert wiring: when false the promote sink is never even constructed.
+    value_betfair_api_promote: bool = False
     # Betfair application key (the "delayed"/live App Key from the developer
     # account). NOT a betting scope — it only identifies the app to the read-only
     # market-data API. Secret: never logged, never persisted.

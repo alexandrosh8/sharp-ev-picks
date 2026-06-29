@@ -12,7 +12,7 @@ orchestrator touches only this module.
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -840,13 +840,22 @@ def build_scheduler(
         and settings.betfair_api_credentials() is not None
         and session_factory is not None
     ):
-        from app.ingestion.betfair_api import EVENT_TYPE_SOCCER, build_shadow_capture
+        from app.clv_trueup import resolve_betfair_back_snaps
+        from app.ingestion.betfair_api import (
+            EVENT_TYPE_SOCCER,
+            PROMOTED_BOOKMAKER,
+            ReferenceOdds,
+            build_shadow_capture,
+        )
         from app.resolution.matching import EventCandidate
+        from app.schemas.base import Market
+        from app.schemas.odds import OddsSnapshotIn
         from app.storage.repositories import select_betfair_targets
 
         bfapi_session_factory = session_factory
         bfapi_window = timedelta(hours=settings.betfair_api_window_hours)
         bfapi_limit = settings.betfair_api_max_targets_per_cycle
+        bfapi_directory = directory
         # SINGLE dedicated proxy (NO rotation — operator requirement). Direct egress
         # when unset. A dedicated client so the proxy never leaks to other callers.
         bfapi_proxy = settings.betfair_api_proxy_url()
@@ -864,6 +873,89 @@ def build_scheduler(
                 if row.starts_at is not None
             ]
 
+        def _reference_from_snaps(
+            snaps: Sequence[OddsSnapshotIn], home: str, away: str
+        ) -> ReferenceOdds:
+            # Role-map the EXISTING betfair-exchange H2H snapshots (home/draw/away)
+            # by team-name / draw, keeping the LATEST captured_at per role. Read-only.
+            def _n(value: str) -> str:
+                return value.strip().lower()
+
+            home_n, away_n = _n(home), _n(away)
+            prices: dict[str, tuple[float, datetime | None]] = {}
+            for snap in snaps:
+                if snap.market is not Market.H2H:
+                    continue
+                sel = _n(snap.selection)
+                role = (
+                    "home"
+                    if sel == home_n
+                    else "away"
+                    if sel == away_n
+                    else "draw"
+                    if sel in {"draw", "the draw", "x"}
+                    else None
+                )
+                if role is None:
+                    continue
+                prev = prices.get(role)
+                if prev is None or (
+                    snap.captured_at is not None
+                    and (prev[1] is None or snap.captured_at >= prev[1])
+                ):
+                    prices[role] = (float(snap.decimal_odds), snap.captured_at)
+            captured = [c for _, c in prices.values() if c is not None]
+            return ReferenceOdds(
+                home_back=prices["home"][0] if "home" in prices else None,
+                draw_back=prices["draw"][0] if "draw" in prices else None,
+                away_back=prices["away"][0] if "away" in prices else None,
+                captured_at=max(captured) if captured else None,
+            )
+
+        async def _betfair_api_reference_odds(ref: str) -> ReferenceOdds | None:
+            # The existing OddsPortal-sourced "betfair exchange" anchor for this
+            # canonical event, or None when none exists / no directory. READ-ONLY.
+            if bfapi_directory is None:
+                return None
+            teams = bfapi_directory.lookup(ref)
+            if teams is None or teams.starts_at is None:
+                return None
+            async with bfapi_session_factory() as session:
+                snaps = await resolve_betfair_back_snaps(session, ref, teams.starts_at)
+            if not snaps:
+                return None
+            return _reference_from_snaps(snaps, teams.home, teams.away)
+
+        # PROMOTION sink — built ONLY when the default-OFF promote flag is set, so
+        # when promotion is disabled the sink is never even constructed (provably
+        # inert). When set, the API rows (tagged the SHARP "betfair exchange" name)
+        # attach-only-persist onto canonical events — the Betfair API then feeds the
+        # sharp anchor INSTEAD of the scrape. Reuses persist_odds_snapshots verbatim
+        # (attach-only: never mints an event), the SAME safe path the scrape uses.
+        bfapi_promote_sink = None
+        if settings.value_betfair_api_promote:
+            from app.storage.repositories import persist_odds_snapshots
+
+            async def _betfair_api_promote_sink(
+                snaps: Sequence[OddsSnapshotIn],
+                teams_by_event: Mapping[str, EventTeams],
+            ) -> int:
+                return await persist_odds_snapshots(
+                    bfapi_session_factory,
+                    snaps,
+                    teams_by_event,
+                    sport="soccer",
+                    default_league="",
+                    attach_only_to_existing=True,
+                )
+
+            bfapi_promote_sink = _betfair_api_promote_sink
+            logger.warning(
+                "betfair API PROMOTE is ENABLED (%s) — Betfair-API odds will feed the "
+                "live sharp anchor INSTEAD of the scrape",
+                PROMOTED_BOOKMAKER,
+            )
+
         betfair_api_capture = build_shadow_capture(
             enabled=settings.value_betfair_api_enabled,
             credentials=settings.betfair_api_credentials(),
@@ -871,6 +963,9 @@ def build_scheduler(
             http_client=bfapi_http,
             candidates_fn=_betfair_api_candidates,
             event_type_ids=(EVENT_TYPE_SOCCER,),
+            reference_odds_fn=_betfair_api_reference_odds,
+            promote=settings.value_betfair_api_promote,
+            promote_sink=bfapi_promote_sink,
         )
 
         async def capture_betfair_api_shadow() -> None:
