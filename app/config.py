@@ -502,6 +502,14 @@ class Settings(BaseSettings):
     # Default "all" = OddsPortal's worldwide dated daily page (every league
     # that day, no slug filter); off-season leagues simply yield no events.
     # Matches the reference deployment so a fresh committed deploy is wide.
+    # Market-key budget when leagues="all" — env-configurable (2026-06-29). DEFAULT
+    # 4 = the validated reference. On the JSON feed each market key is ONE cheap .dat
+    # GET per match (the whole wildcard ladder rides one feed body — no per-tab
+    # Playwright render cost), so a higher budget is cheap; set 5 in .env to add the
+    # football asian_handicap visibility market. Bounded ge=1, le=8.
+    oddsportal_all_leagues_market_budget: int = Field(
+        default=ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET, ge=1, le=8
+    )
     oddsportal_football_leagues: str = "all"  # csv of slugs, or "all" sentinel
     # Devig-sound markets only. With leagues="all" (the default) the budget
     # validator caps this at ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET (4) keys —
@@ -1009,12 +1017,12 @@ class Settings(BaseSettings):
             keys = [m.strip() for m in markets.split(",") if m.strip()]
             # ["all"] is the loader's exact league-less sentinel (a list
             # MIXING 'all' with slugs is not, and fails in the loader).
-            if slugs == ["all"] and len(keys) > ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET:
+            if slugs == ["all"] and len(keys) > self.oddsportal_all_leagues_market_budget:
                 raise ValueError(
                     f"ODDSPORTAL_{sport}_LEAGUES=all scrapes the worldwide daily page "
                     f"(hundreds of matches; every market key adds one browser tab per "
                     f"match): {len(keys)} markets configured, budget is "
-                    f"{ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET}. Trim "
+                    f"{self.oddsportal_all_leagues_market_budget}. Trim "
                     f"ODDSPORTAL_{sport}_MARKETS or scope the leagues — at ~73s/match "
                     "with 18 tabs a cycle runs HOURS and the odds-age gate then "
                     "silently discards almost the whole slate."

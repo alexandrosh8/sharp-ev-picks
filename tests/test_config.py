@@ -372,6 +372,24 @@ def test_all_leagues_within_market_budget_passes() -> None:
     assert len(s.oddsportal_football_markets.split(",")) <= ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET
 
 
+def test_market_budget_is_env_configurable() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    five = "1x2,over_under_2_5,btts,double_chance,asian_handicap"
+    # Default budget (4) rejects a 5th market on leagues=all (the validated cap).
+    with pytest.raises(ValidationError):
+        make_settings(oddsportal_football_leagues="all", oddsportal_football_markets=five)
+    # Raising the budget to 5 in env accepts it (AH on the JSON feed is 1 GET/match).
+    s = make_settings(
+        oddsportal_all_leagues_market_budget=5,
+        oddsportal_football_leagues="all",
+        oddsportal_football_markets=five,
+    )
+    assert s.oddsportal_all_leagues_market_budget == 5
+    assert len(s.oddsportal_football_markets.split(",")) == 5
+
+
 def test_scoped_leagues_allow_a_wide_market_list() -> None:
     # The budget binds ONLY on the exact ["all"] sentinel — a SCOPED-league
     # config (specific slugs, not "all") keeps the full devig-sound market
