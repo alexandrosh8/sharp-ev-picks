@@ -548,6 +548,17 @@
         border: 1px solid var(--line); border-radius: 3px; padding: 0 4px;
       }
       .anchor { font-family: var(--mono); font-size: 9.5px; color: var(--faint); }
+      /* Shadow-gate signals (parsed from reason_summary): a DASHED border marks
+         them as informational/shadow — what a (default-off) gate WOULD do, never
+         an alert. VIS-ONLY flags a visibility-only market (football AH); STEAM?
+         flags a steam-gate shadow verdict. */
+      .gate-chip {
+        font-family: var(--mono); font-size: 9px; letter-spacing: 0.04em;
+        text-transform: uppercase; color: var(--faint);
+        border: 1px dashed var(--line); border-radius: 3px; padding: 0 4px;
+      }
+      .gate-chip.warn { color: var(--warn); border-color: rgba(224, 163, 62, 0.4); }
+      .gate-chip.info { color: var(--info); border-color: rgba(211, 160, 47, 0.4); }
 
       /* ---- the SIGNATURE: beat-the-close drift bar (per pick) ---------- */
       .drift { position: relative; height: 26px; margin: 1px 0; }
@@ -615,7 +626,7 @@
         .p-sel { gap: 6px; }
         .p-sel .sel { font-size: 12px; }
         .p-sel .book { font-size: 10px; }
-        .mk-chip, .anchor { font-size: 9px; }
+        .mk-chip, .anchor, .gate-chip { font-size: 9px; }
         /* thinner drift bar + smaller node, re-centred on the axis */
         .drift { height: 19px; }
         .drift .axis { top: 9px; }
@@ -942,6 +953,8 @@
               <div><b>CLOSED</b> — kicked off: the line closed, CLV is locked, awaiting the settled result.</div>
               <div><b>RESULTS</b> — every kicked-off pick merged: won/lost/awaiting plus recorded settlements + P&amp;L.</div>
               <div><b>SHADOW</b> — volume tier: never alerted or sized, kept purely as CLV evidence.</div>
+              <div><b>VIS-ONLY</b> — visibility-only market (e.g. football Asian handicap): capped at the shadow tier regardless of edge — never alerted or sized, kept only as forward CLV evidence.</div>
+              <div><b>STEAM?</b> — a default-off gate's SHADOW verdict (e.g. the steam / line-movement check) that WOULD demote this pick. Measured only; changes nothing — watch what the gates would do.</div>
               <div><b>Drift bar</b> — your fill ◆ vs the de-vigged FAIR close ┊ and the book's close/now. Green gap = the +EV you locked.</div>
             </div>
           </div>
@@ -1276,6 +1289,18 @@
             an.title = "Fair-value anchor: " + p.anchor_type + " (PIN=Pinnacle, CONS=consensus median, SHARP=other sharp book).";
             sel.appendChild(an);
           }
+          // shadow-gate signals (visibility-only / steam(shadow) / demotions) —
+          // informational chips so the operator can SEE why a pick is shadow and
+          // watch what the default-off gates WOULD do. textContent only.
+          gateChips(p).forEach((g) => {
+            const c = document.createElement("span");
+            c.className = "gate-chip " + g.cls;
+            c.textContent = g.label;
+            c.title =
+              g.title +
+              " — shadow/visibility signal: informational only, never alerted or sized.";
+            sel.appendChild(c);
+          });
           el.appendChild(sel);
 
           // the drift bar signature
@@ -1390,6 +1415,40 @@
           else { text = String(p.status).toUpperCase(); cls = "neu"; }
           const b = document.createElement("span"); b.className = "badge " + cls; b.textContent = text;
           return b;
+        }
+
+        // Shadow-gate signals parsed from reason_summary. The value pipeline
+        // appends " | <note>" segments after the first when a gate fires; we
+        // surface the ones the operator is watching as compact, dashed chips so
+        // a shadow/volume pick reads its WHY at a glance — never as an alert.
+        //   • visibility-only market (football AH) -> VIS-ONLY  (info)
+        //   • steam(shadow) verdict (default-off gate WOULD demote) -> STEAM? (warn)
+        //   • steam (enforced demote) -> STEAM (warn)
+        //   • non-major / no-sharp-anchor / ml-filter demotions -> compact chip
+        // (the experimental-sport note is already shown by the sport EXP tag, so
+        //  it is skipped here to avoid a duplicate). Any other "(shadow)"/"would"
+        // note falls back to a generic SHADOW chip. The raw note is the tooltip,
+        // so the operator always sees exactly what the pipeline recorded.
+        function gateChips(p) {
+          const rs = String((p && p.reason_summary) || "");
+          if (!rs) return [];
+          const out = [];
+          rs.split(" | ").slice(1).forEach((seg) => {
+            const s = seg.trim(); if (!s) return;
+            const low = s.toLowerCase();
+            let label, cls;
+            if (low.indexOf("visibility-only") !== -1) { label = "VIS-ONLY"; cls = "info"; }
+            else if (low.indexOf("steam(shadow)") !== -1) { label = "STEAM?"; cls = "warn"; }
+            else if (low.indexOf("steam ") === 0) { label = "STEAM"; cls = "warn"; }
+            else if (low.indexOf("non-major") !== -1) { label = "NON-MAJOR"; cls = "info"; }
+            else if (low.indexOf("no sharp anchor") !== -1) { label = "NO-ANCHOR"; cls = "info"; }
+            else if (low.indexOf("ml-filter") !== -1) { label = "ML-FILTER"; cls = "info"; }
+            else if (low.indexOf("unvalidated sport") !== -1 || low.indexOf("experimental") !== -1) { return; }
+            else if (low.indexOf("shadow") !== -1 || low.indexOf("would") !== -1) { label = "SHADOW"; cls = "info"; }
+            else return;
+            out.push({ label: label, cls: cls, title: s });
+          });
+          return out;
         }
 
         // ===== render the tape ======================================

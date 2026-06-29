@@ -342,6 +342,57 @@ def test_dashboard_fetches_picks_per_tier() -> None:
     assert '"/picks?limit=200"' not in text  # the unscoped fetch is gone
 
 
+def test_picks_payload_carries_reason_summary(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Forward-evidence contract: the dashboard's shadow-gate indicator parses
+    each pick's `reason_summary` (visibility-only / steam(shadow) notes ride on
+    it), so the /picks payload must carry the field through the confidence-
+    enrichment step untouched."""
+    import app.api.routes as routes
+
+    async def fake_rows(session, limit, tier=None, min_edge=None, volume_min_edge=None):  # type: ignore[no-untyped-def]
+        return [
+            _pick_row(
+                tier="volume",
+                market="spreads",
+                reason_summary=(
+                    "value: Pinnacle fair 1.95 vs BookA 2.10 | "
+                    "visibility-only market: capped at volume (shadow) | "
+                    "steam(shadow) (soft_converging): would demote"
+                ),
+            )
+        ]
+
+    monkeypatch.setattr(routes, "latest_picks_with_events", fake_rows)
+    body = TestClient(make_app()).get("/picks").json()
+    assert "reason_summary" in body[0]
+    assert "visibility-only" in body[0]["reason_summary"]
+    assert "steam(shadow)" in body[0]["reason_summary"]
+
+
+def test_dashboard_surfaces_visibility_only_and_steam_shadow_signals() -> None:
+    """Forward-evidence visibility (feat/ah-scope-loaders-dashboard): the new
+    football Asian-handicap visibility-only picks (volume tier, market=spreads)
+    get a clear VIS-ONLY label so they are never mistaken for an alerted premium
+    pick; and a default-off gate's SHADOW verdict (e.g. steam(shadow)) surfaces a
+    compact indicator so the operator can watch what the gates WOULD do before a
+    promote decision. Both are parsed from the per-pick reason_summary and built
+    via DOM (no innerHTML)."""
+    text = TestClient(make_app()).get("/").text
+    # the indicator reads the per-pick reason_summary served by /picks
+    assert "reason_summary" in text
+    # a dedicated parser turns the gate notes into compact chips
+    assert "function gateChips" in text
+    assert "gate-chip" in text
+    # the AH visibility-only LABEL + the steam shadow verdict it keys on
+    assert "VIS-ONLY" in text
+    assert "visibility-only" in text
+    assert "steam(shadow)" in text
+    # documented in the legend so the label reads as informational, never an alert
+    assert "shadow tier regardless of edge" in text
+    # safety: untrusted scrape strings (selection/book/reason) never via innerHTML
+    assert "innerHTML" not in text
+
+
 def test_dashboard_fetches_and_renders_available_games() -> None:
     text = TestClient(make_app()).get("/").text
     assert 'id="toggle-games"' in text
