@@ -156,6 +156,25 @@ def test_sport_market_clv_gate_enabled_requires_every_bar() -> None:
     )
 
 
+def test_meta_model_calibration_stratifies_by_close_anchor() -> None:
+    # Review #5: the score predicts P(beat the MAX-of-books close), but beat_close
+    # is realized vs whatever close anchor each pick got. The monitor must
+    # stratify by closing_anchor_type so consensus (max-equivalent) and pinnacle
+    # closes are not conflated into one apples-to-oranges aggregate.
+    from app.backtesting.live_evidence import meta_model_calibration_by_close_anchor
+
+    rows = [row(score=0.8, beat=True, closing_anchor="consensus") for _ in range(4)] + [
+        row(score=0.2, beat=False, closing_anchor="pinnacle") for _ in range(4)
+    ]
+    strata = meta_model_calibration_by_close_anchor(rows, min_n=1)
+    assert set(strata) == {"consensus", "pinnacle"}
+    assert strata["consensus"].n == 4
+    assert strata["pinnacle"].n == 4
+    # rows missing a score or a beat-close label are excluded entirely
+    none_score = [row(score=None, beat=True, closing_anchor="consensus")]
+    assert meta_model_calibration_by_close_anchor(none_score, min_n=1) == {}
+
+
 def test_sharp_close_excludes_asymmetric_devig_fallback() -> None:
     # P2-2: a genuine independent sharp snapshot close is dropped from the trusted
     # sharp_close stratum when the MINT devig fell back but the CLOSE did not (or

@@ -231,6 +231,32 @@ def test_summarize_matches_value_backtest_stats_math() -> None:
     assert got.n_missing_clv_max == 1
 
 
+def test_clv_se_uses_sample_std_ddof1_not_population() -> None:
+    # The SE feeding the >2SE adoption gate must be the UNBIASED sample SE
+    # (ddof=1), not the population SE (ddof=0) which is too small.
+    import math as _m
+
+    vb = sys.modules["value_backtest"]
+    xs = [0.05, -0.02, 0.01]
+    s = vb.Stats.from_bets(
+        [vb.VBet(won=True, odds=2.0, edge=0.02, clv_pinn=x, clv_max=None) for x in xs]
+    )
+    m = sum(xs) / 3
+    sample_se = _m.sqrt(sum((x - m) ** 2 for x in xs) / 2) / _m.sqrt(3)  # ddof=1
+    pop_se = _m.sqrt(sum((x - m) ** 2 for x in xs) / 3) / _m.sqrt(3)  # ddof=0
+    assert s.clv_pinn_se == pytest.approx(sample_se)
+    assert s.clv_pinn_se > pop_se  # strictly larger than the old population SE
+
+
+def test_single_observation_clv_se_is_none_not_fake_zero() -> None:
+    # n<2 has no defined sample variance: SE must be None (not a fake-zero that
+    # mints spurious >2SE significance from one observation).
+    vb = sys.modules["value_backtest"]
+    s = vb.Stats.from_bets([vb.VBet(won=True, odds=2.0, edge=0.02, clv_pinn=0.03, clv_max=None)])
+    assert s.clv_pinn == pytest.approx(0.03)
+    assert s.clv_pinn_se is None
+
+
 def test_bootstrap_is_deterministic_and_zero_for_identical_sets() -> None:
     bets = _frame(
         [

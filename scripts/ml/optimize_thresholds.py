@@ -225,11 +225,18 @@ class Summary:
 
 
 def _mean_se(xs: np.ndarray) -> tuple[float | None, float | None]:
-    """Population-std analytic SE — exact parity with Stats.from_bets."""
-    if xs.size == 0:
+    """Sample-std (ddof=1) analytic SE — exact parity with Stats.from_bets. The
+    SE feeds the >2SE adoption gate, so it must use the UNBIASED sample variance,
+    not the population std (which is too small and makes the gate too easy on a
+    small sample). n<2 has no defined sample SE -> None (callers treat None as
+    not-significant), never a fake-zero SE that mints spurious significance."""
+    n = int(xs.size)
+    if n == 0:
         return None, None
     m = float(xs.mean())
-    se = float(xs.std(ddof=0) / math.sqrt(xs.size))
+    if n < 2:
+        return m, None
+    se = float(xs.std(ddof=1) / math.sqrt(n))
     return m, se
 
 

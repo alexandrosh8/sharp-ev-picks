@@ -85,10 +85,19 @@ class Stats:
         cm = [b.clv_max for b in bets if b.clv_max is not None]
 
         def mean_se(xs: list[float]) -> tuple[float | None, float | None]:
-            if not xs:
+            # SAMPLE std (ddof=1), not population std (ddof=0): the SE that feeds
+            # the >2SE adoption gate must use the unbiased sample variance, or it
+            # is too small and the gate too easy to pass on a small sample. n<2 has
+            # no defined sample SE -> None (callers treat None as not-significant),
+            # never a fake-zero SE that mints spurious significance. Matches
+            # app.backtesting.clv.mean_significance (ddof=1 t-CI).
+            n = len(xs)
+            if n == 0:
                 return None, None
-            m = sum(xs) / len(xs)
-            se = math.sqrt(sum((x - m) ** 2 for x in xs) / len(xs)) / math.sqrt(len(xs))
+            m = sum(xs) / n
+            if n < 2:
+                return m, None
+            se = math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1)) / math.sqrt(n)
             return m, se
 
         mp, sp = mean_se(cp)

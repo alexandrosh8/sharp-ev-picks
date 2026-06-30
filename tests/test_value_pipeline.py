@@ -1292,3 +1292,156 @@ async def test_steam_gate_absent_is_strict_noop() -> None:
     picks = await run_value_pipeline(deps, "soccer")
     assert len(picks) == 1
     assert "steam" not in picks[0].reason_summary
+
+
+def two_event_snapshots(soft_home_a: float, soft_home_b: float) -> list[OddsSnapshotIn]:
+    """Two independent H2H events, each Pinnacle-anchored (identical sharp lines)
+    with SoftBook overpricing Home. evt-A is iterated FIRST (snapshot order ->
+    dict insertion order in group_market_prices). A larger SoftBook Home price
+    means a larger raw Kelly at the SAME sharp fair prob, so the caller sets the
+    raw_kelly ordering purely through soft_home_a vs soft_home_b."""
+    now = datetime.now(tz=UTC)
+
+    def s(ev: str, book: str, sel: str, odds: float) -> OddsSnapshotIn:
+        return OddsSnapshotIn(
+            event_id=ev,
+            bookmaker=book,
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=odds,
+            captured_at=now - timedelta(seconds=30),
+            ingested_at=now,
+        )
+
+    out: list[OddsSnapshotIn] = []
+    for ev, soft_home in (("evt-A", soft_home_a), ("evt-B", soft_home_b)):
+        out += [
+            s(ev, "Pinnacle", "Home FC", 2.50),
+            s(ev, "Pinnacle", "Draw", 3.30),
+            s(ev, "Pinnacle", "Away FC", 3.10),
+            s(ev, "SoftBook", "Home FC", soft_home),
+        ]
+    return out
+
+
+def make_deps_two_events(
+    sink: RecordingSink, loader: FakeLoader, *, max_daily: float
+) -> PipelineDeps:
+    """make_deps with BOTH evt-A and evt-B registered and a caller-set daily
+    exposure cap so the cap can be made to bind on a 2-pick slate."""
+    directory = EventDirectory()
+    directory.register("evt-A", EventTeams(home="Home FC", away="Away FC"))
+    directory.register("evt-B", EventTeams(home="Home FC", away="Away FC"))
+    deps = PipelineDeps(
+        loader=loader,
+        model=NullModel(),
+        dispatcher=AlertDispatcher([sink], InMemoryIdempotencyStore()),
+        gate_policy=POLICY,
+        stake_policy=StakePolicy(),
+        ledger=DailyExposureLedger(max_daily_fraction=max_daily),
+        bankroll=Decimal("1000"),
+        directory=directory,
+        value_min_edge=0.015,
+        value_min_odds=1.30,
+    )
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    return deps
+
+
+async def test_daily_cap_funds_highest_raw_kelly_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the daily-exposure cap binds, the HIGHEST-raw_kelly (highest-growth)
+    pick must fund first — even when it is iterated AFTER a lower-raw_kelly pick.
+
+    evt-A (SoftBook Home 3.20, raw_kelly ~0.115) iterates BEFORE evt-B (SoftBook
+    Home 4.00, raw_kelly ~0.189); both cap to final 0.02. With a 0.02 daily cap
+    exactly one funds. Under the old iteration-order reservation evt-A won the
+    budget and evt-B was skipped; ranking the ledger reservation by raw_kelly
+    funds evt-B (the higher-growth pick) instead."""
+    patch_persist_recording(monkeypatch, ["inserted", "inserted"])
+
+    sink = RecordingSink()
+    deps = make_deps_two_events(sink, FakeLoader(two_event_snapshots(3.20, 4.00)), max_daily=0.02)
+    day = datetime.now(tz=UTC).date()
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert [p.event_id for p in picks] == ["evt-B"]  # higher raw_kelly funded
+    assert picks[0].tier == "premium"
+    assert [a.title for a in sink.sent].count("evt-A") == 0  # evt-A never alerted
+    assert len(sink.sent) == 1  # exactly the funded pick alerted
+    assert deps.ledger.used(day) == pytest.approx(0.02)  # cap fully bound by one pick
+
+
+async def test_equal_raw_kelly_keeps_deterministic_iteration_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ties break by iteration order: the raw_kelly sort is STABLE, so two picks
+    with IDENTICAL raw_kelly fund in iteration order. evt-A (iterated first) wins
+    the single 0.02 slot when both carry the same SoftBook Home price."""
+    patch_persist_recording(monkeypatch, ["inserted", "inserted"])
+
+    sink = RecordingSink()
+    deps = make_deps_two_events(sink, FakeLoader(two_event_snapshots(4.00, 4.00)), max_daily=0.02)
+    day = datetime.now(tz=UTC).date()
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert [p.event_id for p in picks] == ["evt-A"]  # tie -> first iterated funds
+    assert deps.ledger.used(day) == pytest.approx(0.02)
+
+
+async def test_deferred_premium_keeps_volume_and_funds_all_when_cap_loose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No behaviour change when the cap does not bind: BOTH premium picks fund and
+    alert (deferral never drops a fundable pick), and a same-cycle VOLUME pick
+    still persists inline with NO alert and NO exposure (volume path unchanged)."""
+    # evt-A Home premium, evt-B Home premium, evt-A Draw lands in the volume band.
+    now = datetime.now(tz=UTC)
+
+    def s(ev: str, book: str, sel: str, odds: float) -> OddsSnapshotIn:
+        return OddsSnapshotIn(
+            event_id=ev,
+            bookmaker=book,
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=odds,
+            captured_at=now - timedelta(seconds=30),
+            ingested_at=now,
+        )
+
+    snaps = [
+        s("evt-A", "Pinnacle", "Home FC", 2.50),
+        s("evt-A", "Pinnacle", "Draw", 3.30),
+        s("evt-A", "Pinnacle", "Away FC", 3.10),
+        s("evt-A", "SoftBook", "Home FC", 3.20),
+        s("evt-A", "SoftBook", "Draw", 3.65),  # ~2.1% edge on Draw -> volume tier
+        s("evt-B", "Pinnacle", "Home FC", 2.50),
+        s("evt-B", "Pinnacle", "Draw", 3.30),
+        s("evt-B", "Pinnacle", "Away FC", 3.10),
+        s("evt-B", "SoftBook", "Home FC", 4.00),
+    ]
+    seen = patch_persist_recording(monkeypatch, ["inserted", "inserted", "inserted"])
+
+    sink = RecordingSink()
+    # Generous daily cap: nothing binds.
+    deps = make_deps_two_events(sink, FakeLoader(snaps), max_daily=0.05)
+    deps.value_min_edge = 0.05  # Draw (~3.5% edge) cannot reach premium
+    deps.value_volume_min_edge = 0.015
+    day = datetime.now(tz=UTC).date()
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    # Both Home premium picks funded (ranked B before A), the Draw stays volume.
+    premium = [p for p in picks if p.tier == "premium"]
+    volume = [p for p in picks if p.tier == "volume"]
+    assert {p.event_id for p in premium} == {"evt-A", "evt-B"}
+    assert [p.event_id for p in premium] == ["evt-B", "evt-A"]  # raw_kelly order
+    assert [(p.event_id, p.selection) for p in volume] == [("evt-A", "Draw")]
+    # Volume persisted inline (recorded) but never alerted; only the 2 premium
+    # picks alerted; the volume pick reserved no exposure.
+    assert ("Draw", "volume") in seen
+    assert len(sink.sent) == 2
+    assert deps.ledger.used(day) == pytest.approx(0.04)  # two 0.02 premium reserves only

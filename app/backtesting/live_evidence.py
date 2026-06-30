@@ -241,13 +241,60 @@ def meta_model_calibration(
     the actual outcome. Well calibrated means a 0.7 reads as a 70% beat-close
     rate. Diagnostic only — held-out CLV stays the staking arbiter (ADR-0017);
     this closes with REAL production outcomes the loop the offline calibrator
-    bake-off opened on the trainer's holdout."""
-    observations = [
+    bake-off opened on the trainer's holdout.
+
+    CAVEAT (measurement honesty): the score predicts P(beat the vig-free
+    MAX-of-books close), but `beat_close` is realized against whatever
+    closing_anchor_type each pick actually got (pinnacle / sharp / consensus) —
+    so this OVERALL aggregate mixes the score's target (max close) with sharp/
+    consensus closes and reads apples-to-oranges. Read the per-close-anchor
+    stratification (`meta_model_calibration_by_close_anchor`) instead: the
+    CONSENSUS stratum is the closest realized proxy to the max-of-books close the
+    score was trained to predict. The overall is kept only for continuity."""
+    return calibration_report(_score_observations(rows), min_n=min_n)
+
+
+def _cal_dict(cal: CalibrationReport) -> dict[str, Any]:
+    """Serialize a CalibrationReport to the GET /performance payload fields."""
+    return {
+        "n": cal.n,
+        "insufficient": cal.insufficient,
+        "log_loss": cal.log_loss,
+        "brier": cal.brier,
+        "ece": cal.ece,
+        "base_rate": cal.base_rate,
+        "mean_pred": cal.mean_pred,
+    }
+
+
+def _score_observations(rows: Sequence[SettledPickRow]) -> list[CalibrationObservation]:
+    return [
         CalibrationObservation(fair_prob=r.value_filter_score, won=r.beat_close)
         for r in rows
         if r.value_filter_score is not None and r.beat_close is not None
     ]
-    return calibration_report(observations, min_n=min_n)
+
+
+def meta_model_calibration_by_close_anchor(
+    rows: Sequence[SettledPickRow], *, min_n: int = MIN_STRATUM_N
+) -> dict[str, CalibrationReport]:
+    """Meta-model calibration STRATIFIED by the close anchor each pick got.
+
+    The score predicts P(beat the max-of-books close); stratifying by
+    closing_anchor_type keeps the score-vs-label comparison internally
+    consistent within each stratum (a constant target per stratum), so the
+    CONSENSUS stratum — the realized close nearest the max-of-books target — can
+    be read as the score-aligned calibration instead of the apples-to-oranges
+    overall. Picks with no recorded close anchor are grouped under "unknown"."""
+    by_anchor: dict[str, list[SettledPickRow]] = {}
+    for r in rows:
+        if r.value_filter_score is None or r.beat_close is None:
+            continue
+        key = r.closing_anchor_type or "unknown"
+        by_anchor.setdefault(key, []).append(r)
+    return {
+        k: calibration_report(_score_observations(v), min_n=min_n) for k, v in by_anchor.items()
+    }
 
 
 def live_evidence_report(
@@ -292,14 +339,17 @@ def live_evidence_report(
         "q_star": ml_threshold,
         "min_n": min_n,
         # Is the meta-model's P(beats close) calibrated against realized outcomes?
+        # The OVERALL is apples-to-oranges (score targets the max-of-books close;
+        # beat_close is vs the realized anchor close) — read by_close_anchor, whose
+        # CONSENSUS stratum is the score-aligned read. Overall kept for continuity.
         "meta_model_calibration": {
-            "n": cal.n,
-            "insufficient": cal.insufficient,
-            "log_loss": cal.log_loss,
-            "brier": cal.brier,
-            "ece": cal.ece,
-            "base_rate": cal.base_rate,
-            "mean_pred": cal.mean_pred,
+            **_cal_dict(cal),
+            "by_close_anchor": {
+                k: _cal_dict(v)
+                for k, v in sorted(
+                    meta_model_calibration_by_close_anchor(rows, min_n=min_n).items()
+                )
+            },
         },
         "by_score": {k: _stratum_stats(v, min_n) for k, v in sorted(by_score.items())},
         "by_tier": {k: _stratum_stats(v, min_n) for k, v in sorted(by_tier.items())},

@@ -961,6 +961,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         )
 
     picks: list[PickOut] = []
+    # PREMIUM reserve+alert is DEFERRED out of the candidate loop into this
+    # per-cycle list of (pick, breakdown, outcome, event_id). Reserving inline
+    # binds the daily-exposure cap in ITERATION order, so on a busy slate a
+    # high-growth pick iterated late loses the budget to a low-growth pick
+    # iterated early. Collected here, then reserved AFTER the loop edge-ranked by
+    # raw_kelly so the highest-growth picks fund first (intra-cycle ordering only;
+    # raw_kelly uses already-computed fair/price — no leakage).
+    premium_candidates: list[tuple[PickOut, StakeBreakdown, PersistOutcome, str]] = []
     n_volume = 0
     n_stale = 0
     # Denominator for the stale-drop RATIO: candidates reaching the freshness
@@ -1330,29 +1338,44 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     picks.append(pick)
                     n_volume += 1
                 continue
-            staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
-            if staked is None:
-                # brand-new premium pick with no remaining daily/event capacity
-                logger.info("daily exposure cap reached; skipping %s", v.selection)
-                continue
-            pick = staked
-            if outcome in ("inserted", "upgraded", "unpersisted"):
-                # "inserted"/"unpersisted" (uncertainty = "new") or "upgraded"
-                # — a volume row just cleared the premium threshold: THIS is its
-                # alert moment. A "duplicate" is re-dispatched (below) but is not
-                # a NEW pick this cycle, so it is not appended.
-                picks.append(pick)
-            # value_min_edge adds the "Still +EV down to X.XX" execution
-            # line (value-strategy semantics: model_probability holds the
-            # sharp fair prob here — see build_pick_alert).
-            await deps.dispatcher.dispatch(
-                build_pick_alert(
-                    pick,
-                    deps.value_min_edge,
-                    model_name=deps.model_name,
-                    model_version=deps.model_version,
-                )
+            # DEFER the reserve + alert: the daily-exposure cap must fund the
+            # highest-growth picks first, not whichever happened to iterate first.
+            # Persistence above stayed inline (order unchanged); only the ledger
+            # reservation and the alert dispatch move below the loop.
+            premium_candidates.append((pick, breakdown, outcome, event_id))
+
+    # Reserve the deferred premium candidates edge-ranked by raw_kelly (DESC) so
+    # that when the daily-exposure cap binds the highest-growth picks fund first.
+    # The sort is STABLE, so equal-raw_kelly candidates keep their deterministic
+    # iteration order. Per-candidate logic is the EXACT prior inline path (reserve
+    # -> skip-on-None -> append-on-new-outcome -> dispatch); only the order moved.
+    # raw_kelly derives only from already-computed fair/price (no leakage) and the
+    # ledger.reserve math / kr-1 ordering inside _reserve_for_outcome are unchanged.
+    premium_candidates.sort(key=lambda c: c[1].raw_kelly, reverse=True)
+    for pick, breakdown, outcome, event_id in premium_candidates:
+        staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
+        if staked is None:
+            # brand-new premium pick with no remaining daily/event capacity
+            logger.info("daily exposure cap reached; skipping %s", pick.selection)
+            continue
+        pick = staked
+        if outcome in ("inserted", "upgraded", "unpersisted"):
+            # "inserted"/"unpersisted" (uncertainty = "new") or "upgraded"
+            # — a volume row just cleared the premium threshold: THIS is its
+            # alert moment. A "duplicate" is re-dispatched (below) but is not
+            # a NEW pick this cycle, so it is not appended.
+            picks.append(pick)
+        # value_min_edge adds the "Still +EV down to X.XX" execution
+        # line (value-strategy semantics: model_probability holds the
+        # sharp fair prob here — see build_pick_alert).
+        await deps.dispatcher.dispatch(
+            build_pick_alert(
+                pick,
+                deps.value_min_edge,
+                model_name=deps.model_name,
+                model_version=deps.model_version,
             )
+        )
 
     # Re-price every OPEN pick from this cycle's snapshots: CLV true-up +
     # current odds/edge ("still worth betting?") — no second scrape. Picks
