@@ -342,11 +342,17 @@ async def test_snapshot_close_uses_the_pick_pipelines_devig_method(session) -> N
     assert abs(fairs[DevigMethod.SHIN] - fairs[DevigMethod.POWER]) > 5e-6
 
 
-async def test_snapshot_close_nets_commission_on_both_sides(session) -> None:  # type: ignore[no-untyped-def]
-    # Effective-odds symmetry: a pick FILLED at a commissioned exchange whose
-    # close set is also exchange-anchored must net 5% on BOTH sides — the
-    # close anchor's odds are netted before devig, and the fill is netted in
-    # clv_log. Feeding either side gross inflates CLV by ~ln(1/(1-c)).
+async def test_snapshot_close_fill_nets_commission_but_close_uses_gross(session) -> None:  # type: ignore[no-untyped-def]
+    # P2-1 (repurposed — was test_snapshot_close_nets_commission_on_both_sides, whose
+    # net-BOTH-sides premise is now contradicted): the two sides play DIFFERENT roles,
+    # so they net DIFFERENTLY. A pick FILLED at a commissioned exchange whose close set
+    # is ALSO exchange-anchored must:
+    #   * net 5% on the BET-SIDE fill (commission is a real cost YOU pay), and
+    #   * devig the GROSS close odds for the closing fair PROBABILITY (commission is a
+    #     payout cost, not a probability signal — it must not enter the true-prob estimate).
+    # This keeps clv_log = ln(net_fill x p_true) EV-faithful: its sign equals the sign of
+    # the bet's true EV (p_true*net_fill - 1). Netting the close too (the old behavior)
+    # biased CLV high by ~ln(1/(1-c)) by double-counting commission into the probability.
     pick = await seed_pick(session, "evt-snapclose-eff", bookmaker="Betfair Exchange")
     await seed_1x2_snaps(
         session, pick.event_id, "Betfair Exchange", PINNACLE_CLOSE, KICKOFF - timedelta(hours=1)
@@ -357,9 +363,15 @@ async def test_snapshot_close_nets_commission_on_both_sides(session) -> None:  #
     await session.refresh(pick)
     assert pick.closing_fair_probability is not None
     assert pick.clv_log is not None
-    eff_close = tuple(1.0 + (o - 1.0) * 0.95 for o in PINNACLE_CLOSE)  # 5% netted
-    fair = devig(eff_close, method=DevigMethod.SHIN)[0]  # ~0.4363809
+    # Close fair-prob = GROSS devig (P2-1), NOT the commission-netted devig.
+    fair = devig(PINNACLE_CLOSE, method=DevigMethod.SHIN)[0]  # ~0.4359962 (gross)
     assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
+    # ...and it is NOT the old net-anchor close (~0.4363809).
+    net_close_fair = devig(
+        tuple(1.0 + (o - 1.0) * 0.95 for o in PINNACLE_CLOSE), method=DevigMethod.SHIN
+    )[0]
+    assert abs(float(pick.closing_fair_probability) - net_close_fair) > 1e-5
+    # Bet-side fill STILL nets commission (your realized cost): clv uses net 2.425.
     eff_fill = 1.0 + (2.50 - 1.0) * 0.95  # 2.425
     assert float(pick.clv_log) == pytest.approx(math.log(eff_fill * fair), abs=1e-5)
     # explicitly NOT the gross-fill CLV (gap is ln(2.5/2.425) ~ 0.0305)

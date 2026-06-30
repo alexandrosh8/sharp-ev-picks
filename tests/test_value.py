@@ -3,12 +3,73 @@
 import pytest
 
 from app.edge.value import (
+    anchor_fair_probs,
     ceil_odds,
     effective_odds,
     find_value_bets,
     find_value_bets_with_fair,
     min_acceptable_odds,
 )
+from app.probabilities.devig import DevigMethod, devig
+
+# --- P2-1: commission is a payout cost, NOT a probability signal -------------
+
+
+def test_exchange_anchor_fair_devigs_gross_not_commission_netted_odds() -> None:
+    # P2-1 (RED before fix): the FAIR probability from a Betfair-Exchange sharp
+    # anchor must devig the GROSS (displayed) odds. Netting commission BEFORE the
+    # devig inflates the favourite's implied prob; the bias mostly cancels on
+    # renormalisation but leaves a residual on asymmetric markets (here ~33 bps on
+    # the favourite). Commission netting belongs ONLY on the bet-side price used
+    # for edge/EV/CLV (tested separately), never on the fair-probability estimate.
+    sels = ["Home", "Draw", "Away"]
+    gross = [1.45, 4.60, 7.20]
+    prices = {
+        "Home": {"Betfair Exchange": 1.45, "SoftBook": 1.50},
+        "Draw": {"Betfair Exchange": 4.60, "SoftBook": 4.40},
+        "Away": {"Betfair Exchange": 7.20, "SoftBook": 7.00},
+    }
+    book, fair = anchor_fair_probs(prices, devig_method=DevigMethod.POWER)
+    assert book == "Betfair Exchange"
+    expected_gross = dict(zip(sels, devig(gross, method=DevigMethod.POWER), strict=True))
+    for sel, p in expected_gross.items():
+        assert fair[sel] == pytest.approx(p, abs=1e-12)
+    # And it must NOT match the (buggy) commission-netted devig.
+    net = [effective_odds("Betfair Exchange", o) for o in gross]
+    net_fair = dict(zip(sels, devig(net, method=DevigMethod.POWER), strict=True))
+    assert fair["Home"] != pytest.approx(net_fair["Home"], abs=1e-9)
+
+
+def test_pinnacle_anchor_fair_unchanged_no_commission() -> None:
+    # P2-1 regression lock: Pinnacle carries NO commission, so gross == net and
+    # the fair is bit-identical to the raw-odds devig. The trusted subset's
+    # Pinnacle-anchored picks are provably unchanged by the gross-devig fix.
+    sels = ["Home", "Draw", "Away"]
+    gross = [1.45, 4.60, 7.20]
+    prices = {
+        "Home": {"Pinnacle": 1.45, "SoftBook": 1.50},
+        "Draw": {"Pinnacle": 4.60, "SoftBook": 4.40},
+        "Away": {"Pinnacle": 7.20, "SoftBook": 7.00},
+    }
+    book, fair = anchor_fair_probs(prices, devig_method=DevigMethod.POWER)
+    assert book == "Pinnacle"
+    expected = dict(zip(sels, devig(gross, method=DevigMethod.POWER), strict=True))
+    for sel, p in expected.items():
+        assert fair[sel] == pytest.approx(p, abs=1e-12)
+
+
+def test_overround_gate_stays_on_net_odds_membership_invariant() -> None:
+    # P2-1 must NOT widen anchor membership: the overround plausibility gate stays
+    # on NET (commission-aware) odds. This single-book market's NET overround
+    # (~7.2%) exceeds a 6% cap though its GROSS overround (~4.6%) would pass — with
+    # no consensus fallback (one book), the Betfair anchor must STILL be rejected,
+    # exactly as before the gross-devig fix.
+    prices = {
+        "Home": {"Betfair Exchange": 1.45},
+        "Draw": {"Betfair Exchange": 4.60},
+        "Away": {"Betfair Exchange": 7.20},
+    }
+    assert anchor_fair_probs(prices, devig_method=DevigMethod.POWER, max_overround=0.06) is None
 
 
 def test_flags_value_when_soft_beats_pinnacle_fair() -> None:

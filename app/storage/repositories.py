@@ -791,6 +791,20 @@ def _clv_row_is_tautological(
     close evidence — so its clv_log/beat_close are dropped from every CLV aggregate.
     Only excludes when BOTH probabilities are present (we can PROVE the tautology); a
     row with no CLV (clv_log is None) or an unknowable fair is not tautological here.
+
+    STRATEGY COUPLING (P2-3): ``model_probability`` is the pick-time MARKET fair only
+    under the deployed VALUE strategy, where the pipeline persists the devigged sharp
+    fair into this column (``model_probability = ValueBet.sharp_fair_prob``;
+    app/pipeline.py). Under the OFF-BY-DEFAULT model strategy it holds the goals-model
+    probability instead (the market fair lives in ``fair_probability`` there), so this
+    guard — comparing close MARKET fair against it — silently no-ops on model-strategy
+    rows. That is a KNOWN, accepted limitation, not a bug: the model strategy is not
+    deployed and contributes no trusted CLV. Closing the coupling for real (routing to
+    fair_probability on model-strategy rows) is DEFERRED — it cannot key safely on
+    ``anchor_type`` because a pre-column legacy VALUE pick also has anchor_type NULL,
+    so the reroute would corrupt legacy value-row CLV. The invariant this guard relies
+    on: on every row that feeds the trusted sharp subset, ``model_probability`` IS the
+    pick-time market fair.
     """
     if clv_log is None:
         return False
@@ -1103,7 +1117,9 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         Sport.key,  # 7 — per-sport split key, not passed to _aggregate_settled
         Pick.decimal_odds,  # 8 — CLV-1 close-implied-edge guard (fill price)
         Pick.closing_fair_probability,  # 9 — CLV-1 close-implied-edge guard (close fair)
-        Pick.model_probability,  # 10 — TAUTOLOGY guard (pick-time fair)
+        Pick.model_probability,  # 10 — TAUTOLOGY guard (pick-time fair; P2-3: this
+        # IS the market fair only under the deployed value strategy — see
+        # _clv_row_is_tautological for the documented strategy coupling)
     ]
     sport_idx = 7
     close_anchor_idx = indep_idx = snapshot_idx = None

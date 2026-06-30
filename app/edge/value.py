@@ -547,7 +547,18 @@ def _named_sharp_anchor(
     exchange_min_liquidity: float = 0.0,
 ) -> tuple[str | None, list[float] | None]:
     """First preferred sharp book that prices the FULL market with a sane
-    overround. Odds are commission-netted before devig.
+    overround. Returns the GROSS (displayed) anchor odds for the fair-probability
+    devig.
+
+    edge-ev-devig-P2-1: commission is a PAYOUT cost, not a probability signal, so
+    the fair-probability estimate devigs the GROSS odds — netting commission before
+    the devig inflates the favourite's implied probability (the bias mostly cancels
+    on renormalisation but leaves a residual on ASYMMETRIC markets). Commission
+    netting stays ONLY on the bet-side price (``_best_other_book`` / ``effective_odds``
+    in ``_scan_against_fair``) used for edge/EV/CLV. The overround PLAUSIBILITY gate
+    still runs on the NET odds, so anchor MEMBERSHIP (which markets earn a sharp
+    anchor) is unchanged — only the returned fair MAGNITUDE moves, and only on
+    commissioned (exchange) anchors; Pinnacle (no commission) is bit-identical.
 
     Build #3 Phase 1 (default OFF): when ``exchange_min_liquidity > 0``, an EXCHANGE
     candidate (Betfair/Smarkets/Matchbook) must show matched ``liquidity`` >= that
@@ -560,14 +571,16 @@ def _named_sharp_anchor(
             raw_by_norm.setdefault(_norm(b), b)
 
     for pref in sharp_books:
-        odds: list[float] = []
+        net_odds: list[float] = []  # commission-netted — overround gate only
+        gross_odds: list[float] = []  # displayed odds — devigged for the fair prob
         complete = True
         for s in selections:
             o = _lookup(prices[s], pref)
             if o is None:
                 complete = False
                 break
-            odds.append(effective_odds(pref, o, commissions))
+            net_odds.append(effective_odds(pref, o, commissions))
+            gross_odds.append(o)
         if not complete:
             continue
         if exchange_min_liquidity > 0.0 and _norm(pref) in commissions:
@@ -583,8 +596,9 @@ def _named_sharp_anchor(
                     ok = False
             if not ok:
                 continue
-        if 0.0 <= _overround(odds) <= max_overround:
-            return raw_by_norm[pref], odds
+        # Gate on NET overround (membership unchanged); devig the GROSS odds.
+        if 0.0 <= _overround(net_odds) <= max_overround:
+            return raw_by_norm[pref], gross_odds
         # implausible anchor (stale/arb-looking) -> try next sharp / consensus
     return None, None
 
