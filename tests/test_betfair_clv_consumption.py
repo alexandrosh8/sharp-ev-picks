@@ -13,7 +13,8 @@ every current/future pick's Betfair rows).
 Proves: (a) _betfair_exchange_close returns the canonical Betfair BACK snaps when
 the canonical event carries them, [] when it has none, and IGNORES a stray
 ``"betfair:"``-namespaced event; (b) finalize_closing with use_betfair_exchange=True
-anchors the closing fair/CLV on the commission-netted Betfair price; (c) the
+anchors the closing fair/CLV on the GROSS Betfair price (P2-1: commission is a payout
+cost, not a probability signal — netting stays on the bet-side fill only); (c) the
 no-Betfair case falls back unchanged. Compose-Postgres fixture (:5433); skips when
 the DB is absent. No live network.
 """
@@ -44,7 +45,8 @@ AWAY = "Betfair Beta"
 LEAGUE = "test-league-betfair"
 
 # A 1X2 BACK close set. The Betfair Exchange row is a SHARP_BOOK with 5%
-# commission, so its odds are netted before devig (and the fill is netted too).
+# commission; P2-1: the close fair-prob devigs these GROSS odds (commission nets
+# the bet-side fill only, never the probability estimate).
 BETFAIR_CLOSE = (2.20, 3.40, 3.30)  # home, draw, away
 # A softbook-only close set: one non-sharp book is neither a named anchor nor a
 # >=3-book consensus, so it yields NO anchorable fair on its own.
@@ -249,8 +251,8 @@ async def test_flag_on_anchors_on_betfair_close(factory) -> None:  # type: ignor
     # The pick's own event has near-kickoff coverage (a single soft book) that
     # PASSES the scrape-coverage gate but is NOT anchorable on its own. With the
     # flag ON, the injected Betfair sharp close supplies the anchor: the closing
-    # fair is the commission-netted Betfair devig. Same effective-odds netting
-    # as the live path — the close anchor is netted before devig.
+    # fair is the GROSS Betfair devig (P2-1 — commission nets the bet-side fill
+    # only, never the close fair-probability estimate).
     ref = "evt-betfair-on"
     pick_id = await seed_pick(factory, ref)
     await seed_betfair_event(factory, ref)
@@ -264,9 +266,11 @@ async def test_flag_on_anchors_on_betfair_close(factory) -> None:  # type: ignor
         assert applied is True
         assert pick.closing_fair_probability is not None
         assert pick.clv_log is not None
-        # 5% commission netted on the Betfair anchor BEFORE devig.
-        eff_close = tuple(1.0 + (o - 1.0) * 0.95 for o in BETFAIR_CLOSE)
-        fair = devig(eff_close, method=DevigMethod.SHIN)[0]
+        # P2-1: the close anchor fair-prob devigs the GROSS Betfair odds — commission
+        # is a payout cost, not a probability signal, so it must NOT enter the close
+        # fair. (Netting stays on the bet-side price only; the fill here is a
+        # commission-free SoftBook, so the fill side is raw 2.50.)
+        fair = devig(BETFAIR_CLOSE, method=DevigMethod.SHIN)[0]
         assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
         # The fair is NOT the soft-book's own devig — proves the Betfair sharp
         # close (not the soft 1x2 group) anchored.
@@ -324,8 +328,8 @@ async def test_flag_on_but_no_betfair_event_is_neutral(factory) -> None:  # type
 
 # --- basketball: the EXACT bridge is sport-agnostic (2-way moneyline) ----------
 
-# A 2-way basketball BACK close (home/away, NO draw). Betfair Exchange nets 5%
-# commission before devig (and the fill is netted too).
+# A 2-way basketball BACK close (home/away, NO draw). P2-1: the close fair-prob
+# devigs these GROSS Betfair odds (commission nets the bet-side fill only).
 BETFAIR_BBALL_CLOSE = (1.80, 2.10)  # home, away
 SOFT_BBALL_CLOSE = (1.85, 2.05)
 
@@ -352,8 +356,8 @@ def _betfair_bball_snaps(event_ref: str, odds: tuple[float, float]) -> list[Odds
 
 async def test_flag_on_anchors_on_betfair_basketball_two_way_close(factory) -> None:  # type: ignore[no-untyped-def]
     # The CANONICAL-event bridge is sport-agnostic: a pick whose captured Betfair
-    # close is a 2-way (home/away) market anchors the closing fair on the
-    # commission-netted Betfair devig — no "Draw" leg required. Proves
+    # close is a 2-way (home/away) market anchors the closing fair on the GROSS
+    # Betfair devig (P2-1) — no "Draw" leg required. Proves
     # _betfair_exchange_close + event_fair_probs handle a 2-way H2H close.
     ref = "evt-betfair-bball"
     pick_id = await seed_pick(factory, ref)  # SoftBook pick on HOME @ 2.50
@@ -390,9 +394,10 @@ async def test_flag_on_anchors_on_betfair_basketball_two_way_close(factory) -> N
             session, pick, ref, KICKOFF, DevigMethod.SHIN, use_betfair_exchange=True
         )
         assert applied is True
-        # 5% commission netted on the 2-way Betfair anchor BEFORE devig.
-        eff_close = tuple(1.0 + (o - 1.0) * 0.95 for o in BETFAIR_BBALL_CLOSE)
-        fair = devig(eff_close, method=DevigMethod.SHIN)[0]
+        # P2-1: the 2-way Betfair close anchor fair-prob devigs the GROSS odds —
+        # commission is a payout cost, not a probability signal (netting stays on
+        # the bet-side price only).
+        fair = devig(BETFAIR_BBALL_CLOSE, method=DevigMethod.SHIN)[0]
         assert pick.closing_fair_probability is not None
         assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
         # Fill is commission-free SoftBook (raw 2.50).
@@ -414,8 +419,9 @@ async def test_betfair_sharp_only_close_anchors_with_no_soft_book(factory) -> No
             session, pick, ref, KICKOFF, DevigMethod.SHIN, use_betfair_exchange=True
         )
         assert applied is True  # sharp close alone satisfied coverage
-        eff_close = tuple(1.0 + (o - 1.0) * 0.95 for o in BETFAIR_CLOSE)
-        fair = devig(eff_close, method=DevigMethod.SHIN)[0]
+        # P2-1: close anchor fair-prob devigs GROSS Betfair odds (no commission in
+        # the probability estimate).
+        fair = devig(BETFAIR_CLOSE, method=DevigMethod.SHIN)[0]
         assert pick.closing_fair_probability is not None
         assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
         # A genuine snapshot close was anchored even though NO soft book quoted it,
