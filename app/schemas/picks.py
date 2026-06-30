@@ -71,6 +71,11 @@ class PickOut(InternalModel):
     # close is independent though both are anchor_type "sharp"). None for the model
     # strategy or a pre-column row.
     anchor_book: str | None = None
+    # P2-2: did the anchor's devig FALL BACK to multiplicative when this pick's
+    # MINT fair was computed (underround book / solver failure)? Persisted as
+    # Pick.mint_devig_fell_back so the trusted CLV subset can drop ASYMMETRIC
+    # mint/close fallbacks. None = model-strategy pick / pre-column row.
+    mint_devig_fell_back: bool | None = None
     # Final score of the settled game ("HOME-AWAY", e.g. "2-1"). None until the
     # pick settles (or when no score was recorded). Surfaced in the dashboard
     # SETTLED view; /picks serializes the repo dict, so this keeps the contract

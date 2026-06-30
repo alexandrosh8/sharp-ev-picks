@@ -8,6 +8,7 @@ Scoring with a real LightGBM booster lives in tests/test_value_filter_ml.py
 """
 
 import json
+import logging
 import math
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 from app.edge.value import CONSENSUS_ANCHOR
 from app.models.value_filter import (
     ValueFilterModel,
+    _adopt_confirmed_by_holdout,
     calibrate,
     league_code,
     live_features,
@@ -334,3 +336,98 @@ def test_load_survives_unreadable_manifest(tmp_path: Path) -> None:
     (tmp_path / "value_filter_manifest.json").write_text("{not json", encoding="utf-8")
     (tmp_path / "value_filter_model.txt").write_text("placeholder", encoding="utf-8")
     assert ValueFilterModel.load(tmp_path) is None
+
+
+# --- ADOPT verdict re-verified against the manifest's own holdout numbers ----- #
+# The self-declared verdict string is not trusted alone: load() re-derives the
+# four pre-registered criteria from manifest["holdout"] so a tampered or stale
+# "ADOPT" whose numbers do not back it cannot demote live picks.
+
+_PASSING_HOLDOUT = {
+    "meta": {"n": 396, "roi": 0.120, "inc_clv_max": {"point": 0.0357, "boot_se": 0.0075}},
+    "volume": {"n": 379, "roi": 0.025, "inc_clv_max": {"point": 0.0190, "boot_se": 0.0100}},
+    "control": {"n": 396, "roi": 0.050, "inc_clv_max": {"point": 0.0100, "boot_se": 0.0050}},
+}
+
+
+def test_adopt_confirmed_when_all_four_criteria_pass() -> None:
+    ok, why = _adopt_confirmed_by_holdout({"holdout": _PASSING_HOLDOUT})
+    assert ok is True
+    assert why == ""
+
+
+def test_adopt_rejected_when_c1_incclv_not_two_se_above_zero() -> None:
+    h = {
+        **_PASSING_HOLDOUT,
+        "meta": {"n": 396, "roi": 0.12, "inc_clv_max": {"point": 0.001, "boot_se": 0.01}},
+    }
+    ok, why = _adopt_confirmed_by_holdout({"holdout": h})
+    assert ok is False
+    assert "C1" in why
+
+
+def test_adopt_rejected_when_c2_roi_below_volume() -> None:
+    # volume roi 0.025 > meta roi 0.01
+    h = {
+        **_PASSING_HOLDOUT,
+        "meta": {"n": 396, "roi": 0.01, "inc_clv_max": {"point": 0.0357, "boot_se": 0.0075}},
+    }
+    ok, why = _adopt_confirmed_by_holdout({"holdout": h})
+    assert ok is False
+    assert "C2" in why
+
+
+def test_adopt_rejected_when_c3_does_not_beat_control() -> None:
+    # control inc point 0.05 > meta inc point 0.0357
+    h = {
+        **_PASSING_HOLDOUT,
+        "control": {"n": 396, "roi": 0.05, "inc_clv_max": {"point": 0.05, "boot_se": 0.005}},
+    }
+    ok, why = _adopt_confirmed_by_holdout({"holdout": h})
+    assert ok is False
+    assert "C3" in why
+
+
+def test_adopt_rejected_when_c4_n_below_floor() -> None:
+    h = {
+        **_PASSING_HOLDOUT,
+        "meta": {"n": 200, "roi": 0.12, "inc_clv_max": {"point": 0.0357, "boot_se": 0.0075}},
+    }
+    ok, why = _adopt_confirmed_by_holdout({"holdout": h})
+    assert ok is False
+    assert "C4" in why
+
+
+def test_adopt_rejected_when_holdout_block_absent() -> None:
+    ok, why = _adopt_confirmed_by_holdout({"verdict": "ADOPT"})
+    assert ok is False
+    assert "no holdout" in why
+
+
+def test_adopt_rejected_when_holdout_block_malformed() -> None:
+    ok, why = _adopt_confirmed_by_holdout({"holdout": {"meta": {"n": 396}}})
+    assert ok is False
+    assert "missing" in why
+
+
+def test_load_refuses_self_declared_adopt_with_failing_holdout(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Drives load() WITHOUT lightgbm: the verdict re-check short-circuits to None
+    # BEFORE any ML import. caplog proves it was the re-check (not the missing
+    # ml extra) that refused.
+    manifest = {
+        "verdict": "ADOPT",
+        "operating_point": {"q": 0.7},
+        "features": ["edge"],
+        "calibrator": {"kind": "platt", "coef": 1.0, "intercept": 0.0},
+        "model": {"kind": "lgbm"},
+        "holdout": {
+            **_PASSING_HOLDOUT,
+            "meta": {"n": 200, "roi": 0.12, "inc_clv_max": {"point": 0.0357, "boot_se": 0.0075}},
+        },
+    }
+    with caplog.at_level(logging.WARNING):
+        result = ValueFilterModel.load(_write_artifacts(tmp_path, manifest))
+    assert result is None
+    assert "do not confirm it" in caplog.text

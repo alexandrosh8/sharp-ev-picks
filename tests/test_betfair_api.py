@@ -468,7 +468,10 @@ def test_comparison_aggregate_over_mock_pairs() -> None:
     api_captured = datetime(2026, 6, 30, 12, 0, tzinfo=UTC)
     older = datetime(2026, 6, 30, 11, 0, tzinfo=UTC)
     newer = datetime(2026, 6, 30, 12, 30, tzinfo=UTC)  # ref NEWER than api -> not fresher
-    base = dict(
+    odds = BetfairMatchOdds(
+        home_back=2.50,
+        away_back=3.10,
+        draw_back=3.60,
         market_id="1.1",
         event_id="e",
         competition="EPL",
@@ -476,7 +479,6 @@ def test_comparison_aggregate_over_mock_pairs() -> None:
         home="H",
         away="A",
     )
-    odds = BetfairMatchOdds(home_back=2.50, away_back=3.10, draw_back=3.60, **base)
     # Event 1: all within one tick, api fresher.
     c1 = compare_event(
         odds,

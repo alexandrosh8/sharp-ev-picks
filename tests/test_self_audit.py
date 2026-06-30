@@ -6,6 +6,14 @@ tested here. The thin DB wrapper is exercised live by the scheduled job.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+# self_audit_job is driven here through a monkeypatched run_self_audit that
+# never touches the session factory, so a typed None sentinel satisfies the
+# signature without weakening the production contract.
+_NO_FACTORY = cast("async_sessionmaker[AsyncSession]", None)
 
 
 def test_self_audit_evaluate_anomalies() -> None:
@@ -103,11 +111,11 @@ async def test_self_audit_job_dispatches_then_dedupes(monkeypatch) -> None:  # t
     state = sa.SelfAuditMonitorState()
 
     # first sighting of the anomaly alerts
-    await sa.self_audit_job(None, dispatcher=disp, monitor_state=state)
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
     assert disp.sent == ["self-audit-stale_odds"]
 
     # the SAME ongoing anomaly the next cycle is deduped (no re-alert)
-    await sa.self_audit_job(None, dispatcher=disp, monitor_state=state)
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
     assert disp.sent == ["self-audit-stale_odds"]
 
 
@@ -127,7 +135,7 @@ async def test_self_audit_job_realerts_after_anomaly_clears(monkeypatch) -> None
     disp = _FakeDispatcher()
     state = sa.SelfAuditMonitorState()
     for _ in range(3):
-        await sa.self_audit_job(None, dispatcher=disp, monitor_state=state)
+        await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
     # appears, clears, reappears -> two distinct transition alerts
     assert disp.sent == ["self-audit-stale_odds", "self-audit-stale_odds"]
 
@@ -142,14 +150,14 @@ async def test_self_audit_job_dead_mans_switch_fires_after_k(monkeypatch) -> Non
     disp = _FakeDispatcher()
     state = sa.SelfAuditMonitorState()
 
-    await sa.self_audit_job(None, dispatcher=disp, monitor_state=state, dead_mans_k=3)
-    await sa.self_audit_job(None, dispatcher=disp, monitor_state=state, dead_mans_k=3)
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=3)
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=3)
     assert disp.sent == []  # not before K consecutive empty cycles
 
-    await sa.self_audit_job(None, dispatcher=disp, monitor_state=state, dead_mans_k=3)
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=3)
     assert disp.sent == ["self-audit-dead_mans_switch"]  # fires on the K-th
 
-    await sa.self_audit_job(None, dispatcher=disp, monitor_state=state, dead_mans_k=3)
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=3)
     assert disp.sent == ["self-audit-dead_mans_switch"]  # quiet while ongoing
 
 
@@ -161,5 +169,7 @@ async def test_self_audit_job_no_dispatcher_is_safe(monkeypatch) -> None:  # typ
 
     monkeypatch.setattr(sa, "run_self_audit", fake_run)
     # no channels wired: the job still runs, logs, and never raises
-    count = await sa.self_audit_job(None, dispatcher=None, monitor_state=sa.SelfAuditMonitorState())
+    count = await sa.self_audit_job(
+        _NO_FACTORY, dispatcher=None, monitor_state=sa.SelfAuditMonitorState()
+    )
     assert count == 1

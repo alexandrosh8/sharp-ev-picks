@@ -127,7 +127,10 @@ class OddsSnapshot(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
     bookmaker: Mapped[str] = mapped_column(String(64))
-    market: Mapped[str] = mapped_column(String(32))
+    # 64, not 32: a 33-char quarter-line handicap-games key
+    # ("asian_handicap_games_-10_25_games") was truncated under the old width,
+    # merging distinct lines into one devig group (see snapshot_market_key).
+    market: Mapped[str] = mapped_column(String(64))
     selection: Mapped[str] = mapped_column(String(64))
     decimal_odds: Mapped[Decimal] = mapped_column(ODDS)
     liquidity: Mapped[Decimal | None] = mapped_column(MONEY)
@@ -311,6 +314,18 @@ class Pick(Base):
     # sharp-CLV subset (n_sharp / sharp_stake_weighted_clv_log) excludes rows
     # where this is False, so a self-priced close can never count as honest CLV.
     close_independent_of_fill: Mapped[bool | None] = mapped_column(Boolean)
+    # P2-2 devig-fallback provenance. True when the devig method FELL BACK to
+    # multiplicative for the MINT (pick-time) fair / the CLOSE fair respectively
+    # — an underround book or solver failure made the configured method not
+    # apply (app/probabilities/devig.devig_with_provenance). When the two
+    # DISAGREE (one fell back, the other did not) the mint and close fairs were
+    # computed by different effective methods, so their CLV is a devig-method
+    # artifact rather than a real line move: the trusted sharp-CLV subset
+    # EXCLUDES such asymmetric rows. NULL = not recorded (model-strategy pick or
+    # pre-column row); additive + nullable, so historical rows stay NULL and are
+    # treated as symmetric (not excluded).
+    mint_devig_fell_back: Mapped[bool | None] = mapped_column(Boolean)
+    close_devig_fell_back: Mapped[bool | None] = mapped_column(Boolean)
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)

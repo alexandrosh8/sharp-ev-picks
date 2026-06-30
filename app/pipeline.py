@@ -1300,6 +1300,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 # CLV close can test BOOK independence (a Smarkets-anchored pick vs a
                 # Betfair-exchange close is independent though both are 'sharp').
                 anchor_book=v.sharp_book,
+                # P2-2: whether the anchor devig fell back to multiplicative for this
+                # MINT fair — the trusted CLV subset drops asymmetric mint/close fallbacks.
+                mint_devig_fell_back=v.sharp_devig_fell_back,
                 # H3: the live policy regime that minted this pick (thresholds,
                 # devig, sharp-anchor gate, ceiling, enforced ML manifest) so CLV
                 # is never attributed across mixed regimes.
@@ -1556,6 +1559,8 @@ def event_fair_probs(
     grouped: GroupedMarkets,
     devig_method: DevigMethod,
     value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
+    *,
+    fell_back_out: dict[tuple[str, Market, str | None], bool] | None = None,
 ) -> EventFairProbs:
     """Trustworthy (anchor_book, selection->fair) per (event, market, line).
 
@@ -1565,25 +1570,33 @@ def event_fair_probs(
     consensus logit-pool flag (``consensus_logit_pool``); the default empty
     policy reproduces the global-method, median-consensus behavior exactly.
     Both knobs flow through this single chokepoint so the pick pipeline and the
-    CLV true-up always price fill and close with the identical method."""
-    from app.edge.value import anchor_fair_probs, double_chance_fair
+    CLV true-up always price fill and close with the identical method.
+
+    When ``fell_back_out`` is provided it is POPULATED (additively, by the same
+    keys as the return) with the P2-2 devig-fallback flag per market — True when
+    the anchor devig fell back to multiplicative. The return value is unchanged
+    (callers that ignore provenance pass nothing)."""
+    from app.edge.value import anchor_fair_probs_with_provenance, double_chance_fair
 
     out: EventFairProbs = {}
-    h2h_3way: dict[str, tuple[tuple[str, dict[str, float]], list[str]]] = {}
+    h2h_3way: dict[str, tuple[tuple[str, dict[str, float]], list[str], bool]] = {}
     for (event_id, market, detail), (prices, _) in grouped.items():
         if market in _DIRECT_MARKETS:
-            anchored = anchor_fair_probs(
+            result = anchor_fair_probs_with_provenance(
                 prices,
                 devig_method=devig_method_for(value_policy, str(market), detail, devig_method),
                 consensus_logit_pool=value_policy.consensus_logit_pool,
             )
-            if anchored is not None:
-                out[(event_id, market, detail)] = anchored
+            if result is not None:
+                book, fair, fell_back = result
+                out[(event_id, market, detail)] = (book, fair)
+                if fell_back_out is not None:
+                    fell_back_out[(event_id, market, detail)] = fell_back
                 if market is Market.H2H and len(prices) == 3:
-                    h2h_3way[event_id] = (anchored, list(prices.keys()))
+                    h2h_3way[event_id] = ((book, fair), list(prices.keys()), fell_back)
     for (event_id, market, detail), _group in grouped.items():
         if market is Market.DOUBLE_CHANCE and event_id in h2h_3way:
-            anchored, selections = h2h_3way[event_id]
+            anchored, selections, fell_back = h2h_3way[event_id]
             # DC fair = pairwise sums of the 1X2 anchor, valid ONLY for the
             # canonical 1/X/2 order (home, Draw, away). Verify the MIDDLE outcome
             # IS the draw before treating [0]/[-1] as home/away — a feed/label
@@ -1595,6 +1608,9 @@ def event_fair_probs(
             dc_fair = double_chance_fair(anchored[1], home, away)
             if dc_fair:
                 out[(event_id, market, detail)] = (anchored[0], dc_fair)
+                # DC inherits the 1X2 anchor's fallback (derived from the same devig).
+                if fell_back_out is not None:
+                    fell_back_out[(event_id, market, detail)] = fell_back
     return out
 
 

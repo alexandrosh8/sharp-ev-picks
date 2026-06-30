@@ -78,16 +78,32 @@ def _train_frame(n: int = 600) -> Any:
     return x[FEATURES]
 
 
+# A holdout block whose recorded numbers PASS all four pre-registered adoption
+# criteria (mirrors the real deployed META manifest: q>=0.725 n=396, ROI +12.0%,
+# incCLV_max +0.0357 +/- 0.0075). A genuine ADOPT manifest always carries this;
+# load() re-derives the verdict from it, so it must be present to load as ADOPT.
+_PASSING_HOLDOUT: dict[str, Any] = {
+    "meta": {"n": 396, "roi": 0.120, "inc_clv_max": {"point": 0.0357, "boot_se": 0.0075}},
+    "volume": {"n": 379, "roi": 0.025, "inc_clv_max": {"point": 0.0190, "boot_se": 0.0100}},
+    "control": {"n": 396, "roi": 0.050, "inc_clv_max": {"point": 0.0100, "boot_se": 0.0050}},
+    "reliability_ece": 0.03,
+}
+
+
 def _write_artifacts(
     tmp_path: Path,
     q: float,
     verdict: str = "ADOPT",
     manifest_filename: str = "value_filter_manifest.json",
     model_filename: str = "value_filter_model.txt",
+    holdout: dict[str, Any] | None = _PASSING_HOLDOUT,
 ) -> Path:
     """Train a tiny real booster (learnable rule: y = edge > 0.03) and write
     the model + a manifest with operating point `q` (default: ADOPT verdict
-    under the deployed v1 filenames)."""
+    under the deployed v1 filenames, backed by a passing holdout block).
+
+    Pass `holdout=None` to omit the block or a custom dict to force a failing
+    re-verification at load."""
     x = _train_frame()
     y = (x["edge"].to_numpy() > 0.03).astype(int)
     booster = lgb.train(
@@ -106,6 +122,8 @@ def _write_artifacts(
         # identity isotonic map: calibrated == raw (clipped off 0/1)
         "calibrator": {"kind": "isotonic", "x_thresholds": [0.0, 1.0], "y_thresholds": [0.0, 1.0]},
     }
+    if holdout is not None:
+        manifest["holdout"] = holdout
     (tmp_path / manifest_filename).write_text(json.dumps(manifest), encoding="utf-8")
     return tmp_path
 
@@ -186,6 +204,46 @@ def test_adopt_manifest_loads_with_shadow_false(tmp_path: Path) -> None:
     vf = ValueFilterModel.load(_write_artifacts(tmp_path, q=0.725))
     assert vf is not None
     assert vf.shadow is False
+
+
+# A holdout block that FAILS C1 (incCLV_max not > 2*SE: 0.001 - 2*0.01 < 0) —
+# every other field still passes, so only the recorded-number re-check rejects it.
+_FAILING_HOLDOUT_C1: dict[str, Any] = {
+    "meta": {"n": 396, "roi": 0.120, "inc_clv_max": {"point": 0.001, "boot_se": 0.010}},
+    "volume": {"n": 379, "roi": 0.025, "inc_clv_max": {"point": 0.019, "boot_se": 0.010}},
+    "control": {"n": 396, "roi": 0.050, "inc_clv_max": {"point": 0.0005, "boot_se": 0.005}},
+    "reliability_ece": 0.03,
+}
+
+
+def test_self_declared_adopt_with_failing_holdout_is_refused(tmp_path: Path) -> None:
+    # The verdict string says ADOPT but the recorded holdout numbers fail C1 —
+    # the loader must NOT trust the self-declared verdict and refuse (None), so
+    # an unverified artifact can never demote live picks.
+    path = _write_artifacts(tmp_path, q=0.725, holdout=_FAILING_HOLDOUT_C1)
+    assert ValueFilterModel.load(path) is None
+
+
+def test_self_declared_adopt_without_holdout_block_is_refused(tmp_path: Path) -> None:
+    # Fail-closed: an ADOPT manifest carrying NO holdout numbers to verify is
+    # treated as not adopted (a genuine ADOPT always records its holdout).
+    path = _write_artifacts(tmp_path, q=0.725, holdout=None)
+    assert ValueFilterModel.load(path) is None
+
+
+def test_unconfirmed_adopt_loads_as_shadow_under_allow_shadow(tmp_path: Path) -> None:
+    # With allow_shadow, an ADOPT claim whose numbers don't confirm it still
+    # loads — but only as an annotation-only SHADOW model, never as enforcing.
+    path = _write_artifacts(tmp_path, q=0.725, holdout=_FAILING_HOLDOUT_C1)
+    vf = ValueFilterModel.load(path, allow_shadow=True)
+    assert vf is not None
+    assert vf.shadow is True
+
+
+def test_adopt_with_holdout_n_below_floor_is_refused(tmp_path: Path) -> None:
+    # C4: held-out n below the pre-registered 300-bet floor invalidates ADOPT.
+    holdout = {**_PASSING_HOLDOUT, "meta": {**_PASSING_HOLDOUT["meta"], "n": 200}}
+    assert ValueFilterModel.load(_write_artifacts(tmp_path, q=0.725, holdout=holdout)) is None
 
 
 def test_shadow_candidate_refused_without_allow_shadow(tmp_path: Path) -> None:

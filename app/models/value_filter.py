@@ -36,6 +36,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -291,6 +292,54 @@ def manifest_operating_point(
     return float(q) if q is not None else None
 
 
+# Pre-registered holdout adoption criteria, frozen in
+# scripts/ml/train_value_filter.py BEFORE the one-shot holdout was consulted:
+# C1 strict incremental CLV vs the Max-of-books close > 2*SE above zero, C2 ROI
+# >= the volume baseline, C3 beats the per-(league,market) threshold control on
+# incremental CLV, C4 held-out n >= this floor. The number must match the
+# trainer (MIN_HOLDOUT_BETS) — it is the C4 gate.
+_MIN_HOLDOUT_BETS = 300
+
+
+def _adopt_confirmed_by_holdout(manifest: Mapping[str, Any]) -> tuple[bool, str]:
+    """Re-derive the ADOPT verdict from the manifest's OWN recorded holdout
+    stats, so a self-declared ``verdict == "ADOPT"`` is trusted only when the
+    numbers behind it still pass every pre-registered criterion.
+
+    Returns ``(True, "")`` when all four criteria pass, else ``(False, reason)``.
+    Fail-closed: a missing or malformed holdout block — whose numbers cannot be
+    checked — is NOT confirmed, because an unverifiable ADOPT string must never
+    be allowed to demote live picks. The genuine trainer always writes this
+    block (manifest["holdout"]) in the same step that stamps verdict=ADOPT, so
+    a real adopted artifact is never false-rejected.
+    """
+    holdout = manifest.get("holdout")
+    if not isinstance(holdout, Mapping):
+        return False, "no holdout block recorded to verify the ADOPT claim"
+    try:
+        meta = holdout["meta"]
+        meta_inc = meta["inc_clv_max"]
+        ctrl_inc = holdout["control"]["inc_clv_max"]
+        meta_point = float(meta_inc["point"])
+        meta_se = float(meta_inc["boot_se"])
+        meta_roi = float(meta["roi"])
+        meta_n = int(meta["n"])
+        vol_roi = float(holdout["volume"]["roi"])
+        ctrl_point = float(ctrl_inc["point"])
+    except (KeyError, TypeError, ValueError):
+        return False, "holdout block is missing the recorded adoption metrics"
+    fails: list[str] = []
+    if not (math.isfinite(meta_se) and meta_point - 2.0 * meta_se > 0.0):
+        fails.append("C1 incCLV_max not > 2*SE above zero")
+    if not meta_roi >= vol_roi:
+        fails.append("C2 ROI below the volume baseline")
+    if not meta_point > ctrl_point:
+        fails.append("C3 does not beat the (league,market) cell control")
+    if meta_n < _MIN_HOLDOUT_BETS:
+        fails.append(f"C4 held-out n={meta_n} < {_MIN_HOLDOUT_BETS}")
+    return (not fails), "; ".join(fails)
+
+
 @dataclass(frozen=True)
 class ValueFilterModel:
     """Loaded meta-model: LightGBM booster + manifest calibrator/threshold."""
@@ -338,6 +387,20 @@ class ValueFilterModel:
             return None
         verdict = manifest.get("verdict")
         is_adopt = verdict == "ADOPT"
+        if is_adopt:
+            # The verdict string is self-declared; re-derive it from the
+            # manifest's own recorded holdout numbers so a hand-edited or stale
+            # "ADOPT" whose evidence does not back it cannot demote live picks.
+            confirmed, why = _adopt_confirmed_by_holdout(manifest)
+            if not confirmed:
+                is_adopt = False
+                logger.warning(
+                    "value-filter manifest declares verdict ADOPT but its own "
+                    "recorded holdout numbers do not confirm it (%s); treating as "
+                    "NOT ADOPT — a self-declared verdict cannot mint authority to "
+                    "demote live picks without the evidence behind it",
+                    why,
+                )
         if not is_adopt:
             if not allow_shadow:
                 logger.warning(

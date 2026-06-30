@@ -98,6 +98,23 @@ class SettledPickRow:
     # treated as tautological (conservative, exactly like the persisted guard).
     closing_fair_probability: float | None = None
     model_probability: float | None = None  # the pick-time fair (1/fair_odds anchor)
+    # P2-2 devig-fallback provenance: did the configured devig method fall back to
+    # multiplicative at MINT / at CLOSE? When they DISAGREE (exactly one fell back)
+    # the mint and close fairs used different effective methods, so the CLV is a
+    # devig-method artifact, not a real line move — excluded from the trusted
+    # subset. Feature-detected: None on either side = symmetric (not excluded).
+    mint_devig_fell_back: bool | None = None
+    close_devig_fell_back: bool | None = None
+
+    @property
+    def devig_fallback_asymmetric(self) -> bool:
+        """True when exactly one of mint/close devig fell back to multiplicative.
+
+        Conservative: a None on either side (provenance not recorded) is treated
+        as SYMMETRIC, so historical rows are never excluded on this basis."""
+        if self.mint_devig_fell_back is None or self.close_devig_fell_back is None:
+            return False
+        return self.mint_devig_fell_back != self.close_devig_fell_back
 
     @property
     def is_tautological_close(self) -> bool:
@@ -135,6 +152,8 @@ class SettledPickRow:
             and self.closing_anchor_type in _SHARP_CLOSE_ANCHORS
             and self.close_independent_of_fill is not False
             and not self.is_tautological_close
+            # P2-2: an asymmetric mint/close devig fallback is a method artifact.
+            and not self.devig_fallback_asymmetric
         )
 
 

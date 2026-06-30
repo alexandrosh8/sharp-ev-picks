@@ -19,6 +19,7 @@ from app.clv_trueup import SNAPSHOT_CLOSE_MAX_GAP, finalize_closing_from_snapsho
 from app.ingestion.base import EventTeams
 from app.probabilities.devig import DevigMethod, devig
 from app.schemas.base import Market
+from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.settlement.engine import settle_event_picks, settle_open_picks
 from app.settlement.results import FinalScore, ScoreBook
@@ -27,6 +28,7 @@ from app.storage.repositories import (
     closing_odds_from_snapshots,
     market_from_snapshot_key,
     persist_pick,
+    snapshot_market_key,
 )
 
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
@@ -168,6 +170,45 @@ def test_market_from_snapshot_key_roundtrip() -> None:
         "asian_handicap_-1_5",
     )
     assert market_from_snapshot_key("frobnicate") is None
+
+
+def test_snapshot_market_key_does_not_truncate_long_submarket_lines() -> None:
+    # A real tennis/quarter-line handicap-games key is 33 chars; the old 32-char
+    # clamp silently dropped the trailing axis token, merging it into a DIFFERENT
+    # line's devig group and breaking the reverse mapping. The key must survive
+    # whole and round-trip to (SPREADS, key).
+    long_key = "asian_handicap_games_-10_25_games"  # 33 chars — over the old clamp
+    assert len(long_key) > 32
+    snap = OddsSnapshotIn(
+        event_id="e1",
+        bookmaker="Pinnacle",
+        market=Market.SPREADS,
+        selection="home",
+        decimal_odds=1.95,
+        captured_at=NOW,
+        ingested_at=NOW,
+        market_detail=long_key,
+    )
+    key = snapshot_market_key(snap)
+    assert key == long_key  # stored whole — no truncation
+    assert market_from_snapshot_key(key) == (Market.SPREADS, long_key)
+
+
+def test_snapshot_market_key_keeps_prefix_colliding_lines_distinct() -> None:
+    # Two lines that share the first 32 chars must NOT collapse to one key (the
+    # old [:32] clamp pooled them into a fake multi-leg book).
+    a = OddsSnapshotIn(
+        event_id="e1",
+        bookmaker="Pinnacle",
+        market=Market.SPREADS,
+        selection="home",
+        decimal_odds=1.95,
+        captured_at=NOW,
+        ingested_at=NOW,
+        market_detail="asian_handicap_games_-10_25_games",
+    )
+    b = a.model_copy(update={"market_detail": "asian_handicap_games_-10_75_games"})
+    assert snapshot_market_key(a) != snapshot_market_key(b)
 
 
 # --- snapshot close preferred when coverage is good ---------------------------

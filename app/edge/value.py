@@ -23,7 +23,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from app.probabilities.devig import DevigMethod, devig
+from app.probabilities.devig import DevigMethod, devig, devig_with_provenance
 
 # Books treated as "sharp" for fair-value estimation, in priority order.
 SHARP_BOOKS = ("pinnacle", "pinnacle sports", "betfair exchange", "smarkets")
@@ -215,6 +215,11 @@ class ValueBet:
     implied_prob: float  # from the EFFECTIVE price
     edge: float  # sharp_fair_prob - implied_prob
     ev: float  # per unit stake at the effective price
+    # P2-2: did the anchor's devig FALL BACK to multiplicative (underround book /
+    # solver failure) when this fair was computed? Recorded as the pick's
+    # mint_devig_fell_back so the trusted CLV subset can drop ASYMMETRIC mint/close
+    # fallbacks. Defaults False (the common case: the configured method applied).
+    sharp_devig_fell_back: bool = False
 
 
 def ah_candidate_plausible(
@@ -321,8 +326,43 @@ def anchor_fair_probs(
     """Trustworthy fair probabilities for one market, or None.
 
     Returns (anchor_book, {selection: fair_prob}). Shared by the value finder
-    and the live CLV true-up (closing fair probability per pick).
+    and the live CLV true-up (closing fair probability per pick). Thin wrapper
+    over :func:`anchor_fair_probs_with_provenance` that drops the P2-2
+    devig-fallback flag — callers that need it use the provenance variant.
     """
+    result = anchor_fair_probs_with_provenance(
+        prices,
+        max_overround=max_overround,
+        devig_method=devig_method,
+        sharp_books=sharp_books,
+        commissions=commissions,
+        consensus_logit_pool=consensus_logit_pool,
+        liquidity=liquidity,
+        exchange_min_liquidity=exchange_min_liquidity,
+    )
+    if result is None:
+        return None
+    anchor_book, fair, _fell_back = result
+    return anchor_book, fair
+
+
+def anchor_fair_probs_with_provenance(
+    prices: Mapping[str, Mapping[str, float]],
+    *,
+    max_overround: float = 0.12,
+    devig_method: DevigMethod = DevigMethod.POWER,
+    sharp_books: Sequence[str] = SHARP_BOOKS,
+    commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
+    consensus_logit_pool: bool = False,
+    liquidity: Mapping[str, Mapping[str, float]] | None = None,
+    exchange_min_liquidity: float = 0.0,
+) -> tuple[str, dict[str, float], bool] | None:
+    """Like :func:`anchor_fair_probs` but also returns whether the anchor devig
+    FELL BACK to multiplicative (P2-2): ``(anchor_book, {selection: fair}, fell_back)``.
+
+    The flag is recorded per pick (mint) and per close so the trusted sharp-CLV
+    subset can drop ASYMMETRIC fallbacks (mint and close devigged by different
+    effective methods — a method artifact, not a real line move)."""
     selections = list(prices.keys())
     if len(selections) < 2 or len(set(selections)) != len(selections):
         return None
@@ -346,8 +386,8 @@ def anchor_fair_probs(
             )
     if anchor_book is None or anchor_odds is None:
         return None
-    fair = devig(anchor_odds, method=devig_method)
-    return anchor_book, dict(zip(selections, fair, strict=True))
+    fair, fell_back = devig_with_provenance(anchor_odds, method=devig_method)
+    return anchor_book, dict(zip(selections, fair, strict=True)), fell_back
 
 
 def find_value_bets(
@@ -371,7 +411,7 @@ def find_value_bets(
     bets sorted by edge (desc). Returns [] when no trustworthy fair-value
     anchor exists (better no pick than a contaminated one).
     """
-    anchored = anchor_fair_probs(
+    anchored = anchor_fair_probs_with_provenance(
         prices,
         max_overround=max_overround,
         devig_method=devig_method,
@@ -383,9 +423,16 @@ def find_value_bets(
     )
     if anchored is None:
         return []
-    anchor_book, fair_by_sel = anchored
+    anchor_book, fair_by_sel, devig_fell_back = anchored
     return _scan_against_fair(
-        prices, fair_by_sel, anchor_book, min_edge, min_odds, commissions, max_edge=max_edge
+        prices,
+        fair_by_sel,
+        anchor_book,
+        min_edge,
+        min_odds,
+        commissions,
+        max_edge=max_edge,
+        devig_fell_back=devig_fell_back,
     )
 
 
@@ -418,12 +465,21 @@ def find_value_bets_with_fair(
     min_odds: float = 1.30,
     max_edge: float = math.inf,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
+    devig_fell_back: bool = False,
 ) -> list[ValueBet]:
     """Value scan against EXTERNALLY-derived fair probabilities (e.g. double
     chance derived from the 1X2 anchor via `double_chance_fair`). Selections
-    without a derived fair probability are skipped."""
+    without a derived fair probability are skipped. `devig_fell_back` carries the
+    P2-2 fallback flag of the anchor the external fair was derived from."""
     return _scan_against_fair(
-        prices, fair_by_sel, anchor_book, min_edge, min_odds, commissions, max_edge=max_edge
+        prices,
+        fair_by_sel,
+        anchor_book,
+        min_edge,
+        min_odds,
+        commissions,
+        max_edge=max_edge,
+        devig_fell_back=devig_fell_back,
     )
 
 
@@ -489,6 +545,7 @@ def _scan_against_fair(
     commissions: Mapping[str, float],
     max_edge: float = math.inf,
     anchor_swap_tolerance: float = ANCHOR_SWAP_TOLERANCE,
+    devig_fell_back: bool = False,
 ) -> list[ValueBet]:
     # edge-ev-devig-r2-2: MARKET-LEVEL anchor-swap guard. If the anchor's devigged
     # ordering inverts the cross-book consensus ordering beyond tolerance, the anchor
@@ -531,6 +588,7 @@ def _scan_against_fair(
                 implied_prob=implied,
                 edge=edge,
                 ev=ev,
+                sharp_devig_fell_back=devig_fell_back,
             )
         )
     out.sort(key=lambda v: v.edge, reverse=True)

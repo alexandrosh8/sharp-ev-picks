@@ -887,6 +887,20 @@ def _significance_fields(
     }
 
 
+def _devig_fallback_asymmetric(mint_fell_back: bool | None, close_fell_back: bool | None) -> bool:
+    """P2-2: True when the MINT and CLOSE fairs were devigged by DIFFERENT
+    effective methods — exactly one of them fell back to multiplicative. Such a
+    CLV reflects a devig-method change, not a real line move, so it is dropped
+    from the trusted sharp-CLV subset.
+
+    Conservative: a None on EITHER side (provenance not recorded — historical or
+    model-strategy rows) is treated as SYMMETRIC (not excluded), so the trusted
+    subset is unchanged until both flags are populated."""
+    if mint_fell_back is None or close_fell_back is None:
+        return False
+    return mint_fell_back != close_fell_back
+
+
 def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     """Aggregate (outcome, pnl, stake, clv_log, beat_close, closing_odds,
     closing_anchor_type) rows into the report fields. Decimals serialize as
@@ -941,20 +955,27 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     # the series (not just the stake-weighted sum) is what makes significance possible.
     blended_clv_series: list[float] = []
     sharp_clv_series: list[float] = []
-    for (
-        outcome,
-        pnl,
-        stake,
-        clv_log,
-        beat_close,
-        _closing_odds,  # optional SOFT display price — no longer the trusted-close gate
-        closing_anchor,
-        close_independent,
-        has_snapshot_close,
-        decimal_odds,
-        closing_fair_probability,
-        model_probability,
-    ) in rows:
+    for row in rows:
+        (
+            outcome,
+            pnl,
+            stake,
+            clv_log,
+            beat_close,
+            _closing_odds,  # optional SOFT display price — no longer the trusted-close gate
+            closing_anchor,
+            close_independent,
+            has_snapshot_close,
+            decimal_odds,
+            closing_fair_probability,
+            model_probability,
+        ) = row[:12]
+        # P2-2 devig-fallback provenance is FEATURE-DETECTED (trailing, optional)
+        # exactly like the close-anchor/independence columns: rows built before
+        # these columns existed are 12-tuples, so a missing flag reads None and
+        # _devig_fallback_asymmetric treats it as symmetric (not excluded).
+        mint_devig_fell_back = row[12] if len(row) > 12 else None
+        close_devig_fell_back = row[13] if len(row) > 13 else None
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
@@ -999,6 +1020,11 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             # independence to be EXACTLY True — None (pre-column / unknown) no longer
             # leaks in as "not circular": unproven independence is not trusted.
             and close_independent is True
+            # P2-2: drop ASYMMETRIC devig fallbacks — when the mint and close
+            # fairs were devigged by different effective methods (one fell back to
+            # multiplicative, the other did not), the CLV is a devig-method
+            # artifact, not a genuine line move. NULL flags are symmetric (kept).
+            and not _devig_fallback_asymmetric(mint_devig_fell_back, close_devig_fell_back)
         ):
             # Genuine, INDEPENDENT sharp snapshot close with a measured CLV — the
             # trusted subset.
@@ -1106,6 +1132,8 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
     indep_attr = getattr(Pick, "close_independent_of_fill", None)
     snapshot_attr = getattr(Pick, "has_snapshot_close", None)
+    mint_fb_attr = getattr(Pick, "mint_devig_fell_back", None)  # P2-2 provenance
+    close_fb_attr = getattr(Pick, "close_devig_fell_back", None)
     select_cols: list[Any] = [
         ResultTracking.outcome,  # 0
         ResultTracking.pnl,  # 1
@@ -1132,6 +1160,13 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     if snapshot_attr is not None:
         snapshot_idx = len(select_cols)
         select_cols.append(snapshot_attr)  # 9 — clv-1 genuine-snapshot-close marker
+    mint_fb_idx = close_fb_idx = None
+    if mint_fb_attr is not None:
+        mint_fb_idx = len(select_cols)
+        select_cols.append(mint_fb_attr)  # P2-2 mint devig-fallback provenance
+    if close_fb_attr is not None:
+        close_fb_idx = len(select_cols)
+        select_cols.append(close_fb_attr)  # P2-2 close devig-fallback provenance
     rows = (
         await session.execute(
             select(*select_cols)
@@ -1159,6 +1194,8 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         closing_anchor = r[close_anchor_idx] if close_anchor_idx is not None else None
         close_independent = r[indep_idx] if indep_idx is not None else None
         has_snapshot_close = r[snapshot_idx] if snapshot_idx is not None else None
+        mint_fell_back = r[mint_fb_idx] if mint_fb_idx is not None else None
+        close_fell_back = r[close_fb_idx] if close_fb_idx is not None else None
         return (
             r[0],
             r[1],
@@ -1172,6 +1209,8 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
             r[8],  # decimal_odds — CLV-1 close-implied-edge guard
             r[9],  # closing_fair_probability — CLV-1 close-implied-edge guard
             r[10],  # model_probability — TAUTOLOGY guard (pick-time fair)
+            mint_fell_back,  # P2-2 mint devig-fallback provenance (or None)
+            close_fell_back,  # P2-2 close devig-fallback provenance (or None)
         )
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
@@ -1216,6 +1255,8 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
     anchor_attr = getattr(Pick, "anchor_type", None)
     close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
     indep_attr = getattr(Pick, "close_independent_of_fill", None)
+    mint_fb_attr = getattr(Pick, "mint_devig_fell_back", None)  # P2-2 provenance
+    close_fb_attr = getattr(Pick, "close_devig_fell_back", None)
     columns = [
         Pick.tier,  # 0
         Pick.value_filter_score,  # 1
@@ -1243,6 +1284,13 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
     if indep_attr is not None:
         indep_idx = len(columns)
         columns.append(indep_attr)
+    mint_fb_idx = close_fb_idx = None
+    if mint_fb_attr is not None:
+        mint_fb_idx = len(columns)
+        columns.append(mint_fb_attr)  # P2-2 mint devig-fallback provenance
+    if close_fb_attr is not None:
+        close_fb_idx = len(columns)
+        columns.append(close_fb_attr)  # P2-2 close devig-fallback provenance
     rows = (
         await session.execute(
             select(*columns)
@@ -1274,6 +1322,9 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             # the pick-time edge — fake CLV the fill-book-only independence flag missed.
             closing_fair_probability=float(row[8]) if row[8] is not None else None,
             model_probability=float(row[9]) if row[9] is not None else None,
+            # P2-2 devig-fallback provenance (feature-detected; None = symmetric).
+            mint_devig_fell_back=row[mint_fb_idx] if mint_fb_idx is not None else None,
+            close_devig_fell_back=row[close_fb_idx] if close_fb_idx is not None else None,
         )
         for row in rows
     ]
@@ -1325,9 +1376,13 @@ def snapshot_market_key(snapshot: OddsSnapshotIn) -> str:
     """The `market` string stored in odds_snapshots: the provider submarket
     key ("asian_handicap_-1_5") when present, else the Market enum value.
     Distinct lines MUST stay distinct observations or downstream devig pools
-    a fake multi-leg book. Clamped to the column's 32 chars (the longest
-    configured key, asian_handicap_games_-10_5_games, is exactly 32)."""
-    return (snapshot.market_detail or str(snapshot.market))[:32]
+    a fake multi-leg book. The old 32-char clamp silently truncated real
+    quarter-line handicap-games keys (e.g. "asian_handicap_games_-10_25_games",
+    33 chars), dropping the trailing axis token so two distinct lines collapsed
+    into one devig group AND the reverse mapping mis-parsed. The column is now
+    String(64); clamp only as a last-resort overflow guard (no realistic key
+    approaches 64) so a distinct line can never be lost to truncation."""
+    return (snapshot.market_detail or str(snapshot.market))[:64]
 
 
 def market_from_snapshot_key(key: str) -> tuple[Market, str | None] | None:
@@ -2414,6 +2469,9 @@ async def persist_pick(
             # CLV-3: the concrete pick-time anchor BOOK (behind anchor_type) so the CLV
             # close can test BOOK independence, not just anchor-type equality.
             anchor_book=pick.anchor_book,
+            # P2-2: mint-side devig-fallback provenance (close side stamped by the CLV
+            # true-up) — the trusted CLV subset drops asymmetric mint/close fallbacks.
+            mint_devig_fell_back=pick.mint_devig_fell_back,
             # H3: the live policy regime that minted this pick — so CLV is scoped to
             # the exact policy, never mixed across config changes. None for the model
             # strategy (which sets no fingerprint).

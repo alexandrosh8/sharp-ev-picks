@@ -9,7 +9,12 @@ import math
 
 import pytest
 
-from app.probabilities.devig import DevigMethod, devig
+from app.probabilities.devig import (
+    DevigMethod,
+    devig,
+    devig_fell_back,
+    devig_with_provenance,
+)
 
 THREE_WAY = [2.5, 3.2, 2.9]  # q = [0.4, 0.3125, 0.34483], overround ~5.73%
 LONGSHOT_BOOK = [1.5, 4.0, 6.0]  # q = [0.66667, 0.25, 0.16667], overround ~8.33%
@@ -89,6 +94,58 @@ def test_additive_negative_prob_falls_back_to_multiplicative() -> None:
     assert math.isclose(sum(probs), 1.0, abs_tol=1e-9)
     mult = devig(odds, method=DevigMethod.MULTIPLICATIVE)
     assert probs == pytest.approx(mult, abs=1e-12)
+
+
+# --- devig fallback provenance (P2-2) --------------------------------------- #
+
+UNDERROUND_TWO_WAY = [2.2, 2.2]  # q = 0.4545 + 0.4545 = 0.909 < 1 (underround)
+ADDITIVE_FALLBACK = [1.05, 10.0, 100.0]  # additive drives a prob negative
+
+
+@pytest.mark.parametrize("method", ALL_METHODS)
+@pytest.mark.parametrize("odds", [THREE_WAY, LONGSHOT_BOOK, [1.9, 1.9], [2.1, 1.75]])
+def test_provenance_probs_are_identical_to_devig(method: DevigMethod, odds: list[float]) -> None:
+    # The provenance variant must never change the probabilities — only add a flag.
+    probs, _fell = devig_with_provenance(odds, method=method)
+    assert probs == pytest.approx(devig(odds, method=method), abs=1e-15)
+
+
+@pytest.mark.parametrize("method", ALL_METHODS)
+def test_clean_overround_book_does_not_fall_back(method: DevigMethod) -> None:
+    # THREE_WAY is a normal overround book: every method applies, none falls back.
+    assert devig_fell_back(THREE_WAY, method=method) is False
+
+
+def test_multiplicative_never_falls_back_even_on_degenerate_input() -> None:
+    assert devig_fell_back(ADDITIVE_FALLBACK, method=DevigMethod.MULTIPLICATIVE) is False
+    assert devig_fell_back(UNDERROUND_TWO_WAY, method=DevigMethod.MULTIPLICATIVE) is False
+
+
+def test_additive_reports_fallback_on_negative_prob() -> None:
+    probs, fell = devig_with_provenance(ADDITIVE_FALLBACK, method=DevigMethod.ADDITIVE)
+    assert fell is True
+    assert probs == pytest.approx(
+        devig(ADDITIVE_FALLBACK, method=DevigMethod.MULTIPLICATIVE), abs=1e-12
+    )
+
+
+def test_shin_reports_fallback_on_underround_but_power_does_not() -> None:
+    # Underround two-way: Shin is only defined on overround books -> falls back;
+    # the power solver still brackets a root -> applies, no fallback.
+    assert devig_fell_back(UNDERROUND_TWO_WAY, method=DevigMethod.SHIN) is True
+    assert devig_fell_back(UNDERROUND_TWO_WAY, method=DevigMethod.POWER) is False
+
+
+def test_shin_overround_two_way_applies_no_fallback() -> None:
+    # [1.9, 1.9] is overround (q sum 1.0526): the exact 2-outcome Shin applies.
+    assert devig_fell_back([1.9, 1.9], method=DevigMethod.SHIN) is False
+
+
+def test_fell_back_predicate_matches_provenance_flag() -> None:
+    for odds in (THREE_WAY, LONGSHOT_BOOK, UNDERROUND_TWO_WAY, ADDITIVE_FALLBACK):
+        for method in ALL_METHODS:
+            _probs, fell = devig_with_provenance(odds, method=method)
+            assert devig_fell_back(odds, method=method) is fell
 
 
 @pytest.mark.parametrize("bad", [[1.0, 2.0], [0.5, 3.0], [-2.0, 2.0], [2.0, 0.0]])

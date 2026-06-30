@@ -31,6 +31,8 @@ def row(
     sport: str | None = None,
     closing_fair: float | None = None,
     model_prob: float | None = None,
+    mint_fell_back: bool | None = None,
+    close_fell_back: bool | None = None,
 ) -> SettledPickRow:
     return SettledPickRow(
         tier=tier,
@@ -46,6 +48,8 @@ def row(
         sport=sport,
         closing_fair_probability=closing_fair,
         model_probability=model_prob,
+        mint_devig_fell_back=mint_fell_back,
+        close_devig_fell_back=close_fell_back,
     )
 
 
@@ -150,6 +154,27 @@ def test_sport_market_clv_gate_enabled_requires_every_bar() -> None:
         )
         is False
     )
+
+
+def test_sharp_close_excludes_asymmetric_devig_fallback() -> None:
+    # P2-2: a genuine independent sharp snapshot close is dropped from the trusted
+    # sharp_close stratum when the MINT devig fell back but the CLOSE did not (or
+    # vice versa) — the CLV is a devig-method artifact. A SYMMETRIC fallback (both
+    # True) and unknown provenance (None) are kept.
+    asymmetric = [
+        row(
+            closing_anchor="pinnacle", has_snapshot=True, mint_fell_back=True, close_fell_back=False
+        )
+        for _ in range(3)
+    ]
+    assert live_evidence_report(asymmetric, ml_threshold=None, min_n=1)["sharp_close"]["n"] == 0
+    symmetric = [
+        row(closing_anchor="pinnacle", has_snapshot=True, mint_fell_back=True, close_fell_back=True)
+        for _ in range(3)
+    ]
+    assert live_evidence_report(symmetric, ml_threshold=None, min_n=1)["sharp_close"]["n"] == 3
+    unknown = [row(closing_anchor="pinnacle", has_snapshot=True) for _ in range(3)]
+    assert live_evidence_report(unknown, ml_threshold=None, min_n=1)["sharp_close"]["n"] == 3
 
 
 def test_sharp_close_stratum_is_zero_when_no_trusted_closes() -> None:

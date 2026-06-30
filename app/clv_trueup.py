@@ -39,6 +39,7 @@ from app.ingestion.base import EventDirectory, OddsLoader
 from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
 from app.resolution.shadow import arcadia_base_sport
+from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.settlement.engine import STALE_NULL_KICKOFF_AGE
 from app.storage.models import Event, Pick, PickLineDrift, Sport, Team
@@ -126,12 +127,18 @@ async def revalidate_open_picks(
     grouped = group_market_prices(snapshots)
     fair_by_key: dict[tuple[str, str, str], float] = {}
     anchor_by_key: dict[tuple[str, str, str], str] = {}
+    # P2-2: the close-side devig-fallback flag per market, carried to each pick so
+    # the trusted CLV subset drops asymmetric mint/close fallbacks.
+    fell_back_by_market: dict[tuple[str, Market, str | None], bool] = {}
+    fell_back_by_key: dict[tuple[str, str, str], bool] = {}
     for (event_id, market, _detail), (book, fair) in event_fair_probs(
-        grouped, devig_method, value_policy
+        grouped, devig_method, value_policy, fell_back_out=fell_back_by_market
     ).items():
+        fb = fell_back_by_market.get((event_id, market, _detail), False)
         for sel, p in fair.items():
             fair_by_key[(event_id, str(market), sel)] = p
             anchor_by_key[(event_id, str(market), sel)] = book
+            fell_back_by_key[(event_id, str(market), sel)] = fb
     prices_by_key: dict[tuple[str, str, str], dict[str, float]] = {}
     for (event_id, market, _detail), (prices, _captured) in grouped.items():
         for sel, books in prices.items():
@@ -181,6 +188,10 @@ async def revalidate_open_picks(
             pick.closing_fair_probability = Decimal(f"{closing_fair:.6f}")
             pick.clv_log = Decimal(f"{clv:.6f}")
             pick.beat_close = clv > 0
+            # P2-2: record whether the CLOSE devig fell back to multiplicative, so a
+            # close devigged by a different effective method than the mint (asymmetric)
+            # is dropped from the trusted CLV subset.
+            pick.close_devig_fell_back = fell_back_by_key.get(key)
             close_anchor = anchor_by_key.get(key)
             if close_anchor:
                 # CLOSE-side provenance: the anchor that priced this re-scrape
@@ -879,12 +890,18 @@ async def finalize_closing_from_snapshots(
     grouped = group_market_prices(snaps)
     fair_by_key: dict[tuple[str, str], float] = {}
     anchor_by_key: dict[tuple[str, str], str] = {}
+    # P2-2: per-market close devig-fallback flag, carried to the pick's
+    # close_devig_fell_back so the trusted CLV subset drops asymmetric fallbacks.
+    fell_back_by_market: dict[tuple[str, Market, str | None], bool] = {}
+    fell_back_by_key: dict[tuple[str, str], bool] = {}
     for (_event, market, _detail), (anchor, fair_by_sel) in event_fair_probs(
-        grouped, devig_method, value_policy
+        grouped, devig_method, value_policy, fell_back_out=fell_back_by_market
     ).items():
+        fb = fell_back_by_market.get((_event, market, _detail), False)
         for sel, p in fair_by_sel.items():
             fair_by_key[(str(market), sel)] = p
             anchor_by_key[(str(market), sel)] = anchor
+            fell_back_by_key[(str(market), sel)] = fb
     fair = fair_by_key.get((pick.market, pick.selection))
     if fair is None or not 0.0 < fair < 1.0:
         logger.info(
@@ -922,6 +939,8 @@ async def finalize_closing_from_snapshots(
     pick.closing_fair_probability = Decimal(f"{fair:.6f}")
     pick.clv_log = Decimal(f"{clv:.6f}")
     pick.beat_close = clv > 0
+    # P2-2: snapshot-close devig-fallback flag (the close half of the symmetry test).
+    pick.close_devig_fell_back = fell_back_by_key.get((pick.market, pick.selection))
     # clv-1: a fair was ANCHORED from our own odds_snapshots history — this IS a
     # genuine snapshot close, regardless of whether a soft book also quoted it
     # (close_odds may be None when only sharp books priced the selection). Mark it

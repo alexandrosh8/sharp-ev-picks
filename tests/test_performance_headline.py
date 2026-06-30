@@ -31,13 +31,16 @@ def _row(
     decimal_odds: float | None = 2.0,
     closing_fair_probability: float | None = None,
     model_probability: float | None = None,
+    mint_devig_fell_back: bool | None = None,
+    close_devig_fell_back: bool | None = None,
 ) -> tuple[object, ...]:
     # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
     #  close_independent, has_snapshot_close, decimal_odds,
-    #  closing_fair_probability, model_probability) — the tuple shape
-    #  performance_report._tier_rows builds. decimal_odds + closing_fair_probability
-    #  feed the CLV-1 implausible close-implied-edge guard; closing_fair_probability +
-    #  model_probability feed the TAUTOLOGY guard (both default unknown -> benign).
+    #  closing_fair_probability, model_probability, mint_devig_fell_back,
+    #  close_devig_fell_back) — the tuple shape performance_report._tier_rows
+    #  builds. decimal_odds + closing_fair_probability feed the CLV-1 implausible
+    #  close-implied-edge guard; closing_fair_probability + model_probability feed
+    #  the TAUTOLOGY guard; the two trailing P2-2 flags default None (symmetric).
     return (
         outcome,
         Decimal(str(pnl)),
@@ -51,6 +54,8 @@ def _row(
         Decimal(str(decimal_odds)) if decimal_odds is not None else None,
         Decimal(str(closing_fair_probability)) if closing_fair_probability is not None else None,
         Decimal(str(model_probability)) if model_probability is not None else None,
+        mint_devig_fell_back,
+        close_devig_fell_back,
     )
 
 
@@ -93,6 +98,31 @@ def test_sharp_only_close_with_no_soft_price_enters_trusted_subset() -> None:
     assert agg["n_sharp_close"] == MIN_HEADLINE_N  # sharp-only closes counted
     assert agg["sharp_status"] == "ok"
     assert agg["sharp_stake_weighted_clv_log"] == "0.04"
+
+
+def test_asymmetric_devig_fallback_excluded_from_trusted_subset() -> None:
+    # P2-2: a genuine independent sharp snapshot close whose MINT devig fell back
+    # to multiplicative but whose CLOSE devig did NOT (asymmetric) is a
+    # devig-method artifact, not a real line move — excluded from n_sharp_close.
+    rows = [
+        _row(clv_log=0.04, mint_devig_fell_back=True, close_devig_fell_back=False)
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg = _aggregate_settled(rows)
+    assert agg["n_sharp_close"] == 0
+
+
+def test_symmetric_devig_fallback_stays_in_trusted_subset() -> None:
+    # Both sides fell back the SAME way (or both None): the fairs were devigged by
+    # the same effective method, so the CLV is honest — kept in the trusted subset.
+    both_fell = [
+        _row(clv_log=0.04, mint_devig_fell_back=True, close_devig_fell_back=True)
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    assert _aggregate_settled(both_fell)["n_sharp_close"] == MIN_HEADLINE_N
+    # NULL provenance (historical rows) is treated as symmetric — not excluded.
+    unknown = [_row(clv_log=0.04) for _ in range(MIN_HEADLINE_N)]
+    assert _aggregate_settled(unknown)["n_sharp_close"] == MIN_HEADLINE_N
 
 
 def test_revalidation_fallback_close_excluded_even_with_soft_price() -> None:
