@@ -689,6 +689,36 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
         )
+
+    # Daily POST-SETTLEMENT calibration-drift watch (P2 ops). Identity-calibration
+    # of the devigged fair_prob anchor is load-bearing for EVERY edge; the
+    # platform runs no recalibration haircut precisely because the walk-forward
+    # recalibration-gain detector says one would not transfer out-of-sample. That
+    # verdict is a property of the DATA, so it must be re-checked as settled data
+    # accrues — not only via the manual probe. This job re-runs the SAME pure
+    # detector on settled picks and ALERTS the operator (never auto-retrains) if
+    # the verdict flips. It degrades to a no-op on thin/absent settled data and
+    # never raises. A CRON job (NOT a continuous poll), so its id is deliberately
+    # absent from _CONTINUOUS_POLL_JOBS — a skip here stays a real WARNING. Runs at
+    # 05:30 UTC: after the 04:10 model refit and overnight settlement, before the
+    # 08:05 upstream watch. Its own dispatcher (reuses the configured sinks; no-ops
+    # gracefully when no channel is wired).
+    if session_factory is not None:
+        calibration_drift_dispatcher = _dispatcher(settings, http_client, redis)
+
+        async def run_calibration_drift_job() -> None:
+            from app.maintenance.calibration_drift import calibration_drift_job
+
+            await calibration_drift_job(session_factory, dispatcher=calibration_drift_dispatcher)
+
+        scheduler.add_job(
+            run_calibration_drift_job,
+            CronTrigger(hour=5, minute=30),
+            id="calibration_drift",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=None,  # run on Mac wake, don't skip
+        )
     # DEDICATED finished-score scrape on its OWN light interval, decoupled from
     # both the heavy odds poll and the hourly settle cron (cactusbets.cloud prod
     # fix). Only registered when the source can actually scrape match pages
