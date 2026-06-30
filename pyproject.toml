@@ -108,5 +108,24 @@ warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "fakeredis.*", "scipy.*", "oddsharvester.*", "penaltyblog.*", "pandas.*", "openpyxl.*"]
+# Third-party modules without type stubs, PLUS the optional-extra packages that
+# importorskip-guarded test modules import (sklearn/lightgbm/xgboost/nba_api/
+# nflreadpy/betfair_data). Listing the extras here makes `mypy app tests` (the
+# documented full gate) deterministic whether or not the extra is installed —
+# otherwise an absent extra makes mypy fail with import-not-found on those tests.
+module = [
+    "apscheduler.*",
+    "fakeredis.*",
+    "scipy.*",
+    "oddsharvester.*",
+    "penaltyblog.*",
+    "pandas.*",
+    "openpyxl.*",
+    "sklearn.*",
+    "lightgbm.*",
+    "xgboost.*",
+    "nba_api.*",
+    "nflreadpy.*",
+    "betfair_data.*",
+]
 ignore_missing_imports = true

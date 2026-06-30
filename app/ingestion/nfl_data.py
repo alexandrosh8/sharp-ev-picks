@@ -136,7 +136,7 @@ async def _default_loader(season: int) -> Sequence[Mapping[str, Any]]:
 
 def _load_schedule_sync(season: int) -> list[Mapping[str, Any]]:
     try:
-        import nflreadpy as nfl  # type: ignore[import-not-found]
+        import nflreadpy as nfl
     except ImportError as exc:  # pragma: no cover - environment guard
         raise RuntimeError("nflreadpy not installed; run `uv sync --extra nfl`") from exc
     # polars -> pandas at the boundary (research 2026-06-21), then plain records.

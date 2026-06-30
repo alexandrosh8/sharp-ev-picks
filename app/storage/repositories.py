@@ -1038,9 +1038,12 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
                 sharp_beat_true += int(beat_close)
     # Defense-in-depth: the gate above already excludes circular closes, so by
     # construction every row in the sharp subset is independent of its fill book
-    # (closing_anchor != fill_book). Assert it so a future refactor of the gate
-    # that re-admits a self-priced close trips here instead of silently faking CLV.
-    assert sharp_all_independent, "sharp-close subset contains a circular (self-priced) close"
+    # (closing_anchor != fill_book). Enforce it with an explicit raise (NOT assert,
+    # which `python -O` strips) so a future refactor of the gate that re-admits a
+    # self-priced close trips here instead of silently faking CLV — even in an
+    # optimized production run.
+    if not sharp_all_independent:
+        raise RuntimeError("sharp-close subset contains a circular (self-priced) close")
     # P2-1 HEADLINE min-n suppression: below MIN_HEADLINE_N settled picks the
     # blended roi / beat_close_rate / stake-weighted CLV are noise (a 10-pick
     # -8.7% reads as signal), so they are NULLED at the source and flagged

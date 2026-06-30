@@ -60,7 +60,7 @@ def test_bakeoff_ranks_isotonic_platt_beta_by_log_loss() -> None:
     lls = [r["log_loss"] for r in rows]
     assert lls == sorted(lls)  # ranked best (lowest) log-loss first
     # the winner must beat the raw distorted score (the bake-off found a real fix)
-    from sklearn.metrics import log_loss as _ll  # type: ignore[import-untyped]
+    from sklearn.metrics import log_loss as _ll
 
     raw_ll = float(_ll(y[cut:], np.clip(p_raw[cut:], 1e-6, 1.0 - 1e-6), labels=[0, 1]))
     assert min(lls) <= raw_ll + 1e-9

@@ -156,8 +156,32 @@ def test_bad_arcadia_proxy_url_error_does_not_echo_secret() -> None:
 
 
 def test_public_app_bind_requires_dashboard_auth() -> None:
-    with pytest.raises(ValidationError, match="APP_HOST_BIND exposes the dashboard"):
+    with pytest.raises(ValidationError, match="PUBLIC interface"):
         make_settings(app_host_bind="0.0.0.0")
+
+
+def test_public_app_bind_blocks_blank_cred_first_run_setup() -> None:
+    # P1 security: a PUBLIC bind with auth ENABLED but BLANK hash/secret is the
+    # unauthenticated first-run /setup path — on a public interface the first
+    # visitor could claim the admin password. Must be rejected (provision creds in
+    # .env or keep the bind on loopback). Previously this was allowed.
+    with pytest.raises(ValidationError, match="PUBLIC interface"):
+        make_settings(app_host_bind="0.0.0.0", dashboard_auth_enabled=True)
+    # ...and one provisioned-but-not-the-other is still a misconfig, not a pass.
+    with pytest.raises(ValidationError):
+        make_settings(
+            app_host_bind="0.0.0.0",
+            dashboard_auth_enabled=True,
+            dashboard_auth_password_hash="pbkdf2_sha256$1$abcd$1234",
+        )
+
+
+def test_empty_app_bind_counts_as_loopback_first_run_ok() -> None:
+    # APP_HOST_BIND="" is the loopback default (it only DECLARES the compose
+    # host-side bind, which maps to loopback), so the blank-cred first-run /setup
+    # path stays allowed there — a blank value is not "bind all interfaces".
+    s = make_settings(app_host_bind="", dashboard_auth_enabled=True)
+    assert s.app_host_bind == ""
 
 
 def test_public_app_bind_passes_with_dashboard_auth() -> None:

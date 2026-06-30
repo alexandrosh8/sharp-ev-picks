@@ -14,8 +14,10 @@ dedupes a repeat, and is a safe no-op with no settled data / no dispatcher.
 """
 
 from datetime import UTC, datetime
+from typing import cast
 
 import numpy as np
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.backtesting.calibration import (
     CalibrationObservation,
@@ -24,6 +26,10 @@ from app.backtesting.calibration import (
 from app.maintenance import calibration_drift as cd
 
 _NOW = datetime(2026, 6, 30, 5, 30, tzinfo=UTC)
+# calibration_drift_job NO-OPS when session_factory is None, and the monkeypatched
+# load_calibration_periods ignores the factory's value — so we pass a NON-None
+# typed sentinel (an opaque object) that clears the None-guard without a real DB.
+_NO_FACTORY = cast("async_sessionmaker[AsyncSession]", object())
 
 
 # --- synthetic settled-data periods (mirrors test_calibration_walkforward) --- #
@@ -109,7 +115,7 @@ async def test_job_dispatches_alert_on_drift(monkeypatch) -> None:  # type: igno
 
     monkeypatch.setattr(cd, "load_calibration_periods", fake_load)
     disp = _FakeDispatcher()
-    report = await cd.calibration_drift_job(object(), dispatcher=disp, now=_NOW)
+    report = await cd.calibration_drift_job(_NO_FACTORY, dispatcher=disp, now=_NOW)
     assert report is not None and report.warrants_recalibration is True
     assert len(disp.sent) == 1
     assert cd._DRIFT_CODE in disp.sent[0].pick_id
@@ -121,7 +127,7 @@ async def test_job_no_alert_when_still_calibrated(monkeypatch) -> None:  # type:
 
     monkeypatch.setattr(cd, "load_calibration_periods", fake_load)
     disp = _FakeDispatcher()
-    report = await cd.calibration_drift_job(object(), dispatcher=disp, now=_NOW)
+    report = await cd.calibration_drift_job(_NO_FACTORY, dispatcher=disp, now=_NOW)
     assert report is not None and report.warrants_recalibration is False
     assert disp.sent == []
 
@@ -149,8 +155,8 @@ async def test_job_dedupes_repeat_same_day(monkeypatch) -> None:  # type: ignore
     monkeypatch.setattr(cd, "load_calibration_periods", fake_load)
     sink = _RecordingSink()
     dispatcher = AlertDispatcher(sinks=[sink], store=InMemoryIdempotencyStore())
-    await cd.calibration_drift_job(object(), dispatcher=dispatcher, now=_NOW)
-    await cd.calibration_drift_job(object(), dispatcher=dispatcher, now=_NOW)
+    await cd.calibration_drift_job(_NO_FACTORY, dispatcher=dispatcher, now=_NOW)
+    await cd.calibration_drift_job(_NO_FACTORY, dispatcher=dispatcher, now=_NOW)
     assert sink.count == 1  # second same-day dispatch deduped by the store
 
 
@@ -163,7 +169,7 @@ async def test_job_no_settled_data_is_safe_noop(monkeypatch) -> None:  # type: i
 
     monkeypatch.setattr(cd, "load_calibration_periods", fake_load)
     disp = _FakeDispatcher()
-    report = await cd.calibration_drift_job(object(), dispatcher=disp, now=_NOW)
+    report = await cd.calibration_drift_job(_NO_FACTORY, dispatcher=disp, now=_NOW)
     assert report is None
     assert disp.sent == []
 
@@ -176,7 +182,7 @@ async def test_job_insufficient_data_skips(monkeypatch) -> None:  # type: ignore
 
     monkeypatch.setattr(cd, "load_calibration_periods", fake_load)
     disp = _FakeDispatcher()
-    report = await cd.calibration_drift_job(object(), dispatcher=disp, now=_NOW)
+    report = await cd.calibration_drift_job(_NO_FACTORY, dispatcher=disp, now=_NOW)
     assert report is not None and report.insufficient is True
     assert disp.sent == []
 
@@ -193,7 +199,7 @@ async def test_job_load_failure_degrades_gracefully(monkeypatch) -> None:  # typ
 
     monkeypatch.setattr(cd, "load_calibration_periods", boom)
     disp = _FakeDispatcher()
-    report = await cd.calibration_drift_job(object(), dispatcher=disp, now=_NOW)
+    report = await cd.calibration_drift_job(_NO_FACTORY, dispatcher=disp, now=_NOW)
     assert report is None  # logged + skipped, never raised
     assert disp.sent == []
 
@@ -204,5 +210,5 @@ async def test_job_no_dispatcher_is_safe(monkeypatch) -> None:  # type: ignore[n
 
     monkeypatch.setattr(cd, "load_calibration_periods", fake_load)
     # drift present but no channel wired: still runs, returns the report, no raise
-    report = await cd.calibration_drift_job(object(), dispatcher=None, now=_NOW)
+    report = await cd.calibration_drift_job(_NO_FACTORY, dispatcher=None, now=_NOW)
     assert report is not None and report.warrants_recalibration is True

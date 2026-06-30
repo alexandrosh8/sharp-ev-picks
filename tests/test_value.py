@@ -29,7 +29,9 @@ def test_exchange_anchor_fair_devigs_gross_not_commission_netted_odds() -> None:
         "Draw": {"Betfair Exchange": 4.60, "SoftBook": 4.40},
         "Away": {"Betfair Exchange": 7.20, "SoftBook": 7.00},
     }
-    book, fair = anchor_fair_probs(prices, devig_method=DevigMethod.POWER)
+    anchored = anchor_fair_probs(prices, devig_method=DevigMethod.POWER)
+    assert anchored is not None
+    book, fair = anchored
     assert book == "Betfair Exchange"
     expected_gross = dict(zip(sels, devig(gross, method=DevigMethod.POWER), strict=True))
     for sel, p in expected_gross.items():
@@ -51,7 +53,9 @@ def test_pinnacle_anchor_fair_unchanged_no_commission() -> None:
         "Draw": {"Pinnacle": 4.60, "SoftBook": 4.40},
         "Away": {"Pinnacle": 7.20, "SoftBook": 7.00},
     }
-    book, fair = anchor_fair_probs(prices, devig_method=DevigMethod.POWER)
+    anchored = anchor_fair_probs(prices, devig_method=DevigMethod.POWER)
+    assert anchored is not None
+    book, fair = anchored
     assert book == "Pinnacle"
     expected = dict(zip(sels, devig(gross, method=DevigMethod.POWER), strict=True))
     for sel, p in expected.items():

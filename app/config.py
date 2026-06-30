@@ -1079,13 +1079,27 @@ class Settings(BaseSettings):
                         "interpolate the $ separators."
                     )
         bind = self.app_host_bind.strip().lower().strip("[]")
-        loopback = bind == "localhost" or bind == "::1" or bind.startswith("127.")
-        if not loopback and not self.dashboard_auth_enabled:
-            raise ValueError(
-                "APP_HOST_BIND exposes the dashboard outside loopback; set "
-                "DASHBOARD_AUTH_ENABLED=true with DASHBOARD_AUTH_PASSWORD_HASH and "
-                "DASHBOARD_SESSION_SECRET before binding the app publicly."
-            )
+        # Empty/unset counts as loopback: the field DEFAULTS to 127.0.0.1 and only
+        # DECLARES the compose host-side bind (which maps to loopback), so a blank
+        # value is "not publicly host-bound", not "bind all interfaces".
+        loopback = bind in ("", "localhost", "::1") or bind.startswith("127.")
+        if not loopback:
+            # A PUBLIC host bind must NOT expose the unauthenticated first-run
+            # /setup screen — on a public interface the FIRST visitor could create
+            # the admin credential (app/api/routes.py /setup). Require auth ENABLED
+            # with BOTH a pre-provisioned password hash AND session secret; the
+            # blank-credential /setup path is permitted ONLY on a loopback bind.
+            has_hash = bool(self.dashboard_auth_password_hash.get_secret_value())
+            has_secret = bool(self.dashboard_session_secret.get_secret_value())
+            if not (self.dashboard_auth_enabled and has_hash and has_secret):
+                raise ValueError(
+                    "APP_HOST_BIND binds the dashboard to a PUBLIC interface; that "
+                    "requires DASHBOARD_AUTH_ENABLED=true with BOTH a pre-provisioned "
+                    "DASHBOARD_AUTH_PASSWORD_HASH and DASHBOARD_SESSION_SECRET. The "
+                    "blank-credential first-run /setup screen (where the first "
+                    "visitor claims the admin password) is allowed only on a loopback "
+                    "bind — provision the hash/secret before binding publicly."
+                )
         return self
 
     @model_validator(mode="after")
