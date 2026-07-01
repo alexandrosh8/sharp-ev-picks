@@ -69,18 +69,14 @@ JSON_RPC_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 # JSON-RPC operation names — the READ-ONLY allowlist, and nothing else. (Each is
 # a price/metadata read; none place a bet or touch a betting account.)
 _RPC_PREFIX = "SportsAPING/v1.0/"
-_OP_LIST_EVENT_TYPES = "listEventTypes"
-_OP_LIST_COMPETITIONS = "listCompetitions"
-_OP_LIST_EVENTS = "listEvents"
 _OP_LIST_MARKET_CATALOGUE = "listMarketCatalogue"
 _OP_LIST_MARKET_BOOK = "listMarketBook"
 # listMarketBook caps at 200 weight-points/request; EX_BEST_OFFERS ~5/market, so
 # batch <=25 markets/call (~125 weight) to stay under the cap (else TOO_MUCH_DATA).
 _MARKET_BOOK_BATCH = 25
 
-# Soccer event type; basketball ("7522") can be added later (req #1).
+# Soccer event type (the only one this read-only shadow capture fetches).
 EVENT_TYPE_SOCCER = "1"
-EVENT_TYPE_BASKETBALL = "7522"
 MARKET_TYPE_MATCH_ODDS = "MATCH_ODDS"
 # Betfair's constant selectionId for "The Draw" on a soccer Match-Odds market.
 DRAW_SELECTION_ID = 58805
@@ -617,27 +613,6 @@ class BetfairApiClient:
         return _error_code(body) in _SESSION_EXPIRY_CODES
 
     # --- read-only operations ------------------------------------------------ #
-    async def list_event_types(self, *, event_type_ids: Sequence[str] | None = None) -> Any:
-        market_filter = {"eventTypeIds": list(event_type_ids)} if event_type_ids else {}
-        return await self._rpc(_OP_LIST_EVENT_TYPES, {"filter": market_filter})
-
-    async def list_competitions(self, *, event_type_ids: Sequence[str]) -> Any:
-        return await self._rpc(
-            _OP_LIST_COMPETITIONS, {"filter": {"eventTypeIds": list(event_type_ids)}}
-        )
-
-    async def list_events(
-        self,
-        *,
-        event_type_ids: Sequence[str],
-        market_start_from: datetime | None = None,
-        market_start_to: datetime | None = None,
-    ) -> Any:
-        return await self._rpc(
-            _OP_LIST_EVENTS,
-            {"filter": _build_filter(event_type_ids, [], market_start_from, market_start_to)},
-        )
-
     async def list_market_catalogue(
         self,
         *,

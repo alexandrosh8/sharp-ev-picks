@@ -622,7 +622,11 @@ def _named_sharp_anchor(
     candidate (Betfair/Smarkets/Matchbook) must show matched ``liquidity`` >= that
     floor on EVERY selection to earn 'sharp' grade — a thin / just-firmed / unknown-
     liquidity exchange line is not trustworthy-sharp (the Welwalo lesson). At the
-    default floor 0 the gate is inert and behaviour is bit-for-bit unchanged."""
+    default floor 0 the gate is inert and behaviour is bit-for-bit unchanged.
+    NOTE: no Settings field feeds this today (only the CAPTURE-time floor
+    BETFAIR_EXCHANGE_MIN_LIQUIDITY exists), so it is inert IN PRODUCTION — live
+    picks are liquidity-gated at capture, not here. Wire VALUE_EXCHANGE_MIN_LIQUIDITY
+    at the composition root to activate, or drop this param path if never used."""
     raw_by_norm: dict[str, str] = {}
     for s in selections:
         for b in prices[s]:
