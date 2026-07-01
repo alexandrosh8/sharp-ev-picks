@@ -856,7 +856,10 @@ class Settings(BaseSettings):
     # ROTATES through the whole slate over successive cycles. Per-cycle cost ==
     # min(this, eligible events). DEFAULT 35 (2026-06-28): the curl_cffi JSON feed
     # is far lighter than the retired Playwright reader, so a higher bound is cheap
-    # and covers soccer+basketball without cannibalizing soccer coverage.
+    # and covers soccer+basketball without cannibalizing soccer coverage. NOTE:
+    # this is the conservative CODE default; the operative value is env-set
+    # (BETFAIR_EXCHANGE_MAX_TARGETS_PER_CYCLE — e.g. 70 in prod on the 14-proxy
+    # rotating pool, ~5 targets/proxy/cycle) — scale via the pool, not one IP.
     betfair_exchange_max_targets_per_cycle: int = Field(default=35, ge=1, le=200)
     # Only events kicking off within this many hours ahead are eligible targets
     # (and only those NOT yet started). Bounds the candidate set to the

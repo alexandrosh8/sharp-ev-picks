@@ -857,12 +857,23 @@ class BetfairApiShadowCapture:
         return result
 
     def _snapshots_for(
-        self, odds: BetfairMatchOdds, event_ref: str, now: datetime
+        self,
+        odds: BetfairMatchOdds,
+        home: str,
+        away: str,
+        event_ref: str,
+        now: datetime,
     ) -> list[OddsSnapshotIn]:
+        # Selection names come from the MATCHED CANONICAL candidate (home/away),
+        # NOT odds.home/odds.away (the Betfair runner names) — the promoted rows
+        # attach to the canonical event and must speak the pick's OddsPortal
+        # selection vocabulary, or the anchor's per-selection lookup silently
+        # misses (complete=False) on any name-form gap. Mirrors the Pinnacle path
+        # (repositories.resolve_pinnacle_close_snaps re-keys via selection_map).
         rows: list[OddsSnapshotIn] = []
         for selection, price in (
-            (odds.home, odds.home_back),
-            (odds.away, odds.away_back),
+            (home, odds.home_back),
+            (away, odds.away_back),
             ("Draw", odds.draw_back),
         ):
             if price is None or not selection:
@@ -924,7 +935,7 @@ class BetfairApiShadowCapture:
                 unmatched += 1
                 continue
             matched += 1
-            snapshots.extend(self._snapshots_for(market, hit.ref, now))
+            snapshots.extend(self._snapshots_for(market, hit.home, hit.away, hit.ref, now))
             # Teams for the (only-when-promoting) attach-only persist; sourced from
             # the matched canonical candidate, never the Betfair competition name.
             teams_by_event[hit.ref] = EventTeams(

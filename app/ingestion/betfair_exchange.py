@@ -435,6 +435,10 @@ class BetfairExchangeCapture:
     open price once with a fresh captured_at; the unique key includes captured_at).
     """
 
+    # Cap the in-memory change-gate so kicked-off events cannot accumulate forever
+    # on a long-lived process. Far above any live (event x selection) slate.
+    _MAX_SEEN_PRICES = 20000
+
     def __init__(
         self,
         reader: BetfairExchangeReader | None,
@@ -469,6 +473,16 @@ class BetfairExchangeCapture:
                 continue
             self._seen_price[key] = snapshot.decimal_odds
             fresh.append(snapshot)
+        # Bound the change-gate memory: on the unless-stopped VPS, entries for
+        # kicked-off events would otherwise accumulate forever (MatchTarget carries
+        # no kickoff to evict by, so cap by insertion order — oldest = earliest,
+        # most-likely-past events go first). A re-appearing event just re-persists
+        # its current price ONCE (benign for a change-only gate). Bound >> any live
+        # slate's (event x selection) count.
+        overflow = len(self._seen_price) - self._MAX_SEEN_PRICES
+        if overflow > 0:
+            for stale_key in list(self._seen_price)[:overflow]:
+                del self._seen_price[stale_key]
         return fresh
 
     async def capture_once(self) -> dict[str, int]:

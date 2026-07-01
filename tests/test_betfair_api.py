@@ -349,6 +349,22 @@ async def test_shadow_matched_builds_anchor_under_canonical_ref() -> None:
     assert {s.selection for s in report.snapshots} == {"Alpha FC", "Beta United", "Draw"}
 
 
+async def test_promote_rows_use_canonical_selection_vocabulary_not_betfair_names() -> None:
+    # The matched candidate's canonical (OddsPortal) home name ("Alpha") differs
+    # from the Betfair runner name ("Alpha FC"); the snapshot destined for the
+    # promote sink MUST speak the CANONICAL vocabulary, or the live anchor's
+    # per-selection lookup silently misses (complete=False) on the name-form gap.
+    # Regression for the Betfair-API promote-path under-anchor trap (2026-07-01).
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha", away="Beta United", kickoff=KICKOFF)
+    ]
+    report = await _shadow_capture(_full_odds_mock(), candidates).capture_once()
+    assert report.matched == 1
+    selections = {s.selection for s in report.snapshots}
+    assert selections == {"Alpha", "Beta United", "Draw"}  # canonical home, not "Alpha FC"
+    assert "Alpha FC" not in selections  # the Betfair runner name never leaks into the anchor
+
+
 async def test_shadow_unmatched_is_skipped_never_guessed() -> None:
     # A different fixture -> the hardened matcher returns None -> no rows, never a guess.
     candidates = [
