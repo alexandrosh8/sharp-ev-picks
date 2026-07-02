@@ -254,6 +254,66 @@ async def seed_exposure_ledger(
         )
 
 
+def _unvalidated_sport_scopes(
+    settings: Settings,
+    *,
+    basketball_keys: frozenset[str] = frozenset(),
+    tennis_keys: frozenset[str] = frozenset(),
+    nfl_keys: frozenset[str] = frozenset(),
+) -> tuple[frozenset[str], frozenset[str]]:
+    """(experimental_sports, visibility_only_sports) for the enabled sport keys.
+
+    ONE evidence-gated scoping policy for EVERY odds-source branch (audit WP6 —
+    the odds_api branch previously skipped it entirely, so basketball would have
+    alerted premium there unconditionally):
+
+    - Basketball (Batch 3 DEMOTION, audit 2026-06-26) has NOT cleared the
+      held-out > 2 SE per-sport CLV gate, so by default it is EXPERIMENTAL —
+      still scraped/minted/persisted/CLV-tracked/auto-settled AND shown, but
+      every pick is forced to the volume/shadow tier (never alerted, zero
+      exposure). Unlike tennis/NFL it still MINTS picks either way — the knob
+      only governs whether they can alert. Promotion is FAIL-CLOSED and needs
+      TWO deliberate flags: NBA_EXPERIMENTAL=false AND
+      NBA_PROMOTION_ACKNOWLEDGE_EVIDENCE=true — the operator's on-record
+      acknowledgement that the per-(sport, market) CLV-readiness bars
+      (SportMarketClvGate, app/backtesting/live_evidence.py) were reviewed and
+      an ADR logged. A bare NBA_EXPERIMENTAL=false is REFUSED loudly and
+      basketball stays experimental.
+    - Tennis / NFL are UNVALIDATED (no usable closing source yet —
+      app/config.py): visibility-only (AVAILABLE GAMES, no picks/alerts) unless
+      the operator opts into ENABLE_UNVALIDATED_PICKS, which lifts them only to
+      the EXPERIMENTAL shadow tier (mint, never alert).
+    """
+    experimental: frozenset[str] = frozenset()
+    visibility_only: frozenset[str] = frozenset()
+    if basketball_keys:
+        if settings.nba_experimental:
+            experimental |= basketball_keys
+        elif not settings.nba_promotion_acknowledge_evidence:
+            logger.warning(
+                "REFUSING basketball premium promotion: NBA_EXPERIMENTAL=false but "
+                "NBA_PROMOTION_ACKNOWLEDGE_EVIDENCE is not set. Promotion requires the "
+                "per-(sport, market) CLV-readiness evidence (SportMarketClvGate, "
+                "app/backtesting/live_evidence.py) to be reviewed + ADR-logged, then "
+                "the acknowledge flag. Basketball stays EXPERIMENTAL (shadow tier)."
+            )
+            experimental |= basketball_keys
+        else:
+            logger.warning(
+                "basketball PROMOTED to alert-eligible premium: NBA_EXPERIMENTAL=false "
+                "with NBA_PROMOTION_ACKNOWLEDGE_EVIDENCE=true (operator-acknowledged "
+                "CLV-readiness evidence, ADR-logged)."
+            )
+    for keys in (tennis_keys, nfl_keys):
+        if not keys:
+            continue
+        if settings.enable_unvalidated_picks:
+            experimental |= keys
+        else:
+            visibility_only |= keys
+    return experimental, visibility_only
+
+
 def build_scheduler(
     settings: Settings,
     http_client: httpx.AsyncClient,
@@ -290,15 +350,6 @@ def build_scheduler(
             config["basketball"] = ("basketball", bb_leagues)
             markets_by["basketball"] = tuple(_csv(settings.oddsportal_basketball_markets))
             sport_keys = ("soccer", "basketball")
-            # Batch 3 DEMOTION (audit 2026-06-26): basketball has NOT cleared the
-            # held-out > 2 SE per-sport CLV gate, so by default it is EXPERIMENTAL —
-            # still scraped/minted/persisted/CLV-tracked/auto-settled AND shown, but
-            # every pick is forced to the volume/shadow tier (never alerted, zero
-            # exposure). Flip NBA_EXPERIMENTAL=false only after a deliberate,
-            # ADR-logged promotion. Unlike tennis/NFL, basketball still MINTS picks
-            # either way — the knob only governs whether they can alert.
-            if settings.nba_experimental:
-                experimental_sports = experimental_sports | frozenset({"basketball"})
         # Tennis is VISIBILITY-ONLY / UNVALIDATED (held-out CLV undefined — no
         # closing source; app/config.py). Enabled only when leagues are set
         # (OFF by default); it scrapes for the AVAILABLE GAMES view but mints
@@ -308,10 +359,6 @@ def build_scheduler(
             config["tennis"] = ("tennis", tennis_leagues)
             markets_by["tennis"] = tuple(_csv(settings.oddsportal_tennis_markets))
             sport_keys = (*sport_keys, "tennis")
-            if settings.enable_unvalidated_picks:
-                experimental_sports = experimental_sports | frozenset({"tennis"})
-            else:
-                visibility_only_sports = visibility_only_sports | frozenset({"tennis"})
         # American football / NFL is ALSO VISIBILITY-ONLY / UNVALIDATED (its
         # forward Pinnacle-close archive is only now being captured via arcadia
         # sport-id 15; held-out CLV cannot be evaluated until it accrues —
@@ -324,10 +371,15 @@ def build_scheduler(
             config["american_football"] = ("american-football", nfl_leagues)
             markets_by["american_football"] = tuple(_csv(settings.oddsportal_nfl_markets))
             sport_keys = (*sport_keys, "american_football")
-            if settings.enable_unvalidated_picks:
-                experimental_sports = experimental_sports | frozenset({"american_football"})
-            else:
-                visibility_only_sports = visibility_only_sports | frozenset({"american_football"})
+        # ONE evidence-gated scoping decision for every unvalidated sport —
+        # basketball promotion is FAIL-CLOSED (needs NBA_EXPERIMENTAL=false AND
+        # NBA_PROMOTION_ACKNOWLEDGE_EVIDENCE=true; see _unvalidated_sport_scopes).
+        experimental_sports, visibility_only_sports = _unvalidated_sport_scopes(
+            settings,
+            basketball_keys=frozenset({"basketball"}) if bb_leagues else frozenset(),
+            tennis_keys=frozenset({"tennis"}) if tennis_leagues else frozenset(),
+            nfl_keys=frozenset({"american_football"}) if nfl_leagues else frozenset(),
+        )
         loader = OddsPortalLoader(
             directory=directory,
             leagues_by_sport_key=config,
@@ -393,6 +445,13 @@ def build_scheduler(
                 api_keys=keys, client=http_client, regions=settings.odds_api_regions
             )
             sport_keys = ("soccer_epl", "basketball_nba")
+            # Same evidence-gated scoping as the oddsportal branch (audit WP6 —
+            # this branch previously never populated experimental_sports, so
+            # basketball would have alerted premium here unconditionally). No
+            # tennis/NFL keys are polled on this source.
+            experimental_sports, visibility_only_sports = _unvalidated_sport_scopes(
+                settings, basketball_keys=frozenset({"basketball_nba"})
+            )
         else:
             logger.warning("odds_source=odds_api but no keys configured; polling disabled")
     else:

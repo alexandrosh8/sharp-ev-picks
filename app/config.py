@@ -1021,6 +1021,18 @@ class Settings(BaseSettings):
     # deliberate, ADR-logged promotion, never automatic.
     nba_experimental: bool = True
 
+    # Promotion ACKNOWLEDGEMENT (audit WP6, 2026-07-02). NBA_EXPERIMENTAL=false
+    # alone must NOT promote basketball to alert-eligible premium — that would
+    # be a bare env flip with zero evidence check. Promotion additionally
+    # requires this explicit operator acknowledgement that the per-(sport,
+    # market) CLV-readiness evidence (the SportMarketClvGate bars in
+    # app/backtesting/live_evidence.py: enough genuine sharp closes, sharp
+    # stake-weighted CLV > 2 SE, beat-close CI lower bound > 0.5) has been
+    # reviewed AND an ADR logged. Without it the composition root REFUSES the
+    # promotion (logs a warning, keeps basketball experimental/shadow) —
+    # fail-closed by default; the operator can still deliberately force it.
+    nba_promotion_acknowledge_evidence: bool = False
+
     @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":
         if self.auto_betting or self.bet_execution_enabled:
