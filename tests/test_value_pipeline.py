@@ -718,6 +718,76 @@ async def test_unpersisted_premium_pick_does_not_accumulate_exposure() -> None:
     assert deps.ledger.used(day) == 0.0  # still zero -> no cross-cycle accumulation
 
 
+async def test_cap_denied_inserted_premium_zeroes_stake_and_never_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP2 (daily-cap bypass): a brand-new premium pick the exhausted daily cap
+    denies (granted == 0) was already persisted at FULL stake BEFORE the
+    reservation ran — the row must be rewritten to stake 0 (the cap-denial
+    marker) and the alert withheld, and the NEXT cycle's re-detection
+    ('duplicate_denied') must stay silent too. Without the marker the duplicate
+    path re-dispatched the alert one cycle late at full stake with zero ledger
+    accounting."""
+    import app.storage.repositories as repos
+
+    patch_persist_recording(monkeypatch, ["inserted", "duplicate_denied"])
+    rewrites: list[float] = []
+
+    async def spy_update_pick_stake(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        rewrites.append(pick.recommended_stake_fraction)
+        return True
+
+    monkeypatch.setattr(repos, "update_pick_stake", spy_update_pick_stake)
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    day = datetime.now(tz=UTC).date()
+    deps.ledger.reserve(day, deps.ledger.remaining(day))  # cap fully exhausted
+
+    first = await run_value_pipeline(deps, "soccer")
+    assert first == []  # cap-denied: not a pick this cycle
+    assert sink.sent == []  # ... and no alert
+    assert rewrites == [pytest.approx(0.0)]  # the row now carries the denial
+
+    second = await run_value_pipeline(deps, "soccer")
+    assert second == []
+    assert sink.sent == []  # the duplicate must NOT late-fire the alert
+    assert rewrites == [pytest.approx(0.0)]  # ... and nothing was rewritten again
+
+
+async def test_unpersisted_premium_with_persistence_configured_withholds_alert(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WP2 fail-closed: persistence is CONFIGURED but the write FAILS (DB
+    outage) -> 'unpersisted'. The pick can never be settled, seeded into the
+    exposure ledger, or CLV-tracked, so its premium alert is WITHHELD and the
+    count logged at WARNING. (Deps WITHOUT a session factory — persistence
+    deliberately unconfigured — keep the historical alert-flowing behavior:
+    see test_unpersisted_premium_pick_does_not_accumulate_exposure.)"""
+    import logging as _logging
+
+    import app.storage.repositories as repos
+
+    async def failing_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        raise RuntimeError("db outage")
+
+    monkeypatch.setattr(repos, "persist_pick", failing_persist_pick)
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    day = datetime.now(tz=UTC).date()
+
+    with caplog.at_level(_logging.WARNING, logger="app.pipeline"):
+        picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []  # fail closed: no pick without a persisted row
+    assert sink.sent == []  # ... and no alert
+    assert deps.ledger.used(day) == 0.0  # ... and no phantom reservation
+    assert "withheld 1 premium alert" in caplog.text
+
+
 def test_pick_tier_boundaries() -> None:
     """Tier floors are INCLUSIVE (>= mirrors the backtests' gates): edge
     exactly 0.03 is premium, a hair under is volume, under 0.015 is no pick;

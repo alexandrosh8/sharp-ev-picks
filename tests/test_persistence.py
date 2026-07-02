@@ -125,6 +125,25 @@ async def test_persist_pick_inserts_then_dedupes(session) -> None:  # type: igno
     assert count2 == 1
 
 
+async def test_persist_pick_cap_denied_row_returns_duplicate_denied(session) -> None:  # type: ignore[no-untyped-def]
+    # WP2: a premium row whose stake was zeroed at insert (daily-exposure cap
+    # granted nothing) is a CAP-DENIAL marker — a re-detection of the same
+    # natural key must come back 'duplicate_denied' so the pipeline never
+    # late-fires the alert the cap already refused.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+
+    inserted = await persist_pick(session, make_pick("evt-cap-denied"), teams, "value", "test-1")
+    assert inserted == "inserted"
+    await session.execute(
+        sa_update(Pick)
+        .where(Pick.bookmaker == "testbook")
+        .values(recommended_stake_fraction=Decimal("0"))
+    )
+
+    again = await persist_pick(session, make_pick("evt-cap-denied"), teams, "value", "test-1")
+    assert again == "duplicate_denied"
+
+
 async def test_persisted_pick_roundtrips_fields(session) -> None:  # type: ignore[no-untyped-def]
     teams = EventTeams(home="Alpha FC", away="Beta United")
     await persist_pick(session, make_pick("evt-roundtrip"), teams, "dixon-coles", "test-2")

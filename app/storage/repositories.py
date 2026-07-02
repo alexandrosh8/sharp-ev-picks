@@ -2409,7 +2409,7 @@ async def pinnacle_archive_capture_by_sport(
     return out
 
 
-PickPersistOutcome = Literal["inserted", "upgraded", "duplicate"]
+PickPersistOutcome = Literal["inserted", "upgraded", "duplicate", "duplicate_denied"]
 
 
 async def _supersede_older_versions(
@@ -2458,6 +2458,11 @@ async def persist_pick(
       already held by a premium row is never touched by a volume candidate
       (the unique key collides across tiers BY DESIGN — one market
       opportunity is one row, whose tier may only ratchet upward).
+    - "duplicate_denied": the key exists but its row carries stake <= 0 —
+      the CAP-DENIAL marker the pipeline writes when the daily-exposure
+      ledger granted nothing at insert (WP2). The caller must NOT dispatch:
+      a re-detection would otherwise late-fire, at full stake, the alert
+      the cap already refused.
 
     `status` stays "alerted" for both tiers: it is the lifecycle column
     (open -> settled/superseded/void) shared by revalidation and settlement;
@@ -2605,6 +2610,11 @@ async def persist_pick(
             session, event_id, str(pick.market), pick.selection, model_version_id, "premium"
         )
         return "upgraded"
+    if existing is not None and existing.recommended_stake_fraction <= 0:
+        # WP2: stake <= 0 is the cap-denial marker (the daily-exposure ledger
+        # granted nothing when this row was inserted) — the re-detection must
+        # never dispatch the alert the cap refused.
+        return "duplicate_denied"
     return "duplicate"
 
 

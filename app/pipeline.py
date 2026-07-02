@@ -474,6 +474,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
     fair = _fair_probabilities(snapshots, deps.devig_method)
     picks: list[PickOut] = []
+    n_unpersisted_withheld = 0
 
     for event_id in sorted({s.event_id for s in snapshots}):
         predictions = {(p.market, p.selection): p for p in await deps.model.predict(event_id)}
@@ -563,6 +564,12 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 logger.info("daily exposure cap reached; skipping %s", snap.selection)
                 continue
             pick = staked
+            if outcome == "unpersisted" and _persistence_configured(deps):
+                # WP2 fail-closed: persistence is configured but THIS pick could
+                # not be persisted (DB outage / unresolvable event) — it can
+                # never be settled, ledger-seeded, or CLV-tracked, so withhold.
+                n_unpersisted_withheld += 1
+                continue
             if outcome in ("inserted", "upgraded", "unpersisted"):
                 picks.append(pick)
             await deps.dispatcher.dispatch(
@@ -573,6 +580,12 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 )
             )
 
+    if n_unpersisted_withheld:
+        logger.warning(
+            "withheld %d premium alert(s) for %s: pick persistence failed (fail closed)",
+            n_unpersisted_withheld,
+            sport_key,
+        )
     logger.info("pipeline cycle for %s: %d picks", sport_key, len(picks))
     _record_available_games(
         sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
@@ -686,19 +699,31 @@ def _score_value_candidate(
         return None
 
 
-PersistOutcome = Literal["inserted", "upgraded", "duplicate", "unpersisted"]
+PersistOutcome = Literal["inserted", "upgraded", "duplicate", "duplicate_denied", "unpersisted"]
+
+
+def _persistence_configured(deps: "PipelineDeps") -> bool:
+    """True when the deps CAN persist picks (session factory + directory set).
+
+    Splits "unpersisted" into two premium policies (WP2): with persistence
+    CONFIGURED, an unpersisted pick is a FAILURE (DB outage / unresolvable
+    event) — it can never be settled, ledger-seeded, or CLV-tracked, so its
+    alert is withheld (fail closed). With persistence deliberately UNCONFIGURED
+    the operator accepted no accounting and the alert flows as before."""
+    return deps.session_factory is not None and deps.directory is not None
 
 
 async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> PersistOutcome:
     """Persist the pick to the DB when a session factory + directory are set.
 
     Passes through repositories.persist_pick's outcome ("inserted" /
-    "upgraded" / "duplicate"); "unpersisted" means persistence was
-    unavailable (no DB/directory/teams) or this write failed. PREMIUM
-    callers treat "unpersisted" like "inserted" — treating uncertainty as
-    "new" keeps the cap conservative and the alert flowing. VOLUME callers
-    drop "unpersisted" picks instead: a shadow pick that never reaches the
-    DB can accumulate no CLV evidence, which is its only purpose.
+    "upgraded" / "duplicate" / "duplicate_denied"); "unpersisted" means
+    persistence was unavailable (no DB/directory/teams) or this write failed.
+    PREMIUM callers withhold the alert of an "unpersisted" pick when
+    persistence is configured (fail closed — see _persistence_configured) and
+    reserve nothing either way. VOLUME callers drop "unpersisted" picks: a
+    shadow pick that never reaches the DB can accumulate no CLV evidence,
+    which is its only purpose.
     """
     if deps.session_factory is None or deps.directory is None:
         return "unpersisted"
@@ -762,18 +787,41 @@ async def _reserve_for_outcome(
       optional per-event cap. A clip below breakdown.final rebuilds the pick
       with the daily-clipped stake AND rewrites the persisted row to match (the
       row was stored pre-clip — BUG 2). A brand-new INSERTED pick with a zero
-      grant returns None (no capacity -> skip); an already-persisted UPGRADED
-      pick is never skipped on a zero grant — its alert moment must still fire.
-    - duplicate: already persisted; reserve NOTHING (a re-detection is not new
-      exposure). The pick keeps breakdown.final, matching its persisted row.
+      grant returns None (no capacity -> skip) AND rewrites its row — persisted
+      at FULL stake before the reservation ran — to stake 0, the cap-denial
+      marker (WP2: without it the next cycle's 'duplicate' re-dispatched the
+      alert at full stake with zero ledger accounting); an already-persisted
+      UPGRADED pick is never skipped on a zero grant — its alert moment must
+      still fire.
+    - duplicate: already persisted AND dispatch-eligible at insert (stake > 0);
+      reserve NOTHING (a re-detection is not new exposure — its budget was
+      consumed on its creation day, which is exactly what seed_exposure_ledger
+      re-counts after a restart). The pick keeps breakdown.final.
+    - duplicate_denied: the persisted row is a cap-denial marker (stake 0) —
+      never dispatch the alert the cap already refused (returns None).
     - unpersisted: DB state is unknown; reserve NOTHING it could never release,
       so a sustained-unpersisted pick cannot accumulate standing daily exposure
       across cycles and silently exhaust the cap (kelly-risk-r2-1).
     """
+    if outcome == "duplicate_denied":
+        return None
     if outcome in ("duplicate", "unpersisted"):
         return pick
     granted = deps.ledger.reserve(now.date(), breakdown.final, event_id)
     if granted <= 0.0 and outcome == "inserted":
+        # WP2: the row was already persisted at full stake — zero it so the
+        # restart seeder and every later re-detection ('duplicate_denied')
+        # see a pick that reserved nothing and was never alerted.
+        denied = pick.model_copy(
+            update={
+                "recommended_stake_fraction": 0.0,
+                "recommended_stake_amount": stake_amount(0.0, deps.bankroll),
+                "stake_breakdown": pick.stake_breakdown.model_copy(
+                    update={"final": 0.0, "daily_clipped": True}
+                ),
+            }
+        )
+        await _persist_stake_clip(deps, denied, event_id)
         return None
     if granted < breakdown.final:
         clipped = pick.model_copy(
@@ -1376,13 +1424,21 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # raw_kelly derives only from already-computed fair/price (no leakage) and the
     # ledger.reserve math / kr-1 ordering inside _reserve_for_outcome are unchanged.
     premium_candidates.sort(key=lambda c: c[1].raw_kelly, reverse=True)
+    n_unpersisted_withheld = 0
     for pick, breakdown, outcome, event_id in premium_candidates:
         staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
         if staked is None:
             # brand-new premium pick with no remaining daily/event capacity
+            # (or a 'duplicate_denied' cap-denial marker — never re-dispatched)
             logger.info("daily exposure cap reached; skipping %s", pick.selection)
             continue
         pick = staked
+        if outcome == "unpersisted" and _persistence_configured(deps):
+            # WP2 fail-closed: persistence is configured but THIS pick could not
+            # be persisted (DB outage / unresolvable event) — it can never be
+            # settled, ledger-seeded, or CLV-tracked, so withhold its alert.
+            n_unpersisted_withheld += 1
+            continue
         if outcome in ("inserted", "upgraded", "unpersisted"):
             # "inserted"/"unpersisted" (uncertainty = "new") or "upgraded"
             # — a volume row just cleared the premium threshold: THIS is its
@@ -1399,6 +1455,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 model_name=deps.model_name,
                 model_version=deps.model_version,
             )
+        )
+    if n_unpersisted_withheld:
+        logger.warning(
+            "withheld %d premium alert(s) for %s: pick persistence failed (fail closed)",
+            n_unpersisted_withheld,
+            sport_key,
         )
 
     # Re-price every OPEN pick from this cycle's snapshots: CLV true-up +

@@ -382,6 +382,73 @@ async def test_uncapped_pick_does_not_rewrite_persisted_stake(
     assert update_calls == []  # no clip -> no stake-rewrite
 
 
+async def test_cap_denied_inserted_pick_zeroes_stake_and_never_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP2 mirror of the value-pipeline daily-cap bypass: an INSERTED pick the
+    exhausted cap denies (granted == 0) was already persisted at full stake —
+    the row must be zeroed (cap-denial marker), no alert this cycle, and the
+    next cycle's 'duplicate_denied' re-detection must stay silent too."""
+    import app.storage.repositories as repos
+
+    outcomes = iter(["inserted", "duplicate_denied"])
+
+    async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        return next(outcomes)
+
+    rewrites: list[float] = []
+
+    async def spy_update_pick_stake(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        rewrites.append(pick.recommended_stake_fraction)
+        return True
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", spy_update_pick_stake)
+
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)
+    day = datetime.now(tz=UTC).date()
+    deps.ledger.reserve(day, deps.ledger.remaining(day))  # cap fully exhausted
+
+    first = await run_pick_pipeline(deps, "soccer_epl")
+    assert first == []  # cap-denied: not a pick this cycle
+    assert sink.sent == []  # ... and no alert
+    assert rewrites == [pytest.approx(0.0)]  # the row now carries the denial
+
+    second = await run_pick_pipeline(deps, "soccer_epl")
+    assert second == []
+    assert sink.sent == []  # the duplicate must NOT late-fire the alert
+    assert rewrites == [pytest.approx(0.0)]  # ... and nothing was rewritten again
+
+
+async def test_unpersisted_with_persistence_configured_withholds_alert(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WP2 fail-closed mirror: persistence CONFIGURED but the write FAILS (DB
+    outage) -> 'unpersisted' — the alert is withheld and counted at WARNING
+    (an unpersisted pick can never be settled, seeded, or CLV-tracked)."""
+    import logging as _logging
+
+    import app.storage.repositories as repos
+
+    async def failing_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        raise RuntimeError("db outage")
+
+    monkeypatch.setattr(repos, "persist_pick", failing_persist_pick)
+
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)
+    day = datetime.now(tz=UTC).date()
+
+    with caplog.at_level(_logging.WARNING, logger="app.pipeline"):
+        picks = await run_pick_pipeline(deps, "soccer_epl")
+    assert picks == []  # fail closed: no pick without a persisted row
+    assert sink.sent == []  # ... and no alert
+    assert deps.ledger.used(day) == 0.0  # ... and no phantom reservation
+    assert "withheld 1 premium alert" in caplog.text
+
+
 async def test_pipeline_no_model_predictions_no_picks() -> None:
     sink = RecordingSink()
     deps = make_deps(sink)

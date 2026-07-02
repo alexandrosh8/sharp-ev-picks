@@ -431,6 +431,15 @@ async def test_pipeline_completes_when_snapshot_persistence_raises(
 
     monkeypatch.setattr(repos, "persist_odds_snapshots", boom)
 
+    # PICK persistence must succeed here: against the bare FakeSessionFactory
+    # the real persist_pick raises -> 'unpersisted', and WP2 fail-closed
+    # withholds an unpersisted premium alert when persistence is CONFIGURED —
+    # which would mask the snapshot-persistence isolation under test.
+    async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        return "inserted"
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+
     from app.pipeline import LAST_POLL
 
     deps = make_deps(market_snapshots(), session_factory=FakeSessionFactory())
