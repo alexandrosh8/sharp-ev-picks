@@ -23,9 +23,18 @@ uv run python scripts/value_backtest.py
 Downloads 7 seasons × 18 leagues × 2 markets (~46k matches) from
 football-data.co.uk, sweeps devig × threshold on TRAIN seasons only, then
 evaluates the chosen combo ONCE on held-out 2024-26. Expected output ends
-with the computed verdict (currently: shin devig, edge ≥ 0.03 → holdout
+with the computed verdict (historically: shin devig, edge ≥ 0.03 → holdout
 n=62, ROI +22.4%, incremental CLV +0.1066 > 2SE). The verdict is computed
 from the data — if the edge ever disappears, the script will say so.
+
+Honesty caveats (audit 2026-07-01): that historical headline fills at the
+gross Max across ALL books (exchanges included) and its ">2SE" treated
+same-match 1X2+OU picks as independent. The script now (a) gates the verdict
+on a cluster-robust by-match SE (the i.i.d. SE stays printed for comparison)
+and (b) offers `--fill-universe soft` — best NAMED soft book only, exchange
+prices only net of commission — which is closer to a live fill. Treat the
+max-book gross number as an upper bound; a defensible re-anchored headline
+awaits fresh 2026 data (the 2025 holdout is spent — ADR-0019).
 
 ## 2) Get live picks right now (one-shot, no DB needed)
 

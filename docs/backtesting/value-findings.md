@@ -30,6 +30,20 @@ markets are independently positive. The train sweep was monotone in
 threshold for every devig method (higher bar → higher ROI and CLV), so the
 chosen corner is a robust pattern, not a lucky cell.
 
+> **Backtest-honesty caveats (audit 2026-07-01) — read every number above as
+> an upper bound.** (1) _Fill universe:_ these fills are football-data's
+> **gross Max across ALL books** (exchanges included, gross of commission),
+> while live fills at the best soft book or an exchange net of commission —
+> optimistic vs live. `scripts/value_backtest.py --fill-universe soft` now
+> fills at the best NAMED soft book only (Pinnacle never a fill; Betfair
+> Exchange prices only net of commission). (2) _Correlation:_ the "> 2SE"
+> here treated same-match 1X2 + OU2.5 picks as i.i.d.; they are correlated,
+> so that SE was understated. The script's verdict now gates on a
+> cluster-robust (by-match) SE, printed next to the i.i.d. one. No
+> re-anchored number is quoted: the 2025 holdout is **spent** (ADR-0019) —
+> the defensible soft-net, clustered figure awaits a single-shot run on
+> fresh 2026 data.
+
 These are the live defaults (`app/config.py`): `PICK_STRATEGY=value`,
 `VALUE_DEVIG=shin`, `VALUE_MIN_EDGE=0.03` → ~120 high-conviction picks/year
 across 18 leagues (≈2-3/week). For more volume at a thinner edge, set

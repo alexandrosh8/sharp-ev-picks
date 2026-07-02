@@ -7,7 +7,7 @@ skill rule); this module just does the arithmetic.
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -105,6 +105,41 @@ def mean_significance(values: Sequence[float], alpha: float = 0.05) -> MeanSigni
         alpha=alpha,
         significant=significant,
     )
+
+
+def cluster_robust_se(values: Sequence[float], clusters: Sequence[Hashable]) -> float | None:
+    """Cluster-robust standard error of mean(values), clustered by ``clusters``.
+
+    Same-cluster observations (e.g. same-match 1X2 + OU picks) are CORRELATED;
+    the i.i.d. SE pretends they are independent draws and understates the SE
+    that feeds any ">2 SE" verdict. This is the standard sandwich/cluster
+    estimator for the mean (a regression on a constant) with the CR1
+    small-sample correction G/(G-1):
+
+        e_g = sum_{i in g} (x_i - mean)        (per-cluster residual sum)
+        SE  = sqrt( G/(G-1) * sum_g e_g^2 ) / n
+
+    With every observation its own cluster (G == n) this reduces EXACTLY to
+    the classic i.i.d. sample SE (ddof=1), so the two columns are directly
+    comparable. Returns None when G < 2 (between-cluster variance — hence the
+    estimator — is undefined; callers must treat None as not-significant,
+    never as a fake-zero SE). Pure: numpy/stdlib only.
+    """
+    n = len(values)
+    if n != len(clusters):
+        raise ValueError(f"values ({n}) and clusters ({len(clusters)}) lengths differ")
+    if n == 0:
+        return None
+    arr = np.asarray(values, dtype=float)
+    mean = float(arr.mean())
+    residual_sums: dict[Hashable, float] = {}
+    for x, g in zip(arr, clusters, strict=True):
+        residual_sums[g] = residual_sums.get(g, 0.0) + (float(x) - mean)
+    n_clusters = len(residual_sums)
+    if n_clusters < 2:
+        return None
+    ssq = sum(e * e for e in residual_sums.values())
+    return math.sqrt(n_clusters / (n_clusters - 1) * ssq) / n
 
 
 def wilson_interval(successes: int, n: int, alpha: float = 0.05) -> tuple[float, float] | None:

@@ -14,7 +14,14 @@ Corrections from the 2026-06-10 deep review:
   then evaluated once on held-out TEST seasons. No in-sample headline.
 - The verdict is COMPUTED from the held-out numbers, never hardcoded.
 
+- WP3 audit (2026-07-01): the headline was earned at the GROSS Max-of-all-books
+  fill (exchanges included) with i.i.d. SEs. `--fill-universe soft` fills at
+  the best NAMED soft book only (exchange prices only net of commission), and
+  all SEs now come with a cluster-robust (by-match) companion — same-match
+  1x2+ou25 picks are correlated; the >2SE verdict uses the clustered SE.
+
     uv run python scripts/value_backtest.py
+    uv run python scripts/value_backtest.py --fill-universe soft
     uv run python scripts/value_backtest.py --train-seasons 2122,2223,2324 --test-seasons 2425,2526
 
 Decision-support only — nothing here places bets.
@@ -32,7 +39,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 
-from app.backtesting.clv import clv_log
+from app.backtesting.clv import cluster_robust_se, clv_log
 from app.ingestion.beatthebookie_series import load_series_any, to_fd_row
 from app.ingestion.betfair_bsp import (
     JoinStats,
@@ -63,6 +70,10 @@ class VBet:
     edge: float
     clv_pinn: float | None  # vs devig(Pinnacle close)
     clv_max: float | None  # vs devig(Max-of-books close) — stricter
+    # Match/event id for cluster-robust SEs (same-match 1x2+ou25 picks are
+    # CORRELATED, not i.i.d. — WP3 audit fix). None (legacy callers) means the
+    # bet is its own cluster, which degrades exactly to the i.i.d. SE.
+    cluster: str | None = None
 
 
 def _roi_bootstrap_ci(
@@ -106,6 +117,13 @@ class Stats:
     # reported Stats (with_roi_ci=True), never in the hot train-sweep cells. None
     # when not requested or n<2.
     roi_ci: tuple[float, float] | None = None
+    # Cluster-robust SEs, clustered by MATCH (VBet.cluster) — WP3 audit fix:
+    # same-match 1x2+ou25 picks are correlated, so the i.i.d. SEs above are
+    # understated. The i.i.d. SEs stay visible for comparison; any >2SE verdict
+    # must use these. None when <2 clusters (undefined, never fake-zero).
+    clv_pinn_se_cl: float | None = None
+    clv_max_se_cl: float | None = None
+    roi_se_cl: float | None = None
 
     @classmethod
     def from_bets(cls, bets: list[VBet], *, with_roi_ci: bool = False) -> "Stats":
@@ -116,6 +134,11 @@ class Stats:
         profit = sum(pnls)
         cp = [b.clv_pinn for b in bets if b.clv_pinn is not None]
         cm = [b.clv_max for b in bets if b.clv_max is not None]
+        # cluster ids parallel to each metric's values; a None cluster (legacy
+        # caller) becomes its own singleton so the estimator degrades to i.i.d.
+        clusters = [b.cluster if b.cluster is not None else f"_solo{i}" for i, b in enumerate(bets)]
+        cp_cl = [c for b, c in zip(bets, clusters, strict=True) if b.clv_pinn is not None]
+        cm_cl = [c for b, c in zip(bets, clusters, strict=True) if b.clv_max is not None]
 
         def mean_se(xs: list[float]) -> tuple[float | None, float | None]:
             # SAMPLE std (ddof=1), not population std (ddof=0): the SE that feeds
@@ -145,6 +168,9 @@ class Stats:
             clv_max_se=sm,
             beat_pinn=(sum(1 for c in cp if c > 0) / len(cp)) if cp else None,
             roi_ci=_roi_bootstrap_ci(pnls) if with_roi_ci else None,
+            clv_pinn_se_cl=cluster_robust_se(cp, cp_cl),
+            clv_max_se_cl=cluster_robust_se(cm, cm_cl),
+            roi_se_cl=cluster_robust_se(pnls, clusters),
         )
 
 
@@ -237,6 +263,75 @@ NBA_MARKETS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Fill universes (WP3 audit fix — backtest honesty)
+# ---------------------------------------------------------------------------
+# 'max'  — fill at football-data's composite Max across ALL books (exchanges
+#          included, GROSS of commission). The original/headline behavior;
+#          OPTIMISTIC vs live, which fills at a soft book or an exchange net
+#          of commission. Kept as the default for compatibility.
+# 'soft' — fill at the best NAMED soft-book price only. The sharp anchor (PS =
+#          Pinnacle) is NEVER a fill; exchange prices (BFE = Betfair Exchange)
+#          are never used gross — they enter the best-of comparison only NET
+#          of commission (parity with app/edge/value.py::effective_odds).
+# Soft-book 1x2 prefixes mirror scripts/ml/build_value_dataset.py::
+# CONSENSUS_BOOKS (PS and BFE excluded there for the same reasons). For ou25
+# the 2019+ football-data era carries per-book totals for B365 only.
+_SOFT_1X2_BOOKS: tuple[str, ...] = (
+    "B365",
+    "BW",
+    "IW",
+    "WH",
+    "VC",
+    "LB",
+    "SJ",
+    "GB",
+    "BS",
+    "SO",
+    "SB",
+    "1XB",
+    "BF",
+    "CL",
+)
+SOFT_FILL_BOOKS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "1x2": tuple((f"{b}H", f"{b}D", f"{b}A") for b in _SOFT_1X2_BOOKS),
+    "ou25": (("B365>2.5", "B365<2.5"),),
+}
+EXCHANGE_FILL_BOOKS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "1x2": (("BFEH", "BFED", "BFEA"),),
+    "ou25": (("BFE>2.5", "BFE<2.5"),),  # absent in current files; used when present
+}
+# Default Betfair commission on winnings — parity with app/edge/value.py::
+# EXCHANGE_COMMISSION["betfair exchange"] (conservative; varies 2-8% by region).
+EXCHANGE_COMMISSION_DEFAULT = 0.05
+
+
+def _soft_fill_odds(
+    r: dict, market: str, n_outcomes: int, exchange_commission: float
+) -> list[float | None]:
+    """Best takeable price per outcome in the 'soft' fill universe.
+
+    Best of: named soft books at their gross price, and exchange prices net of
+    commission (1 + (odds-1)*(1-c)) — an exchange price is NEVER used gross.
+    None per outcome when no soft/exchange book prices it (no fallback to the
+    sharp anchor or the composite Max — that would be the 'max' universe)."""
+    fills: list[float | None] = [None] * n_outcomes
+    for cols in SOFT_FILL_BOOKS.get(market, ()):
+        for i, c in enumerate(cols):
+            v = _f(r.get(c))
+            if v is not None and (fills[i] is None or v > fills[i]):
+                fills[i] = v
+    for cols in EXCHANGE_FILL_BOOKS.get(market, ()):
+        for i, c in enumerate(cols):
+            v = _f(r.get(c))
+            if v is None:
+                continue
+            net = 1.0 + (v - 1.0) * (1.0 - exchange_commission)
+            if net > 1.0 and (fills[i] is None or net > fills[i]):
+                fills[i] = net
+    return fills
+
+
 def bets_for(
     rows: list[dict],
     thr: float,
@@ -245,27 +340,44 @@ def bets_for(
     min_odds: float = 1.0,
     max_odds: float = 1000.0,
     markets_map: dict | None = None,
+    *,
+    fill_universe: str = "max",
+    exchange_commission: float = EXCHANGE_COMMISSION_DEFAULT,
 ) -> list[VBet]:
     """One bet per (match, market): the highest-edge selection >= threshold.
 
     ``markets_map`` defaults to the football MARKETS dict; the tennis path passes
-    TENNIS_MARKETS so the parity-locked MARKETS stays football-only."""
+    TENNIS_MARKETS so the parity-locked MARKETS stays football-only.
+    ``fill_universe`` selects the takeable price: 'max' (composite Max, gross —
+    original behavior) or 'soft' (best named soft book; exchange net of
+    commission; see the block comment above SOFT_FILL_BOOKS)."""
+    if fill_universe not in ("max", "soft"):
+        raise ValueError(f"unknown fill_universe {fill_universe!r} (expected 'max' or 'soft')")
     mkts = MARKETS if markets_map is None else markets_map
     out: list[VBet] = []
-    for r in rows:
+    for ri, r in enumerate(rows):
         for market in markets:
             ps_c, mx_c, psc_c, mxc_c, won_fn = mkts[market]
             ps = [_f(r.get(c)) for c in ps_c]
-            mx = [_f(r.get(c)) for c in mx_c]
+            if fill_universe == "soft":
+                mx = _soft_fill_odds(r, market, len(ps_c), exchange_commission)
+            else:
+                mx = [_f(r.get(c)) for c in mx_c]
             psc = [_f(r.get(c)) for c in psc_c]
             mxc = [_f(r.get(c)) for c in mxc_c]
-            if None in ps or None in mx or won_fn(r, 0) is None:
+            if None in ps or won_fn(r, 0) is None:
+                continue
+            # 'max' keeps the original whole-row skip on any missing Max column;
+            # 'soft' skips only the outcomes no soft/exchange book prices.
+            if fill_universe == "max" and None in mx:
                 continue
             sharp = devig(ps, method=devig_method)  # type: ignore[arg-type]
             close_p = devig(psc, method=devig_method) if None not in psc else None  # type: ignore[arg-type]
             close_m = devig(mxc, method=devig_method) if None not in mxc else None  # type: ignore[arg-type]
             best: tuple[float, int] | None = None  # (edge, idx)
             for i in range(len(ps)):
+                if mx[i] is None:
+                    continue  # no takeable price for this outcome (soft universe)
                 if mx[i] < min_odds or mx[i] > max_odds:  # type: ignore[operator]
                     continue  # odds band: floor (no short prices) + ceiling (no longshots)
                 edge = sharp[i] - 1.0 / mx[i]  # type: ignore[operator]
@@ -296,6 +408,9 @@ def bets_for(
                         if close_m and 0.0 < close_m[i] < 1.0
                         else None
                     ),
+                    # cluster = the MATCH (row): the 1x2 and ou25 bets on the
+                    # same match share it, so SEs can be clustered by match.
+                    cluster=f"m{ri}",
                 )
             )
     return out
@@ -320,13 +435,22 @@ async def load(leagues: list[str], seasons: list[str]) -> list[dict]:
 def _fmt(stats: Stats, label: str, baseline: Stats | None = None) -> str:
     if stats.n == 0:
         return f"{label:>9} | (no bets)"
+
+    def _pm(se_iid: float | None, se_cl: float | None) -> str:
+        # i.i.d. 2SE kept visible; the by-match cluster-robust 2SE (cl...) is
+        # the honest one for any significance read (same-match picks correlate).
+        s = f"+/-{2 * (se_iid or 0):.4f}"
+        if se_cl is not None:
+            s += f"(cl{2 * se_cl:.4f})"
+        return s
+
     cp = (
-        f"{stats.clv_pinn:+.4f}+/-{2 * (stats.clv_pinn_se or 0):.4f}"
+        f"{stats.clv_pinn:+.4f}{_pm(stats.clv_pinn_se, stats.clv_pinn_se_cl)}"
         if stats.clv_pinn is not None
         else "n/a"
     )
     cm = (
-        f"{stats.clv_max:+.4f}+/-{2 * (stats.clv_max_se or 0):.4f}"
+        f"{stats.clv_max:+.4f}{_pm(stats.clv_max_se, stats.clv_max_se_cl)}"
         if stats.clv_max is not None
         else "n/a"
     )
@@ -338,6 +462,9 @@ def _fmt(stats: Stats, label: str, baseline: Stats | None = None) -> str:
         if stats.roi_ci is not None
         else ""
     )
+    if stats.roi_ci is not None and stats.roi_se_cl is not None:
+        # by-match cluster-robust 2SE on mean ROI — final reported rows only
+        roi_ci += f"(cl2SE {2 * stats.roi_se_cl * 100:.1f}%)"
     return (
         f"{label:>9} | n={stats.n:5d} | hit {stats.hit * 100:4.1f}% | "
         f"ROI {stats.roi * 100:+6.2f}%{roi_ci} | CLVpinn {cp} | CLVmax {cm}{inc}"
@@ -1077,6 +1204,26 @@ async def main() -> None:
     p.add_argument(
         "--max-odds", type=float, default=1000.0, help="odds ceiling — kill longshots (P2)"
     )
+    p.add_argument(
+        "--fill-universe",
+        choices=("max", "soft"),
+        default="max",
+        help=(
+            "takeable-price universe (football-data source): 'max' = composite "
+            "Max across ALL books, gross (original headline behavior — OPTIMISTIC "
+            "vs live); 'soft' = best NAMED soft book only, sharp (Pinnacle) never "
+            "a fill, exchange (Betfair Exchange) prices only NET of commission"
+        ),
+    )
+    p.add_argument(
+        "--exchange-commission",
+        type=float,
+        default=EXCHANGE_COMMISSION_DEFAULT,
+        help=(
+            "commission netted off exchange winnings wherever an exchange price "
+            "is used as a fill (soft universe; parity with app/edge/value.py)"
+        ),
+    )
     args = p.parse_args()
     if args.source == "beatthebookie":
         await run_beatthebookie(args)
@@ -1100,16 +1247,42 @@ async def main() -> None:
     min_odds = args.min_odds
     max_odds = args.max_odds
 
+    fill_universe: str = args.fill_universe
+    exchange_commission: float = args.exchange_commission
+
     print(f"\nVALUE BACKTEST — {len(leagues)} leagues, markets {markets}, min_odds {min_odds}")
     if min_odds < 1.6:
         print("NOTE: production v4 config was selected WITH --min-odds 1.6 (odds floor);")
         print("      at the default floor the sweep may pick a different (equivalent) devig.")
     print(f"TRAIN {train_s} (devig x threshold sweep) | TEST {test_s} (held out, one shot)")
-    print("One bet per (match, market); CLV vs Pinnacle close AND Max-of-books close.\n")
+    print("One bet per (match, market); CLV vs Pinnacle close AND Max-of-books close.")
+    if fill_universe == "max":
+        print(
+            "FILL UNIVERSE: max (composite Max across ALL books, GROSS — the original\n"
+            "headline behavior; OPTIMISTIC vs live fills. Rerun with --fill-universe soft\n"
+            "for the best-soft-book, exchange-net-of-commission variant.)\n"
+        )
+    else:
+        print(
+            f"FILL UNIVERSE: soft (best NAMED soft book; sharp never a fill; exchange\n"
+            f"prices only net of {exchange_commission:.0%} commission.)\n"
+        )
 
     train_rows = await load(leagues, train_s)
     test_rows = await load(leagues, test_s)
     print(f"train: {len(train_rows)} matches | test: {len(test_rows)} matches\n")
+
+    def _bets(rows: list[dict], thr: float, dm: DevigMethod, mkts: tuple[str, ...]) -> list[VBet]:
+        return bets_for(
+            rows,
+            thr,
+            dm,
+            mkts,
+            min_odds,
+            max_odds,
+            fill_universe=fill_universe,
+            exchange_commission=exchange_commission,
+        )
 
     devig_methods = (
         DevigMethod.POWER,
@@ -1125,10 +1298,10 @@ async def main() -> None:
     sweep: list[tuple[DevigMethod, float, Stats]] = []
     baselines: dict[DevigMethod, Stats] = {}
     for dm in devig_methods:
-        baselines[dm] = Stats.from_bets(bets_for(train_rows, 0.0, dm, markets, min_odds, max_odds))
+        baselines[dm] = Stats.from_bets(_bets(train_rows, 0.0, dm, markets))
         print(_fmt(baselines[dm], f"{dm.value[:5]}/0.000"))
         for thr in thresholds:
-            s = Stats.from_bets(bets_for(train_rows, thr, dm, markets, min_odds, max_odds))
+            s = Stats.from_bets(_bets(train_rows, thr, dm, markets))
             sweep.append((dm, thr, s))
             print(_fmt(s, f"{dm.value[:5]}/{thr:.3f}", baselines[dm]))
 
@@ -1144,30 +1317,30 @@ async def main() -> None:
     )
 
     print("\nHELD-OUT TEST evaluation (single shot, never tuned on):")
-    baseline_test = Stats.from_bets(bets_for(test_rows, 0.0, best_dm, markets, min_odds, max_odds))
-    test = Stats.from_bets(
-        bets_for(test_rows, best_thr, best_dm, markets, min_odds, max_odds), with_roi_ci=True
-    )
+    baseline_test = Stats.from_bets(_bets(test_rows, 0.0, best_dm, markets))
+    test = Stats.from_bets(_bets(test_rows, best_thr, best_dm, markets), with_roi_ci=True)
     print(_fmt(baseline_test, "0.000"))
     print(_fmt(test, f"{best_thr:.3f}", baseline_test))
     for market in markets:
-        m_stats = Stats.from_bets(
-            bets_for(test_rows, best_thr, best_dm, (market,), min_odds, max_odds)
-        )
+        m_stats = Stats.from_bets(_bets(test_rows, best_thr, best_dm, (market,)))
         print(_fmt(m_stats, f"  {market}", baseline_test))
 
     # computed verdict (never hardcoded): selection skill on held-out data =
     # incremental CLV-vs-Pinnacle over the baseline, with 2*SE separation,
-    # plus the stricter CLV-vs-Max sign check.
+    # plus the stricter CLV-vs-Max sign check. The SE feeding the gate is the
+    # CLUSTER-ROBUST (by-match) one — same-match 1x2+ou25 picks are correlated
+    # and the i.i.d. SE understates the noise (WP3 audit fix); i.i.d. falls
+    # back only when clustering is undefined (<2 matches).
     verdict = "NO PROVEN EDGE on held-out data"
+    gate_se = test.clv_pinn_se_cl if test.clv_pinn_se_cl is not None else test.clv_pinn_se
     if (
         test.n >= 50
         and test.clv_pinn is not None
         and baseline_test.clv_pinn is not None
-        and test.clv_pinn_se is not None
+        and gate_se is not None
     ):
         inc = test.clv_pinn - baseline_test.clv_pinn
-        if inc - 2 * test.clv_pinn_se > 0 and test.roi > 0:
+        if inc - 2 * gate_se > 0 and test.roi > 0:
             if (test.clv_max or 0) > 0:
                 strict = "and beats even the Max-of-books close"
             else:
@@ -1177,7 +1350,7 @@ async def main() -> None:
                 )
             verdict = (
                 f"POSITIVE selection skill on held-out data: incremental CLV {inc:+.4f} "
-                f"(>2SE), ROI {test.roi * 100:+.2f}% — {strict}"
+                f"(>2SE, cluster-robust by match), ROI {test.roi * 100:+.2f}% — {strict}"
             )
         elif test.roi > 0:
             verdict = (

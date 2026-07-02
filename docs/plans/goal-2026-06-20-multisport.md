@@ -8,7 +8,9 @@ Goal: solid high-EV picks across football/basketball/tennis/NFL with auto-result
 ## Honest constraints (non-negotiable, from research 2026-06-20)
 
 - **Football**: validated edge (holdout n=62, +22.4% ROI, +0.107 incremental
-  CLV > 2 SE). Real picks.
+  CLV > 2 SE). Real picks. _(Audit 2026-07-01: that headline is max-book
+  GROSS fill with i.i.d. SEs — an upper bound; see README caveats and
+  `--fill-universe soft`.)_
 - **Basketball**: already a pick source; validation accrues forward via Pinnacle
   ARCADIA (no free historical close exists).
 - **Tennis**: NO free closing line exists anywhere → CLV is structurally
