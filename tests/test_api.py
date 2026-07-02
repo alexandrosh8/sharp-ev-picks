@@ -478,16 +478,19 @@ def test_dashboard_fetches_and_renders_available_games() -> None:
 
 def test_dashboard_has_mobile_table_card_layout() -> None:
     text = TestClient(make_app()).get("/").text
-    # TAPE redesign: picks are NATIVE article cards (el.className = "pick"), not a
-    # table that collapses via td::before pseudo-labels — so on mobile they are
-    # inherently card-shaped, never a cramped horizontally-scrolling table. The
-    # same intent (mobile = stacked, readable cards) is met by the responsive
-    # deck collapsing to a single column at the tablet breakpoint.
+    # Picks are NATIVE article cards (el.className = "pick"), not a table that
+    # collapses via td::before pseudo-labels — so on mobile they are inherently
+    # card-shaped, never a cramped horizontally-scrolling table. The 2026-07
+    # rebuild replaced the two-pane deck with four sections (Picks / Games /
+    # Performance / Diagnostics); the performance grid stacks to one column at
+    # the tablet breakpoint and every wide table rides an overflow-x wrapper.
     assert 'el.className = "pick"' in text
     assert "@media (max-width: 980px)" in text
-    # the two-pane deck stacks to one column at that breakpoint
+    # the performance two-column grid stacks to one column at that breakpoint
     assert "grid-template-columns: 1fr;" in text
-    assert 'grid-template-areas: "tape" "settled" "coverage";' in text
+    # wide tables scroll horizontally instead of shattering into vertical shards
+    assert "overflow-x: auto" in text
+    assert 'class="tscroll"' in text
     # long event/league names are truncated, not allowed to blow out the card
     assert "text-overflow: ellipsis" in text
     assert "innerHTML" not in text
@@ -1075,10 +1078,15 @@ def test_picks_serializer_attaches_confidence_rating(monkeypatch) -> None:  # ty
 
 def test_dashboard_renders_confidence_stars_not_visible_stake() -> None:
     """The Confidence stars are the headline (they replaced the stake column).
-    The operator removed the hover tooltip, so the stake % is no longer surfaced
-    in the dashboard at ALL, and the ★ framing (confidence in the EDGE, not a win
-    probability) lives in the static legend — never claiming a win rate."""
+    The 2026-07 rebuild re-surfaces the stake as an explicitly-informational
+    'Suggested Stake' footer stat (bankroll FRACTION only, premium open picks,
+    with a never-a-profit-guarantee tooltip); the unit amount stays unsurfaced
+    and the ★ framing (confidence in the EDGE, not a win probability) lives in
+    the static legend — never claiming a win rate."""
     text = TestClient(make_app()).get("/").text
+    # Suggested Stake: fraction-only, informational, never-a-guarantee framing
+    assert 'mkStat("Suggested Stake"' in text
+    assert "recommended_stake_fraction" in text
     # the stars are the confidence headline in the pick card (was a <th>Confidence</th>
     # table column); the cell carries class "stars" and is built from confidence_rating
     assert 'stars.className = "stars"' in text
@@ -1210,8 +1218,11 @@ def test_dashboard_settled_view_swaps_table_header() -> None:
     assert 'mkStat("score"' in text
     assert "p.outcome || p.provisional_outcome" in text
     assert 'mkStat("p&l"' in text
-    # LIVE branch renders a DISTINCT set (fair/EV/edge) — never shown for settled
-    assert 'mkStat("fair"' in text
+    # LIVE branch renders a DISTINCT set (fair/EV/edge, under the exact
+    # product labels of the 2026-07 rebuild) — never shown for settled
+    assert 'mkStat("Fair Probability"' in text
+    assert 'mkStat("Fair Odds"' in text
+    assert 'mkStat("Offered Odds"' in text
     assert 'mkStat("EV"' in text
     # every stat carries its own inline label, so a value can never sit under the
     # wrong column (the structural guarantee that replaces the header swap)
@@ -1251,3 +1262,95 @@ def test_dashboard_tape_has_persisted_sort_control() -> None:
     assert "SORT_KEYS[savedSortCol]" in text
     # display-only reorder, never a second server fetch / no XSS sink
     assert "innerHTML" not in text
+
+
+def test_dashboard_information_architecture_and_required_states() -> None:
+    """2026-07 rebuild: the dashboard is four nav sections (Picks / Games /
+    Performance / Diagnostics) under a top status bar that answers "can I
+    trust the data right now?", with the REQUIRED honest state copy baked in:
+    premium/shadow empty states, the stale-odds warning, the sharp-anchor
+    coverage state, the display-only promotion-gate copy, and per-fetch error
+    states (including the 401 -> login redirect message)."""
+    text = TestClient(make_app()).get("/").text
+    # top status bar landmark + trust chips
+    assert 'id="statusbar"' in text
+    for chip in ("sb-fresh", "sb-premium", "sb-shadow", "sb-open", "sb-roi", "sb-clv"):
+        assert 'id="' + chip + '"' in text
+    # four nav sections, wired in BOTH the desktop nav and the mobile bottom bar
+    for view in ("picks", "games", "performance", "diagnostics"):
+        assert text.count('data-view="' + view + '"') >= 2
+        assert 'id="view-' + view + '"' in text
+    # REQUIRED empty/state copy — exact strings
+    assert "Nothing currently passes Premium gates. Shadow candidates may still be tracked." in text
+    assert "No shadow candidates currently tracked." in text
+    assert "Odds data is stale. Picks should not be treated as current." in text
+    assert "Sharp anchor coverage is unavailable or insufficient." in text
+    assert (
+        "This sport is display-only until sport-specific CLV evidence clears the promotion gate."
+        in text
+    )
+    # shadow tier is labelled non-actionable, and per-fetch error states exist
+    assert "tracked — not actionable" in text
+    assert "Could not load picks." in text
+    assert "Could not load games." in text
+    assert "Could not load performance data." in text
+    assert "Authentication required." in text
+    # exact product labels on the pick card / panels
+    for label in (
+        'mkStat("Offered Odds"',
+        'mkStat("Fair Odds"',
+        'mkStat("Fair Probability"',
+        'mkStat("Edge"',
+        'mkStat("EV"',
+        'mkStat("Suggested Stake"',
+        'mkStat("Closing Line"',
+        "Anchor Source",
+        "Match Confidence",
+        "Last Updated",
+        "Source Freshness",
+        "Pick Count",
+    ):
+        assert label in text
+    # anchor-absence is MARKED (never silently clean) + risk row exists
+    assert "MISSING ANCHOR" in text
+    assert "DISPLAY-ONLY" in text
+    # /health 503-degraded bodies are parsed, not discarded as fetch failures
+    assert "res.status === 503" in text
+    # times render in the BROWSER's local timezone — no hardcoded zone
+    assert "Asia/Nicosia" not in text
+
+
+def test_dashboard_accessibility_markers() -> None:
+    """A11y floor for the rebuilt shell: real headings, labelled landmarks,
+    scoped table headers, live regions for refresh status, and an ARIA tab
+    pattern that points at its panel."""
+    text = TestClient(make_app()).get("/").text
+    assert "<h1" in text
+    assert "<h2" in text
+    assert 'scope="col"' in text
+    assert "aria-live" in text
+    assert 'role="alert"' in text
+    assert 'aria-controls="cards"' in text
+    assert 'role="tablist"' in text
+
+
+def test_dashboard_avoids_promotional_language() -> None:
+    """Banned-language regression: no gambling-hype vocabulary anywhere in the
+    served dashboard. 'lock/locked' (as a word), 'sure bet', 'easy money',
+    'risk-free' and 'guaranteed' must never appear; the word 'guarantee' may
+    appear ONLY inside the honest negations ('not a profit guarantee' /
+    'never a profit guarantee')."""
+    text = TestClient(make_app()).get("/").text
+    low = text.lower()
+    for banned in ("sure bet", "easy money", "risk-free", "guaranteed"):
+        assert banned not in low, banned
+    # 'lock' as a standalone word (lock/locks/locked/locking) is banned;
+    # identifiers like toggleBlock/.sub-block do not count.
+    assert re.search(r"\block(?:ed|s|ing)?\b", low) is None
+    # every 'guarantee' occurrence is an explicit negation. JS string
+    # concatenation may split the phrase ("never a " + "profit guarantee"),
+    # so normalise the quote-plus-quote seams before checking.
+    joined = re.sub(r'"\s*\+\s*"', "", low)
+    for m in re.finditer("guarante", joined):
+        ctx = joined[max(0, m.start() - 40) : m.start()]
+        assert "not a profit" in ctx or "never a profit" in ctx, ctx
