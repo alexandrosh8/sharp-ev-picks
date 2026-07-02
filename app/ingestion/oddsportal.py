@@ -1763,6 +1763,16 @@ class OddsPortalLoader:
             str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
         )
         league = str(match.get("league_name") or "")
+        # ET/OT/penalties veto: a knockout game decided in extra time carries an
+        # ET-inclusive score — recording it as final would missettle 90-minute
+        # markets. Any marker on the scraped status/score strings -> NO score
+        # (the pick stays pending; manual settlement / the void path take over).
+        et_decided = _carries_et_marker(
+            match.get("event_stage_name"),
+            match.get("partial_results"),
+            match.get("home_score"),
+            match.get("away_score"),
+        )
         self._directory.register(
             event_id,
             EventTeams(
@@ -1775,8 +1785,8 @@ class OddsPortalLoader:
                 # scrape. The capture path settles from these, gated by `finished`
                 # so an in-play partial (stage 13, populated live score) is never
                 # taken as final. Scores parsed only when the whole string is digits.
-                home_score=_parse_score(match.get("home_score")),
-                away_score=_parse_score(match.get("away_score")),
+                home_score=None if et_decided else _parse_score(match.get("home_score")),
+                away_score=None if et_decided else _parse_score(match.get("away_score")),
                 finished=_coerce_finished(
                     match.get("is_finished"),
                     match.get("event_stage_id"),
@@ -1909,6 +1919,25 @@ def _parse_score(raw: Any) -> int | None:
         return None
     text = str(raw).strip()
     return int(text) if text.isdigit() else None
+
+
+# Markers meaning the score was reached AFTER regulation time (extra time /
+# overtime / penalties) on OddsPortal status ("After ET", "After Penalties"),
+# partial-result or score strings. Word-bounded so plain digits/team words
+# never fire ("(1:0, 1:1)" has no marker). OT is included: even where totals
+# conventionally include OT (NBA), the primary basketball settle path is the
+# ESPN feed — refusing the scraped score here only defers, never corrupts.
+_ET_PEN_MARKER_RE = re.compile(
+    r"(?i)(?<![a-z0-9])(a\.?e\.?t|et|ot|pen(?:s|alt(?:y|ies))?|w\.?/?o|walkover|"
+    r"extra\s+time|overtime|shootout)\.?(?![a-z0-9])"
+)
+
+
+def _carries_et_marker(*fields: Any) -> bool:
+    """True when any scraped status/score string carries an ET/OT/pen marker."""
+    return any(
+        isinstance(field, str) and _ET_PEN_MARKER_RE.search(field) is not None for field in fields
+    )
 
 
 def _coerce_finished(is_finished: Any, stage_id: Any, stage_name: Any) -> bool | None:

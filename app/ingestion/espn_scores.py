@@ -16,6 +16,7 @@ each player) — which settles BOTH match_winner (h2h) and over_under_sets
 """
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -86,13 +87,40 @@ def parse_team_scoreboard(data: dict) -> list[FinalScore]:
     return scores
 
 
+# A tennis competition whose status text carries any of these was NOT decided
+# by normal play (retirement / walkover / default). ESPN still flags them
+# completed=True, so the text is the only gate; matched case-insensitively on
+# status.type name/detail/shortDetail/description. "\bret\b\.?" catches "Ret."
+# without firing on ordinary words containing "ret".
+_ABNORMAL_COMPLETION_RE = re.compile(
+    r"(?i)(retired|\bret\b\.?|walkover|\bw/o\b|default)",
+)
+
+
+def _is_abnormal_completion(competition: dict) -> bool:
+    status_type = competition.get("status", {}).get("type", {})
+    return any(
+        _ABNORMAL_COMPLETION_RE.search(str(status_type.get(key) or ""))
+        for key in ("name", "detail", "shortDetail", "description")
+    )
+
+
+def _set_complete(winner_games: int, loser_games: int) -> bool:
+    """A set is WON only when finished: >=6 games with a >=2 margin (covers
+    6-x, 7-5 and advantage sets, and a >=10 match tiebreak) or a 7-6 tiebreak.
+    A leading PARTIAL set (play stopped mid-set) is never counted."""
+    if winner_games == 7 and loser_games == 6:
+        return True
+    return winner_games >= 6 and winner_games - loser_games >= 2
+
+
 def _sets_won(home_lines: Sequence[float], away_lines: Sequence[float]) -> tuple[int, int]:
-    """Sets won by (home, away) compared set by set from per-set game counts."""
+    """COMPLETE sets won by (home, away) from per-set game counts."""
     hw = aw = 0
     for h, a in zip(home_lines, away_lines, strict=False):
-        if h > a:
+        if h > a and _set_complete(int(h), int(a)):
             hw += 1
-        elif a > h:
+        elif a > h and _set_complete(int(a), int(h)):
             aw += 1
     return hw, aw
 
@@ -112,6 +140,8 @@ def parse_tennis_scoreboard(data: dict) -> list[FinalScore]:
             for comp in grouping.get("competitions") or []:
                 if not _is_final(comp):
                     continue
+                if _is_abnormal_completion(comp):
+                    continue  # retirement/walkover/default -> never a set score
                 md = _match_date(comp.get("date") or event.get("date") or "")
                 sides: dict[str, tuple[str, list[float]]] = {}
                 for c in comp.get("competitors") or []:
@@ -128,8 +158,12 @@ def parse_tennis_scoreboard(data: dict) -> list[FinalScore]:
                     continue
                 (hn, hl), (an, al) = sides["home"], sides["away"]
                 hs, a_s = _sets_won(hl, al)
-                if hs == 0 and a_s == 0:
-                    continue  # no completed sets parsed -> not a real result
+                # Emit only a COMPLETE best-of pattern: 2 winner sets (Bo3) or
+                # 3 (Bo5). Anything else (0 sets, 1 set, a tie) is a partial
+                # match — emit nothing, the pick stays pending and ages into
+                # the existing void path rather than settling on a fragment.
+                if max(hs, a_s) not in (2, 3) or hs == a_s:
+                    continue
                 scores.append(FinalScore(hn, an, md, hs, a_s))
     return scores
 

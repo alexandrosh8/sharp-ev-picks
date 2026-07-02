@@ -62,8 +62,25 @@ async def fetch_results_csv(client: httpx.AsyncClient) -> str:
     return response.text
 
 
-def parse_results(text: str) -> list[InternationalMatch]:
-    """Completed matches only (rows with numeric scores)."""
+# Tournament FORMATS that can never reach extra time, casefolded. martj42
+# scores INCLUDE extra time (documented upstream) and the CSV carries no
+# stage/shootout column, so the tournament name is the ONLY 90-minute signal:
+# a knockout-capable competition's row may be an ET-inclusive score that would
+# missettle 90-minute 1X2/totals. Conservative ALLOWLIST (fail-closed —
+# unknown tournaments are excluded; those picks settle manually or void):
+# international friendlies always end at 90'. Qualifications are NOT listed —
+# their playoff rounds (UEFA WC/Euro paths, inter-confederation) go to ET and
+# the rows are indistinguishable from the group-stage ones.
+NINETY_MINUTE_TOURNAMENTS = frozenset({"friendly"})
+
+
+def parse_results(text: str, *, ninety_minute_only: bool = False) -> list[InternationalMatch]:
+    """Completed matches only (rows with numeric scores).
+
+    `ninety_minute_only=True` (the SETTLEMENT path) additionally keeps only
+    tournaments in NINETY_MINUTE_TOURNAMENTS, because these scores include
+    extra time. The default keeps everything (model training wants all rows).
+    """
     matches: list[InternationalMatch] = []
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     for raw in reader:
@@ -72,6 +89,9 @@ def parse_results(text: str) -> list[InternationalMatch]:
         hs = raw.get("home_score") or ""
         as_ = raw.get("away_score") or ""
         if hs in ("", "NA") or as_ in ("", "NA"):
+            continue
+        tournament = (raw.get("tournament") or "").strip()
+        if ninety_minute_only and tournament.casefold() not in NINETY_MINUTE_TOURNAMENTS:
             continue
         parsed = _parse_iso_date(raw.get("date") or "")
         if parsed is None:
@@ -84,7 +104,7 @@ def parse_results(text: str) -> list[InternationalMatch]:
                     away_team=(raw.get("away_team") or "").strip(),
                     home_goals=int(hs),
                     away_goals=int(as_),
-                    tournament=(raw.get("tournament") or "").strip(),
+                    tournament=tournament,
                     neutral=str(raw.get("neutral") or "").strip().upper() == "TRUE",
                 )
             )

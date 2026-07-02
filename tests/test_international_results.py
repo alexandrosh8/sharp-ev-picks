@@ -37,6 +37,23 @@ def test_parse_fixtures_filters_tournament_and_date() -> None:
     assert mx.neutral is False  # host nation at home
 
 
+def test_parse_results_ninety_minute_only_excludes_et_capable_tournaments() -> None:
+    # martj42 scores INCLUDE extra time (documented upstream) and the CSV has
+    # no stage/shootout column, so the only safe 90-minute signal is the
+    # tournament FORMAT: keep only competitions that can never reach ET
+    # (fail-closed — an excluded pick stays open for manual settlement).
+    csv_text = (
+        "date,home_team,away_team,home_score,away_score,tournament,city,country,neutral\n"
+        "2026-07-01,Atlantis,Wakanda,2,1,FIFA World Cup,Dallas,United States,TRUE\n"
+        "2026-07-01,Genovia,Latveria,1,0,Friendly,Rome,Italy,TRUE\n"
+        "2025-03-25,Elbonia,Sokovia,3,1,FIFA World Cup qualification,Riga,Latvia,FALSE\n"
+    )
+    matches = parse_results(csv_text, ninety_minute_only=True)
+    assert [(m.home_team, m.tournament) for m in matches] == [("Genovia", "Friendly")]
+    # default (model-training path) still parses everything
+    assert len(parse_results(csv_text)) == 3
+
+
 def test_to_match_rows_carries_neutral_and_results() -> None:
     rows, neutral = to_match_rows(parse_results(CSV))
     assert len(rows) == len(neutral) == 2

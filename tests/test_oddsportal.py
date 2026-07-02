@@ -1231,3 +1231,51 @@ async def test_convert_match_ignores_unfinished_score() -> None:
     assert teams2 is not None
     assert teams2.home_score is None
     assert teams2.away_score is None
+
+
+@pytest.mark.parametrize(
+    "marker_fields",
+    [
+        {"event_stage_name": "After ET"},
+        {"event_stage_name": "After Penalties"},
+        {"event_stage_name": "After Extra Time"},
+        {"partial_results": "(1:1, 0:0, 1:0 ET)"},
+        {"home_score": "2 ET", "away_score": "1 ET"},
+    ],
+)
+async def test_convert_match_refuses_et_decided_score(marker_fields: dict[str, Any]) -> None:
+    # A knockout final decided in extra time / penalties carries the ET-inclusive
+    # score — settling a 90-minute market from it is wrong-result corruption.
+    # Any ET/OT/pen marker on the scraped status/score strings -> NO final score
+    # (the pick stays pending; manual settlement / the void path take over).
+    directory = EventDirectory()
+    et_final = {**MATCH, "home_score": "2", "away_score": "1", "is_finished": True}
+    et_final.update(marker_fields)
+    loader = make_loader(directory, [et_final])
+    await loader.fetch_odds("soccer")
+
+    teams = directory.lookup(str(MATCH["match_link"]))
+    assert teams is not None
+    assert teams.home_score is None
+    assert teams.away_score is None
+
+
+async def test_convert_match_keeps_regulation_finished_score() -> None:
+    # Control: a plain Finished status (no ET/pen marker) still captures.
+    directory = EventDirectory()
+    finished = {
+        **MATCH,
+        "home_score": "2",
+        "away_score": "1",
+        "is_finished": True,
+        "event_stage_name": "Finished",
+        "partial_results": "(1:0, 1:1)",
+    }
+    loader = make_loader(directory, [finished])
+    await loader.fetch_odds("soccer")
+
+    teams = directory.lookup(str(MATCH["match_link"]))
+    assert teams is not None
+    assert teams.home_score == 2
+    assert teams.away_score == 1
+    assert teams.finished is True

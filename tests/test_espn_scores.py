@@ -167,6 +167,82 @@ def test_parse_tennis_scoreboard_three_set_match() -> None:
     ]
 
 
+def _tennis_comp(
+    home_lines: list[float],
+    away_lines: list[float],
+    status: dict | None = None,
+    home: str = "Player A",
+    away: str = "Player B",
+) -> dict:
+    return {
+        "events": [
+            {
+                "date": "2024-02-01T00:00Z",
+                "groupings": [
+                    {
+                        "competitions": [
+                            {
+                                "date": "2024-02-01T12:00Z",
+                                "status": status
+                                or {"type": {"name": "STATUS_FINAL", "completed": True}},
+                                "competitors": [
+                                    {
+                                        "homeAway": "home",
+                                        "athlete": {"displayName": home},
+                                        "linescores": [{"value": v} for v in home_lines],
+                                    },
+                                    {
+                                        "homeAway": "away",
+                                        "athlete": {"displayName": away},
+                                        "linescores": [{"value": v} for v in away_lines],
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_parse_tennis_skips_retired_and_walkover_matches() -> None:
+    # A retirement/walkover is NOT a normal completed match: the set score is
+    # meaningless for over_under_sets and often for match_winner too. ESPN
+    # still flags these completed=True, so the detail text must gate them out
+    # (the pick stays pending and ages into the existing void path).
+    retired = {"type": {"name": "STATUS_RETIRED", "completed": True, "detail": "Ret."}}
+    assert parse_tennis_scoreboard(_tennis_comp([6.0, 3.0], [4.0, 1.0], status=retired)) == []
+    walkover = {"type": {"name": "STATUS_FINAL", "completed": True, "shortDetail": "W/O"}}
+    assert parse_tennis_scoreboard(_tennis_comp([], [], status=walkover)) == []
+    defaulted = {"type": {"name": "STATUS_FINAL", "completed": True, "detail": "Defaulted"}}
+    assert parse_tennis_scoreboard(_tennis_comp([6.0, 2.0], [2.0, 0.0], status=defaulted)) == []
+
+
+def test_parse_tennis_does_not_count_leading_partial_set() -> None:
+    # Mid-set 3-1 lead when play stopped: NOT a won set, and 1 complete set is
+    # not a complete best-of-3 -> emit nothing (never settle a partial match).
+    assert parse_tennis_scoreboard(_tennis_comp([6.0, 3.0], [4.0, 1.0])) == []
+
+
+def test_parse_tennis_requires_complete_best_of_pattern() -> None:
+    # One completed set only (6-4) with completed=True -> no FinalScore.
+    assert parse_tennis_scoreboard(_tennis_comp([6.0], [4.0])) == []
+
+
+def test_parse_tennis_settles_normal_and_tiebreak_finals() -> None:
+    assert parse_tennis_scoreboard(_tennis_comp([6.0, 6.0], [4.0, 4.0])) == [
+        FinalScore("Player A", "Player B", date(2024, 2, 1), 2, 0)
+    ]
+    assert parse_tennis_scoreboard(_tennis_comp([7.0, 7.0], [6.0, 6.0])) == [
+        FinalScore("Player A", "Player B", date(2024, 2, 1), 2, 0)
+    ]
+    # third-set match tiebreak to 10 counts as a won set
+    assert parse_tennis_scoreboard(_tennis_comp([4.0, 6.0, 10.0], [6.0, 4.0, 8.0])) == [
+        FinalScore("Player A", "Player B", date(2024, 2, 1), 2, 1)
+    ]
+
+
 async def test_fetch_espn_scores_uses_dated_endpoint_and_parses() -> None:
     seen: list[str] = []
 

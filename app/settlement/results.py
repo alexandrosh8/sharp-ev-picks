@@ -128,22 +128,50 @@ class ScoreBook:
         return self._count
 
     def lookup(self, home: str, away: str, kickoff_utc: datetime) -> FinalScore | None:
-        """Score for the fixture, tolerating ±1 day of CSV/UTC date skew."""
+        """Score for the fixture, tolerating ±1 day of CSV/UTC date skew.
+
+        Date discipline (wrong-game guard): the pick's OWN kickoff date always
+        wins; an adjacent-date (±1) hit is accepted ONLY when the exact date has
+        nothing AND exactly one adjacent date matches. Same pairing on BOTH
+        adjacent dates (an NBA back-to-back) is ambiguous — either could be
+        "the" game — so refuse and leave the pick open.
+        """
         h, a = normalize_team(home), normalize_team(away)
-        dates = [kickoff_utc.date() + timedelta(days=delta) for delta in (0, -1, 1)]
-        for d in dates:
-            found = self._exact.get((h, a, d))
-            if found is not None:
-                return found
-        candidates = [
-            score
-            for d in dates
-            for score in self._by_date.get(d, [])
-            if _names_match(h, normalize_team(score.home_team))
-            and _names_match(a, normalize_team(score.away_team))
-            and _markers_agree(home, score.home_team)
-            and _markers_agree(away, score.away_team)
-        ]
+        d0 = kickoff_utc.date()
+        exact = self._exact.get((h, a, d0))
+        if exact is not None:
+            return exact
+        prev = self._exact.get((h, a, d0 - timedelta(days=1)))
+        nxt = self._exact.get((h, a, d0 + timedelta(days=1)))
+        if prev is not None and nxt is not None:
+            logger.warning(
+                "back-to-back pairing %s vs %s on both adjacent dates — leaving open", home, away
+            )
+            return None
+        if prev is not None or nxt is not None:
+            return prev if prev is not None else nxt
+
+        def _contained(d: date) -> list[FinalScore]:
+            return [
+                score
+                for score in self._by_date.get(d, [])
+                if _names_match(h, normalize_team(score.home_team))
+                and _names_match(a, normalize_team(score.away_team))
+                and _markers_agree(home, score.home_team)
+                and _markers_agree(away, score.away_team)
+            ]
+
+        candidates = _contained(d0)
+        if not candidates:  # same exact-date-first / adjacent-ambiguity discipline
+            before, after = _contained(d0 - timedelta(days=1)), _contained(d0 + timedelta(days=1))
+            if before and after:
+                logger.warning(
+                    "back-to-back pairing %s vs %s on both adjacent dates — leaving open",
+                    home,
+                    away,
+                )
+                return None
+            candidates = before or after
         if len(candidates) == 1:
             return candidates[0]
         if len(candidates) > 1:
@@ -215,7 +243,12 @@ async def load_scores(
         try:
             if source.kind == "international":
                 text = await fetch_results_csv(client)
-                scores.extend(scores_from_international(parse_results(text)))
+                # ninety_minute_only: martj42 scores INCLUDE extra time, so only
+                # tournaments whose format can never reach ET are settleable —
+                # an ET-inclusive score would corrupt 90-minute 1X2/totals.
+                scores.extend(
+                    scores_from_international(parse_results(text, ninety_minute_only=True))
+                )
             elif source.kind == "new_league" and source.code is not None:
                 text = await fetch_new_league_csv(client, source.code)
                 scores.extend(scores_from_match_rows(parse_new_league_csv(text)))

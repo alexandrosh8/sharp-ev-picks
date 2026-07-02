@@ -51,6 +51,55 @@ def test_lookup_tolerates_one_day_offset() -> None:
     assert book.lookup("Alpha FC", "Beta United", datetime(2026, 6, 12, 18, 0, tzinfo=UTC)) is None
 
 
+def test_lookup_prefers_exact_date_over_adjacent() -> None:
+    # Back-to-back pairing: yesterday's final must NEVER shadow today's game.
+    book = ScoreBook(
+        [
+            FinalScore("Alpha FC", "Beta United", date(2026, 6, 8), 5, 0),
+            FinalScore("Alpha FC", "Beta United", date(2026, 6, 9), 2, 1),
+        ]
+    )
+    found = book.lookup("Alpha FC", "Beta United", datetime(2026, 6, 9, 18, 0, tzinfo=UTC))
+    assert found is not None
+    assert (found.home_score, found.away_score) == (2, 1)  # the exact-date game
+
+
+def test_lookup_refuses_ambiguous_adjacent_exact_hits() -> None:
+    # NBA-style back-to-back: the same pairing played on D-1 AND D+1 with no
+    # entry on the pick's own date — either could be "the" game, so refuse
+    # (the pick stays open and settles once the exact-date score lands).
+    book = ScoreBook(
+        [
+            FinalScore("Alpha FC", "Beta United", date(2026, 6, 8), 5, 0),
+            FinalScore("Alpha FC", "Beta United", date(2026, 6, 10), 2, 1),
+        ]
+    )
+    assert book.lookup("Alpha FC", "Beta United", datetime(2026, 6, 9, 18, 0, tzinfo=UTC)) is None
+
+
+def test_lookup_containment_prefers_exact_date_and_refuses_adjacent_ambiguity() -> None:
+    # The containment fallback follows the same date discipline as exact hits.
+    exact_day = ScoreBook(
+        [
+            fs(home="Flamengo", away="Palmeiras", d=date(2026, 6, 8)),
+            FinalScore("Flamengo", "Palmeiras", date(2026, 6, 9), 3, 3),
+        ]
+    )
+    found = exact_day.lookup("Flamengo RJ", "Palmeiras", datetime(2026, 6, 9, 22, 0, tzinfo=UTC))
+    assert found is not None
+    assert (found.home_score, found.away_score) == (3, 3)  # exact date wins
+    both_adjacent = ScoreBook(
+        [
+            fs(home="Flamengo", away="Palmeiras", d=date(2026, 6, 8)),
+            fs(home="Flamengo", away="Palmeiras", d=date(2026, 6, 10)),
+        ]
+    )
+    assert (
+        both_adjacent.lookup("Flamengo RJ", "Palmeiras", datetime(2026, 6, 9, 22, 0, tzinfo=UTC))
+        is None
+    )
+
+
 def test_lookup_unique_containment_fallback() -> None:
     # OddsPortal says "Flamengo RJ"; football-data says "Flamengo".
     book = ScoreBook([fs(home="Flamengo", away="Palmeiras")])
@@ -150,7 +199,10 @@ NEW_LEAGUE_CSV = (
 )
 INTL_CSV = (
     "date,home_team,away_team,home_score,away_score,tournament,city,country,neutral\n"
-    "2026-06-09,Atlantis,Wakanda,3,1,FIFA World Cup,Nicosia,Cyprus,TRUE\n"
+    "2026-06-09,Atlantis,Wakanda,3,1,Friendly,Nicosia,Cyprus,TRUE\n"
+    # ET-capable knockout competition: the score may include extra time, so the
+    # settlement load must EXCLUDE it (90-minute markets would settle wrong).
+    "2026-06-09,Etland,Penaltia,2,1,FIFA World Cup,Dallas,United States,TRUE\n"
     "1950-01-01,Oldland,Pastville,1,0,Friendly,X,Y,FALSE\n"
 )
 
@@ -174,6 +226,8 @@ async def test_load_scores_fetches_mapped_sources_and_filters_by_date() -> None:
     assert ("Flamengo", "Palmeiras") in names
     assert ("Atlantis", "Wakanda") in names
     assert ("Oldland", "Pastville") not in names  # filtered: before on_or_after
+    # ET-capable knockout tournament: score may include extra time -> excluded
+    assert ("Etland", "Penaltia") not in names
 
 
 async def test_load_scores_survives_a_failing_source() -> None:

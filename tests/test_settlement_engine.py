@@ -279,6 +279,55 @@ async def test_unparseable_selection_skipped_not_guessed(session, caplog) -> Non
     assert pick.status == "alerted"
 
 
+def test_settle_delay_for_applies_sport_floor() -> None:
+    # Basketball/NFL/tennis picks must not be settle-eligible on the generic
+    # 2h delay: an NBA back-to-back's game-2 is still in play then, and the
+    # score book's ±1-day tolerance would settle it with game-1's final.
+    from app.settlement.engine import SETTLE_DELAY, settle_delay_for
+
+    assert settle_delay_for("soccer") == SETTLE_DELAY  # unchanged for soccer
+    assert settle_delay_for("basketball") == timedelta(hours=4)
+    assert settle_delay_for("american_football") == timedelta(hours=4, minutes=30)
+    assert settle_delay_for("tennis") == timedelta(hours=6)
+    assert settle_delay_for("unknown-sport") == SETTLE_DELAY
+    # a caller-supplied LONGER base delay is never shortened by the map
+    assert settle_delay_for("basketball", timedelta(hours=9)) == timedelta(hours=9)
+
+
+async def test_basketball_pick_not_settle_eligible_before_sport_floor(session) -> None:  # type: ignore[no-untyped-def]
+    # Back-to-back guard, half 2: at kickoff+2h an NBA game can still be in
+    # play while YESTERDAY'S same-pairing final sits in the book — the pick
+    # must not be settle-eligible until the sport floor (4h) passes, by which
+    # time the exact-date final exists and is preferred by ScoreBook.lookup.
+    home, away = "Backtoback Hawks", "Backtoback Bulls"
+    kickoff = NOW - timedelta(hours=2, minutes=30)  # past the generic 2h delay
+    teams = EventTeams(home=home, away=away, league="nba", starts_at=kickoff)
+    pick_out = make_pick("evt-bball-floor", market=Market.H2H, selection=home).model_copy(
+        update={"sport": "basketball", "event": f"{home} vs {away}"}
+    )
+    assert await persist_pick(session, pick_out, teams, "value", "test-v")
+    yesterdays_final = ScoreBook(
+        [FinalScore(home, away, kickoff.date() - timedelta(days=1), 110, 99)]
+    )
+    assert await settle_open_picks(session, yesterdays_final, NOW) == 0  # floor holds
+    todays_final = ScoreBook([FinalScore(home, away, kickoff.date(), 120, 100)])
+    assert await settle_open_picks(session, todays_final, NOW) == 0  # still < 4h
+
+    # past the sport floor the exact-date final settles normally
+    later = NOW + timedelta(hours=2)  # kickoff+4h30
+    assert await settle_open_picks(session, todays_final, later) == 1
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == "evt-bball-floor")
+    )
+    assert pick is not None
+    assert pick.status == "settled"
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert (row.home_score, row.away_score) == (120, 100)  # game-2's score, not game-1's
+
+
 # --- stale-TBD voiding (NULL kickoff older than 14 days) ----------------------
 
 

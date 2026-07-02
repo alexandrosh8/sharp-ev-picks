@@ -27,7 +27,7 @@ from app.probabilities.devig import DevigMethod
 from app.schemas.base import Outcome
 from app.settlement.outcomes import pick_pnl, pick_roi, settle_selection
 from app.settlement.results import FinalScore, ScoreBook, load_scores
-from app.storage.models import Event, ManualBetLog, Pick, ResultTracking, Team
+from app.storage.models import Event, ManualBetLog, Pick, ResultTracking, Sport, Team
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -41,6 +41,26 @@ SCORE_WINDOW = timedelta(days=14)
 # Full time + stoppage + a buffer for the results CSVs to update. Scores are
 # matched by date anyway; the delay just avoids settling in-play fixtures.
 SETTLE_DELAY = timedelta(hours=2)
+
+# Per-sport settle-eligibility floors past kickoff (mirrors app/clv_trueup.py's
+# _FINISHED_FLOOR, keyed by Sport.key). The generic 2h delay is soccer-sized;
+# an NBA back-to-back's game-2 can still be IN PLAY at kickoff+2h while
+# yesterday's same-pairing final sits in the score book — the ±1-day lookup
+# tolerance would then settle game-2 with game-1's score. Holding basketball
+# to >=4h means the exact-date final exists by eligibility time and
+# ScoreBook.lookup prefers it. Sports not listed keep the caller's base delay.
+_SPORT_SETTLE_DELAY: dict[str, timedelta] = {
+    "basketball": timedelta(hours=4),
+    "american_football": timedelta(hours=4, minutes=30),
+    "tennis": timedelta(hours=6),
+}
+
+
+def settle_delay_for(sport_key: str, base: timedelta = SETTLE_DELAY) -> timedelta:
+    """The settle-eligibility delay for a sport: the sport floor, never below
+    the caller's base delay (a longer caller-supplied delay always holds)."""
+    return max(base, _SPORT_SETTLE_DELAY.get(sport_key, base))
+
 
 # Shared frozen no-op policy for the default-OFF path (ruff B008: no call in a
 # function default). ValuePolicy is immutable, so one instance is safe to share.
@@ -223,10 +243,11 @@ async def settle_open_picks(
     home, away = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
-            select(Pick, home.name, away.name, Event.starts_at, Event.external_ref)
+            select(Pick, home.name, away.name, Event.starts_at, Event.external_ref, Sport.key)
             .join(Event, Pick.event_id == Event.id)
             .join(home, Event.home_team_id == home.id)
             .join(away, Event.away_team_id == away.id)
+            .join(Sport, Event.sport_id == Sport.id)
             # NULL starts_at (kickoff unknown) is filtered out here by SQL
             # three-valued logic — correct: never auto-settle a game we
             # cannot prove has finished. Manual settlement stays available.
@@ -235,7 +256,9 @@ async def settle_open_picks(
     ).all()
 
     settled = 0
-    for pick, home_name, away_name, starts_at, external_ref in rows:
+    for pick, home_name, away_name, starts_at, external_ref, sport_key in rows:
+        if starts_at > now - settle_delay_for(sport_key, delay):
+            continue  # sport floor not reached — the game may still be in play
         score = book.lookup(home_name, away_name, starts_at)
         if score is None:
             continue  # close_pending — stays open, retried next cycle
