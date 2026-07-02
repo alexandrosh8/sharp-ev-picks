@@ -1,0 +1,93 @@
+--- a/app/resolution/aliases_seed.json
++++ b/app/resolution/aliases_seed.json
+@@ -3551,6 +3551,90 @@
+     ],
+     "Deportes Limache": [
+       "Limache"
++    ],
++    "Hawke's Bay Hawks": [
++      "Bay Hawks"
++    ],
++    "Whai": [
++      "Tauranga Whai"
++    ],
++    "Frankston Blues": [
++      "Frankston"
++    ],
++    "Kilsyth Cobras": [
++      "Kilsyth"
++    ],
++    "Knox Raiders": [
++      "Knox"
++    ],
++    "Ringwood Hawks": [
++      "Ringwood"
++    ],
++    "CODM Meknes": [
++      "COD Meknes"
++    ],
++    "Olympique Dcheira": [
++      "Dcheira"
++    ],
++    "Ittihad Tanger": [
++      "IR Tanger"
++    ],
++    "Olympic Safi": [
++      "Olympique de Safi"
++    ],
++    "Zbrojovka Brno": [
++      "Brno"
++    ],
++    "Arges Pitesti": [
++      "FC Arges"
++    ],
++    "Brinje Grosuplje": [
++      "Grosuplje"
++    ],
++    "Petrolul Ploiesti": [
++      "Petrolul"
++    ],
++    "Vllaznia Shkoder": [
++      "Vllaznia"
++    ],
++    "Audax Italiano": [
++      "A. Italiano"
++    ],
++    "Universidad Catolica": [
++      "U. Catolica"
++    ],
++    "Universidad de Chile": [
++      "U. De Chile"
++    ],
++    "Universidad de Concepcion": [
++      "U. De Concepcion"
++    ],
++    "HK Kopavogur": [
++      "Kopavogur"
++    ],
++    "Shanghai Segenda": [
++      "Shanghai Second"
++    ],
++    "Dodoma": [
++      "Dodoma Jiji"
++    ],
++    "Broadmeadow Magic": [
++      "Broadmeadow"
++    ],
++    "Weston Workers": [
++      "Weston Bears"
++    ],
++    "Para Hills Knights": [
++      "Para"
++    ],
++    "Al Riyadi Abassiya": [
++      "Al Riyadi Abbasiyah"
++    ],
++    "Shabab Al Sahel": [
++      "Al Sahel"
++    ],
++    "Jwaya": [
++      "Jwayya"
+     ]
+   }
+ }
