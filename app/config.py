@@ -1393,6 +1393,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         ah_max_sharp_soft_ratio=settings.value_ah_max_sharp_soft_ratio,
         moneyline_max_odds=settings.value_moneyline_max_odds,
         exchange_min_liquidity=settings.value_exchange_min_liquidity,
+        betfair_api_promote=settings.value_betfair_api_promote,
     )
 
 

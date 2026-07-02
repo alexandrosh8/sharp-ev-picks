@@ -16,6 +16,7 @@ only trusted while it stays positive (docs/backtesting/value-findings.md).
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -1176,7 +1177,10 @@ def build_sharp_anchor_loader(
                 await session.commit()
             except Exception as exc:
                 logger.warning("sharp-anchor observability commit failed: %s", type(exc).__name__)
-                await session.rollback()
+                # A dead connection raises on rollback too — never let the
+                # observability cleanup discard the cycle's sharp anchors.
+                with contextlib.suppress(Exception):
+                    await session.rollback()
         # Observability only (no acceptance change): a FULL miss across resolvable
         # events signals a systemic sharp-capture/freshness outage; a partial miss
         # is the normal capture ceiling and stays at debug to avoid per-cycle noise.

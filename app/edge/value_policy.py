@@ -153,6 +153,12 @@ class ValuePolicy:
     # Betfair-anchored events. 0.0 = gate OFF (the inert empty-policy default);
     # set from Settings.value_exchange_min_liquidity at the composition root.
     exchange_min_liquidity: float = 0.0
+    # Mirrors Settings.value_betfair_api_promote (composition root). When the
+    # read-only Betfair API is PROMOTED to persist odds rows, exchange rows on
+    # a canonical event are no longer guaranteed inline-by-construction (the
+    # API attach is fuzzy-matched at ingestion), so per-pick anchor match
+    # confidence must stop claiming 1.0 (see pipeline._anchor_match_provenance).
+    betfair_api_promote: bool = False
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:

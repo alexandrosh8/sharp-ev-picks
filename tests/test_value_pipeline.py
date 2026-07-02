@@ -1657,3 +1657,19 @@ async def test_anchor_match_provenance_per_path() -> None:
     assert picks3 and all(p.anchor_type == "sharp" for p in picks3)
     assert all(p.anchor_match_confidence == 1.0 for p in picks3)
     assert all(p.anchor_match_method == "inline_betfair_canonical" for p in picks3)
+
+    # PROMOTE-ON honest downgrade (verifier finding): with the Betfair API
+    # promoted, an exchange row on the canonical event may have been attached
+    # by the FUZZY ingestion matcher and is indistinguishable per-row from an
+    # inline row — sharp anchors must stop claiming 1.0 and store the explicit
+    # unattributed marker instead (never a fabricated confidence).
+    sink4 = RecordingSink()
+    deps4 = replace(
+        make_deps(sink4, FakeLoader(list(soft))),
+        sharp_anchor_loader=betfair_loader,
+    )
+    deps4 = replace(deps4, value_policy=replace(deps4.value_policy, betfair_api_promote=True))
+    picks4 = await run_value_pipeline(deps4, "soccer")
+    assert picks4 and all(p.anchor_type == "sharp" for p in picks4)
+    assert all(p.anchor_match_confidence is None for p in picks4)
+    assert all(p.anchor_match_method == "inline_or_promoted_unattributed" for p in picks4)

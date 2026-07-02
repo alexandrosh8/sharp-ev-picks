@@ -276,6 +276,8 @@ def _anchor_match_provenance(
     anchor_type: str,
     event_ref: str,
     provenance: Mapping[tuple[str, str], tuple[float, str]],
+    *,
+    api_promote_enabled: bool = False,
 ) -> tuple[float | None, str | None]:
     """(anchor_match_confidence, anchor_match_method) for one value pick.
 
@@ -287,6 +289,11 @@ def _anchor_match_provenance(
       event — no pick-time matching happened, so confidence is 1.0 by
       construction (both the main-scrape inline rows and the loader-injected
       dedicated capture, which was exact-ref-matched at ingestion).
+      EXCEPT under VALUE_BETFAIR_API_PROMOTE: promoted API rows were attached
+      by the FUZZY hardened matcher at ingestion and are indistinguishable
+      per-row from inline rows here, so with promotion enabled every sharp
+      anchor stores None/'inline_or_promoted_unattributed' — fail HONEST
+      (per-row snapshot provenance is the prerequisite for restoring 1.0).
     - 'consensus' (or anything else): None/None — no cross-source match exists.
     Observability only: never influences minting or anchor selection.
     """
@@ -294,6 +301,8 @@ def _anchor_match_provenance(
         entry = provenance.get((event_ref, "pinnacle"))
         return entry if entry is not None else (None, "unscored")
     if anchor_type == "sharp":
+        if api_promote_enabled:
+            return (None, "inline_or_promoted_unattributed")
         return (1.0, "inline_betfair_canonical")
     return (None, None)
 
@@ -1367,7 +1376,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         league_label = teams.league
 
             anchor_match_confidence, anchor_match_method = _anchor_match_provenance(
-                anchor_type_for(v.sharp_book), event_id, anchor_provenance
+                anchor_type_for(v.sharp_book),
+                event_id,
+                anchor_provenance,
+                api_promote_enabled=deps.value_policy.betfair_api_promote,
             )
             pick = PickOut(
                 pick_id=str(uuid.uuid4()),
