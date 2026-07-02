@@ -1200,16 +1200,23 @@ def test_dashboard_fades_value_gone_picks() -> None:
 
 
 def test_dashboard_shows_closing_price() -> None:
-    """Once a pick has kicked off / settled, the Odds cell shows the de-facto
-    closing price ("close X.XX") so the pick→close move is visible next to the
-    entry (value) price. The close is the finalized closing_odds when present,
-    else the frozen pre-kickoff current_odds (re-pricing stops at kickoff)."""
+    """Once a pick has kicked off / settled, the card shows the de-facto
+    closing price so the pick→close move is visible next to the entry (value)
+    price. The close is the finalized closing_odds when present, else the
+    frozen pre-kickoff current_odds (re-pricing stops at kickoff).
+
+    2026-07 redesign (operator finding F6): the drift-legend NUMBERS were
+    removed — they repeated the price stat row on every card ("Starts shown
+    twice"). The close now renders ONCE: the 'Closing Line' stat on settled/
+    closed cards, plus the drift-bar marker tooltip ("Book close: X.XX")."""
     text = TestClient(make_app()).get("/").text
-    # the close price is rendered in the drift legend labelled "close" (vs "now"
-    # for a still-open pre-kickoff line); textContent only, no markup injection
+    # the single visible close figure: the Closing Line stat on settled cards
+    assert 'mkStat("Closing Line"' in text
+    # the drift marker keeps the close/now number in its TOOLTIP only
     assert '? "close" : "now"' in text
-    assert "addLeg(nowLabel, nowO.toFixed(2))" in text
-    assert '"Book " + nowLabel' in text  # the book close/now tooltip
+    assert '"Book " + nowLabel' in text
+    # F6 regression: the duplicate numeric legend lines stay deleted
+    assert "addLeg(" not in text
     # it sources closing_odds first, then the frozen current_odds fallback
     assert "p.closing_odds" in text
     assert "const closeRaw" in text
@@ -1289,9 +1296,10 @@ def test_dashboard_settled_view_swaps_table_header() -> None:
     assert "const settledView" in text
     assert 'p.status === "settled" || inClosedTab(p)' in text
     # SETTLED branch renders the results set: score, Result outcome badge, P&L
-    assert 'mkStat("score"' in text
+    # (labels Title-cased in the 2026-07 redesign — one label case system)
+    assert 'mkStat("Score"' in text
     assert "p.outcome || p.provisional_outcome" in text
-    assert 'mkStat("p&l"' in text
+    assert 'mkStat("P&L"' in text
     # LIVE branch renders a DISTINCT set (fair/EV/edge, under the exact
     # product labels of the 2026-07 rebuild) — never shown for settled
     assert 'mkStat("Fair Probability"' in text
@@ -1350,8 +1358,9 @@ def test_dashboard_information_architecture_and_required_states() -> None:
     assert 'id="statusbar"' in text
     for chip in ("sb-fresh", "sb-premium", "sb-shadow", "sb-open", "sb-roi", "sb-clv"):
         assert 'id="' + chip + '"' in text
-    # four nav sections, wired in BOTH the desktop nav and the mobile bottom bar
-    for view in ("picks", "games", "performance", "diagnostics"):
+    # five nav sections (Overview default landing since the 2026-07 redesign),
+    # wired in BOTH the desktop nav and the mobile bottom bar
+    for view in ("overview", "picks", "games", "performance", "diagnostics"):
         assert text.count('data-view="' + view + '"') >= 2
         assert 'id="view-' + view + '"' in text
     # REQUIRED empty/state copy — exact strings

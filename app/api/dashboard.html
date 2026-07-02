@@ -9,7 +9,7 @@
     <title>TAPE — Picks Terminal</title>
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23100d09'/%3E%3Crect x='2' y='7.2' width='12' height='1.6' fill='%234fc78d'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230d1014'/%3E%3Crect x='2' y='7.2' width='12' height='1.6' fill='%233fb984'/%3E%3C/svg%3E"
     />
     <!-- Installable PWA: opens standalone from the home screen on iOS + Android.
          Manifest + service worker are served same-origin by app/api/routes.py;
@@ -17,9 +17,9 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link
       rel="apple-touch-icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='28' fill='%23100d09'/%3E%3Crect x='24' y='86' width='132' height='8' fill='%234fc78d'/%3E%3Ccircle cx='118' cy='90' r='13' fill='%23100d09' stroke='%234fc78d' stroke-width='5'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='28' fill='%230d1014'/%3E%3Crect x='24' y='86' width='132' height='8' fill='%233fb984'/%3E%3Ccircle cx='118' cy='90' r='13' fill='%230d1014' stroke='%233fb984' stroke-width='5'/%3E%3C/svg%3E"
     />
-    <meta name="theme-color" content="#100d09" />
+    <meta name="theme-color" content="#0d1014" />
     <meta name="color-scheme" content="dark" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -31,26 +31,47 @@
     <style>
       /* ===================================================================
          TAPE — picks-only decision-support dashboard.
-         IA: a top status bar ("can I trust the data right now?"), four
-         sections (Picks / Games / Performance / Diagnostics) switched by a
-         desktop nav + a fixed mobile bottom nav, and honest state styling:
-         Shadow / stale / display-only / missing-anchor can never be mistaken
-         for an actionable Premium pick. Dark warm terminal chrome; +EV green
-         is the single bright signal. No frameworks, no CDNs, system fonts.
+         IA: a top status bar ("can I trust the data right now?"), five
+         sections (Overview / Picks / Games / Performance / Diagnostics)
+         switched by a desktop nav + a fixed mobile bottom nav, and honest
+         state styling: Shadow / stale / display-only / missing-anchor can
+         never be mistaken for an actionable Premium pick. Dark cool-graphite
+         restrained-fintech chrome; +EV green is the single bright signal.
+         No frameworks, no CDNs, system fonts.
          =================================================================== */
       :root {
-        --bg: #100d09;
-        --s1: #16120c;
-        --s2: #1e1810;
-        --s3: #271f15;
-        --line: #2d2417;
-        --bone: #ece2cf;
-        --dim: #b8ab93;
-        --faint: #9c9078; /* >=5.6:1 on --bg, >=4.6:1 on --s2 */
-        --pos: #4fc78d; /* the ONE accent — +EV green */
-        --warn: #e0a33e;
-        --neg: #e2554a;
-        --info: #d3a02f;
+        /* surfaces — cool graphite */
+        --bg: #0d1014;
+        --s1: #12161c;
+        --s2: #171c23;
+        --s3: #1e242d;
+        --line: #262d37;
+        /* text (>=4.5:1 on --s2) */
+        --bone: #e8ebef;
+        --dim: #a8b0ba;
+        --faint: #7d8590;
+        /* semantic — one accent, desaturated states */
+        --pos: #3fb984; /* the ONE accent — +EV green */
+        --warn: #d9a441;
+        --neg: #d95d52;
+        --info: #5d9bd4;
+        --neutral: #8a93a0;
+        /* type scale (mono for numerals, sans for prose) */
+        --fs-xs: 10px;
+        --fs-sm: 11.5px;
+        --fs-base: 13px;
+        --fs-md: 15px;
+        --fs-lg: 18px;
+        --fs-xl: 26px;
+        /* spacing scale */
+        --sp-1: 4px;
+        --sp-2: 8px;
+        --sp-3: 12px;
+        --sp-4: 16px;
+        --sp-5: 24px;
+        --sp-6: 32px;
+        --radius: 4px;
+        --radius-lg: 6px;
         --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
           monospace;
         --sans: system-ui, "SF Pro Display", -apple-system, "Segoe UI", sans-serif;
@@ -109,7 +130,7 @@
         gap: 10px 14px;
         min-height: calc(var(--bar-h) + env(safe-area-inset-top));
         padding: calc(env(safe-area-inset-top) + 8px) 14px 8px;
-        background: rgba(22, 18, 12, 0.96);
+        background: rgba(18, 22, 28, 0.96);
         backdrop-filter: blur(6px);
         border-bottom: 1px solid var(--line);
         flex-wrap: wrap;
@@ -265,7 +286,7 @@
           position: fixed;
           left: 0; right: 0; bottom: 0;
           z-index: 50;
-          background: rgba(22, 18, 12, 0.97);
+          background: rgba(18, 22, 28, 0.97);
           backdrop-filter: blur(8px);
           border-top: 1px solid var(--line);
           padding-bottom: env(safe-area-inset-bottom);
@@ -300,10 +321,24 @@
         .cmdbar.hidden { transform: translateY(-100%); }
         /* iOS zooms the page when a focused input is <16px — keep 16px on phones */
         input, select { font-size: 16px; min-height: 44px; }
-        #tabs button { min-height: 44px; flex: 1 1 auto; }
+        /* tab chips ride ONE momentum-scroll line instead of wrapping */
+        #tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+        #tabs::-webkit-scrollbar { display: none; }
+        #tabs button { min-height: 44px; flex: 0 0 auto; }
         .iconbtn { min-height: 44px; min-width: 44px; }
         .filters { flex: 1 1 100%; }
         .filters #f-search { flex: 1 1 auto; width: auto; }
+        /* compact status strip: the trust chips stay ONE swipeable line on
+           every phone/tablet width (not only ≤430px) */
+        .sumchips {
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: none;
+          padding-bottom: 2px;
+        }
+        .sumchips::-webkit-scrollbar { display: none; }
+        .sumchips .chip { flex: 0 0 auto; }
       }
 
       /* ---- status-bar compaction (small phones ≤430px) --------------------
@@ -332,12 +367,21 @@
       }
 
       /* ---- pick cards (the tape) ------------------------------------------ */
-      #cards { display: flex; flex-direction: column; }
+      #cards {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: var(--sp-2);
+        padding: var(--sp-2) var(--sp-3) var(--sp-3);
+      }
+      /* desktop: two card columns so one card never stretches to ~1300px */
+      @media (min-width: 1024px) {
+        #cards { grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+        #cards > .group-h, #cards > .group-empty, #cards > .date-div,
+        #cards > .empty, #cards > .skel, #cards > .results-note { grid-column: 1 / -1; }
+      }
       .group-h {
         display: flex; align-items: baseline; gap: 10px;
-        padding: 12px 14px 6px;
-        border-bottom: 1px solid var(--line);
-        background: var(--s1);
+        padding: 10px 2px 2px;
       }
       .group-h .gt {
         font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
@@ -346,24 +390,38 @@
       .group-h .gn { font-family: var(--mono); font-size: 11px; color: var(--faint); }
       .group-h.shadowed .gt { color: var(--faint); }
       .group-empty {
-        padding: 14px; color: var(--faint); font-size: 12.5px;
-        border-bottom: 1px solid var(--line);
+        padding: 10px 2px; color: var(--faint); font-size: 12.5px;
+      }
+      /* date divider inside RESULTS / CLOSED (auto-recorded results by day) */
+      .date-div {
+        font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--faint);
+        padding: 8px 2px 0; border-top: 1px solid var(--line); margin-top: 4px;
+      }
+      .results-note {
+        font-family: var(--mono); font-size: 11px; color: var(--dim);
+        padding: 6px 2px 0;
       }
       .pick {
-        padding: 12px 14px 13px;
-        border-bottom: 1px solid var(--line);
+        padding: var(--sp-4);
+        background: var(--s1);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-lg);
         display: grid;
         gap: 7px;
+        align-content: start;
       }
+      /* premium carries the single-accent 2px left rule; shadow never does */
+      .pick.prem { border-left: 2px solid var(--pos); }
       .pick.gone { opacity: 0.55; }
-      .pick:hover { background: var(--s1); }
+      .pick:hover { border-color: var(--faint); }
       /* Shadow (volume) cards are visibly NON-actionable: muted, dashed left
          rail, hatched — never confusable with a Premium card. */
       .pick.shadow {
-        opacity: 0.75;
+        opacity: 0.85;
         border-left: 3px dashed var(--faint);
         background: repeating-linear-gradient(
-          -45deg, transparent 0 14px, rgba(45, 36, 23, 0.25) 14px 16px
+          -45deg, transparent 0 14px, rgba(38, 45, 55, 0.25) 14px 16px
         );
       }
       .p-top { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
@@ -407,8 +465,8 @@
         text-transform: uppercase; color: var(--faint);
         border: 1px dashed var(--line); border-radius: 3px; padding: 1px 4px;
       }
-      .gate-chip.warn { color: var(--warn); border-color: rgba(224, 163, 62, 0.4); }
-      .gate-chip.info { color: var(--info); border-color: rgba(211, 160, 47, 0.4); }
+      .gate-chip.warn { color: var(--warn); border-color: rgba(217, 164, 65, 0.4); }
+      .gate-chip.info { color: var(--info); border-color: rgba(93, 155, 212, 0.4); }
       /* quiet inline stat in the risk row (e.g. Match Confidence: 0.97) —
          normal styling, mirrors .p-stats .stat; NOT a warning */
       .p-risk .stat {
@@ -458,11 +516,11 @@
       }
       .drift .gap {
         position: absolute; top: 8px; height: 10px;
-        background: rgba(79, 199, 141, 0.18);
+        background: rgba(63, 185, 132, 0.18);
         border-left: 1px solid var(--pos); border-right: 1px solid var(--pos);
       }
       .drift .gap.neg {
-        background: rgba(226, 85, 74, 0.16);
+        background: rgba(217, 93, 82, 0.16);
         border-left-color: var(--neg); border-right-color: var(--neg);
       }
       .drift .mk {
@@ -522,10 +580,10 @@
         padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line);
         white-space: nowrap; text-transform: uppercase;
       }
-      .badge.pos { color: var(--pos); border-color: rgba(79,199,141,.4); background: rgba(79,199,141,.08); }
-      .badge.neg { color: var(--neg); border-color: rgba(226,85,74,.4); background: rgba(226,85,74,.07); }
-      .badge.warn { color: var(--warn); border-color: rgba(224,163,62,.4); }
-      .badge.info { color: var(--info); border-color: rgba(211,160,47,.4); }
+      .badge.pos { color: var(--pos); border-color: rgba(63,185,132,.4); background: rgba(63,185,132,.08); }
+      .badge.neg { color: var(--neg); border-color: rgba(217,93,82,.4); background: rgba(217,93,82,.07); }
+      .badge.warn { color: var(--warn); border-color: rgba(217,164,65,.4); }
+      .badge.info { color: var(--info); border-color: rgba(93,155,212,.4); }
       .badge.neu { color: var(--faint); }
       .badge.dashed { border-style: dashed; }
       .clv-chip { font-size: 11px; padding: 2px 7px; font-weight: 600; }
@@ -558,9 +616,9 @@
         border: 1px solid var(--line); border-radius: 3px; padding: 4px 7px;
         background: var(--s2); white-space: nowrap;
       }
-      .chip.ok { color: var(--pos); border-color: rgba(79,199,141,.35); }
-      .chip.warn { color: var(--warn); border-color: rgba(224,163,62,.35); }
-      .chip.err { color: var(--neg); border-color: rgba(226,85,74,.4); }
+      .chip.ok { color: var(--pos); border-color: rgba(63,185,132,.35); }
+      .chip.warn { color: var(--warn); border-color: rgba(217,164,65,.35); }
+      .chip.err { color: var(--neg); border-color: rgba(217,93,82,.4); }
       .chip.info { color: var(--info); }
       .sub-block { margin-top: 14px; }
       .sub-block > .sb-head {
@@ -593,7 +651,7 @@
       .closeband {
         border-bottom: 1px solid var(--line);
         background:
-          radial-gradient(120% 120% at 100% 0, rgba(79, 199, 141, 0.06), transparent 52%),
+          radial-gradient(120% 120% at 100% 0, rgba(63, 185, 132, 0.06), transparent 52%),
           linear-gradient(180deg, var(--s2), var(--s1));
         position: relative;
       }
@@ -632,7 +690,7 @@
       .pm-count { font-family: var(--mono); font-size: 13px; color: var(--bone); }
       .pm-track { display: flex; gap: 2px; }
       .pm-seg { height: 8px; flex: 1; background: var(--s3); border-radius: 1px; }
-      .pm-seg.on { background: rgba(79, 199, 141, 0.55); }
+      .pm-seg.on { background: rgba(63, 185, 132, 0.55); }
       .pm-seg.full { background: var(--pos); }
       .pm-note { font-family: var(--mono); font-size: 10.5px; color: var(--faint); line-height: 1.5; margin-top: 6px; }
       .clvaxis { position: relative; margin: 20px 0 4px; height: 58px; }
@@ -646,17 +704,17 @@
       }
       .clvaxis .posfill {
         position: absolute; top: 27px; height: 6px; border-radius: 1px;
-        background: linear-gradient(90deg, rgba(79,199,141,0.18), rgba(79,199,141,0.6));
+        background: linear-gradient(90deg, rgba(63,185,132,0.18), rgba(63,185,132,0.6));
       }
       .clvaxis .negfill {
         position: absolute; top: 27px; height: 6px; border-radius: 1px;
-        background: linear-gradient(90deg, rgba(226,85,74,0.6), rgba(226,85,74,0.18));
+        background: linear-gradient(90deg, rgba(217,93,82,0.6), rgba(217,93,82,0.18));
       }
       .clvaxis .mk {
         position: absolute; top: 23px; width: 3px; height: 14px; background: var(--pos);
-        transform: translateX(-50%); box-shadow: 0 0 0 3px rgba(79,199,141,0.18);
+        transform: translateX(-50%); box-shadow: 0 0 0 3px rgba(63,185,132,0.18);
       }
-      .clvaxis .mk.neg { background: var(--neg); box-shadow: 0 0 0 3px rgba(226,85,74,0.18); }
+      .clvaxis .mk.neg { background: var(--neg); box-shadow: 0 0 0 3px rgba(217,93,82,0.18); }
       .clvaxis .mk .cap {
         position: absolute; top: -18px; left: 50%; transform: translateX(-50%); white-space: nowrap;
         font-family: var(--mono); font-size: 11px; color: var(--bone);
@@ -685,8 +743,8 @@
         flex: 1; min-height: 2px; background: var(--s3);
         border-top: 2px solid var(--faint); border-radius: 2px 2px 0 0;
       }
-      .dist .bars > span.pos { background: rgba(79,199,141,.16); border-top-color: var(--pos); }
-      .dist .bars > span.neg { background: rgba(226,85,74,.14); border-top-color: var(--neg); }
+      .dist .bars > span.pos { background: rgba(63,185,132,.16); border-top-color: var(--pos); }
+      .dist .bars > span.neg { background: rgba(217,93,82,.14); border-top-color: var(--neg); }
       .dist .ax {
         display: flex; justify-content: space-between; margin-top: 4px;
         font-family: var(--mono); font-size: 9.5px; color: var(--faint);
@@ -697,10 +755,7 @@
         border-left: 2px solid var(--line); padding-left: 12px; margin: 0;
       }
       .safety b { color: var(--dim); font-weight: 600; }
-      .perfgrid { display: grid; gap: 1px; background: var(--line); grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
-      .perfgrid > section { background: var(--s1); }
       @media (max-width: 980px) {
-        .perfgrid { grid-template-columns: 1fr; }
         .close-inner { padding: 14px 14px 16px; }
         .hero-num { font-size: 32px; }
         .clvaxis { height: 46px; margin: 12px 0 2px; }
@@ -740,6 +795,139 @@
       .evtoggle .evcount { margin-left: auto; color: var(--faint); }
       .evtable td.evinsuf { color: var(--faint); font-style: italic; }
 
+      /* ---- date rail (F1: navigate picks by date) --------------------------- */
+      .daterail {
+        display: flex; gap: 6px; align-items: center;
+        padding: 8px 14px 0;
+      }
+      .datechips {
+        display: flex; gap: 4px; flex: 1; min-width: 0;
+        overflow-x: auto;
+        scroll-snap-type: x proximity;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+      .datechips::-webkit-scrollbar { display: none; }
+      .datechips button {
+        flex: 0 0 auto; scroll-snap-align: center;
+        background: var(--s1); border: 1px solid var(--line);
+        color: var(--dim); font-size: 11px; letter-spacing: 0.04em;
+        text-transform: uppercase; padding: 6px 10px; min-height: 40px;
+        border-radius: var(--radius);
+      }
+      .datechips button[aria-pressed="true"] {
+        color: var(--bone); border-color: var(--faint); background: var(--s3);
+      }
+      .daterail input[type="date"] {
+        flex: 0 0 auto; min-height: 40px; padding: 4px 6px;
+        color-scheme: dark;
+      }
+
+      /* ---- tile system (Overview / Performance / Diagnostics) --------------- */
+      .tilegrid { display: grid; grid-template-columns: 1fr; gap: var(--sp-3); }
+      @media (min-width: 1024px) {
+        .tilegrid.cols2 { grid-template-columns: 1fr 1fr; }
+        .tile.wide { grid-column: 1 / -1; }
+      }
+      .tile {
+        background: var(--s1); border: 1px solid var(--line);
+        border-radius: var(--radius-lg); padding: var(--sp-4); min-width: 0;
+      }
+      .tile-h {
+        display: flex; align-items: center; gap: 8px;
+        margin: 0 0 var(--sp-3);
+      }
+      .tile-h h3, .tile-h h2 {
+        font-family: var(--mono); font-size: var(--fs-xs); letter-spacing: 0.1em;
+        text-transform: uppercase; color: var(--faint); font-weight: 600;
+        margin: 0; flex: 1; min-width: 0;
+      }
+      .tile-h .chip { flex: 0 0 auto; }
+      .tile .muted { margin: 0; }
+      .tile .sub-block:first-of-type { margin-top: 6px; }
+
+      /* per-sport ingestion summary cards (Diagnostics, phone-first) */
+      .sportcards {
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: var(--sp-2); margin-top: var(--sp-2);
+      }
+      .sportcard {
+        border: 1px solid var(--line); border-radius: var(--radius);
+        padding: 10px 12px; background: var(--s2); display: grid; gap: 4px;
+      }
+      .sportcard .sc-h {
+        display: flex; justify-content: space-between; gap: 8px;
+        align-items: baseline;
+      }
+      .sportcard .sc-h b {
+        font-family: var(--mono); font-size: 12px; color: var(--bone);
+        text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+      }
+      .sportcard .kv {
+        display: flex; justify-content: space-between; gap: 8px;
+        font-family: var(--mono); font-size: 11px; color: var(--faint);
+        font-variant-numeric: tabular-nums;
+      }
+      .sportcard .kv span:last-child { color: var(--dim); text-align: right; }
+
+      /* one-click copy pick summary (plain data, no promo words, no stake) */
+      .copybtn {
+        background: transparent; border: 1px dashed var(--line);
+        color: var(--faint); font-family: var(--mono); font-size: 10px;
+        letter-spacing: 0.05em; text-transform: uppercase;
+        padding: 3px 8px; min-height: 28px; border-radius: var(--radius);
+        cursor: pointer;
+      }
+      .copybtn:hover { color: var(--bone); border-color: var(--faint); }
+
+      /* ---- overview tiles ---------------------------------------------------- */
+      .ovbig {
+        font-family: var(--mono); font-size: var(--fs-xl); font-weight: 700;
+        color: var(--bone); font-variant-numeric: tabular-nums; line-height: 1.1;
+      }
+      .ovbig.accruing { color: var(--dim); }
+      .ovnote { color: var(--faint); font-size: 11.5px; margin-top: 6px; line-height: 1.5; }
+      .ovrow {
+        display: flex; gap: 8px 10px; align-items: baseline; padding: 7px 0;
+        border-top: 1px solid var(--line); font-size: 12.5px; min-width: 0;
+        flex-wrap: wrap;
+      }
+      .ovrow .t { font-family: var(--mono); font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+      .ovrow .e {
+        font-weight: 600; color: var(--bone); overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 130px;
+      }
+      .ovrow .s { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: nowrap; }
+      .trustlist { display: grid; gap: 6px; }
+      .trustlist .kv {
+        display: flex; justify-content: space-between; gap: 10px;
+        font-family: var(--mono); font-size: 11.5px; color: var(--faint);
+      }
+      .trustlist .kv span:last-child { color: var(--dim); text-align: right; }
+
+      /* ---- phone card ergonomics (≤768px) ------------------------------------ */
+      @media (max-width: 768px) {
+        /* stats as a labeled 3-column grid instead of a wrapping inline strip */
+        .p-stats {
+          display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px 10px;
+        }
+        .p-stats .stat { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+        .p-stats .stat b { font-size: 13px; }
+        /* the card FOOTER (stake note / shadow note / copy) stays a flex row */
+        .p-stats.foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+        .p-stats.foot .stat { display: inline; }
+        /* risk badges become one horizontally-scrollable chip rail */
+        .p-risk {
+          flex-wrap: nowrap; overflow-x: auto;
+          -webkit-overflow-scrolling: touch; scrollbar-width: none;
+          padding-bottom: 2px;
+        }
+        .p-risk::-webkit-scrollbar { display: none; }
+        .p-risk .badge, .p-risk .gate-chip, .p-risk .stat { flex: 0 0 auto; }
+        .copybtn, .datechips button, .daterail input[type="date"] { min-height: 44px; }
+      }
+
       @media (prefers-reduced-motion: reduce) {
         * { animation: none !important; transition: none !important; }
       }
@@ -760,7 +948,8 @@
         <span class="sub">picks only · manual betting decision support</span>
       </div>
       <nav class="viewnav" id="viewnav" aria-label="Sections">
-        <button type="button" data-view="picks" aria-current="true">Picks</button>
+        <button type="button" data-view="overview" aria-current="true">Overview</button>
+        <button type="button" data-view="picks" aria-current="false">Picks</button>
         <button type="button" data-view="games" aria-current="false">Games</button>
         <button type="button" data-view="performance" aria-current="false">Performance</button>
         <button type="button" data-view="diagnostics" aria-current="false">Diagnostics</button>
@@ -785,8 +974,48 @@
     </header>
 
     <main>
+      <!-- ==================== OVERVIEW ================================= -->
+      <!-- Default landing: one screen answering "can I trust the data, what
+           is live today, what settled yesterday, where does the evidence
+           stand?" — composed entirely from /picks, /performance, /health and
+           /resolution/match-rate. Informational only; no new endpoints. -->
+      <section class="view" id="view-overview" aria-labelledby="ov-h">
+        <h2 class="vh" id="ov-h">Overview</h2>
+        <div class="pad tilegrid cols2" id="ovgrid">
+          <section class="tile" aria-labelledby="ov-trust-h">
+            <div class="tile-h">
+              <h3 id="ov-trust-h">Trust · data freshness</h3>
+              <span class="chip" id="ov-trust-verdict">—</span>
+            </div>
+            <div class="trustlist" id="ov-trust-body"></div>
+          </section>
+          <section class="tile" aria-labelledby="ov-today-h">
+            <div class="tile-h">
+              <h3 id="ov-today-h">Today · premium live</h3>
+              <span class="chip" id="ov-today-count">—</span>
+            </div>
+            <div id="ov-today-body"></div>
+          </section>
+          <section class="tile" aria-labelledby="ov-clv-h">
+            <div class="tile-h"><h3 id="ov-clv-h">Evidence of edge · sharp CLV</h3></div>
+            <div id="ov-clv-body"></div>
+          </section>
+          <section class="tile" aria-labelledby="ov-results-h">
+            <div class="tile-h">
+              <h3 id="ov-results-h">Recent results · auto-graded</h3>
+              <span class="chip" id="ov-results-count">—</span>
+            </div>
+            <div id="ov-results-body"></div>
+          </section>
+          <section class="tile wide" aria-labelledby="ov-funnel-h">
+            <div class="tile-h"><h3 id="ov-funnel-h">Pick funnel · one line</h3></div>
+            <p class="muted" id="ov-funnel-body" style="margin:0">—</p>
+          </section>
+        </div>
+      </section>
+
       <!-- ==================== PICKS ==================================== -->
-      <section class="view" id="view-picks" aria-labelledby="picks-h">
+      <section class="view" id="view-picks" aria-labelledby="picks-h" hidden>
         <section id="tape" aria-label="Picks tape">
           <div class="pane-h">
             <h2 class="title" id="picks-h">Picks</h2>
@@ -810,6 +1039,13 @@
             </div>
           </div>
           <div class="cmdnote" id="tape-note" hidden></div>
+          <!-- F1: date navigation — pressing a date filters the tape to picks
+               whose LOCAL kickoff date matches; persisted in location.hash
+               (#d=YYYY-MM-DD) so back/refresh keep the selection. -->
+          <div class="daterail" id="daterail" role="toolbar" aria-label="Filter picks by date">
+            <div class="datechips" id="datechips"></div>
+            <input type="date" id="f-date" aria-label="Jump to a date" />
+          </div>
           <div id="tabs" role="tablist" aria-label="Pick views">
             <button type="button" role="tab" data-status="live" aria-selected="true" aria-controls="cards">LIVE</button>
             <button type="button" role="tab" data-status="unverified" aria-selected="false" aria-controls="cards">UNVERIFIED</button>
@@ -820,7 +1056,10 @@
         </section>
 
         <div class="pad sub-block">
-          <h2 class="evtitle">Legend</h2>
+          <button class="sb-head" id="toggle-legend" aria-expanded="false" aria-controls="legend-panel">
+            <span class="mk">[+]</span><span class="grow">Legend</span>
+          </button>
+          <div class="panel" id="legend-panel" hidden>
           <div class="legend">
             <div><b>PREMIUM</b> — passed every premium gate (edge ≥ floor vs a fresh sharp-anchored fair). Informational only: you review and place any bet yourself.</div>
             <div><b>SHADOW</b> — volume tier: never alerted or sized, kept purely as CLV evidence. Rendered muted + dashed: tracked — not actionable.</div>
@@ -835,6 +1074,7 @@
             <div><b>★ Confidence</b> — model confidence in the EDGE, never a win probability and not a profit guarantee.</div>
             <div><b>Drift bar</b> — your fill ◆ vs the de-vigged FAIR close ┊ and the book's close/now. Green gap = the +EV captured at your fill price.</div>
             <div><b>CLV</b> — the honest proof of edge: did your price beat the de-vigged sharp close? Informational, not a profit guarantee. <b>This system never places bets.</b></div>
+          </div>
           </div>
         </div>
       </section>
@@ -854,9 +1094,6 @@
               <span class="mono" id="games-count" style="color:var(--dim)">—</span>
             </button>
             <div class="panel" id="games-panel" hidden>
-              <div class="chips" style="margin-bottom:8px">
-                <span class="chip" id="chip-sports">—</span>
-              </div>
               <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
                 <select id="f-game-sport" aria-label="Filter fixtures by sport">
                   <option value="">All sports</option>
@@ -926,145 +1163,162 @@
           </div>
         </section>
 
-        <div class="perfgrid">
-          <section id="settled" aria-labelledby="settled-h">
-            <div class="pane-h"><h2 class="title" id="settled-h">Settled Ledger · premium</h2></div>
-            <div class="pad">
-              <div class="ledger-grid">
-                <div class="cell" id="card-record"><div class="v" id="c-record">—</div><div class="k">Record · W-L-P</div></div>
-                <div class="cell" id="card-pnl"><div class="v" id="c-pnl">—</div><div class="k">P&amp;L / ROI (units)</div></div>
-                <div class="cell" id="card-settled"><div class="v" id="c-settled">—</div><div class="k">Settled (all-time)</div></div>
-                <div class="cell" id="card-open"><div class="v" id="c-open">—</div><div class="k" id="c-open-k">Open · premium verified</div></div>
-              </div>
-              <div class="muted" style="margin-top:10px">
-                Stake-weighted ROI &amp; record are recorded as final scores arrive —
-                settlement is automatic; no bet is ever placed from here.
-              </div>
-
-              <div class="sub-block">
-                <h3 class="evtitle">Premium vs Shadow · never mixed</h3>
-                <div class="tscroll">
-                  <table aria-label="Premium versus shadow tier performance">
-                    <thead><tr>
-                      <th scope="col">Tier</th><th scope="col" class="r">Pick Count</th>
-                      <th scope="col" class="r">Open</th><th scope="col" class="r">Record</th>
-                      <th scope="col" class="r">P&amp;L</th><th scope="col" class="r">ROI</th>
-                      <th scope="col" class="r">CLV</th>
-                    </tr></thead>
-                    <tbody id="tier-rows"></tbody>
-                  </table>
-                </div>
-                <div class="muted" style="margin-top:4px">
-                  Tier CLV here blends all close types — indicative context only;
-                  the sharp-close headline above is the evidence figure.
-                </div>
-              </div>
-
-              <div class="sub-block">
-                <h3 class="evtitle">By sport · settled picks (both tiers)</h3>
-                <div class="tscroll">
-                  <table aria-label="Performance by sport">
-                    <thead><tr>
-                      <th scope="col">Sport</th><th scope="col" class="r">Pick Count</th>
-                      <th scope="col" class="r">Record</th><th scope="col" class="r">ROI</th>
-                      <th scope="col" class="r">CLV</th>
-                    </tr></thead>
-                    <tbody id="sport-rows"></tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div class="sub-block">
-                <h3 class="evtitle">Calibration monitor · bet band</h3>
-                <p class="muted" id="calib-note" style="margin:4px 0 0">—</p>
-              </div>
+        <!-- F4: the mess of stacked blocks is now self-contained TILES — each
+             one section of the payload, each independently add/removable
+             (one render function per tile). One CLV altitude only: the sharp
+             hero above; blended context lives in the close audit. -->
+        <div class="pad tilegrid cols2" id="perftiles">
+          <section class="tile" id="tile-ledger" aria-labelledby="settled-h">
+            <div class="tile-h"><h2 id="settled-h">Settled Ledger · premium</h2></div>
+            <div class="ledger-grid">
+              <div class="cell" id="card-record"><div class="v" id="c-record">—</div><div class="k">Record · W-L-P</div></div>
+              <div class="cell" id="card-pnl"><div class="v" id="c-pnl">—</div><div class="k">P&amp;L / ROI (units)</div></div>
+              <div class="cell" id="card-settled"><div class="v" id="c-settled">—</div><div class="k">Settled (all-time)</div></div>
+              <div class="cell" id="card-open"><div class="v" id="c-open">—</div><div class="k" id="c-open-k">Open · premium verified</div></div>
+            </div>
+            <div class="muted" style="margin-top:10px">
+              Stake-weighted ROI &amp; record are recorded as final scores arrive —
+              settlement is automatic; no bet is ever placed from here.
             </div>
           </section>
 
-          <section id="evidence" aria-labelledby="evidence-h">
-            <div class="pane-h"><h2 class="title" id="evidence-h">Live evidence</h2></div>
-            <div class="pad">
-              <!-- stratified live-evidence panel: hidden until /performance serves
-                   live_evidence; renders per-stratum CLV/ROI with honest-n
-                   suppression (the VALUE_ML_FILTER-flip instrument). Shadow-only. -->
-              <div class="evpanel" id="evidence-panel" style="display:none">
-                <div class="evtitle" id="evidence-title">Live evidence</div>
-                <div class="muted" style="margin:4px 0 8px">
-                  Stratified CLV / beat-close / ROI over your settled picks — the
-                  VALUE_ML_FILTER readiness instrument. Each stratum reports its n;
-                  a thin stratum reads "insufficient data" instead of noise.
-                  Shadow-only: changes no pick.
-                </div>
-                <div class="tscroll">
-                  <table class="evtable" aria-label="Live evidence by slice">
-                    <thead><tr>
-                      <th scope="col">Slice</th><th scope="col" class="r">n</th><th scope="col" class="r">n CLV</th>
-                      <th scope="col" class="r">CLV</th><th scope="col" class="r">Beat</th><th scope="col" class="r">ROI</th>
-                    </tr></thead>
-                    <tbody id="evidence-rows"></tbody>
-                  </table>
-                </div>
-              </div>
-              <p class="muted" id="evidence-empty" style="margin:4px 0 0">
-                No stratified live evidence yet — it appears once settled picks accrue.
-              </p>
+          <section class="tile" id="tile-tiers" aria-labelledby="tiers-h">
+            <div class="tile-h"><h3 id="tiers-h">Premium vs Shadow · never mixed</h3></div>
+            <div class="tscroll">
+              <table aria-label="Premium versus shadow tier performance">
+                <thead><tr>
+                  <th scope="col">Tier</th><th scope="col" class="r">Pick Count</th>
+                  <th scope="col" class="r">Open</th><th scope="col" class="r">Record</th>
+                  <th scope="col" class="r">P&amp;L</th><th scope="col" class="r">ROI</th>
+                </tr></thead>
+                <tbody id="tier-rows"></tbody>
+              </table>
+            </div>
+            <div class="muted" style="margin-top:4px">
+              Counts, record and P&amp;L only — the sharp-close headline above is
+              the one CLV evidence figure on this page.
+            </div>
+          </section>
 
-              <div class="sub-block">
-                <h3 class="evtitle">Evidence quality · close audit</h3>
-                <div class="muted" style="margin:4px 0 8px">
-                  How much of the settled sample the CLV guards excluded, and what
-                  kind of close each pick got. Exclusions keep the CLV read honest
-                  — an excluded close is unusable evidence, not a loss.
-                </div>
-                <div class="tscroll">
-                  <table aria-label="Evidence quality — close audit">
-                    <thead><tr>
-                      <th scope="col">Check</th><th scope="col" class="r">Reading</th>
-                    </tr></thead>
-                    <tbody id="evq-rows"></tbody>
-                  </table>
-                </div>
-                <p class="muted" id="evq-note" style="margin:4px 0 0">—</p>
+          <section class="tile" id="tile-sports" aria-labelledby="sports-h">
+            <div class="tile-h"><h3 id="sports-h">By sport · settled picks (both tiers)</h3></div>
+            <div class="tscroll">
+              <table aria-label="Performance by sport">
+                <thead><tr>
+                  <th scope="col">Sport</th><th scope="col" class="r">Pick Count</th>
+                  <th scope="col" class="r">Record</th><th scope="col" class="r">ROI</th>
+                  <th scope="col" class="r">CLV</th>
+                </tr></thead>
+                <tbody id="sport-rows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="tile" id="tile-calibration" aria-labelledby="calib-h">
+            <div class="tile-h"><h3 id="calib-h">Calibration monitor · bet band</h3></div>
+            <p class="muted" id="calib-note" style="margin:0">—</p>
+          </section>
+
+          <section class="tile" id="tile-evidence" aria-labelledby="evidence-h">
+            <div class="tile-h"><h3 id="evidence-h">Live evidence</h3></div>
+            <!-- stratified live-evidence panel: hidden until /performance serves
+                 live_evidence; renders per-stratum CLV/ROI with honest-n
+                 suppression (the VALUE_ML_FILTER-flip instrument). Shadow-only. -->
+            <div class="evpanel" id="evidence-panel" style="display:none">
+              <div class="evtitle" id="evidence-title">Live evidence</div>
+              <div class="muted" style="margin:4px 0 8px">
+                Stratified CLV / beat-close / ROI over your settled picks — the
+                VALUE_ML_FILTER readiness instrument. Each stratum reports its n;
+                a thin stratum reads "insufficient data" instead of noise.
+                Shadow-only: changes no pick.
+              </div>
+              <div class="tscroll">
+                <table class="evtable" aria-label="Live evidence by slice">
+                  <thead><tr>
+                    <th scope="col">Slice</th><th scope="col" class="r">n</th><th scope="col" class="r">n CLV</th>
+                    <th scope="col" class="r">CLV</th><th scope="col" class="r">Beat</th><th scope="col" class="r">ROI</th>
+                  </tr></thead>
+                  <tbody id="evidence-rows"></tbody>
+                </table>
               </div>
             </div>
+            <p class="muted" id="evidence-empty" style="margin:4px 0 0">
+              No stratified live evidence yet — it appears once settled picks accrue.
+            </p>
+          </section>
+
+          <section class="tile" id="tile-closeaudit" aria-labelledby="evq-h">
+            <div class="tile-h"><h3 id="evq-h">Evidence quality · close audit</h3></div>
+            <div class="muted" style="margin:0 0 8px">
+              How much of the settled sample the CLV guards excluded, and what
+              kind of close each pick got. Exclusions keep the CLV read honest
+              — an excluded close is unusable evidence, not a loss.
+            </div>
+            <div class="tscroll">
+              <table aria-label="Evidence quality — close audit">
+                <thead><tr>
+                  <th scope="col">Check</th><th scope="col" class="r">Reading</th>
+                </tr></thead>
+                <tbody id="evq-rows"></tbody>
+              </table>
+            </div>
+            <p class="muted" id="evq-note" style="margin:4px 0 0">—</p>
           </section>
         </div>
       </section>
 
       <!-- ==================== DIAGNOSTICS ============================== -->
+      <!-- F3: diagnostics is a 2×2 tile grid — each tile leads with a one-word
+           verdict chip (OK / DEGRADED / …) before any detail; the dense
+           8-column freshness table is demoted to a collapsed detail
+           disclosure (phones read per-sport summary cards instead). -->
       <section class="view" id="view-diagnostics" aria-labelledby="diag-h" hidden>
         <h2 class="vh" id="diag-h">Diagnostics — why are there few (or no) premium picks?</h2>
-        <div class="pad">
-          <div class="chips" id="status-chips">
-            <span class="chip" id="chip-poll">poll: —</span>
-            <span class="chip" id="chip-window">verified: —</span>
-            <span class="chip" id="chip-deps" style="display:none"></span>
-          </div>
-          <div class="chips" id="ing-chips" style="margin-top:6px"></div>
-
-          <div class="sub-block">
-            <h3 class="evtitle">Source Freshness · per-sport ingestion</h3>
-            <div class="tscroll">
-              <table aria-label="Source freshness by sport">
-                <thead><tr>
-                  <th scope="col">Sport</th><th scope="col">Last cycle</th>
-                  <th scope="col" class="r">Odds rows</th><th scope="col" class="r">Matches</th>
-                  <th scope="col" class="r">Premium</th><th scope="col" class="r">Shadow</th>
-                  <th scope="col">Per market</th><th scope="col">State</th>
-                </tr></thead>
-                <tbody id="src-rows"></tbody>
-              </table>
+        <div class="pad tilegrid cols2" id="diaggrid">
+          <section class="tile" id="tile-ingest" aria-labelledby="ingest-h">
+            <div class="tile-h">
+              <h3 id="ingest-h">Ingestion · Source Freshness</h3>
+              <span class="chip" id="diag-ingest-verdict">—</span>
             </div>
+            <div class="chips" id="status-chips">
+              <span class="chip" id="chip-poll">poll: —</span>
+              <span class="chip" id="chip-window">verified: —</span>
+              <span class="chip" id="chip-deps" style="display:none"></span>
+            </div>
+            <div class="sportcards" id="diag-sport-cards"></div>
             <p class="muted" id="src-note" style="margin:6px 0 0">—</p>
-          </div>
+            <div class="sub-block">
+              <button class="sb-head" id="toggle-srcdetail" aria-expanded="false" aria-controls="srcdetail-panel">
+                <span class="mk">[+]</span><span class="grow">Detail · per-sport ingestion table</span>
+              </button>
+              <div class="panel" id="srcdetail-panel" hidden>
+                <div class="tscroll">
+                  <table aria-label="Source freshness by sport">
+                    <thead><tr>
+                      <th scope="col">Sport</th><th scope="col">Last cycle</th>
+                      <th scope="col" class="r">Odds rows</th><th scope="col" class="r">Matches</th>
+                      <th scope="col" class="r">Premium</th><th scope="col" class="r">Shadow</th>
+                      <th scope="col">Per market</th><th scope="col">State</th>
+                    </tr></thead>
+                    <tbody id="src-rows"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
 
-          <div class="sub-block">
-            <h3 class="evtitle">Pick funnel · why few premium picks</h3>
+          <section class="tile" id="tile-whyfew" aria-labelledby="funnel-h">
+            <div class="tile-h">
+              <h3 id="funnel-h">Pick funnel · why few premium picks</h3>
+              <span class="chip" id="diag-funnel-verdict">—</span>
+            </div>
+            <div class="chips" id="ing-chips" style="margin-bottom:6px"></div>
             <p class="muted" id="whyfew" style="margin:4px 0 0">—</p>
-          </div>
+          </section>
 
-          <div class="sub-block">
-            <button class="sb-head" id="toggle-archive" aria-expanded="false" aria-controls="archive-panel">
+          <section class="tile" id="tile-sharpcov" aria-labelledby="cov-h">
+            <div class="tile-h"><h3 id="cov-h">Sharp-close coverage</h3></div>
+            <button class="sb-head" id="toggle-archive" aria-expanded="false" aria-controls="archive-panel" style="border-top:0;padding-top:0">
               <span class="mk">[+]</span><span class="grow">Sharp-close coverage</span>
               <span class="mono" id="archive-count" style="color:var(--dim)">—</span>
             </button>
@@ -1084,39 +1338,48 @@
               </div>
               <div class="muted" id="archive-capture" hidden style="margin-top:6px"></div>
               <div class="muted" id="archive-betfair" hidden style="margin-top:6px"></div>
-              <div class="sub-block">
-                <h4 class="evtitle">Match Confidence · strict cross-source event matching</h4>
-                <p class="muted" id="match-detail" style="margin:4px 0 0">—</p>
-                <div class="tscroll" style="margin-top:6px">
-                  <table aria-label="Match confidence by sport">
-                    <thead><tr>
-                      <th scope="col">Sport</th><th scope="col" class="r">Picks</th>
-                      <th scope="col" class="r">Matched</th><th scope="col" class="r">Rate</th>
-                    </tr></thead>
-                    <tbody id="match-rows"></tbody>
-                  </table>
-                </div>
-              </div>
             </div>
-          </div>
+          </section>
+
+          <section class="tile" id="tile-matchconf" aria-labelledby="match-h">
+            <div class="tile-h">
+              <h3 id="match-h">Match Confidence · strict cross-source event matching</h3>
+              <span class="chip" id="diag-match-verdict">—</span>
+            </div>
+            <p class="muted" id="match-detail" style="margin:4px 0 0">—</p>
+            <div class="tscroll" style="margin-top:6px">
+              <table aria-label="Match confidence by sport">
+                <thead><tr>
+                  <th scope="col">Sport</th><th scope="col" class="r">Picks</th>
+                  <th scope="col" class="r">Matched</th><th scope="col" class="r">Rate</th>
+                </tr></thead>
+                <tbody id="match-rows"></tbody>
+              </table>
+            </div>
+          </section>
         </div>
       </section>
     </main>
 
     <!-- MOBILE: fixed bottom SECTION nav (<=980px) — thumb-reachable switcher
-         between Picks / Games / Performance / Diagnostics. Hidden on desktop. -->
+         between Overview / Picks / Games / Performance / Diagnostics.
+         Hidden on desktop. F2: no placeholder glyphs — the only badge is the
+         live-premium count on PICKS, rendered ONLY when data is present. -->
     <nav class="tabbar" id="navbar" aria-label="Sections (mobile)">
-      <button type="button" data-view="picks" aria-current="true">
-        <span class="lbl">PICKS</span><span class="n" id="nav-picks-n">0</span>
+      <button type="button" data-view="overview" aria-current="true">
+        <span class="lbl">OVR</span>
+      </button>
+      <button type="button" data-view="picks" aria-current="false">
+        <span class="lbl">PICKS</span><span class="n" id="nav-picks-n" hidden></span>
       </button>
       <button type="button" data-view="games" aria-current="false">
-        <span class="lbl">GAMES</span><span class="n" aria-hidden="true">·</span>
+        <span class="lbl">GAMES</span>
       </button>
       <button type="button" data-view="performance" aria-current="false">
-        <span class="lbl">PERF</span><span class="n" aria-hidden="true">·</span>
+        <span class="lbl">PERF</span>
       </button>
       <button type="button" data-view="diagnostics" aria-current="false">
-        <span class="lbl">DIAG</span><span class="n" aria-hidden="true">·</span>
+        <span class="lbl">DIAG</span>
       </button>
     </nav>
 
@@ -1128,7 +1391,9 @@
         let GAMES = [];
         let GAMES_ERR = null;
         let STATUS_TAB = "live";
-        let ACTIVE_VIEW = "picks";
+        let ACTIVE_VIEW = "overview";
+        let SELECTED_DATE = null; // F1: local YYYY-MM-DD date filter (null = all)
+        let LAST_HEALTH = null;
         let LAST_OK = null;
         let LAST_PERF = null, LAST_PERF_AT = null;
         let FIRST_LOAD = true;
@@ -1197,6 +1462,16 @@
 
         const tierOf = (p) => p.tier || "premium";
         const leagueLabel = (p) => (!p ? "" : p.country ? p.country + " — " + p.league : p.league);
+        // local-calendar-date key (YYYY-MM-DD in the VIEWER's timezone) — the
+        // date rail navigates by the kickoff date the operator actually sees.
+        const dkey = (iso) => {
+          const d = new Date(iso);
+          if (isNaN(d)) return null;
+          return d.getFullYear() + "-" +
+            String(d.getMonth() + 1).padStart(2, "0") + "-" +
+            String(d.getDate()).padStart(2, "0");
+        };
+        const todayKey = () => dkey(new Date().toISOString());
 
         // ===== verified window / tab predicates =====================
         function verifiedWindowMs() {
@@ -1387,18 +1662,11 @@
           bar.appendChild(mkf);
           wrap.appendChild(bar);
 
-          // exact numbers + CLV call-out
+          // CLV call-out only. F6 fix: the fill/fair/close NUMBERS are not
+          // repeated here — they already live once in the price stat row
+          // (Offered/Fair Odds, Closing Line) and in the marker tooltips, so
+          // the same figures were printed twice on every card.
           const leg = document.createElement("div"); leg.className = "d-legend";
-          const addLeg = (label, val, vcls) => {
-            const s = document.createElement("span");
-            const b = document.createElement("b"); b.textContent = label + " ";
-            const v = document.createElement("span"); v.className = "v"; v.textContent = val;
-            if (vcls) v.style.color = vcls;
-            s.append(b, v); leg.appendChild(s);
-          };
-          addLeg("fill", fill.toFixed(2), beat === null ? "var(--dim)" : "var(--pos)");
-          if (fairO != null) addLeg("fair", fairO.toFixed(2));
-          if (nowO != null) addLeg(nowLabel, nowO.toFixed(2));
           const clvc = document.createElement("span");
           clvc.className = "badge clv-chip " + ci.cls;
           clvc.textContent = "CLV " + ci.text.replace(/^live\s*/, "").replace(/^CLV\s*/, "");
@@ -1431,6 +1699,7 @@
           const settledView = p.status === "settled" || inClosedTab(p);
           const el = document.createElement("article");
           el.className = "pick" + (valueGone(p) ? " gone" : "") + (tierOf(p) === "volume" ? " shadow" : "");
+          if (tierOf(p) !== "volume") el.classList.add("prem");
           el.setAttribute("role", "listitem");
 
           // top: kickoff + match + tier/status badges
@@ -1481,8 +1750,17 @@
           // price / result stats strip
           const st = document.createElement("div"); st.className = "p-stats";
           if (settledView) {
+            // F5: results LEAD with the auto-scraped score — settlement is
+            // automatic; manual entry is only the fallback when no score
+            // arrived. Provenance is explicit (auto-fetched vs recorded).
             const score = p.score || p.scraped_score || "—";
-            st.appendChild(mkStat("score", score));
+            const scoreStat = mkStat("Score", score);
+            scoreStat.title = p.score != null
+              ? "Recorded final score."
+              : p.scraped_score != null
+                ? "Auto-fetched final score — recorded automatically for calibration; verify before relying on it."
+                : "No final score fetched yet.";
+            st.appendChild(scoreStat);
             const oc = p.outcome || p.provisional_outcome;
             const res = document.createElement("span"); res.className = "stat";
             if (oc) {
@@ -1492,6 +1770,12 @@
               b.textContent = glyph + oc.replace("_", " ").toUpperCase();
               b.title = p.outcome ? "recorded result" : "provisional — graded from the auto-fetched score";
               res.appendChild(b);
+              if (!p.outcome && p.provisional_outcome) {
+                const pv = document.createElement("span"); pv.className = "clv-sub";
+                pv.textContent = "auto-graded · provisional";
+                pv.title = "Graded automatically from the fetched final score — verify before relying on it.";
+                res.appendChild(pv);
+              }
             } else { res.textContent = "awaiting result"; res.style.color = "var(--faint)"; }
             st.appendChild(res);
             const closeShown = p.closing_odds != null ? p.closing_odds : p.current_odds;
@@ -1499,7 +1783,7 @@
             const raw = p.pnl != null ? p.pnl : p.provisional_pnl;
             if (raw != null) {
               const v = Number(raw);
-              const ps = mkStat("p&l", (v >= 0 ? "+" : "") + v.toFixed(2));
+              const ps = mkStat("P&L", (v >= 0 ? "+" : "") + v.toFixed(2));
               if (v < 0) ps.querySelector("b").style.color = "var(--neg)";
               st.appendChild(ps);
             }
@@ -1579,7 +1863,7 @@
           el.appendChild(riskRow(p));
 
           // footer: Suggested Stake (informational) + shadow/value-gone flags
-          const ft = document.createElement("div"); ft.className = "p-stats";
+          const ft = document.createElement("div"); ft.className = "p-stats foot";
           if (!settledView && tierOf(p) !== "volume" && !valueGone(p) && isVerified(p) && p.recommended_stake_fraction != null) {
             const sf = Number(p.recommended_stake_fraction);
             if (isFinite(sf) && sf > 0) {
@@ -1600,14 +1884,49 @@
             vg.title = "The live re-price no longer beats the fair value — kept on the board for honest CLV tracking (dropping losers would be survivorship bias).";
             ft.appendChild(vg);
           }
-          if (ft.childNodes.length) el.appendChild(ft);
+          // one-click copy summary: plain data only — no stake, no verdicts.
+          ft.appendChild(copyButton(p));
+          el.appendChild(ft);
 
-          // manual settle: only CLOSED cards (started, still unsettled) get the
-          // small "Record result" affordance — the manual path for leagues
-          // without a free results feed. It records the final score ONLY;
-          // nothing here places a bet.
-          if (inClosedTab(p) && p.event_id != null) el.appendChild(recordResultBlock(p));
+          // manual settle (fallback ONLY): CLOSED cards (started, still
+          // unsettled) WITHOUT an auto-fetched score get the "Record result"
+          // affordance — results are recorded automatically when the score
+          // scrape lands (F5). It records the final score ONLY; nothing here
+          // places a bet.
+          if (inClosedTab(p) && p.event_id != null && p.scraped_score == null) {
+            el.appendChild(recordResultBlock(p));
+          }
           return el;
+        }
+
+        // plain-text pick summary → clipboard: event · market · selection @
+        // odds (book) · fair · edge · kickoff ISO. No stake, no promo words.
+        function copyButton(p) {
+          const cp = document.createElement("button");
+          cp.type = "button"; cp.className = "copybtn"; cp.textContent = "⧉ copy";
+          cp.title = "Copy a plain-text pick summary (event, market, price, fair, edge, kickoff). Informational only.";
+          cp.addEventListener("click", () => {
+            const fairP = numOf(p.model_probability);
+            const eff = numOf(p.current_edge == null ? p.edge : p.current_edge);
+            const txt = [
+              p.event,
+              (MARKETS[p.market] || p.market || "—"),
+              p.selection + " @ " + odds2(p.decimal_odds) + " (" + p.bookmaker + ")",
+              "fair " + (isFinite(fairP) && fairP > 0 ? (1 / fairP).toFixed(2) : "—"),
+              "edge " + (isFinite(eff) ? spct(eff) : "—"),
+              "kickoff " + (p.starts_at != null ? p.starts_at : "TBD"),
+            ].join(" · ");
+            const reset = () => { cp.textContent = "⧉ copy"; };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(txt).then(
+                () => { cp.textContent = "✓ copied"; setTimeout(reset, 1500); },
+                () => { cp.textContent = "copy failed"; setTimeout(reset, 1500); }
+              );
+            } else {
+              cp.textContent = "copy unavailable"; setTimeout(reset, 1500);
+            }
+          });
+          return cp;
         }
 
         // "Record result" disclosure on a CLOSED card: expands to two labeled
@@ -1712,7 +2031,11 @@
           if (p.status === "alerted") {
             if (closed) { text = "CLOSED"; cls = "neu"; glyph = "■ "; }
             else if (!isVerified(p)) { text = "UNVERIFIED"; cls = "warn"; glyph = "○ "; }
-            else { text = "LIVE"; cls = "pos"; glyph = "● "; }
+            else if (tierOf(p) === "volume" || valueGone(p)) {
+              // Verifier finding: a green LIVE chip on a non-actionable card
+              // (shadow tier / value gone) contradicts its own state.
+              text = "TRACKED"; cls = "neu"; glyph = "○ ";
+            } else { text = "LIVE"; cls = "pos"; glyph = "● "; }
           } else if (p.status === "settled") { text = "SETTLED"; cls = "neu"; glyph = "▣ "; }
           else if (p.status === "superseded") { text = "SUPERSEDED"; cls = "neu"; glyph = "≠ "; }
           else { text = String(p.status).toUpperCase(); cls = "neu"; glyph = ""; }
@@ -1839,9 +2162,13 @@
           return d;
         }
         function render() {
+          renderDateRail();
           const tier = $("f-tier").value;
           const q = $("f-search").value.trim().toLowerCase();
+          // F1: the date rail scopes the whole tape (counts included) to the
+          // selected LOCAL kickoff date; TBD-kickoff picks only show on "All".
           const inScope = (p) =>
+            (!SELECTED_DATE || (p.starts_at != null && dkey(p.starts_at) === SELECTED_DATE)) &&
             (!tier || tierOf(p) === tier) &&
             (!q || [p.event, p.selection, p.bookmaker, p.league, p.country || "",
               p.market, MARKETS[p.market] || "", tierOf(p)].join(" ").toLowerCase().includes(q));
@@ -1873,7 +2200,8 @@
           // key reorders every view.
           sortRows(rows, ($("f-sort") && $("f-sort").value) || "default");
 
-          $("tape-count").textContent = rows.length + (rows.length === 1 ? " pick" : " picks");
+          $("tape-count").textContent = rows.length + (rows.length === 1 ? " pick" : " picks") +
+            (SELECTED_DATE ? " · " + SELECTED_DATE : "");
 
           // partial-refresh warning (one tier's fetch failed; other data live)
           const note = $("tape-note");
@@ -1896,6 +2224,33 @@
           const prem = rows.filter((p) => tierOf(p) !== "volume");
           const vol = rows.filter((p) => tierOf(p) === "volume");
           const openTab = STATUS_TAB === "live" || STATUS_TAB === "unverified";
+          // F5: surface how many results were graded automatically (provisional)
+          const settledTab = STATUS_TAB === "results" || STATUS_TAB === "closed";
+          if (settledTab) {
+            const nProv = rows.filter((p) => !p.outcome && p.provisional_outcome).length;
+            if (nProv) {
+              const rn = document.createElement("div");
+              rn.className = "results-note";
+              rn.textContent = nProv + " provisional — auto-graded from the fetched score; verify before relying on it.";
+              box.appendChild(rn);
+            }
+          }
+          // date dividers (results/closed): auto-recorded results grouped by day
+          const appendCards = (list) => {
+            let lastD = null;
+            list.forEach((p) => {
+              if (settledTab) {
+                const dk2 = p.starts_at != null ? dkey(p.starts_at) : "tbd";
+                if (dk2 !== lastD) {
+                  lastD = dk2;
+                  const dv = document.createElement("div"); dv.className = "date-div";
+                  dv.textContent = p.starts_at != null ? fmtDay(p.starts_at) : "Date TBD";
+                  box.appendChild(dv);
+                }
+              }
+              box.appendChild(pickCard(p));
+            });
+          };
           if (tier !== "volume") {
             box.appendChild(groupHeader("Premium", prem.length, false));
             if (!prem.length) {
@@ -1903,12 +2258,12 @@
                 ? "Nothing currently passes Premium gates. Shadow candidates may still be tracked."
                 : "No premium picks in this view."));
             }
-            prem.forEach((p) => box.appendChild(pickCard(p)));
+            appendCards(prem);
           }
           if (tier !== "premium") {
             box.appendChild(groupHeader("Shadow — tracked, not actionable", vol.length, true));
             if (!vol.length) box.appendChild(groupEmpty("No shadow candidates currently tracked."));
-            vol.forEach((p) => box.appendChild(pickCard(p)));
+            appendCards(vol);
           }
           if (!rows.length && tier === "premium" && !openTab) {
             // closed/results premium scope: add the tab-specific context line
@@ -1932,8 +2287,68 @@
         };
         function sortRows(rows, key) {
           if (key && SORT_KEYS[key]) { rows.sort(SORT_KEYS[key]); return; }
-          // default: best-on-top for live/unverified; server order elsewhere
+          // default: best-on-top for live/unverified; results/closed sort by
+          // most-recent kickoff (TBD last) so the per-day dividers group cleanly.
           if (STATUS_TAB === "live" || STATUS_TAB === "unverified") rows.sort(SORT_KEYS.confidence);
+          else rows.sort((a, b) =>
+            (b.starts_at == null ? -Infinity : koTime(b)) -
+            (a.starts_at == null ? -Infinity : koTime(a)));
+        }
+
+        // ===== F1: date navigation (rail + hash persistence) =========
+        // Selecting a date filters the tape client-side on the pick's LOCAL
+        // kickoff date; the choice rides in location.hash (#d=YYYY-MM-DD) so
+        // back/refresh keep it. "All dates" clears the filter.
+        function parseHashDate() {
+          const m = /[#&]d=(\d{4}-\d{2}-\d{2})/.exec(location.hash || "");
+          return m ? m[1] : null;
+        }
+        function setDate(d, fromHash) {
+          SELECTED_DATE = d || null;
+          if (!fromHash) {
+            const want = SELECTED_DATE ? "#d=" + SELECTED_DATE : "";
+            if (location.hash !== want) {
+              if (SELECTED_DATE) location.hash = "d=" + SELECTED_DATE;
+              else history.pushState("", document.title, location.pathname + location.search);
+            }
+          }
+          const fd = $("f-date");
+          if (fd && fd.value !== (SELECTED_DATE || "")) fd.value = SELECTED_DATE || "";
+          render();
+        }
+        let RAIL_CENTERED = false;
+        function renderDateRail() {
+          const rail = $("datechips");
+          if (!rail) return;
+          const keep = rail.scrollLeft; // 30s re-render must not yank the strip
+          const dates = new Set();
+          PICKS.forEach((p) => {
+            if (p.starts_at != null) { const k = dkey(p.starts_at); if (k) dates.add(k); }
+          });
+          const tk = todayKey();
+          dates.add(tk);
+          if (SELECTED_DATE) dates.add(SELECTED_DATE);
+          rail.replaceChildren();
+          const addChip = (label, value, title) => {
+            const b = document.createElement("button");
+            b.type = "button"; b.textContent = label;
+            b.setAttribute("aria-pressed", String(value === SELECTED_DATE));
+            if (title) b.title = title;
+            b.addEventListener("click", () => setDate(value === SELECTED_DATE ? null : value));
+            rail.appendChild(b);
+            return b;
+          };
+          addChip("All dates", null, "Show every pick regardless of kickoff date.");
+          let todayBtn = null;
+          Array.from(dates).sort().forEach((k) => {
+            const b = addChip(k === tk ? "TODAY" : fmtDay(k + "T12:00:00"), k,
+              "Picks kicking off " + k + " (your local date).");
+            if (k === tk) todayBtn = b;
+          });
+          if (!RAIL_CENTERED && todayBtn && dates.size > 1) {
+            RAIL_CENTERED = true;
+            rail.scrollLeft = Math.max(0, todayBtn.offsetLeft - rail.clientWidth / 2);
+          } else rail.scrollLeft = keep;
         }
 
         function emptyState() {
@@ -2033,28 +2448,14 @@
             : "—";
           const beat = sharpOk && perf.sharp_beat_close_rate != null
             ? (Number(perf.sharp_beat_close_rate) * 100).toFixed(0) + "%" : "—";
-          const allClv = perf.stake_weighted_clv_log == null ? "—"
-            : (clvFromLog(perf.stake_weighted_clv_log) >= 0 ? "+" : "") +
-              clvFromLog(perf.stake_weighted_clv_log).toFixed(1) + "%";
-          // The blended all-closes CLV is INDICATIVE ONLY. The payload flags it
-          // non-evidential (perf.blended_clv_evidential === false): it mixes
-          // consensus-anchored + poll-time fallback closes that are NOT
-          // independent sharp evidence. Surface it dim, as context, with an
-          // explicit non-evidential tooltip — never as the evidence of edge
-          // (that is the sharp headline above). The flag is structural; treat
-          // anything but true as non-evidential so a missing flag fails to the
-          // honest (dim) side.
-          const blendedEvidential = perf.blended_clv_evidential === true;
-          const allClvTitle = blendedEvidential ? ""
-            : "Indicative only — blends consensus + poll-time fallback closes that are " +
-              "NOT independent sharp evidence. Not the evidence of edge; see the sharp " +
-              "stake-weighted CLV headline above.";
 
+          // ONE CLV altitude on the hero: the sharp headline above. The blended
+          // all-closes figure (indicative, non-evidential) now lives only in
+          // the Evidence-quality close audit — see renderClvQuality.
           addStat(stats, beat, "Beat close · sharp", stale, false);
           addStat(stats, String(perf.n_settled), "Settled", stale, false);
           addStat(stats, record, "Record W-L-P", stale, false);
           addStat(stats, pnlText, "P&L / ROI · units", stale, isFinite(pnl) && pnl < 0);
-          addStat(stats, allClv, "All-closes CLV · context · indicative", stale, false, true, allClvTitle);
 
           if (stale) {
             heroSub.textContent += " · STALE — /performance failing, frozen at " +
@@ -2308,7 +2709,7 @@
           const tr = document.createElement("tr");
           if (dimmed) tr.className = "dimrow";
           td(tr, label);
-          if (!agg) { const c = td(tr, "no data", "evinsuf"); c.colSpan = 6; tbody.appendChild(tr); return; }
+          if (!agg) { const c = td(tr, "no data", "evinsuf"); c.colSpan = 5; tbody.appendChild(tr); return; }
           td(tr, String(Number(agg.n_settled) || 0), "r");
           td(tr, nPending == null ? "—" : String(nPending), "r");
           const won = Number(agg.won) || 0, lost = Number(agg.lost) || 0;
@@ -2318,16 +2719,15 @@
           td(tr, isFinite(pnl) ? (pnl >= 0 ? "+" : "") + pnl.toFixed(2) : "—", "r");
           const minN = agg.min_headline_n || 50;
           td(tr, agg.roi == null ? (agg.roi_status === "insufficient" ? "n<" + minN : "—") : spct(agg.roi), "r");
-          const clvCell = td(tr, agg.stake_weighted_clv_log == null ? "—"
-            : (clvFromLog(agg.stake_weighted_clv_log) >= 0 ? "+" : "") + clvFromLog(agg.stake_weighted_clv_log).toFixed(1) + "%", "r");
-          clvCell.title = "Indicative only — blends all close types; the sharp headline is the evidence figure.";
+          // (the per-tier CLV column was removed: it repeated the indicative
+          // blended figure a third time — counts/record/P&L stay)
           tbody.appendChild(tr);
         }
         function renderTierSplit(perf) {
           const tbody = $("tier-rows"); tbody.replaceChildren();
           if (!perf) {
             const tr = document.createElement("tr");
-            const c = td(tr, "Could not load performance data.", "evinsuf"); c.colSpan = 7;
+            const c = td(tr, "Could not load performance data.", "evinsuf"); c.colSpan = 6;
             tbody.appendChild(tr); return;
           }
           aggRow(tbody, "Premium", perf, perf.n_pending, false);
@@ -2395,7 +2795,8 @@
           if (!q) {
             ["Trusted sharp CLV n", "Tautological closes excluded", "Circular closes excluded",
              "Fabricated closes excluded", "Settled without CLV", "Close source split",
-             "Close age p50 / p90", "Stale closes"].forEach((label) => row(label, "—"));
+             "Close age p50 / p90", "Stale closes",
+             "All-closes CLV · context · indicative"].forEach((label) => row(label, "—"));
             note.textContent = perf
               ? "Evidence-quality metrics not yet reported by this backend version — the close audit fills in after the next deploy."
               : "Evidence-quality metrics unavailable — GET /performance is failing.";
@@ -2426,6 +2827,23 @@
             row("Close age p50 / p90", "— · provenance accruing");
             row("Stale closes", "— · provenance accruing");
           }
+          // The blended all-closes CLV lives ONLY here (context, one place —
+          // never on the hero). The payload flags it non-evidential
+          // (perf.blended_clv_evidential === false): it mixes consensus-anchored
+          // + poll-time fallback closes that are NOT independent sharp evidence.
+          // Anything but true fails to the honest (non-evidential) side.
+          const allClv = perf.stake_weighted_clv_log == null ? "—"
+            : (clvFromLog(perf.stake_weighted_clv_log) >= 0 ? "+" : "") +
+              clvFromLog(perf.stake_weighted_clv_log).toFixed(1) + "%";
+          const blendedEvidential = perf.blended_clv_evidential === true;
+          const allTr = document.createElement("tr");
+          td(allTr, "All-closes CLV · context · indicative");
+          td(allTr, allClv, "r");
+          allTr.title = blendedEvidential ? ""
+            : "Indicative only — blends consensus + poll-time fallback closes that are " +
+              "NOT independent sharp evidence. Not the evidence of edge; the sharp " +
+              "stake-weighted CLV headline is.";
+          body.appendChild(allTr);
           note.textContent =
             "A tautological close re-encodes the pick-time price; a circular close was " +
             "priced by the pick's own book; a fallback close is the last poll-time " +
@@ -2486,7 +2904,11 @@
           setChip("sb-premium", "Premium " + live + " live", live > 0 ? "ok" : null);
           setChip("sb-shadow", "Shadow " + shadow);
           setChip("sb-open", "Open " + open);
-          $("nav-picks-n").textContent = String(live);
+          // F2: the PICKS badge renders ONLY when there are live premium picks
+          // — never a hardcoded 0, and the other sections carry no placeholder.
+          const navN = $("nav-picks-n");
+          navN.textContent = live > 0 ? String(live) : "";
+          navN.hidden = !(live > 0);
           const perf = LAST_PERF;
           if (perf) {
             const minN = perf.min_headline_n || 50;
@@ -2508,6 +2930,139 @@
             setChip("sb-roi", "ROI —");
             setChip("sb-clv", "CLV —");
           }
+          renderOverview();
+        }
+
+        // ===== OVERVIEW (default landing) ============================
+        // One screen composed ONLY from data already fetched (/picks,
+        // /performance, /health, /resolution/match-rate): trust strip, today's
+        // live premium picks, the sharp-CLV evidence state, recent auto-graded
+        // results, and a one-line funnel. Informational only — no new fetches.
+        function renderOverview() {
+          if (!$("ov-trust-body")) return;
+
+          // trust tile — can I act on what this page shows right now?
+          const trust = $("ov-trust-body"); trust.replaceChildren();
+          const kv = (k, v) => {
+            const d = document.createElement("div"); d.className = "kv";
+            const a = document.createElement("span"); a.textContent = k;
+            const b = document.createElement("span"); b.textContent = v;
+            d.append(a, b); trust.appendChild(d);
+          };
+          const staleNow = !$("stale-banner").hidden;
+          const verdict = LOAD_FAILED ? ["err", "OFFLINE"]
+            : HEALTH_DEGRADED ? ["err", "DEGRADED"]
+            : staleNow ? ["warn", "STALE"]
+            : LAST_OK ? ["ok", "OK"] : [null, "—"];
+          setChip("ov-trust-verdict", verdict[1], verdict[0]);
+          kv("Source freshness", ($("sb-fresh").textContent || "—").replace("Source Freshness", "").trim() || "—");
+          kv("Engine", $("eng-label").textContent || "—");
+          kv("Verified window", "≤ " + fmtDur(verifiedWindowMs()));
+          kv("Last refresh", LAST_OK ? fmtTime(LAST_OK) : "—");
+          kv("ROI (settled premium)", ($("sb-roi").textContent || "—").replace(/^ROI\s*/, ""));
+          kv("Sharp CLV", ($("sb-clv").textContent || "—").replace(/^CLV\s*/, ""));
+
+          // today tile — live premium picks, top 3 by confidence
+          const premLive = PICKS.filter((p) => tierOf(p) !== "volume").filter(inLiveTab);
+          const shadowOpen = PICKS.filter((p) => tierOf(p) === "volume" && p.status === "alerted").length;
+          const tk = todayKey();
+          const todayLive = premLive.filter((p) => p.starts_at != null && dkey(p.starts_at) === tk);
+          setChip("ov-today-count",
+            todayLive.length + " today · " + premLive.length + " live",
+            premLive.length ? "ok" : null);
+          const tb = $("ov-today-body"); tb.replaceChildren();
+          if (!premLive.length) {
+            const p0 = document.createElement("p"); p0.className = "ovnote";
+            p0.textContent = "No verified live premium picks right now. Nothing currently passes Premium gates; shadow candidates may still be tracked.";
+            tb.appendChild(p0);
+          } else {
+            premLive.slice().sort(SORT_KEYS.confidence).slice(0, 3).forEach((p) => {
+              const r = document.createElement("div"); r.className = "ovrow";
+              const t = document.createElement("span"); t.className = "t";
+              t.textContent = p.starts_at != null ? fmtLocal(p.starts_at) : "TBD";
+              const e = document.createElement("span"); e.className = "e";
+              e.textContent = p.event; e.title = p.event;
+              const s = document.createElement("span"); s.className = "s";
+              const eff = p.current_edge == null ? numOf(p.edge) : Number(p.current_edge);
+              s.textContent = p.selection + " @ " + odds2(p.decimal_odds) +
+                (isFinite(eff) ? " · edge " + spct(eff) : "");
+              r.append(t, e, s); tb.appendChild(r);
+            });
+            const go = document.createElement("button");
+            go.type = "button"; go.className = "rr-toggle"; go.style.marginTop = "8px";
+            go.textContent = "Open Picks →";
+            go.addEventListener("click", () => setView("picks"));
+            tb.appendChild(go);
+          }
+
+          // sharp-CLV evidence tile — same trust rules as the hero, never more
+          const cb = $("ov-clv-body"); cb.replaceChildren();
+          const perf = LAST_PERF;
+          const big = document.createElement("div"); big.className = "ovbig";
+          const cnote = document.createElement("p"); cnote.className = "ovnote";
+          if (!perf) {
+            big.textContent = "—"; big.classList.add("accruing");
+            cnote.textContent = "Could not load performance data.";
+          } else if (perf.sharp_status === "ok" && perf.sharp_stake_weighted_clv_log != null) {
+            const v = clvFromLog(perf.sharp_stake_weighted_clv_log);
+            big.textContent = (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
+            if (v < 0) big.style.color = "var(--neg)";
+            cnote.textContent = "Stake-weighted CLV over " + (perf.n_sharp_close || 0) +
+              " genuine sharp closes. " +
+              (perf.sharp_clv_significant === true
+                ? "Statistically above zero."
+                : "Live evidence not yet conclusive (CI includes 0).") +
+              " Informational — not a profit guarantee.";
+          } else {
+            big.textContent = (perf.n_sharp_close || 0) + " / " + (perf.min_headline_n || 50);
+            big.classList.add("accruing");
+            cnote.textContent = "CLV sample too small — the headline reports once " +
+              (perf.min_headline_n || 50) + " genuine sharp closes settle. " +
+              "Live evidence not yet conclusive.";
+          }
+          cb.append(big, cnote);
+
+          // recent auto-graded results tile (F5 surfacing)
+          const rb = $("ov-results-body"); rb.replaceChildren();
+          const graded = PICKS.filter((p) =>
+            (p.status === "settled" || (p.status === "alerted" && hasStarted(p))) &&
+            (p.outcome || p.provisional_outcome || p.score || p.scraped_score));
+          const recent = graded.filter((p) =>
+            p.starts_at != null && Date.now() - new Date(p.starts_at).getTime() < 48 * 3.6e6);
+          recent.sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at));
+          const nProv = recent.filter((p) => !p.outcome && p.provisional_outcome).length;
+          setChip("ov-results-count",
+            recent.length + " graded · 48h" + (nProv ? " · " + nProv + " provisional" : ""));
+          if (!recent.length) {
+            const p1 = document.createElement("p"); p1.className = "ovnote";
+            p1.textContent = "No graded results in the last 48h. Results are recorded automatically as fetched final scores arrive; manual entry is only the fallback.";
+            rb.appendChild(p1);
+          } else {
+            recent.slice(0, 4).forEach((p) => {
+              const r = document.createElement("div"); r.className = "ovrow";
+              const t = document.createElement("span"); t.className = "t";
+              t.textContent = fmtDay(p.starts_at);
+              const e = document.createElement("span"); e.className = "e";
+              e.textContent = p.event; e.title = p.event;
+              const s = document.createElement("span"); s.className = "s";
+              const oc = p.outcome || p.provisional_outcome;
+              s.textContent = (p.score || p.scraped_score || "—") + " · " +
+                (oc ? oc.replace("_", " ").toUpperCase() : "AWAITING") +
+                (!p.outcome && p.provisional_outcome ? " (provisional)" : "");
+              r.append(t, e, s); rb.appendChild(r);
+            });
+            const p2 = document.createElement("p"); p2.className = "ovnote";
+            p2.textContent = "Auto-graded from fetched scores — recorded automatically for calibration; verify before relying on it.";
+            rb.appendChild(p2);
+          }
+
+          // one-line funnel tile
+          $("ov-funnel-body").textContent =
+            GAMES.length + " fixtures priced · " + premLive.length + " premium live · " +
+            shadowOpen + " shadow tracked" +
+            (ARCHIVE && ARCHIVE.coverage_summary && typeof ARCHIVE.coverage_summary.headline === "string"
+              ? " · sharp anchors " + ARCHIVE.coverage_summary.headline
+              : "") + ".";
         }
 
         // ===== health chips + staleness + diagnostics ================
@@ -2516,9 +3071,12 @@
           c.textContent = text; if (tip) c.title = tip; return c;
         }
         function summarizeHealth(health, errLabel) {
+          LAST_HEALTH = health;
           const poll = $("chip-poll"), win = $("chip-window"), ing = $("ing-chips"), deps = $("chip-deps");
           if (!health) {
             HEALTH_DEGRADED = false;
+            setChip("diag-ingest-verdict", "UNKNOWN", "warn",
+              "GET /health failed — ingestion freshness cannot be assessed.");
             poll.className = "chip warn"; poll.textContent = "health: unavailable";
             poll.title = "GET /health failed (" + errLabel + ") — poll freshness cannot be assessed.";
             win.className = "chip"; win.textContent = "verified ≤ " + fmtDur(verifiedWindowMs());
@@ -2556,6 +3114,13 @@
                 : "Newest completed odds poll is beyond the freshness window — treat pick prices as stale.");
           }
           $("stale-banner").hidden = !stale;
+          // one-word verdict BEFORE detail (F3): degraded > stale > ok
+          setChip("diag-ingest-verdict",
+            HEALTH_DEGRADED ? "DEGRADED" : stale ? "STALE" : "OK",
+            HEALTH_DEGRADED ? "err" : stale ? "warn" : "ok",
+            HEALTH_DEGRADED ? "Engine reports degraded — the newest poll cycle is too old."
+              : stale ? "The newest completed odds poll is beyond the freshness window."
+              : "Newest odds poll is inside the value freshness window.");
           win.className = "chip"; win.textContent = "verified ≤ " + fmtDur(windowMs);
           win.title = MAX_ODDS_AGE_S !== null
             ? "Open picks count VERIFIED when re-priced within the value freshness window (" + MAX_ODDS_AGE_S + "s); beyond it they drop to UNVERIFIED."
@@ -2586,8 +3151,44 @@
           renderDiagnostics(health);
         }
 
+        // per-sport ingestion summary cards (phone-first) — the dense 8-col
+        // table stays available under the "Detail" disclosure (F3).
+        function renderSportCards(health) {
+          const box = $("diag-sport-cards"); if (!box) return;
+          box.replaceChildren();
+          if (!health) return;
+          const polls = health.polls || {};
+          Object.keys(polls).sort().forEach((sport) => {
+            const info = polls[sport] || {};
+            const snaps = Number(info.snapshots || 0);
+            const card = document.createElement("div"); card.className = "sportcard";
+            const head = document.createElement("div"); head.className = "sc-h";
+            const nm = document.createElement("b");
+            nm.textContent = SPORT_LABELS[sport] || sport;
+            const st = document.createElement("span");
+            st.className = "chip " + (info.degraded ? "err" : snaps > 0 ? "ok" : "warn");
+            st.textContent = info.degraded ? "DEGRADED" : snaps > 0 ? "OK" : "NO ODDS";
+            st.title = info.degraded
+              ? "Matches listed but ZERO odds parsed — check app logs."
+              : snaps > 0 ? "Odds captured this cycle."
+              : "No odds captured this cycle — nothing here can become a pick.";
+            head.append(nm, st); card.appendChild(head);
+            const kv = (k, v) => {
+              const d = document.createElement("div"); d.className = "kv";
+              const a = document.createElement("span"); a.textContent = k;
+              const b = document.createElement("span"); b.textContent = v;
+              d.append(a, b); card.appendChild(d);
+            };
+            kv("last cycle", rel(info.finished_at));
+            kv("odds / matches", snaps + " / " + (info.matches_found == null ? "—" : info.matches_found));
+            kv("picks", (Number(info.picks) || 0) + " premium · " + (Number(info.volume_picks) || 0) + " shadow");
+            box.appendChild(card);
+          });
+        }
+
         // per-sport Source Freshness table + the "why few premium picks" funnel
         function renderDiagnostics(health) {
+          renderSportCards(health);
           const tbody = $("src-rows"); tbody.replaceChildren();
           const note = $("src-note");
           if (!health) {
@@ -2654,6 +3255,12 @@
             parts.push("Sharp anchor coverage is unavailable or insufficient.");
           }
           el.textContent = parts.join(" ");
+          setChip("diag-funnel-verdict",
+            HEALTH_DEGRADED ? "DEGRADED" : premLive > 0 ? "OK" : "QUIET",
+            HEALTH_DEGRADED ? "err" : premLive > 0 ? "ok" : null,
+            HEALTH_DEGRADED ? "Ingestion is degraded — few or no picks is expected until it recovers."
+              : premLive > 0 ? "Premium picks are passing the gates right now."
+              : "No premium pick currently passes every gate — expected when edges are thin or odds are stale.");
         }
 
         // ===== games (fixtures priced, grouped by date + sport) ======
@@ -2665,16 +3272,9 @@
           return g.starts_at != null ? fmtDay(g.starts_at) : "Date TBD";
         }
         function renderGames() {
+          // (the sport-count chip row was removed — it restated the sport
+          // <select> right next to it; the select is the single control)
           const tbody = $("game-rows");
-          const sc = { soccer: 0, basketball: 0, tennis: 0, american_football: 0 };
-          for (const g of GAMES) {
-            const s = String(g.sport);
-            const k = s.startsWith("american_football") ? "american_football" : s.split("_")[0];
-            if (k in sc) sc[k] += 1;
-          }
-          $("chip-sports").textContent = "football " + sc.soccer + " · basketball " + sc.basketball +
-            " · tennis " + sc.tennis + " · Am.football " + sc.american_football;
-
           const sport = $("f-game-sport").value, q = $("f-game-search").value.trim().toLowerCase();
           const rows = GAMES.filter((g) =>
             (!sport || g.sport === sport || String(g.sport).startsWith(sport + "_")) &&
@@ -2807,6 +3407,14 @@
         function renderMatchDetail(a) {
           const el = $("match-detail");
           const tbody = $("match-rows"); tbody.replaceChildren();
+          if (!a || !Number(a.total)) {
+            setChip("diag-match-verdict", "—", null,
+              "No picks with a known kickoff graded yet.");
+          } else {
+            const r = Number(a.match_rate) || 0;
+            setChip("diag-match-verdict", r >= 0.5 ? "OK" : "LOW", r >= 0.5 ? "ok" : "warn",
+              "Strict cross-source match rate " + ratePct(a.match_rate) + " over the last 180d.");
+          }
           if (!a) { el.textContent = "—"; return; }
           const total = Number(a.total) || 0;
           el.textContent = total
@@ -2851,7 +3459,9 @@
             if (res.status === 401) { throw authRequired(); }
             if (!res.ok) throw new Error("HTTP " + res.status);
             ARCHIVE = await res.json(); ARCHIVE_LOADED = true; ARCHIVE_ERR = false;
-            setCoverageHeadline(ARCHIVE); if (ARCHIVE_OPEN) renderArchive();
+            setCoverageHeadline(ARCHIVE); renderMatchDetail(ARCHIVE);
+            renderOverview(); // funnel line picks up the coverage headline
+            if (ARCHIVE_OPEN) renderArchive();
           } catch (err) {
             // header shows the unavailable state; expanding the panel retries
             ARCHIVE_ERR = true;
@@ -2869,7 +3479,11 @@
         }
         const isTimeout = (e) => !!e && (e.name === "AbortError" || e.name === "TimeoutError");
         const errLabel = (e) => isTimeout(e) ? "no answer in " + FETCH_TIMEOUT_MS / 1000 + "s" : e.message;
-        function setEngine(ok, label) { $("eng").classList.toggle("down", !ok); $("eng-label").textContent = label; }
+        function setEngine(ok, label) {
+          $("eng").classList.toggle("down", !ok);
+          $("eng-label").textContent = label;
+          renderOverview(); // the trust tile mirrors the engine state
+        }
         const frozenAt = () => LAST_OK ? fmtTime(LAST_OK) : "page load (no data this session)";
 
         // 401 = session expiry: redirect ONCE, and raise a typed error so no
@@ -2967,9 +3581,9 @@
         // ===== wiring ===============================================
         // section navigation: the desktop top nav + the mobile bottom bar
         // drive the same ACTIVE_VIEW; both stay in sync.
-        const VIEW_IDS = ["picks", "games", "performance", "diagnostics"];
+        const VIEW_IDS = ["overview", "picks", "games", "performance", "diagnostics"];
         function setView(view) {
-          if (VIEW_IDS.indexOf(view) === -1) view = "picks";
+          if (VIEW_IDS.indexOf(view) === -1) view = "overview";
           ACTIVE_VIEW = view;
           VIEW_IDS.forEach((k) => { $("view-" + k).hidden = k !== view; });
           document.querySelectorAll("#viewnav button[data-view], #navbar button[data-view]").forEach((b) => {
@@ -3008,6 +3622,14 @@
         } catch (e) {}
         $("f-game-sport").addEventListener("change", renderGames);
         $("f-game-search").addEventListener("input", renderGames);
+        // F1 date navigation: hash → state on boot, picker + hash both drive it
+        SELECTED_DATE = parseHashDate();
+        if (SELECTED_DATE) { try { $("f-date").value = SELECTED_DATE; } catch (e) {} }
+        $("f-date").addEventListener("change", () => setDate($("f-date").value || null));
+        window.addEventListener("hashchange", () => {
+          const d = parseHashDate();
+          if (d !== SELECTED_DATE) setDate(d, true);
+        });
 
         function toggleBlock(btnId, panelId, onOpen) {
           const btn = $(btnId), panel = $(panelId);
@@ -3024,6 +3646,8 @@
           if (ARCHIVE_LOADED) renderArchive(); else if (!ARCHIVE_LOADING) loadArchive();
         });
         toggleBlock("toggle-games", "games-panel", () => { renderGames(); });
+        toggleBlock("toggle-legend", "legend-panel");
+        toggleBlock("toggle-srcdetail", "srcdetail-panel");
 
         $("btn-logout").addEventListener("click", () => {
           fetchWithTimeout("/logout", { method: "POST" }).finally(() => window.location.assign("/login"));
@@ -3059,10 +3683,11 @@
           else if (mq.addListener) mq.addListener(onMq);
         })();
 
-        // restore the last-open section (validated against the known views)
+        // restore the last-open section (validated against the known views);
+        // Overview is the default landing
         try {
           const savedView = localStorage.getItem("pt_view");
-          if (savedView && VIEW_IDS.indexOf(savedView) !== -1 && savedView !== "picks") setView(savedView);
+          if (savedView && VIEW_IDS.indexOf(savedView) !== -1 && savedView !== "overview") setView(savedView);
         } catch (e) {}
 
         // live countdowns + age-out: re-render every 30s so kickoff timers

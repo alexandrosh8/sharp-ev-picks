@@ -79,18 +79,18 @@ _LOGIN_HTML = """<!doctype html>
     <title>TAPE — sign in</title>
     <style>
       :root {
-        --bg: #100d09;
-        --surface-1: #16120c;
-        --surface-2: #1e1810;
-        --line: #2d2417;
-        --text: #ece2cf;
-        --dim: #b4a78f;
-        --faint: #8a7e67;
-        --pos: #4fc78d;
-        --neg: #e2554a;
-        --info: #d3a02f;
-        --radius: 3px;
-        --radius-sm: 3px;
+        --bg: #0d1014;
+        --surface-1: #12161c;
+        --surface-2: #171c23;
+        --line: #262d37;
+        --text: #e8ebef;
+        --dim: #a8b0ba;
+        --faint: #7d8590;
+        --pos: #3fb984;
+        --neg: #d95d52;
+        --info: #5d9bd4;
+        --radius: 4px;
+        --radius-sm: 4px;
         --font-display:
           ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
           monospace;
@@ -111,9 +111,9 @@ _LOGIN_HTML = """<!doctype html>
         padding: 24px;
         background:
           radial-gradient(820px 360px at 50% -10%,
-            rgba(79, 199, 141, 0.07), transparent 60%),
-          repeating-linear-gradient(0deg, transparent 0 23px, rgba(45, 36, 23, 0.28) 23px 24px),
-          repeating-linear-gradient(90deg, transparent 0 23px, rgba(45, 36, 23, 0.16) 23px 24px),
+            rgba(63, 185, 132, 0.07), transparent 60%),
+          repeating-linear-gradient(0deg, transparent 0 23px, rgba(38, 45, 55, 0.28) 23px 24px),
+          repeating-linear-gradient(90deg, transparent 0 23px, rgba(38, 45, 55, 0.16) 23px 24px),
           var(--bg);
       }
       .card {
@@ -169,7 +169,7 @@ _LOGIN_HTML = """<!doctype html>
         width: 100%;
         margin-top: 22px;
         cursor: pointer;
-        background: rgba(79, 199, 141, 0.10);
+        background: rgba(63, 185, 132, 0.10);
         color: var(--pos);
         border: 1px solid var(--pos);
         border-radius: var(--radius-sm);
@@ -179,7 +179,7 @@ _LOGIN_HTML = """<!doctype html>
         text-transform: uppercase;
         transition: background-color 120ms, box-shadow 120ms;
       }
-      button:hover { background: rgba(79, 199, 141, 0.18); box-shadow: 0 0 0 1px var(--pos); }
+      button:hover { background: rgba(63, 185, 132, 0.18); box-shadow: 0 0 0 1px var(--pos); }
       button:focus-visible { outline: 2px solid var(--pos); outline-offset: 2px; }
       button:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
       .err {
@@ -195,7 +195,7 @@ _LOGIN_HTML = """<!doctype html>
     </style>
   </head>
   <body>
-    <form class="card" id="login-form" autocomplete="off">
+    <form class="card" id="login-form" method="post" autocomplete="off">
       <div class="brand"><span class="mark">▌</span>TAPE<span class="tick">.</span></div>
       <div class="sub">picks terminal · sign in</div>
       <label for="u">Username</label>
@@ -459,18 +459,18 @@ _SETUP_HTML = """<!doctype html>
     <title>TAPE — first-run setup</title>
     <style>
       :root {
-        --bg: #100d09;
-        --surface-1: #16120c;
-        --surface-2: #1e1810;
-        --line: #2d2417;
-        --text: #ece2cf;
-        --dim: #b4a78f;
-        --faint: #8a7e67;
-        --pos: #4fc78d;
-        --neg: #e2554a;
-        --info: #d3a02f;
-        --radius: 3px;
-        --radius-sm: 3px;
+        --bg: #0d1014;
+        --surface-1: #12161c;
+        --surface-2: #171c23;
+        --line: #262d37;
+        --text: #e8ebef;
+        --dim: #a8b0ba;
+        --faint: #7d8590;
+        --pos: #3fb984;
+        --neg: #d95d52;
+        --info: #5d9bd4;
+        --radius: 4px;
+        --radius-sm: 4px;
         --font-display:
           ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
           monospace;
@@ -491,9 +491,9 @@ _SETUP_HTML = """<!doctype html>
         padding: 24px;
         background:
           radial-gradient(820px 360px at 50% -10%,
-            rgba(79, 199, 141, 0.07), transparent 60%),
-          repeating-linear-gradient(0deg, transparent 0 23px, rgba(45, 36, 23, 0.28) 23px 24px),
-          repeating-linear-gradient(90deg, transparent 0 23px, rgba(45, 36, 23, 0.16) 23px 24px),
+            rgba(63, 185, 132, 0.07), transparent 60%),
+          repeating-linear-gradient(0deg, transparent 0 23px, rgba(38, 45, 55, 0.28) 23px 24px),
+          repeating-linear-gradient(90deg, transparent 0 23px, rgba(38, 45, 55, 0.16) 23px 24px),
           var(--bg);
       }
       .card {
@@ -549,7 +549,7 @@ _SETUP_HTML = """<!doctype html>
         width: 100%;
         margin-top: 22px;
         cursor: pointer;
-        background: rgba(79, 199, 141, 0.10);
+        background: rgba(63, 185, 132, 0.10);
         color: var(--pos);
         border: 1px solid var(--pos);
         border-radius: var(--radius-sm);
@@ -559,7 +559,7 @@ _SETUP_HTML = """<!doctype html>
         text-transform: uppercase;
         transition: background-color 120ms, box-shadow 120ms;
       }
-      button:hover { background: rgba(79, 199, 141, 0.18); box-shadow: 0 0 0 1px var(--pos); }
+      button:hover { background: rgba(63, 185, 132, 0.18); box-shadow: 0 0 0 1px var(--pos); }
       button:focus-visible { outline: 2px solid var(--pos); outline-offset: 2px; }
       .hint { color: var(--faint); font-size: 10px; margin-top: 6px; letter-spacing: 0.02em; }
       .err {
@@ -575,7 +575,7 @@ _SETUP_HTML = """<!doctype html>
     </style>
   </head>
   <body>
-    <form class="card" id="setup-form" autocomplete="off">
+    <form class="card" id="setup-form" method="post" autocomplete="off">
       <div class="brand"><span class="mark">▌</span>TAPE<span class="tick">.</span></div>
       <div class="sub">first run · create your admin password</div>
       <label for="u">Username</label>
