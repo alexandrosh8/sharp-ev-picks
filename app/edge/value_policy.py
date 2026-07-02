@@ -143,6 +143,16 @@ class ValuePolicy:
     # the consensus-vs-median comparisons, NOT premium (sharp-anchored) pricing.
     # See app/edge/value._logit_consensus_anchor (the pure implementation).
     consensus_logit_pool: bool = False
+    # EXCHANGE ANCHOR LIQUIDITY FLOOR (£ matched best-back size — the unit the
+    # dedicated Betfair capture writes into odds_snapshots.liquidity). When
+    # > 0, an exchange row (Betfair/Smarkets/Matchbook) with KNOWN liquidity
+    # below the floor on any selection must NOT serve as the named sharp
+    # anchor (falls through to the next anchor / consensus — fail-closed
+    # anchoring). UNKNOWN (None) liquidity stays anchor-ELIGIBLE: the dominant
+    # main-scrape Betfair rows carry liquidity=None and provide 59/62
+    # Betfair-anchored events. 0.0 = gate OFF (the inert empty-policy default);
+    # set from Settings.value_exchange_min_liquidity at the composition root.
+    exchange_min_liquidity: float = 0.0
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:

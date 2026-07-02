@@ -301,16 +301,21 @@ def _line_token(line: float) -> str:
 
 
 def _signed_token(line: float) -> str:
-    """Signed AH line token for market_detail: -1.5->'-1_5', 0.5->'+0_5'."""
-    return f"{'-' if line < 0 else '+'}{_line_token(line)}"
+    """Signed AH line token for market_detail matching the OddsPortal JSON
+    feed's wildcard vocabulary (the feed key's line segment is ``(-?\\d+...)``
+    so a POSITIVE line carries NO '+'): -1.5->'-1_5', 0.5->'0_5', 0.0->'0_0'.
+    (WP5 fix: the old '+'-signed token, e.g. 'asian_handicap_+1_5', could never
+    share a devig group with the feed's 'asian_handicap_1_5'.)"""
+    return f"{'-' if line < 0 else ''}{_line_token(line)}"
 
 
 def _games_line_token(line: float) -> str:
     """OddsPortal SOFT "_games" line token — mirrors the JSON feed's market_detail
     EXACTLY: ``f"{line:g}"`` with '.'->'_', a leading '-' for negatives and NO '+'
     for positives (220.5->'220_5', -7.5->'-7_5', 7.5->'7_5'). Distinct from
-    ``_signed_token`` (which adds a '+'): the soft feed key is ``(-?\\d+...)`` so
-    a positive line carries no sign. Used so Arcadia basketball totals/spreads
+    ``_signed_token`` only in integer-line formatting (3.0->'3' here vs '3_0'
+    there); both are unsigned for positives — the soft feed key is
+    ``(-?\\d+...)``. Used so Arcadia basketball totals/spreads
     share the soft pick's (market, market_detail) devig group; the signed line is
     preserved verbatim (never abs / never flipped)."""
     return f"{line:g}".replace(".", "_")
@@ -484,8 +489,9 @@ def extract_spread_quotes(
 
     ``sport`` selects the market_detail namespace so the snapshot groups with the
     matching soft pick: basketball uses the soft "_games" namespace
-    ("asian_handicap_games_-7_5", positive lines carry NO '+'); soccer/other keep
-    the bare "asian_handicap_-1_5" (positive lines carry a '+')."""
+    ("asian_handicap_games_-7_5"); soccer/other keep the bare
+    "asian_handicap_-1_5". BOTH are unsigned for positive lines — the feed key
+    segment is ``(-?\\d+...)`` so '+' can never appear (WP5 fix)."""
     games_ns = sport in _GAMES_DETAIL_SPORTS
     quotes: list[MarketQuote] = []
     for market in markets:

@@ -424,9 +424,11 @@ def test_extract_soccer_detail_unchanged_with_explicit_sport() -> None:
     assert all(s.market_detail == "over_under_2_5" for s in totals[0].snapshots)
     spreads = extract_spread_quotes(matchups, [_spread_market(555, -1.5)], now=NOW, sport="soccer")
     assert all(s.market_detail == "asian_handicap_-1_5" for s in spreads[0].snapshots)
-    # Positive soccer home line keeps the bare-namespace "+" (_signed_token).
+    # Positive soccer home line is UNSIGNED, matching the JSON feed's wildcard
+    # key vocabulary (WP5 fix: the old "+"-signed 'asian_handicap_+0_5' never
+    # grouped with the feed's 'asian_handicap_0_5').
     pos = extract_spread_quotes(matchups, [_spread_market(555, 0.5)], now=NOW, sport="soccer")
-    assert all(s.market_detail == "asian_handicap_+0_5" for s in pos[0].snapshots)
+    assert all(s.market_detail == "asian_handicap_0_5" for s in pos[0].snapshots)
 
 
 def test_extract_market_quotes_basketball_threads_games_namespace() -> None:

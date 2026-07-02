@@ -744,17 +744,20 @@ def test_exchange_liquidity_gate_off_by_default_keeps_exchange_anchor() -> None:
     assert res is not None and res[0] == "betfair exchange"
 
 
-def test_exchange_liquidity_gate_demotes_thin_or_unknown_liquidity() -> None:
-    # build #3: floor > 0 + liquidity below floor (or absent) -> Betfair does NOT
-    # earn 'sharp'; the anchor falls back to the consensus median.
+def test_exchange_liquidity_gate_demotes_known_thin_keeps_unknown() -> None:
+    # WP5: floor > 0 + KNOWN liquidity below floor -> Betfair does NOT earn
+    # 'sharp'; the anchor falls back to the consensus median. UNKNOWN (None /
+    # absent) liquidity stays anchor-ELIGIBLE — the dominant main-scrape
+    # Betfair rows carry liquidity=None and anchor 59/62 Betfair events
+    # (memory: do-not-remove-main-scrape-betfair); only known-thin is rejected.
     from app.edge.value import CONSENSUS_ANCHOR, anchor_fair_probs
 
     thin = {s: {"betfair exchange": 5.0} for s in _EX_PRICES}  # below a 100 floor
     res = anchor_fair_probs(_EX_PRICES, liquidity=thin, exchange_min_liquidity=100.0)
     assert res is not None and res[0] == CONSENSUS_ANCHOR
-    # unknown liquidity (no map) also demotes the exchange under a positive floor
+    # unknown liquidity (no map) stays eligible under a positive floor
     res2 = anchor_fair_probs(_EX_PRICES, exchange_min_liquidity=100.0)
-    assert res2 is not None and res2[0] == CONSENSUS_ANCHOR
+    assert res2 is not None and res2[0] == "betfair exchange"
 
 
 def test_exchange_liquidity_gate_keeps_liquid_exchange() -> None:

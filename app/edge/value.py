@@ -618,15 +618,20 @@ def _named_sharp_anchor(
     anchor) is unchanged — only the returned fair MAGNITUDE moves, and only on
     commissioned (exchange) anchors; Pinnacle (no commission) is bit-identical.
 
-    Build #3 Phase 1 (default OFF): when ``exchange_min_liquidity > 0``, an EXCHANGE
-    candidate (Betfair/Smarkets/Matchbook) must show matched ``liquidity`` >= that
-    floor on EVERY selection to earn 'sharp' grade — a thin / just-firmed / unknown-
-    liquidity exchange line is not trustworthy-sharp (the Welwalo lesson). At the
-    default floor 0 the gate is inert and behaviour is bit-for-bit unchanged.
-    NOTE: no Settings field feeds this today (only the CAPTURE-time floor
-    BETFAIR_EXCHANGE_MIN_LIQUIDITY exists), so it is inert IN PRODUCTION — live
-    picks are liquidity-gated at capture, not here. Wire VALUE_EXCHANGE_MIN_LIQUIDITY
-    at the composition root to activate, or drop this param path if never used."""
+    Exchange liquidity floor (WP5, wired via VALUE_EXCHANGE_MIN_LIQUIDITY ->
+    ValuePolicy.exchange_min_liquidity -> event_fair_probs): when
+    ``exchange_min_liquidity > 0``, an EXCHANGE candidate (Betfair/Smarkets/
+    Matchbook) with KNOWN matched ``liquidity`` (£ best-back size, the unit the
+    dedicated Betfair capture writes into odds_snapshots.liquidity) BELOW the
+    floor on ANY selection must NOT serve as the named sharp anchor — a
+    known-thin / just-firmed exchange line is not trustworthy-sharp (the
+    Welwalo lesson); the market falls through to the next sharp book /
+    consensus. UNKNOWN (None / absent) liquidity stays anchor-ELIGIBLE: the
+    dominant main-scrape Betfair rows carry liquidity=None (only the dedicated
+    gated capture sets it) and anchor 59/62 Betfair events (.claude memory:
+    do-not-remove-main-scrape-betfair) — rejecting NULL would gut Betfair
+    coverage. Known-thin is rejected; unknown stays as today. At floor 0 the
+    gate is inert and behaviour is bit-for-bit unchanged."""
     raw_by_norm: dict[str, str] = {}
     for s in selections:
         for b in prices[s]:
@@ -646,17 +651,19 @@ def _named_sharp_anchor(
         if not complete:
             continue
         if exchange_min_liquidity > 0.0 and _norm(pref) in commissions:
-            # Exchange anchor: require matched liquidity >= floor on EVERY selection.
-            # Unknown (None) liquidity does NOT qualify a 'sharp' exchange anchor.
-            ok = liquidity is not None
+            # Exchange anchor floor: a selection with KNOWN liquidity BELOW the
+            # floor disqualifies the anchor (known-thin is rejected — fail
+            # closed for anchoring). UNKNOWN (None/absent) liquidity stays
+            # eligible: main-scrape Betfair rows carry liquidity=None and are
+            # the dominant Betfair anchor source (see docstring).
+            known_thin = False
             for s in selections:
-                if not ok:
-                    break
                 sel_liq = liquidity.get(s) if liquidity is not None else None
                 lq = _lookup(sel_liq, _norm(pref)) if sel_liq is not None else None
-                if lq is None or lq < exchange_min_liquidity:
-                    ok = False
-            if not ok:
+                if lq is not None and lq < exchange_min_liquidity:
+                    known_thin = True
+                    break
+            if known_thin:
                 continue
         # Gate on NET overround (membership unchanged); devig the GROSS odds.
         if 0.0 <= _overround(net_odds) <= max_overround:

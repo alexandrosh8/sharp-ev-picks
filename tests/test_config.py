@@ -466,11 +466,15 @@ def test_premium_adjustment_knobs_default_to_current_behavior() -> None:
     assert s.value_min_books_per_market == ""
     assert s.stake_max_drawdown is None
     assert s.stake_max_drawdown_probability is None
-    # The premium-adjustment knobs stay no-op; the only non-empty defaults are two
+    # The premium-adjustment knobs stay no-op; the only non-empty defaults are
     # default-ON SAFETY GUARDS (not tunable knobs): the max_edge data-error ceiling
-    # (0.20) and the moneyline odds ceiling (5.0 — drops the CLV-negative 1X2
-    # longshot band, research 2026-06-30).
-    assert value_policy(s) == ValuePolicy(max_edge=0.20, moneyline_max_odds=5.0)
+    # (0.20), the moneyline odds ceiling (5.0 — drops the CLV-negative 1X2
+    # longshot band, research 2026-06-30) and the exchange anchor liquidity floor
+    # (50.0 £ best-back — WP5: a KNOWN-thin exchange line never anchors; unknown
+    # liquidity stays eligible so main-scrape Betfair coverage is untouched).
+    assert value_policy(s) == ValuePolicy(
+        max_edge=0.20, moneyline_max_odds=5.0, exchange_min_liquidity=50.0
+    )
     stakes = stake_policy(s)
     assert stakes.max_drawdown is None
     assert stakes.max_drawdown_probability is None

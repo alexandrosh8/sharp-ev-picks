@@ -973,7 +973,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 len(extra),
             )
     grouped = group_market_prices(anchor_snapshots)
-    fair = event_fair_probs(grouped, deps.devig_method, deps.value_policy)
+    fair = event_fair_probs(
+        grouped,
+        deps.devig_method,
+        deps.value_policy,
+        liquidity_by_market=group_market_liquidity(anchor_snapshots),
+    )
     await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
 
@@ -1661,6 +1666,27 @@ def group_market_prices(snapshots: Sequence[OddsSnapshotIn]) -> GroupedMarkets:
     return out
 
 
+LiquidityByMarket = dict[tuple[str, Market, str | None], dict[str, dict[str, float]]]
+
+
+def group_market_liquidity(snapshots: Sequence[OddsSnapshotIn]) -> LiquidityByMarket:
+    """KNOWN matched liquidity per market, keyed like ``group_market_prices``:
+    {(event_id, market, market_detail): {selection: {book: liquidity}}}.
+
+    Only snapshots with a KNOWN (non-None) ``liquidity`` (£ best-back size —
+    today the dedicated Betfair capture) contribute; the dominant main-scrape
+    rows carry liquidity=None and are deliberately ABSENT here, which keeps
+    them anchor-eligible under the WP5 exchange floor (known-thin is rejected,
+    unknown stays as before — see app/edge/value._named_sharp_anchor)."""
+    out: LiquidityByMarket = {}
+    for snap in snapshots:
+        if snap.liquidity is None:
+            continue
+        key = (snap.event_id, snap.market, snap.market_detail)
+        out.setdefault(key, {}).setdefault(snap.selection, {})[snap.bookmaker] = snap.liquidity
+    return out
+
+
 # Markets whose outcomes are mutually exclusive and exhaustive — direct
 # anchor devig of one book is sound. Loader config guarantees SPREADS groups
 # are half-line AH (no pushes) or 3-way European handicap. Double chance is
@@ -1680,6 +1706,7 @@ def event_fair_probs(
     value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
     *,
     fell_back_out: dict[tuple[str, Market, str | None], bool] | None = None,
+    liquidity_by_market: LiquidityByMarket | None = None,
 ) -> EventFairProbs:
     """Trustworthy (anchor_book, selection->fair) per (event, market, line).
 
@@ -1690,6 +1717,12 @@ def event_fair_probs(
     policy reproduces the global-method, median-consensus behavior exactly.
     Both knobs flow through this single chokepoint so the pick pipeline and the
     CLV true-up always price fill and close with the identical method.
+
+    ``liquidity_by_market`` (``group_market_liquidity``) carries KNOWN matched
+    exchange liquidity so ``value_policy.exchange_min_liquidity`` can reject a
+    KNOWN-thin exchange anchor (WP5); None (the default, and every market
+    absent from the map) leaves anchor selection unchanged — the unknown-
+    liquidity main-scrape rows stay eligible.
 
     When ``fell_back_out`` is provided it is POPULATED (additively, by the same
     keys as the return) with the P2-2 devig-fallback flag per market — True when
@@ -1705,6 +1738,12 @@ def event_fair_probs(
                 prices,
                 devig_method=devig_method_for(value_policy, str(market), detail, devig_method),
                 consensus_logit_pool=value_policy.consensus_logit_pool,
+                liquidity=(
+                    liquidity_by_market.get((event_id, market, detail))
+                    if liquidity_by_market is not None
+                    else None
+                ),
+                exchange_min_liquidity=value_policy.exchange_min_liquidity,
             )
             if result is not None:
                 book, fair, fell_back = result

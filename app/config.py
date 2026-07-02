@@ -504,6 +504,19 @@ class Settings(BaseSettings):
     # Scoped to H2H — OU/AH rarely price this high, so they are untouched. Set a
     # large value (e.g. 1000) to effectively disable.
     value_moneyline_max_odds: float = Field(default=5.0, gt=1.0)
+    # EXCHANGE ANCHOR LIQUIDITY FLOOR (WP5) — £ matched best-back size, the
+    # unit the dedicated Betfair capture writes into odds_snapshots.liquidity
+    # (app/ingestion/betfair_api.py "best-back available £"). An exchange row
+    # whose KNOWN liquidity sits below this floor on any selection must NOT
+    # serve as the named sharp anchor (the market falls through to the next
+    # sharp book / consensus — fail-closed anchoring). UNKNOWN (NULL)
+    # liquidity stays anchor-eligible: the dominant main-scrape Betfair rows
+    # carry liquidity=NULL and provide 59/62 Betfair-anchored events, so the
+    # floor only rejects KNOWN-thin lines. Distinct from the CAPTURE-time
+    # floor BETFAIR_EXCHANGE_MIN_LIQUIDITY (10.0 — gates £0/dust rows at
+    # ingestion): 50.0 here demands a real, firmed market before an exchange
+    # price is trusted as the SHARP fair-value anchor. 0 = gate off.
+    value_exchange_min_liquidity: float = Field(default=50.0, ge=0.0)
 
     # --- Line-movement / steam-awareness gate (app/edge/steam.py) ------------
     # Guards the dominant soft-book FALSE POSITIVE: a phantom edge from a moving
@@ -1353,6 +1366,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         ah_max_odds=settings.value_ah_max_odds,
         ah_max_sharp_soft_ratio=settings.value_ah_max_sharp_soft_ratio,
         moneyline_max_odds=settings.value_moneyline_max_odds,
+        exchange_min_liquidity=settings.value_exchange_min_liquidity,
     )
 
 

@@ -485,14 +485,36 @@ def _markers_conflict(home: str, away: str, cand_home: str, cand_away: str) -> b
     ) or distinguishing_markers(away) != distinguishing_markers(cand_away)
 
 
+def _tennis_initial(name: str) -> str | None:
+    """The trailing first-initial when ``name`` has the tennis canonical shape
+    ``"surname f"`` produced by tennis_names.canonical_tennis_name (two or more
+    tokens, the LAST a single alphabetic letter) — else None. Team-sport names
+    carry no trailing single-letter token, so they never yield an initial."""
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None
+    last = tokens[-1]
+    return last if len(last) == 1 and last.isalpha() else None
+
+
 def _base_name_ok(a: str, b: str) -> bool:
     """Two-tier fuzzy accept on marker-stripped base names: exact canonical-base
     equality, OR (JW>=0.92 AND token_sort>=90) with NO disambiguating-token-only
-    difference. Returns False in the REVIEW band and on a disambiguating diff."""
+    difference. Returns False in the REVIEW band and on a disambiguating diff.
+    HARD VETO (WP5): two tennis-canonical-shaped names whose first-initials
+    differ are distinct players regardless of similarity scores."""
     if not a or not b:
         return False
     if a == b:
         return True
+    # Tennis first-initial veto: siblings ('cerundolo f' vs 'cerundolo j')
+    # score JW 0.964 / token_sort 90.9 — above BOTH accept tiers — so when both
+    # names have the tennis canonical shape ("surname f"), a first-initial
+    # mismatch is a categorical contradiction: different players, never a
+    # fuzzy call. Team-sport names have no single-letter token (no veto).
+    initial_a, initial_b = _tennis_initial(a), _tennis_initial(b)
+    if initial_a is not None and initial_b is not None and initial_a != initial_b:
+        return False
     # Disambiguating-token veto: if the two base names differ ONLY by tokens that
     # distinguish clubs (United/City/Sociedad/...), they are different clubs.
     diff = set(a.split()) ^ set(b.split())
