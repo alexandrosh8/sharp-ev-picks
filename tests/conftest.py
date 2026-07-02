@@ -70,3 +70,15 @@ def _isolate_login_throttle() -> None:
     from app.api.routes import reset_login_throttle
 
     reset_login_throttle()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settlement_feed_cache() -> None:
+    """The settle-feed TTL cache (WP7) is module-global in-process state keyed
+    by feed config; an earlier test's SUCCESSFUL fetch would otherwise be
+    served from cache to a later test that mocks the feeds down (e.g. the
+    refuses-when-providers-empty invariant settled a pick from cached scores
+    in CI, where the DB-backed settlement tests actually run)."""
+    from app.settlement.engine import clear_feed_cache
+
+    clear_feed_cache()
