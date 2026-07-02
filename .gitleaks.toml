@@ -22,3 +22,11 @@ paths = [
   '''(^|/)\.env$''',
   '''(^|/)\.env\.(local|dev|development|prod|production|staging|test)$''',
 ]
+# FALSE POSITIVE (CI #427): `api_best_back_size=sizes.get(sel.selection)` in the
+# Betfair anchor-verdict constructor trips generic-api-key ("api_…=….get(…)").
+# It is a kwarg carrying the exchange's displayed back-depth — market data, not
+# a credential. Allowlist the exact code pattern, nothing wider: every other
+# generic-api-key match in any file still fails the scan.
+regexes = [
+  '''api_best_back_size=sizes\.get\(sel\.selection\)''',
+]
