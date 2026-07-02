@@ -54,6 +54,7 @@ from app.storage.repositories import (
     performance_report,
     pinnacle_archive_capture_by_sport,
     shadow_match_rate_outcomes,
+    source_link_metrics,
 )
 
 logger = logging.getLogger(__name__)
@@ -1016,6 +1017,10 @@ async def resolution_match_rate(
         betfair_capture=betfair_inline_capture,
         pinnacle_capture=pinnacle_capture,
     ).as_dict()
+    # Cross-source LINK observability (event_source_links + match_review_queue):
+    # auto-linked count, per-source averages, weak links (<0.95 confidence), and
+    # the review-queue depth. Null-safe — empty tables yield zeros/empty maps.
+    report["links"] = await source_link_metrics(session)
     return report
 
 

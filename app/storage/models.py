@@ -280,6 +280,17 @@ class Pick(Base):
     # finding CLV-3) is possible without re-deriving it. NULL = model-strategy
     # pick or pre-column row.
     anchor_book: Mapped[str | None] = mapped_column(String(64))
+    # MATCH-CONFIDENCE provenance of the pick-time sharp anchor (observability
+    # only — never gates minting). For a Pinnacle (cross-source, fuzzy-matched)
+    # anchor: min per-side Jaro-Winkler of the accepted candidate in [0,1] with
+    # method 'exact_canonical'/'jw_two_tier' ('slug_' prefix on the OddsPortal
+    # slug-fallback path; 'unscored' = pinnacle-typed pick whose provenance was
+    # unavailable — recorded honestly as NULL confidence, never fabricated 1.0).
+    # For an inline Betfair/Smarkets anchor (same canonical event, no pick-time
+    # match): 1.0 / 'inline_betfair_canonical'. NULL/NULL = consensus anchor,
+    # model-strategy pick, or pre-column row.
+    anchor_match_confidence: Mapped[Decimal | None] = mapped_column(PROB)
+    anchor_match_method: Mapped[str | None] = mapped_column(String(32))
     # Compact, human-debuggable POLICY FINGERPRINT of the live value-strategy
     # policy that minted this pick (H3): active thresholds (value_min_edge /
     # volume_min_edge / min_odds), devig method, require-sharp-anchor on/off, the
@@ -455,6 +466,80 @@ class DashboardCredential(Base):
     session_secret: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(onupdate=func.now())
+
+
+class EventSourceLink(Base):
+    """Persisted cross-source event identity: one row per CONFIRMED link between
+    a canonical (OddsPortal) event and a per-source stable id (Pinnacle arcadia
+    matchup id, Betfair API event id). Seeded from live matcher confirmations —
+    the matcher itself stays authoritative and is NOT gated by this table
+    (observability: makes matches stable, auditable, and reviewable). Re-links
+    upsert in place (matched_at/confidence refresh); ``active`` is a soft-delete
+    for a human reviewer to retire a wrong link without losing the audit trail.
+    Never breaks anchor resolution: writers wrap failures and log type-only."""
+
+    __tablename__ = "event_source_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "source_event_id",
+            "canonical_event_id",
+            name="uq_event_source_links_source_event",
+        ),
+        Index("idx_event_source_links_canonical", "canonical_event_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    canonical_event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
+    source: Mapped[str] = mapped_column(String(32))  # 'pinnacle_arcadia' | 'betfair_api'
+    source_event_id: Mapped[str] = mapped_column(String(128))  # per-source stable id
+    source_market_id: Mapped[str | None] = mapped_column(String(64))  # e.g. Betfair market_id
+    confidence_score: Mapped[Decimal] = mapped_column(PROB)  # matcher min-side JW in [0,1]
+    match_method: Mapped[str] = mapped_column(String(32))  # exact_canonical/jw_two_tier/slug_*
+    matched_at: Mapped[datetime]  # last time the live matcher confirmed this link
+    active: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    # Raw source-side identity at match time (audit trail for a human reviewer).
+    raw_sport: Mapped[str | None] = mapped_column(String(64))
+    raw_league: Mapped[str | None] = mapped_column(String(128))
+    raw_home: Mapped[str | None] = mapped_column(String(128))
+    raw_away: Mapped[str | None] = mapped_column(String(128))
+    raw_start_time_utc: Mapped[datetime | None]
+    evidence_json: Mapped[dict[str, Any] | None]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class MatchReviewQueue(Base):
+    """Borderline matcher REJECTS captured for human review — a TAP on the
+    hardened matcher's silently-discarded bands (JW review band 0.84<=JW<0.92,
+    token-sort misses, ambiguity-margin and kickoff-window rejects). The match
+    itself still fails exactly as before: this queue is observability, NEVER a
+    gate, and recovery of a near-miss goes through reviewed per-club aliases
+    (aliases_seed.json), never a threshold drop. Idempotent by the unique key,
+    so re-running the matcher enqueues each (source event, candidate, reason)
+    once (ON CONFLICT DO NOTHING at write time)."""
+
+    __tablename__ = "match_review_queue"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "source_event_id",
+            "candidate_canonical_event_id",
+            "reason",
+            name="uq_match_review_queue_dedupe",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    source: Mapped[str] = mapped_column(String(32))
+    source_event_id: Mapped[str] = mapped_column(String(128))
+    source_market_id: Mapped[str | None] = mapped_column(String(64))
+    candidate_canonical_event_id: Mapped[int | None] = mapped_column(ForeignKey("events.id"))
+    confidence_score: Mapped[Decimal] = mapped_column(PROB)  # rejected candidate's min-side JW
+    reason: Mapped[str] = mapped_column(String(64))  # jw_below_accept / ambiguity_margin / ...
+    evidence_json: Mapped[dict[str, Any] | None]  # name forms + scores + kickoff delta
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    reviewed_at: Mapped[datetime | None]
+    review_status: Mapped[str] = mapped_column(String(16), server_default="pending")
 
 
 class PickLineDrift(Base):

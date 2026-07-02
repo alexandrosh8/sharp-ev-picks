@@ -29,7 +29,9 @@ from app.settlement.outcomes import provisional_result
 from app.storage.models import (
     DashboardCredential,
     Event,
+    EventSourceLink,
     League,
+    MatchReviewQueue,
     ModelVersion,
     OddsSnapshot,
     Pick,
@@ -455,6 +457,14 @@ async def latest_picks_with_events(
             # consensus) — live CLV stratification key; null = model pick
             # or pre-column row
             "anchor_type": p.anchor_type,
+            # anchor MATCH-CONFIDENCE provenance (observability): matcher
+            # min-side JW in [0,1] (string-serialized NUMERIC, like the other
+            # Decimal fields) + the accept method. null = consensus/model pick
+            # or pre-column row.
+            "anchor_match_confidence": (
+                str(p.anchor_match_confidence) if p.anchor_match_confidence is not None else None
+            ),
+            "anchor_match_method": p.anchor_match_method,
             # sport of the pick (soccer/basketball/tennis/american_football) +
             # human label, so the multi-sport picks table can badge each row and
             # tag UNVALIDATED (experimental) sports honestly.
@@ -1697,6 +1707,207 @@ async def recent_odds_trajectories(
     return out
 
 
+@dataclass(frozen=True)
+class SourceLinkByRef:
+    """One confirmed cross-source link keyed by the CANONICAL event's
+    external_ref (resolved to events.id at write time). Neutral shape so
+    ingestion modules can emit links without importing the ORM."""
+
+    source: str
+    source_event_id: str
+    canonical_external_ref: str
+    confidence: float
+    method: str
+    matched_at: datetime
+    source_market_id: str | None = None
+    raw_sport: str | None = None
+    raw_league: str | None = None
+    raw_home: str | None = None
+    raw_away: str | None = None
+    raw_start_time_utc: datetime | None = None
+    evidence: dict[str, Any] | None = None
+
+
+async def upsert_event_source_links(session: AsyncSession, links: Sequence[SourceLinkByRef]) -> int:
+    """Bulk-upsert confirmed cross-source links (observability — NEVER gates
+    matching). Canonical refs that do not resolve to an events row yet are
+    skipped (nothing to link against). ON CONFLICT refreshes matched_at +
+    confidence (+method), so a re-confirmed link stays one row. Returns the
+    number of rows written. Raises on DB failure — callers that must never
+    break (anchor resolution) wrap this themselves."""
+    if not links:
+        return 0
+    refs = sorted({link.canonical_external_ref for link in links})
+    id_rows = (
+        await session.execute(
+            select(Event.external_ref, Event.id).where(Event.external_ref.in_(refs))
+        )
+    ).all()
+    id_by_ref = {ref: eid for ref, eid in id_rows}
+    values = [
+        {
+            "canonical_event_id": id_by_ref[link.canonical_external_ref],
+            "source": link.source,
+            "source_event_id": link.source_event_id,
+            "source_market_id": link.source_market_id,
+            "confidence_score": Decimal(str(round(link.confidence, 6))),
+            "match_method": link.method,
+            "matched_at": link.matched_at,
+            "raw_sport": link.raw_sport,
+            "raw_league": link.raw_league,
+            "raw_home": link.raw_home,
+            "raw_away": link.raw_away,
+            "raw_start_time_utc": link.raw_start_time_utc,
+            "evidence_json": link.evidence,
+        }
+        for link in links
+        if link.canonical_external_ref in id_by_ref
+    ]
+    if not values:
+        return 0
+    stmt = pg_insert(EventSourceLink).values(values)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_event_source_links_source_event",
+        set_={
+            "matched_at": stmt.excluded.matched_at,
+            "confidence_score": stmt.excluded.confidence_score,
+            "match_method": stmt.excluded.match_method,
+        },
+    )
+    await session.execute(stmt)
+    return len(values)
+
+
+async def record_source_links(
+    session_factory: "async_sessionmaker", links: Sequence[SourceLinkByRef]
+) -> int:
+    """Open a short-lived session, bulk-upsert the links, COMMIT. The
+    composition-root sink for ingestion-time link observations (Betfair API
+    capture). Raises on failure — callers wrap (observability must never break
+    a capture)."""
+    if not links:
+        return 0
+    async with session_factory() as session:
+        written = await upsert_event_source_links(session, links)
+        await session.commit()
+        return written
+
+
+@dataclass(frozen=True)
+class MatchReviewIn:
+    """One borderline matcher reject to enqueue for human review (a TAP on the
+    matcher's silently-discarded bands — never a gate)."""
+
+    source: str
+    source_event_id: str
+    candidate_canonical_event_id: int | None
+    confidence: float
+    reason: str
+    source_market_id: str | None = None
+    evidence: dict[str, Any] | None = None
+
+
+async def enqueue_match_reviews(session: AsyncSession, rows: Sequence[MatchReviewIn]) -> int:
+    """Bulk-enqueue borderline rejects into match_review_queue. Idempotent by
+    the (source, source_event_id, candidate_canonical_event_id, reason) unique
+    key — re-running the matcher never duplicates a queue row (ON CONFLICT DO
+    NOTHING). Returns the number of rows offered (not necessarily inserted)."""
+    if not rows:
+        return 0
+    values = [
+        {
+            "source": row.source,
+            "source_event_id": row.source_event_id,
+            "source_market_id": row.source_market_id,
+            "candidate_canonical_event_id": row.candidate_canonical_event_id,
+            "confidence_score": Decimal(str(round(row.confidence, 6))),
+            "reason": row.reason,
+            "evidence_json": row.evidence,
+        }
+        for row in rows
+    ]
+    stmt = (
+        pg_insert(MatchReviewQueue)
+        .values(values)
+        .on_conflict_do_nothing(constraint="uq_match_review_queue_dedupe")
+    )
+    await session.execute(stmt)
+    return len(values)
+
+
+async def source_link_metrics(session: AsyncSession) -> dict[str, Any]:
+    """Roll-up of the cross-source link tables for GET /resolution/match-rate:
+    counts + per-source averages over event_source_links and the review-queue
+    depth. Read-only and null-safe — empty tables yield zeros/empty maps."""
+    auto_linked = await session.scalar(select(func.count()).select_from(EventSourceLink)) or 0
+    weak_links = (
+        await session.scalar(
+            select(func.count())
+            .select_from(EventSourceLink)
+            .where(EventSourceLink.confidence_score < Decimal("0.95"))
+        )
+        or 0
+    )
+    review_queued = (
+        await session.scalar(
+            select(func.count())
+            .select_from(MatchReviewQueue)
+            .where(MatchReviewQueue.review_status == "pending")
+        )
+        or 0
+    )
+    rejected_observed = (
+        await session.scalar(select(func.count()).select_from(MatchReviewQueue)) or 0
+    )
+    by_source_rows = (
+        await session.execute(
+            select(
+                EventSourceLink.source,
+                func.count(),
+                func.avg(EventSourceLink.confidence_score),
+            ).group_by(EventSourceLink.source)
+        )
+    ).all()
+    return {
+        "auto_linked": int(auto_linked),
+        "review_queued": int(review_queued),
+        "rejected_observed": int(rejected_observed),
+        "weak_links": int(weak_links),
+        "by_source": {
+            source: {
+                "links": int(n),
+                "avg_confidence": float(avg) if avg is not None else None,
+            }
+            for source, n, avg in by_source_rows
+        },
+    }
+
+
+async def _record_pinnacle_link_observability(
+    session: AsyncSession,
+    *,
+    pick_external_ref: str,
+    accepted_link: SourceLinkByRef | None,
+    reviews: Sequence[MatchReviewIn],
+) -> None:
+    """Best-effort observability writes for one resolve call — NEVER breaks
+    anchor resolution. Runs inside a SAVEPOINT so a failed write cannot poison
+    the caller's transaction; failures log the exception type only (no odds/
+    names/URLs — query strings can carry keys elsewhere)."""
+    try:
+        async with session.begin_nested():
+            if accepted_link is not None:
+                await upsert_event_source_links(session, [accepted_link])
+            if reviews:
+                await enqueue_match_reviews(session, reviews)
+    except Exception as exc:  # pragma: no cover - defensive: observability only
+        logger.warning(
+            "pinnacle link observability write skipped for %s: %s",
+            pick_external_ref,
+            type(exc).__name__,
+        )
+
+
 async def resolve_pinnacle_close_snaps(
     session: AsyncSession,
     *,
@@ -1706,6 +1917,7 @@ async def resolve_pinnacle_close_snaps(
     away: str,
     kickoff: datetime,
     max_day_drift: int = 1,
+    provenance_out: dict[str, tuple[float, str]] | None = None,
 ) -> list[OddsSnapshotIn]:
     """Strict-match a pick's fixture to its `pinnacle_<sport>` ARCHIVE event and
     return that event's CLOSE snapshots, re-keyed to the pick's event_id and
@@ -1721,9 +1933,10 @@ async def resolve_pinnacle_close_snaps(
     """
     from app.resolution import (
         EventCandidate,
+        MatchReviewCandidate,
         default_aliases,
         distinguishing_markers,
-        match_event_hardened,
+        match_event_hardened_scored,
         normalize_name,
         oddsportal_slug_names,
     )
@@ -1794,7 +2007,11 @@ async def resolve_pinnacle_close_snaps(
     aliases = default_aliases()
     qhome = canonical_tennis_name(home) if is_tennis else home
     qaway = canonical_tennis_name(away) if is_tennis else away
-    matched = match_event_hardened(
+    # Observability taps (NEVER gates): borderline rejects the matcher would
+    # silently drop are collected here and enqueued for human review below.
+    review_taps: list[MatchReviewCandidate] = []
+    match_method: str | None = None
+    outcome = match_event_hardened_scored(
         qhome,
         qaway,
         kickoff,
@@ -1804,7 +2021,11 @@ async def resolve_pinnacle_close_snaps(
         league=None,  # cross-source league taxonomies are incomparable here
         candidate_leagues=None,
         max_minute_drift=minute_drift,
+        review_out=review_taps,
     )
+    if outcome is not None:
+        match_method = outcome.method
+    matched = outcome.candidate if outcome is not None else None
     if matched is None:
         # Fallback: OddsPortal's URL slug recovers fixtures the scraped display
         # name spelled differently (sponsor tails, abbreviations; live basketball
@@ -1822,7 +2043,7 @@ async def resolve_pinnacle_close_snaps(
             display_markers = distinguishing_markers(home) | distinguishing_markers(away)
             slug_markers = distinguishing_markers(sh) | distinguishing_markers(sa)
             if display_markers <= slug_markers:
-                matched = match_event_hardened(
+                slug_outcome = match_event_hardened_scored(
                     sh,
                     sa,
                     kickoff,
@@ -1832,8 +2053,40 @@ async def resolve_pinnacle_close_snaps(
                     league=None,  # cross-source league taxonomies are incomparable here
                     candidate_leagues=None,
                     max_minute_drift=minute_drift,
+                    review_out=review_taps,
                 )
-    if matched is None:
+                if slug_outcome is not None:
+                    outcome = slug_outcome
+                    matched = slug_outcome.candidate
+                    # slug-fallback provenance: same score, 'slug_'-prefixed method
+                    match_method = f"slug_{slug_outcome.method}"
+    if matched is None or outcome is None:
+        # UNMATCHED: enqueue any borderline (review-band) rejects so a human can
+        # recover the near-miss via a reviewed per-club alias — the match itself
+        # failed exactly as before (the queue is a tap, not a gate).
+        if review_taps:
+            canonical_id = await session.scalar(
+                select(Event.id).where(Event.external_ref == pick_external_ref)
+            )
+            if canonical_id is not None:
+                ext_by_ref = {str(eid): ext for eid, ext, _h, _a, _ko in rows}
+                reviews = [
+                    MatchReviewIn(
+                        source="pinnacle_arcadia",
+                        source_event_id=ext_by_ref.get(tap.candidate.ref, tap.candidate.ref),
+                        candidate_canonical_event_id=canonical_id,
+                        confidence=tap.confidence,
+                        reason=tap.reason,
+                        evidence=dict(tap.evidence),
+                    )
+                    for tap in review_taps
+                ]
+                await _record_pinnacle_link_observability(
+                    session,
+                    pick_external_ref=pick_external_ref,
+                    accepted_link=None,
+                    reviews=reviews,
+                )
         return []
     # tennis: require a shared normalized token between the pick and the matched
     # arcadia event, so a degenerate surname+initial pair can't attach same-day
@@ -1843,6 +2096,29 @@ async def resolve_pinnacle_close_snaps(
     ):
         return []
     pin_id, pin_ref, pin_home, pin_away, pin_kickoff = by_ref[matched.ref]
+    # ACCEPTED match: expose the confidence provenance to the caller (per-pick
+    # anchor_match_confidence/method) and persist the cross-source link
+    # (observability only — a write failure never breaks anchor resolution).
+    resolved_method = match_method or outcome.method
+    if provenance_out is not None:
+        provenance_out[pick_external_ref] = (outcome.confidence, resolved_method)
+    await _record_pinnacle_link_observability(
+        session,
+        pick_external_ref=pick_external_ref,
+        accepted_link=SourceLinkByRef(
+            source="pinnacle_arcadia",
+            source_event_id=pin_ref,
+            canonical_external_ref=pick_external_ref,
+            confidence=outcome.confidence,
+            method=resolved_method,
+            matched_at=datetime.now(tz=UTC),
+            raw_sport=pinnacle_sport_key,
+            raw_home=pin_home,
+            raw_away=pin_away,
+            raw_start_time_utc=pin_kickoff,
+        ),
+        reviews=(),
+    )
     # Cap the close cutoff at the matched ARCADIA event's OWN kickoff: the match
     # window allows +/- a day of drift, so the arcadia event may start earlier
     # than the pick. Using the pick's kickoff would admit post-arcadia-kickoff
@@ -2517,6 +2793,15 @@ async def persist_pick(
             # CLV-3: the concrete pick-time anchor BOOK (behind anchor_type) so the CLV
             # close can test BOOK independence, not just anchor-type equality.
             anchor_book=pick.anchor_book,
+            # anchor MATCH-CONFIDENCE provenance (observability only): how the
+            # sharp anchor was matched to this fixture and how confident the
+            # matcher was. NULL/NULL = consensus/model pick or pre-column row.
+            anchor_match_confidence=(
+                Decimal(str(round(pick.anchor_match_confidence, 6)))
+                if pick.anchor_match_confidence is not None
+                else None
+            ),
+            anchor_match_method=pick.anchor_match_method,
             # P2-2: mint-side devig-fallback provenance (close side stamped by the CLV
             # true-up) — the trusted CLV subset drops asymmetric mint/close fallbacks.
             mint_devig_fell_back=pick.mint_devig_fell_back,
@@ -2577,6 +2862,12 @@ async def persist_pick(
         # the alert the operator acts on
         existing.anchor_type = pick.anchor_type
         existing.anchor_book = pick.anchor_book
+        existing.anchor_match_confidence = (
+            Decimal(str(round(pick.anchor_match_confidence, 6)))
+            if pick.anchor_match_confidence is not None
+            else None
+        )
+        existing.anchor_match_method = pick.anchor_match_method
         # the promoting detection's policy regime replaces the shadow row's: the
         # row now describes the premium alert the operator acts on, so its CLV must
         # attribute to the policy that promoted it (H3).

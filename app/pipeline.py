@@ -9,7 +9,7 @@ import logging
 import math
 import uuid
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -272,10 +272,41 @@ def _loader_matches_found(loader: OddsLoader, sport_key: str) -> int | None:
     return None
 
 
+def _anchor_match_provenance(
+    anchor_type: str,
+    event_ref: str,
+    provenance: Mapping[tuple[str, str], tuple[float, str]],
+) -> tuple[float | None, str | None]:
+    """(anchor_match_confidence, anchor_match_method) for one value pick.
+
+    - 'pinnacle': the injector's hardened-matcher score for this event. A
+      pinnacle-typed pick with NO map entry (theoretically impossible — only the
+      injector produces "Pinnacle" rows on scraped events) stores None +
+      'unscored': fail HONEST, never fabricate 1.0.
+    - 'sharp' (inline Betfair/Smarkets): rows live on the pick's OWN canonical
+      event — no pick-time matching happened, so confidence is 1.0 by
+      construction (both the main-scrape inline rows and the loader-injected
+      dedicated capture, which was exact-ref-matched at ingestion).
+    - 'consensus' (or anything else): None/None — no cross-source match exists.
+    Observability only: never influences minting or anchor selection.
+    """
+    if anchor_type == "pinnacle":
+        entry = provenance.get((event_ref, "pinnacle"))
+        return entry if entry is not None else (None, "unscored")
+    if anchor_type == "sharp":
+        return (1.0, "inline_betfair_canonical")
+    return (None, None)
+
+
 #: Pick-time sharp-anchor injector (PipelineDeps.sharp_anchor_loader): returns
 #: extra OddsSnapshotIn rows (captured free Betfair/Pinnacle prices) to merge
-#: into the scrape before anchoring. One line so ruff format is version-stable.
-SharpAnchorLoader = Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[Sequence[OddsSnapshotIn]]]
+#: into the scrape before anchoring, PLUS a match-provenance map keyed
+#: ``(event_ref, anchor_type)`` -> ``(match_confidence, match_method)`` so a
+#: pick can persist HOW its sharp anchor was matched (observability only).
+SharpAnchorLoader = Callable[
+    [str, Sequence[OddsSnapshotIn]],
+    Awaitable[tuple[Sequence[OddsSnapshotIn], Mapping[tuple[str, str], tuple[float, str]]]],
+]
 
 #: Pick-time odds-history reader (PipelineDeps.steam_history_loader): given the
 #: cycle's current snapshots, returns recent odds_snapshots HISTORY rows (per-book
@@ -959,12 +990,16 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # (scrape) is what gets persisted/counted; only `grouped` sees the extras.
     # Failure is isolated: sharp injection must NEVER break picking.
     anchor_snapshots: Sequence[OddsSnapshotIn] = snapshots
+    # (event_ref, anchor_type) -> (match_confidence, match_method): HOW each
+    # injected sharp anchor was matched to its fixture (observability only —
+    # persisted per pick as anchor_match_confidence/anchor_match_method).
+    anchor_provenance: Mapping[tuple[str, str], tuple[float, str]] = {}
     if deps.sharp_anchor_loader is not None:
         try:
-            extra = await deps.sharp_anchor_loader(sport_key, snapshots)
+            extra, anchor_provenance = await deps.sharp_anchor_loader(sport_key, snapshots)
         except Exception as exc:
             logger.error("sharp-anchor injection failed for %s: %s", sport_key, type(exc).__name__)
-            extra = []
+            extra, anchor_provenance = [], {}
         if extra:
             anchor_snapshots = [*snapshots, *extra]
             logger.info(
@@ -1331,6 +1366,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     if teams.league:  # scraped per-event league beats config csv
                         league_label = teams.league
 
+            anchor_match_confidence, anchor_match_method = _anchor_match_provenance(
+                anchor_type_for(v.sharp_book), event_id, anchor_provenance
+            )
             pick = PickOut(
                 pick_id=str(uuid.uuid4()),
                 sport=sport_key,  # one deps serves soccer AND basketball polls
@@ -1385,6 +1423,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 # CLV close can test BOOK independence (a Smarkets-anchored pick vs a
                 # Betfair-exchange close is independent though both are 'sharp').
                 anchor_book=v.sharp_book,
+                # anchor MATCH-CONFIDENCE provenance (observability only): how the
+                # sharp anchor above was matched to this fixture. Pinnacle = the
+                # injector's hardened-matcher score; a missing map entry stores
+                # None/'unscored' — HONEST, never a fabricated 1.0. Inline sharp
+                # (Betfair/Smarkets, same canonical event) = 1.0 by construction.
+                # Consensus = None/None (no cross-source match happened).
+                anchor_match_confidence=anchor_match_confidence,
+                anchor_match_method=anchor_match_method,
                 # P2-2: whether the anchor devig fell back to multiplicative for this
                 # MINT fair — the trusted CLV subset drops asymmetric mint/close fallbacks.
                 mint_devig_fell_back=v.sharp_devig_fell_back,

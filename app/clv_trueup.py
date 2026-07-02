@@ -1074,7 +1074,10 @@ def build_sharp_anchor_loader(
     use_betfair: bool,
     use_pinnacle: bool,
     max_age_seconds: float,
-) -> Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[list[OddsSnapshotIn]]]:
+) -> Callable[
+    [str, Sequence[OddsSnapshotIn]],
+    Awaitable[tuple[list[OddsSnapshotIn], dict[tuple[str, str], tuple[float, str]]]],
+]:
     """Pick-time SHARP-ANCHOR loader for PipelineDeps.sharp_anchor_loader.
 
     For each scraped event it returns the captured free Betfair Exchange (EXACT
@@ -1084,6 +1087,13 @@ def build_sharp_anchor_loader(
     settlement-time CLV close — no new false-match surface. Per-event failures
     propagate to the pipeline's isolated try/except (picking never breaks).
 
+    Returns ``(snapshots, provenance)`` where ``provenance`` maps
+    ``(event_ref, anchor_type)`` to ``(match_confidence, match_method)`` —
+    Pinnacle entries carry the hardened matcher's accepted-candidate score;
+    Betfair (exact canonical-ref lookup, no pick-time matching) is
+    ``(1.0, 'inline_betfair_canonical')``. Observability only: the snapshots
+    and their acceptance are unchanged.
+
     FRESHNESS-GATED (review 2026-06-21): a LIVE pick must anchor on a CURRENT
     sharp line, so any captured snapshot older than ``max_age_seconds`` is
     dropped. The 'old price still valid' (change-only) reasoning applies to the
@@ -1091,10 +1101,13 @@ def build_sharp_anchor_loader(
     """
     from app.storage.repositories import resolve_pinnacle_close_snaps
 
-    async def loader(sport_key: str, snapshots: Sequence[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
+    async def loader(
+        sport_key: str, snapshots: Sequence[OddsSnapshotIn]
+    ) -> tuple[list[OddsSnapshotIn], dict[tuple[str, str], tuple[float, str]]]:
         base = arcadia_base_sport(sport_key)
         now = datetime.now(tz=UTC)
         out: list[OddsSnapshotIn] = []
+        provenance: dict[tuple[str, str], tuple[float, str]] = {}
         seen: set[str] = set()
 
         # temporal-leakage-1: gate freshness PER SOURCE, not on a single event-wide
@@ -1126,28 +1139,44 @@ def build_sharp_anchor_loader(
                 eligible += 1  # directory-resolvable event: a sharp anchor is possible
                 event_snaps: list[OddsSnapshotIn] = []
                 if use_betfair:
-                    event_snaps.extend(
-                        _fresh_source(
-                            await resolve_betfair_back_snaps(session, ref, teams.starts_at)
-                        )
+                    betfair_rows = _fresh_source(
+                        await resolve_betfair_back_snaps(session, ref, teams.starts_at)
                     )
+                    if betfair_rows:
+                        event_snaps.extend(betfair_rows)
+                        # exact canonical-ref lookup — no pick-time matching
+                        provenance[(ref, "sharp")] = (1.0, "inline_betfair_canonical")
                 if use_pinnacle:
-                    event_snaps.extend(
-                        _fresh_source(
-                            await resolve_pinnacle_close_snaps(
-                                session,
-                                pinnacle_sport_key=f"pinnacle_{base}",
-                                pick_external_ref=ref,
-                                home=teams.home,
-                                away=teams.away,
-                                kickoff=teams.starts_at,
-                            )
+                    pin_provenance: dict[str, tuple[float, str]] = {}
+                    pinnacle_rows = _fresh_source(
+                        await resolve_pinnacle_close_snaps(
+                            session,
+                            pinnacle_sport_key=f"pinnacle_{base}",
+                            pick_external_ref=ref,
+                            home=teams.home,
+                            away=teams.away,
+                            kickoff=teams.starts_at,
+                            provenance_out=pin_provenance,
                         )
                     )
+                    if pinnacle_rows:
+                        event_snaps.extend(pinnacle_rows)
+                        if ref in pin_provenance:
+                            provenance[(ref, "pinnacle")] = pin_provenance[ref]
                 if not event_snaps:
                     continue
                 anchored += 1
                 out.extend(event_snaps)
+            # Flush the resolver's OBSERVABILITY writes (event_source_links +
+            # match_review_queue savepoints) — this dedicated session otherwise
+            # closes without commit and would silently roll them back. Anchors
+            # are already materialized in `out`; a commit failure only loses
+            # observability rows, never the anchor (log type-name only).
+            try:
+                await session.commit()
+            except Exception as exc:
+                logger.warning("sharp-anchor observability commit failed: %s", type(exc).__name__)
+                await session.rollback()
         # Observability only (no acceptance change): a FULL miss across resolvable
         # events signals a systemic sharp-capture/freshness outage; a partial miss
         # is the normal capture ceiling and stays at debug to avoid per-cycle noise.
@@ -1157,7 +1186,7 @@ def build_sharp_anchor_loader(
             )
         else:
             logger.debug("sharp-anchor: %d/%d resolvable events anchored", anchored, eligible)
-        return out
+        return out, provenance
 
     return loader
 

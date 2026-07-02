@@ -394,11 +394,12 @@ async def test_sharp_anchor_loader_injects_betfair_as_live_anchor() -> None:
 
     # With the Betfair injector: the same soft scrape now anchors on Betfair.
     async def betfair_loader(sport_key, snapshots):  # type: ignore[no-untyped-def]
-        return [
+        rows = [
             snap("Betfair Exchange", "Home FC", 2.40),
             snap("Betfair Exchange", "Draw", 3.45),
             snap("Betfair Exchange", "Away FC", 3.25),
         ]
+        return rows, {("evt-1", "sharp"): (1.0, "inline_betfair_canonical")}
 
     sink = RecordingSink()
     deps = replace(make_deps(sink, FakeLoader(list(soft))), sharp_anchor_loader=betfair_loader)
@@ -429,7 +430,7 @@ async def test_sharp_anchor_pick_book_is_never_sharp() -> None:
     async def dual_sharp_loader(sport_key, snapshots):  # type: ignore[no-untyped-def]
         # Betfair carries the JUICIEST Home price (3.40) — WITHOUT the fix the
         # pick would recommend "at Betfair Exchange" (unbettable). Pinnacle anchors.
-        return [
+        rows = [
             snap("Betfair Exchange", "Home FC", 3.40),
             snap("Betfair Exchange", "Draw", 3.50),
             snap("Betfair Exchange", "Away FC", 3.20),
@@ -437,6 +438,10 @@ async def test_sharp_anchor_pick_book_is_never_sharp() -> None:
             snap("Pinnacle", "Draw", 3.45),
             snap("Pinnacle", "Away FC", 3.25),
         ]
+        return rows, {
+            ("evt-1", "sharp"): (1.0, "inline_betfair_canonical"),
+            ("evt-1", "pinnacle"): (0.97, "jw_two_tier"),
+        }
 
     sink = RecordingSink()
     deps = replace(make_deps(sink, FakeLoader(list(soft))), sharp_anchor_loader=dual_sharp_loader)
@@ -1574,3 +1579,81 @@ async def test_deferred_premium_keeps_volume_and_funds_all_when_cap_loose(
     assert ("Draw", "volume") in seen
     assert len(sink.sent) == 2
     assert deps.ledger.used(day) == pytest.approx(0.04)  # two 0.02 premium reserves only
+
+
+async def test_anchor_match_provenance_per_path() -> None:
+    """R1 per-path anchor_match_confidence/method contract on minted picks:
+    pinnacle -> the injector's map entry; pinnacle WITHOUT a map entry ->
+    None/'unscored' (fail honest, never fabricate 1.0); inline sharp (Betfair)
+    -> 1.0/'inline_betfair_canonical'; consensus -> None/None."""
+    from dataclasses import replace
+
+    soft = [
+        snap("SoftA", "Home FC", 2.45),
+        snap("SoftA", "Draw", 3.30),
+        snap("SoftA", "Away FC", 3.10),
+        snap("SoftB", "Home FC", 2.50),
+        snap("SoftB", "Draw", 3.25),
+        snap("SoftB", "Away FC", 3.05),
+        snap("SoftC", "Home FC", 2.95),
+        snap("SoftC", "Draw", 3.20),
+        snap("SoftC", "Away FC", 2.95),
+    ]
+
+    # CONSENSUS path: no injector -> None/None.
+    sink0 = RecordingSink()
+    picks0 = await run_value_pipeline(make_deps(sink0, FakeLoader(list(soft))), "soccer")
+    assert picks0 and all(p.anchor_type == "consensus" for p in picks0)
+    assert all(p.anchor_match_confidence is None for p in picks0)
+    assert all(p.anchor_match_method is None for p in picks0)
+
+    # PINNACLE path WITH a provenance entry -> the map's (confidence, method).
+    async def pinnacle_loader(sport_key, snapshots):  # type: ignore[no-untyped-def]
+        rows = [
+            snap("Pinnacle", "Home FC", 2.40),
+            snap("Pinnacle", "Draw", 3.45),
+            snap("Pinnacle", "Away FC", 3.25),
+        ]
+        return rows, {("evt-1", "pinnacle"): (0.9765, "jw_two_tier")}
+
+    sink1 = RecordingSink()
+    deps1 = replace(make_deps(sink1, FakeLoader(list(soft))), sharp_anchor_loader=pinnacle_loader)
+    picks1 = await run_value_pipeline(deps1, "soccer")
+    assert picks1 and all(p.anchor_type == "pinnacle" for p in picks1)
+    assert all(p.anchor_match_confidence == 0.9765 for p in picks1)
+    assert all(p.anchor_match_method == "jw_two_tier" for p in picks1)
+
+    # PINNACLE path with NO provenance entry -> None + 'unscored' (honest).
+    async def unscored_pinnacle_loader(sport_key, snapshots):  # type: ignore[no-untyped-def]
+        rows = [
+            snap("Pinnacle", "Home FC", 2.40),
+            snap("Pinnacle", "Draw", 3.45),
+            snap("Pinnacle", "Away FC", 3.25),
+        ]
+        return rows, {}
+
+    sink2 = RecordingSink()
+    deps2 = replace(
+        make_deps(sink2, FakeLoader(list(soft))), sharp_anchor_loader=unscored_pinnacle_loader
+    )
+    picks2 = await run_value_pipeline(deps2, "soccer")
+    assert picks2 and all(p.anchor_type == "pinnacle" for p in picks2)
+    assert all(p.anchor_match_confidence is None for p in picks2)
+    assert all(p.anchor_match_method == "unscored" for p in picks2)
+
+    # INLINE SHARP (Betfair) path -> 1.0/'inline_betfair_canonical' (constant —
+    # holds even for inline rows arriving in the MAIN scrape with no map entry).
+    async def betfair_loader(sport_key, snapshots):  # type: ignore[no-untyped-def]
+        rows = [
+            snap("Betfair Exchange", "Home FC", 2.40),
+            snap("Betfair Exchange", "Draw", 3.45),
+            snap("Betfair Exchange", "Away FC", 3.25),
+        ]
+        return rows, {}
+
+    sink3 = RecordingSink()
+    deps3 = replace(make_deps(sink3, FakeLoader(list(soft))), sharp_anchor_loader=betfair_loader)
+    picks3 = await run_value_pipeline(deps3, "soccer")
+    assert picks3 and all(p.anchor_type == "sharp" for p in picks3)
+    assert all(p.anchor_match_confidence == 1.0 for p in picks3)
+    assert all(p.anchor_match_method == "inline_betfair_canonical" for p in picks3)

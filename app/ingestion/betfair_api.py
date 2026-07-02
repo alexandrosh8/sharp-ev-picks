@@ -53,7 +53,7 @@ from app.resolution.matching import (
     AliasTable,
     EventCandidate,
     default_aliases,
-    match_event_hardened,
+    match_event_hardened_scored,
 )
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
@@ -794,6 +794,32 @@ PromoteSink = Callable[[Sequence[OddsSnapshotIn], Mapping[str, EventTeams]], Awa
 
 
 @dataclass(frozen=True)
+class SourceLinkObservation:
+    """One ACCEPTED ingestion-time match: the Betfair event/market ids linked to
+    a canonical event ref, with the hardened matcher's confidence provenance.
+    Pure data — the composition root persists these into event_source_links
+    (observability only; a sink failure never breaks the capture)."""
+
+    source: str
+    source_event_id: str
+    source_market_id: str | None
+    canonical_external_ref: str
+    confidence: float
+    method: str
+    matched_at: datetime
+    raw_league: str | None = None
+    raw_home: str | None = None
+    raw_away: str | None = None
+    raw_start_time_utc: datetime | None = None
+
+
+# OBSERVABILITY sink for accepted-match link observations (event_source_links).
+# Optional and best-effort: never wired -> nothing recorded; failure -> logged
+# type-only and the capture continues (a tap, never a gate).
+LinkSink = Callable[[Sequence[SourceLinkObservation]], Awaitable[None]]
+
+
+@dataclass(frozen=True)
 class BetfairApiShadowReport:
     """One shadow cycle's outcome: how many Betfair markets were fetched, how many
     matched a canonical event, how many did not, and the would-be anchor rows.
@@ -833,6 +859,7 @@ class BetfairApiShadowCapture:
         reference_odds_fn: ReferenceOddsFn | None = None,
         promote: bool = False,
         promote_sink: PromoteSink | None = None,
+        link_sink: LinkSink | None = None,
     ) -> None:
         self._client = client
         self._candidates_fn = candidates_fn
@@ -841,6 +868,8 @@ class BetfairApiShadowCapture:
         self._event_type_ids = tuple(event_type_ids)
         self._now_fn = now_fn or _utc_now
         self._reference_odds_fn = reference_odds_fn
+        # OBSERVABILITY tap (event_source_links): default None -> inert.
+        self._link_sink = link_sink
         # PROMOTION is default-OFF. When OFF the rows are tagged the NON-SHARP
         # SHADOW_BOOKMAKER and the sink is never invoked — byte-equivalent to the
         # measurement-only shadow. The sharp PROMOTED_BOOKMAKER is emitted ONLY
@@ -925,16 +954,19 @@ class BetfairApiShadowCapture:
         snapshots: list[OddsSnapshotIn] = []
         teams_by_event: dict[str, EventTeams] = {}
         matched_pairs: list[tuple[BetfairMatchOdds, str]] = []
+        link_observations: list[SourceLinkObservation] = []
         for market in odds:
             if not market.home or not market.away or market.kickoff is None:
                 unmatched += 1
                 continue
-            # REUSE the hardened matcher verbatim. league is left None: Betfair
-            # competition names do not normalize-equal OddsPortal league names, so
-            # passing them would FALSE-BLOCK every market; name + tight kickoff
-            # window + ambiguity guard carry precision. Unmatched -> skipped, never
-            # guessed (a wrong attach would be fake CLV).
-            hit = match_event_hardened(
+            # REUSE the hardened matcher verbatim (the SCORED variant — identical
+            # accept/reject, plus confidence provenance for event_source_links).
+            # league is left None: Betfair competition names do not normalize-equal
+            # OddsPortal league names, so passing them would FALSE-BLOCK every
+            # market; name + tight kickoff window + ambiguity guard carry
+            # precision. Unmatched -> skipped, never guessed (a wrong attach would
+            # be fake CLV).
+            outcome = match_event_hardened_scored(
                 market.home,
                 market.away,
                 market.kickoff,
@@ -943,9 +975,10 @@ class BetfairApiShadowCapture:
                 ordered=True,
                 league=None,
             )
-            if hit is None:
+            if outcome is None:
                 unmatched += 1
                 continue
+            hit = outcome.candidate
             matched += 1
             snapshots.extend(self._snapshots_for(market, hit.home, hit.away, hit.ref, now))
             # Teams for the (only-when-promoting) attach-only persist; sourced from
@@ -954,7 +987,26 @@ class BetfairApiShadowCapture:
                 home=hit.home, away=hit.away, starts_at=hit.kickoff
             )
             matched_pairs.append((market, hit.ref))
+            # OBSERVABILITY (event_source_links): persist the Betfair stable ids
+            # (event_id/market_id — previously thrown away) + the match score.
+            if self._link_sink is not None:
+                link_observations.append(
+                    SourceLinkObservation(
+                        source="betfair_api",
+                        source_event_id=market.event_id,
+                        source_market_id=market.market_id,
+                        canonical_external_ref=hit.ref,
+                        confidence=outcome.confidence,
+                        method=outcome.method,
+                        matched_at=now,
+                        raw_league=market.competition,
+                        raw_home=market.home,
+                        raw_away=market.away,
+                        raw_start_time_utc=market.kickoff,
+                    )
+                )
 
+        await self._record_links(link_observations)
         comparison = await self._compare(matched_pairs, now)
         report = BetfairApiShadowReport(
             markets_fetched=len(odds),
@@ -967,6 +1019,17 @@ class BetfairApiShadowCapture:
         await self._maybe_promote(snapshots, teams_by_event)
         self._log(report)
         return report
+
+    async def _record_links(self, observations: Sequence[SourceLinkObservation]) -> None:
+        """Best-effort observability: route accepted-match link observations to
+        the (optional) sink. NEVER breaks the capture — failure logs the
+        exception type only (no ids/URLs in the error path)."""
+        if self._link_sink is None or not observations:
+            return
+        try:
+            await self._link_sink(observations)
+        except Exception as exc:
+            logger.warning("betfair api link sink failed: %s", type(exc).__name__)
 
     async def _compare(
         self, matched_pairs: Sequence[tuple[BetfairMatchOdds, str]], now: datetime
@@ -1050,6 +1113,7 @@ def build_shadow_capture(
     reference_odds_fn: ReferenceOddsFn | None = None,
     promote: bool = False,
     promote_sink: PromoteSink | None = None,
+    link_sink: LinkSink | None = None,
 ) -> BetfairApiShadowCapture | None:
     """Build the shadow capture, or None when the integration is INERT — i.e.
     disabled OR any credential blank. None means the scheduler adds NO job and no
@@ -1075,4 +1139,5 @@ def build_shadow_capture(
         reference_odds_fn=reference_odds_fn,
         promote=promote,
         promote_sink=promote_sink,
+        link_sink=link_sink,
     )

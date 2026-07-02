@@ -540,6 +540,101 @@ def _pair_score(a1: str, a2: str, b1: str, b2: str) -> float:
     return jaro_winkler(a1, b1) + jaro_winkler(a2, b2)
 
 
+@dataclass(frozen=True)
+class MatchOutcome:
+    """An ACCEPTED hardened match plus its confidence provenance.
+
+    ``confidence`` is ``min(JW(base_home), JW(base_away))`` over the accepted
+    orientation's alias-canonicalized, marker-stripped base names — 1.0 when both
+    sides are exact-canonical-equal. ``method`` is ``'exact_canonical'`` (both
+    bases string-equal after aliasing/stripping) or ``'jw_two_tier'`` (the fuzzy
+    accept tier fired on at least one side). Callers on the slug-fallback path
+    prefix the method with ``'slug_'``. Observability only — the accept/reject
+    decision is byte-identical to ``match_event_hardened``.
+    """
+
+    candidate: EventCandidate
+    confidence: float
+    method: str
+
+
+@dataclass(frozen=True)
+class MatchReviewCandidate:
+    """A candidate the hardened matcher REJECTED but that lands in a reviewable
+    borderline band — a TAP for the human review queue, never a gate. The match
+    still fails exactly as before; this only records what was silently dropped.
+
+    ``confidence`` is the candidate's min-side base-name JW; ``reason`` is one of
+    ``'jw_below_accept'`` (the documented 0.84<=JW<0.92 review band),
+    ``'token_sort_below_accept'`` (JW>=0.92 but token_sort<90),
+    ``'ambiguity_margin'`` (two distinct candidates within the score margin),
+    ``'kickoff_drift'`` (name-accepted but outside the tight accept window), or
+    ``'same_teams_kickoff_split'`` (same-teams legs split across the duplicate-
+    capture bound). ``evidence`` carries name forms + scores + kickoff delta
+    (team names only — never odds-source secrets)."""
+
+    candidate: EventCandidate
+    confidence: float
+    reason: str
+    evidence: dict[str, object]
+
+
+def _review_side_status(a: str, b: str) -> str | None:
+    """Reviewability of ONE base-name side: ``'ok'`` (would accept),
+    ``'jw_below_accept'`` / ``'token_sort_below_accept'`` (the silent borderline
+    bands), or None (categorical reject / below the review floor — never
+    reviewable; the wrong-game vetoes are decided, not borderline)."""
+    if not a or not b:
+        return None
+    if a == b:
+        return "ok"
+    initial_a, initial_b = _tennis_initial(a), _tennis_initial(b)
+    if initial_a is not None and initial_b is not None and initial_a != initial_b:
+        return None  # categorical: distinct players
+    diff = set(a.split()) ^ set(b.split())
+    if diff and diff <= _DISAMBIGUATING_TOKENS:
+        return None  # categorical: distinct clubs (United/City class)
+    jw = jaro_winkler(a, b)
+    if jw < _JW_REVIEW_FLOOR:
+        return None
+    if jw >= _JW_ACCEPT:
+        return "ok" if token_sort_ratio(a, b) >= _TOKEN_SORT_ACCEPT else "token_sort_below_accept"
+    return "jw_below_accept"
+
+
+def _oriented_bases(cand: EventCandidate, aliases: AliasTable, *, swapped: bool) -> tuple[str, str]:
+    """The candidate's (home-slot, away-slot) base names in the given
+    orientation — alias-canonicalized and marker-stripped, exactly as the
+    hardened matcher compares them."""
+    cand_base_home = aliases.canonical(strip_markers(cand.home))
+    cand_base_away = aliases.canonical(strip_markers(cand.away))
+    return (cand_base_away, cand_base_home) if swapped else (cand_base_home, cand_base_away)
+
+
+def _min_side_jw(base_home: str, base_away: str, cand_bases: tuple[str, str]) -> float:
+    return min(jaro_winkler(base_home, cand_bases[0]), jaro_winkler(base_away, cand_bases[1]))
+
+
+def _review_evidence(
+    base_home: str,
+    base_away: str,
+    cand_bases: tuple[str, str],
+    kickoff: datetime,
+    cand: EventCandidate,
+) -> dict[str, object]:
+    return {
+        "query_base_home": base_home,
+        "query_base_away": base_away,
+        "candidate_base_home": cand_bases[0],
+        "candidate_base_away": cand_bases[1],
+        "jw_home": round(jaro_winkler(base_home, cand_bases[0]), 4),
+        "jw_away": round(jaro_winkler(base_away, cand_bases[1]), 4),
+        "token_sort_home": round(token_sort_ratio(base_home, cand_bases[0]), 2),
+        "token_sort_away": round(token_sort_ratio(base_away, cand_bases[1]), 2),
+        "kickoff_delta_seconds": abs((cand.kickoff - kickoff).total_seconds()),
+    }
+
+
 def match_event_hardened(
     home: str,
     away: str,
@@ -554,6 +649,40 @@ def match_event_hardened(
     max_accept_minute_drift: int = _ACCEPT_MINUTE_DRIFT,
     allow_orientation_flip: bool = False,
 ) -> EventCandidate | None:
+    """Thin wrapper over ``match_event_hardened_scored`` returning only the bare
+    accepted candidate — the historical public surface. Accept/reject behavior
+    is IDENTICAL (the scored variant only adds confidence provenance)."""
+    outcome = match_event_hardened_scored(
+        home,
+        away,
+        kickoff,
+        candidates,
+        aliases=aliases,
+        ordered=ordered,
+        league=league,
+        candidate_leagues=candidate_leagues,
+        max_minute_drift=max_minute_drift,
+        max_accept_minute_drift=max_accept_minute_drift,
+        allow_orientation_flip=allow_orientation_flip,
+    )
+    return outcome.candidate if outcome is not None else None
+
+
+def match_event_hardened_scored(
+    home: str,
+    away: str,
+    kickoff: datetime,
+    candidates: Sequence[EventCandidate],
+    *,
+    aliases: AliasTable,
+    ordered: bool = True,
+    league: str | None = None,
+    candidate_leagues: Mapping[str, str] | None = None,
+    max_minute_drift: int = 360,
+    max_accept_minute_drift: int = _ACCEPT_MINUTE_DRIFT,
+    allow_orientation_flip: bool = False,
+    review_out: list[MatchReviewCandidate] | None = None,
+) -> MatchOutcome | None:
     """Precision-hardened cross-source match — the SHADOW-path lift over the
     strict ``match_event``. ``match_event`` is intentionally left UNCHANGED so the
     live anchor loader keeps its exact-only behaviour; this function adds the
@@ -582,8 +711,13 @@ def match_event_hardened(
                       / doubleheader) are DISTINCT games and are NEVER silently
                       collapsed to the nearer kickoff — they REJECT as ambiguous.
 
-    Returns the unique best candidate, or None (never guess — a wrong close is
-    fake CLV, the cardinal sin).
+    Returns the unique best candidate (wrapped in a ``MatchOutcome`` with its
+    confidence provenance), or None (never guess — a wrong close is fake CLV,
+    the cardinal sin). ``review_out`` (optional) is an OBSERVABILITY TAP: when a
+    borderline candidate is rejected (the documented review bands / ambiguity /
+    kickoff-window rejects), a ``MatchReviewCandidate`` is appended so the caller
+    can queue it for human review. The tap NEVER changes accept/reject — with
+    ``review_out=None`` behavior is bit-identical to the pre-scored matcher.
     """
     leagues = candidate_leagues or {}
     target_home = aliases.canonical(home)
@@ -597,7 +731,7 @@ def match_event_hardened(
     base_home = aliases.canonical(strip_markers(home))
     base_away = aliases.canonical(strip_markers(away))
 
-    scored: list[tuple[float, EventCandidate]] = []
+    scored: list[tuple[float, EventCandidate, bool]] = []
     for cand in candidates:
         # STAGE 0a: UTC-minute kickoff window (not calendar day).
         if abs((cand.kickoff - kickoff).total_seconds()) > max_minute_drift * 60:
@@ -619,7 +753,9 @@ def match_event_hardened(
             and _base_name_ok(base_away, cand_base_away)
         )
         if forward:
-            scored.append((_pair_score(base_home, base_away, cand_base_home, cand_base_away), cand))
+            scored.append(
+                (_pair_score(base_home, base_away, cand_base_home, cand_base_away), cand, False)
+            )
             continue
 
         # Orientation flip: ONLY for unordered (tennis) by default, or for ordered
@@ -636,8 +772,40 @@ def match_event_hardened(
             )
             if swapped:
                 scored.append(
-                    (_pair_score(base_home, base_away, cand_base_away, cand_base_home), cand)
+                    (
+                        _pair_score(base_home, base_away, cand_base_away, cand_base_home),
+                        cand,
+                        True,
+                    )
                 )
+                continue
+
+        # REVIEW TAP (observability only — the candidate stays rejected): a
+        # forward-orientation name miss whose sides BOTH sit in an accept/review
+        # band (never a categorical wrong-game veto) is recorded for a human
+        # review queue. Marker conflicts are categorical and never reviewable.
+        if review_out is not None and not _markers_conflict(home, away, cand.home, cand.away):
+            side_home = _review_side_status(base_home, cand_base_home)
+            side_away = _review_side_status(base_away, cand_base_away)
+            if side_home is not None and side_away is not None:
+                borderline = {s for s in (side_home, side_away) if s != "ok"}
+                if borderline:
+                    reason = (
+                        "jw_below_accept"
+                        if "jw_below_accept" in borderline
+                        else "token_sort_below_accept"
+                    )
+                    cand_bases = (cand_base_home, cand_base_away)
+                    review_out.append(
+                        MatchReviewCandidate(
+                            candidate=cand,
+                            confidence=_min_side_jw(base_home, base_away, cand_bases),
+                            reason=reason,
+                            evidence=_review_evidence(
+                                base_home, base_away, cand_bases, kickoff, cand
+                            ),
+                        )
+                    )
 
     if not scored:
         return None
@@ -651,9 +819,26 @@ def match_event_hardened(
     # swapped, 48h earlier); attaching its close would be fake CLV, the cardinal sin.
     accept_seconds = max_accept_minute_drift * 60
     eligible = [
-        (s, c) for (s, c) in scored if abs((c.kickoff - kickoff).total_seconds()) <= accept_seconds
+        (s, c, sw)
+        for (s, c, sw) in scored
+        if abs((c.kickoff - kickoff).total_seconds()) <= accept_seconds
     ]
     if not eligible:
+        # REVIEW TAP: every name-accepted candidate sat OUTSIDE the tight accept
+        # window — record the best-scoring one as a kickoff-drift near-miss.
+        if review_out is not None:
+            drift_score, drift_cand, drift_sw = max(scored, key=lambda s: s[0])
+            drift_bases = _oriented_bases(drift_cand, aliases, swapped=drift_sw)
+            review_out.append(
+                MatchReviewCandidate(
+                    candidate=drift_cand,
+                    confidence=_min_side_jw(base_home, base_away, drift_bases),
+                    reason="kickoff_drift",
+                    evidence=_review_evidence(
+                        base_home, base_away, drift_bases, kickoff, drift_cand
+                    ),
+                )
+            )
         return None
 
     def _same_fixture(x: EventCandidate, y: EventCandidate) -> bool:
@@ -661,15 +846,30 @@ def match_event_hardened(
             x.away
         ) == aliases.canonical(y.away)
 
+    def _reject_review(cand: EventCandidate, swapped: bool, reason: str) -> None:
+        if review_out is None:
+            return
+        bases = _oriented_bases(cand, aliases, swapped=swapped)
+        review_out.append(
+            MatchReviewCandidate(
+                candidate=cand,
+                confidence=_min_side_jw(base_home, base_away, bases),
+                reason=reason,
+                evidence=_review_evidence(base_home, base_away, bases, kickoff, cand),
+            )
+        )
+
     # Best (already score/kickoff/ref sorted) among the eligible in-bound candidates.
     eligible.sort(key=lambda s: (-s[0], abs((s[1].kickoff - kickoff).total_seconds()), s[1].ref))
-    best_score, best = eligible[0]
+    best_score, best, best_swapped = eligible[0]
     if len(eligible) > 1:
-        runner_score, runner = eligible[1]
+        runner_score, runner, runner_swapped = eligible[1]
         # Two DISTINCT candidates within the ambiguity margin -> cannot tell which
         # is the real fixture. (Duplicate captures of ONE fixture share canonical
         # teams and are NOT ambiguous — they collapse to the nearest-kickoff one.)
         if not _same_fixture(runner, best) and best_score - runner_score < _AMBIGUITY_MARGIN:
+            _reject_review(best, best_swapped, "ambiguity_margin")
+            _reject_review(runner, runner_swapped, "ambiguity_margin")
             return None
         # Two DISTINCT same-teams games BOTH inside the tight accept bound (a true
         # doubleheader / two legs <6h apart) cannot be told apart by name OR by a
@@ -677,11 +877,22 @@ def match_event_hardened(
         # tolerance of the best are treated as duplicate captures and collapsed;
         # a same-teams runner inside the accept window but a distinct-game distance
         # from the best (a few hours, not minutes) is ambiguous, not a duplicate.
-        for _runner_score, other in eligible[1:]:
+        for _runner_score, other, _other_swapped in eligible[1:]:
             if other is best:
                 continue
             if _same_fixture(other, best) and (
                 abs((other.kickoff - best.kickoff).total_seconds()) > _DUPLICATE_CAPTURE_SECONDS
             ):
+                _reject_review(best, best_swapped, "same_teams_kickoff_split")
                 return None
-    return best
+    # ACCEPTED: derive the confidence provenance from the accepted orientation's
+    # base names (observability only — the decision above is already final).
+    best_bases = _oriented_bases(best, aliases, swapped=best_swapped)
+    if base_home == best_bases[0] and base_away == best_bases[1]:
+        return MatchOutcome(candidate=best, confidence=1.0, method="exact_canonical")
+    confidence = _min_side_jw(base_home, base_away, best_bases)
+    return MatchOutcome(
+        candidate=best,
+        confidence=min(1.0, max(0.0, confidence)),
+        method="jw_two_tier",
+    )

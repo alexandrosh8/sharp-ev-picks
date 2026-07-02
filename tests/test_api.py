@@ -614,11 +614,28 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
             {"sport": "basketball", "scraped": 64, "captured": 0},
         ]
 
+    async def fake_link_metrics(session):  # type: ignore[no-untyped-def]
+        # Shape contract of repositories.source_link_metrics (null-safe zeros
+        # when the link tables are empty; per-source averages otherwise).
+        return {
+            "auto_linked": 2,
+            "review_queued": 1,
+            "rejected_observed": 1,
+            "weak_links": 1,
+            "by_source": {"pinnacle_arcadia": {"links": 2, "avg_confidence": 0.955}},
+        }
+
     monkeypatch.setattr(routes, "shadow_match_rate_outcomes", fake_outcomes)
     monkeypatch.setattr(routes, "pinnacle_archive_capture_by_sport", fake_capture)
     monkeypatch.setattr(routes, "betfair_archive_capture_by_sport", fake_betfair_capture)
     monkeypatch.setattr(routes, "betfair_inline_capture_by_sport", fake_betfair_inline_capture)
+    monkeypatch.setattr(routes, "source_link_metrics", fake_link_metrics)
     body = TestClient(make_app()).get("/resolution/match-rate").json()
+    # Cross-source link observability rides the same payload.
+    assert body["links"]["auto_linked"] == 2
+    assert body["links"]["review_queued"] == 1
+    assert body["links"]["weak_links"] == 1
+    assert body["links"]["by_source"]["pinnacle_arcadia"]["links"] == 2
     assert body["total"] == 3
     assert body["matched"] == 1
     assert body["match_rate"] == pytest.approx(1 / 3)

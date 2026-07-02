@@ -17,12 +17,23 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.storage.models import Base
+# HERMETIC .env OVERRIDE (ADR-0019 H4 guard): app.main constructs Settings() at
+# module import, which reads the operator's LIVE .env — the one suite path that
+# is not hermetic. The per-market devig guard now (correctly) hard-fails a live
+# 'multiplicative' override; that is a DEPLOY concern, never a test outcome. Env
+# vars take precedence over .env in pydantic-settings, so pinning the key to its
+# safe default ('') keeps every Settings() construction in the suite guard-clean
+# WITHOUT weakening the guard (explicit kwargs in tests still override this, so
+# the guard's own rejection tests still trip it).
+os.environ.setdefault("VALUE_DEVIG_PER_MARKET", "")
+
+from app.storage.models import Base  # noqa: E402
 
 _BASE = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433"
 _MAINTENANCE_URL = f"{_BASE}/betting_ai"  # existing DB, used only to CREATE the test DB

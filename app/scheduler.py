@@ -999,6 +999,7 @@ def build_scheduler(
             EVENT_TYPE_SOCCER,
             PROMOTED_BOOKMAKER,
             ReferenceOdds,
+            SourceLinkObservation,
             build_shadow_capture,
         )
         from app.resolution.matching import EventCandidate
@@ -1110,6 +1111,37 @@ def build_scheduler(
                 PROMOTED_BOOKMAKER,
             )
 
+        # OBSERVABILITY sink (event_source_links): persist each ACCEPTED
+        # ingestion-time match's Betfair stable ids (event_id/market_id) + the
+        # matcher's confidence. Best effort — record_source_links commits its own
+        # short session and the capture wraps sink failures (type-name-only log);
+        # never gates the capture or the anchors.
+        async def _betfair_api_link_sink(
+            observations: Sequence[SourceLinkObservation],
+        ) -> None:
+            from app.storage.repositories import SourceLinkByRef, record_source_links
+
+            await record_source_links(
+                bfapi_session_factory,
+                [
+                    SourceLinkByRef(
+                        source=obs.source,
+                        source_event_id=obs.source_event_id,
+                        source_market_id=obs.source_market_id,
+                        canonical_external_ref=obs.canonical_external_ref,
+                        confidence=obs.confidence,
+                        method=obs.method,
+                        matched_at=obs.matched_at,
+                        raw_sport="soccer",
+                        raw_league=obs.raw_league,
+                        raw_home=obs.raw_home,
+                        raw_away=obs.raw_away,
+                        raw_start_time_utc=obs.raw_start_time_utc,
+                    )
+                    for obs in observations
+                ],
+            )
+
         betfair_api_capture = build_shadow_capture(
             enabled=settings.value_betfair_api_enabled,
             credentials=settings.betfair_api_credentials(),
@@ -1120,6 +1152,7 @@ def build_scheduler(
             reference_odds_fn=_betfair_api_reference_odds,
             promote=settings.value_betfair_api_promote,
             promote_sink=bfapi_promote_sink,
+            link_sink=_betfair_api_link_sink,
         )
 
         async def capture_betfair_api_shadow() -> None:

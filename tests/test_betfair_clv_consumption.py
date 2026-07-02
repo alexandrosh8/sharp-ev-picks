@@ -510,10 +510,14 @@ async def test_loader_drops_stale_pinnacle_but_keeps_fresh_betfair_per_source(fa
             ingested_at=now,
         )
     ]
-    out = await loader("soccer", scrape)
+    out, provenance = await loader("soccer", scrape)
     books = {s.bookmaker for s in out}
     assert "Betfair Exchange" in books  # fresh source kept
     assert "Pinnacle" not in books  # stale source dropped per-source (no leakage)
+    # provenance mirrors the surviving sources: inline Betfair scores 1.0 by
+    # construction; the dropped (stale) Pinnacle source must NOT leave an entry.
+    assert provenance.get((ref, "sharp")) == (1.0, "inline_betfair_canonical")
+    assert (ref, "pinnacle") not in provenance
 
 
 async def test_sharp_anchor_loader_event_wide_freshness(factory) -> None:  # type: ignore[no-untyped-def]
@@ -567,7 +571,7 @@ async def test_sharp_anchor_loader_event_wide_freshness(factory) -> None:  # typ
         )
         for ref in ("evt-fresh", "evt-stale")
     ]
-    out = await loader("soccer", scrape)
+    out, _provenance = await loader("soccer", scrape)
     refs = {s.event_id for s in out}
     assert "evt-fresh" in refs  # fresh -> anchor kept
     assert "evt-stale" not in refs  # fell out of capture -> dropped

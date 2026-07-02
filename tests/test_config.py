@@ -349,6 +349,26 @@ def test_value_devig_rejects_unknown_method() -> None:
         make_settings(value_devig="nonsense_method")
 
 
+def test_value_devig_rejects_multiplicative_per_market() -> None:
+    # ADR-0019 H4 guard: the per-market override is subject to the SAME
+    # multiplicative ban as the global default — an .env map entry must never
+    # reintroduce the method through a side door.
+    with pytest.raises(ValidationError, match="ADR-0019 H4"):
+        make_settings(value_devig_per_market="1x2:multiplicative")
+
+
+def test_value_devig_rejects_multiplicative_per_market_among_valid_entries() -> None:
+    # The guard scans EVERY entry, not just the first.
+    with pytest.raises(ValidationError, match="ADR-0019 H4"):
+        make_settings(value_devig_per_market="over_under:power,1x2:multiplicative")
+
+
+def test_value_devig_per_market_shift_family_accepted() -> None:
+    # Non-multiplicative per-market overrides remain valid (guard is targeted).
+    s = make_settings(value_devig_per_market="1x2:shin,over_under:power")
+    assert s.value_devig_per_market == "1x2:shin,over_under:power"
+
+
 def test_volume_tier_floor_default_is_validated_v2_threshold() -> None:
     # v2 holdout n=379, CLV +0.019 — the volume (shadow) tier's evidence base.
     assert make_settings().value_volume_min_edge == 0.015

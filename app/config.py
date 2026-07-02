@@ -1235,7 +1235,20 @@ class Settings(BaseSettings):
         parse_market_min_books(self.value_min_books_per_market)
         # Per-market devig override: a bad method name must fail fast at startup,
         # never silently fall through to the global method on those markets.
-        parse_market_devig(self.value_devig_per_market)
+        # ADR-0019 H4 GUARD: 'multiplicative' is banned PER-MARKET exactly as it
+        # is banned globally below — a per-market override is the same
+        # favourite-longshot trap through a side door (an .env map entry must
+        # never reintroduce the method the global guard rejects).
+        for key, per_market_method in parse_market_devig(self.value_devig_per_market):
+            if per_market_method is DevigMethod.MULTIPLICATIVE:
+                raise ValueError(
+                    f"VALUE_DEVIG_PER_MARKET[{key}] must not be 'multiplicative' "
+                    "(ADR-0019 H4): the per-market override is subject to the same "
+                    "ban as the global default — multiplicative is ~6-8 SE worse "
+                    "than the shift family on 3-way 1X2 (favourite-longshot trap, "
+                    "ADR-0006). Use 'power' (canonical) or another shift-family "
+                    "method, or remove the entry."
+                )
         # GLOBAL devig must be a valid method AND must not be multiplicative —
         # multiplicative is ~6-8 SE worse than the shift family on 3-way 1X2
         # (favourite-longshot trap; ADR-0006, research 2026-06-30). Fail fast at

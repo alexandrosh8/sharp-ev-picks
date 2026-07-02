@@ -71,6 +71,16 @@ class PickOut(InternalModel):
     # close is independent though both are anchor_type "sharp"). None for the model
     # strategy or a pre-column row.
     anchor_book: str | None = None
+    # MATCH-CONFIDENCE provenance of the pick-time sharp anchor (observability
+    # only — never gates minting). Pinnacle (cross-source fuzzy-matched) anchor:
+    # the accepted candidate's min per-side Jaro-Winkler in [0,1] with method
+    # 'exact_canonical'/'jw_two_tier' ('slug_' prefix on the OddsPortal slug-
+    # fallback path; 'unscored' + None confidence when a pinnacle-typed pick's
+    # provenance was unavailable — never a fabricated 1.0). Inline Betfair/
+    # Smarkets anchor (same canonical event, no pick-time match): 1.0 /
+    # 'inline_betfair_canonical'. None/None = consensus anchor or model pick.
+    anchor_match_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    anchor_match_method: str | None = None
     # P2-2: did the anchor's devig FALL BACK to multiplicative when this pick's
     # MINT fair was computed (underround book / solver failure)? Persisted as
     # Pick.mint_devig_fell_back so the trusted CLV subset can drop ASYMMETRIC
