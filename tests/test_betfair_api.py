@@ -662,6 +662,55 @@ def test_build_shadow_capture_threads_promote_and_reference_defaults_inert() -> 
     assert capture.promote is False
 
 
+# --- runtime op allowlist (structural read-only guard) ----------------------- #
+def test_allowed_ops_is_exactly_the_two_read_ops() -> None:
+    # The runtime allowlist holds the two read constants and NOTHING else — any
+    # new op must be added here deliberately (and stay read-only).
+    assert frozenset({"listMarketCatalogue", "listMarketBook"}) == betfair_api._ALLOWED_OPS
+
+
+@pytest.mark.parametrize(
+    "forbidden_op",
+    [
+        # Built by concatenation so the banned identifiers never appear literally
+        # anywhere in the repo (the safety-audit grep and the structural test below
+        # both stay empty).
+        "place" + "Orders",
+        "cancel" + "Orders",
+        "replace" + "Orders",
+        "update" + "Orders",
+        "listCurrent" + "Orders",
+        "listCleared" + "Orders",
+    ],
+)
+async def test_rpc_rejects_non_allowlisted_op_before_any_http(forbidden_op: str) -> None:
+    def no_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"non-allowlisted op reached the transport: {request.url}")
+
+    client = BetfairApiClient(
+        app_key=APP_KEY,
+        username=USERNAME,
+        password=PASSWORD,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(no_network)),
+    )
+    with pytest.raises(BetfairApiError, match="allowlist"):
+        await client._rpc(forbidden_op, {})
+    # Rejected BEFORE any login/HTTP: no session was ever established.
+    assert client.has_session is False
+
+
+async def test_keepalive_and_login_do_not_route_through_rpc_allowlist() -> None:
+    # login/keepAlive/logout use the identitysso endpoints via _post/_get, never
+    # _rpc — the allowlist cannot break session management.
+    mock = MockBetfair(login_tokens=["ssoid-alive"])
+    client = make_client(mock)
+    await client.login()
+    await client.keep_alive()
+    assert client.has_session is True
+    urls = [url for url, _, _ in mock.requests]
+    assert urls == [IDENTITY_LOGIN_URL, IDENTITY_KEEPALIVE_URL]
+
+
 # --- structural safety ------------------------------------------------------ #
 def test_no_order_or_account_methods_in_module() -> None:
     source = Path(betfair_api.__file__).read_text(encoding="utf-8")

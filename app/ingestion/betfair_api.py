@@ -71,6 +71,12 @@ JSON_RPC_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 _RPC_PREFIX = "SportsAPING/v1.0/"
 _OP_LIST_MARKET_CATALOGUE = "listMarketCatalogue"
 _OP_LIST_MARKET_BOOK = "listMarketBook"
+# RUNTIME allowlist: the ONLY operations _rpc may ever dispatch. The JSON-RPC
+# endpoint also serves order-placement ops for a full-capability session, so the
+# read-only guarantee must be STRUCTURAL, not just "no caller passes anything
+# else" — _rpc refuses any op outside this frozenset BEFORE any login or HTTP
+# (scripts/safety_audit.sh asserts this allowlist is present).
+_ALLOWED_OPS = frozenset({_OP_LIST_MARKET_CATALOGUE, _OP_LIST_MARKET_BOOK})
 # listMarketBook caps at 200 weight-points/request; EX_BEST_OFFERS ~5/market, so
 # batch <=25 markets/call (~125 weight) to stay under the cap (else TOO_MUCH_DATA).
 _MARKET_BOOK_BATCH = 25
@@ -601,7 +607,13 @@ class BetfairApiClient:
     # --- JSON-RPC core (read-only ops only) ---------------------------------- #
     async def _rpc(self, op: str, params: Mapping[str, Any]) -> Any:
         """Call a read-only SportsAPING operation. Establishes a session if
-        needed and re-logs-in EXACTLY ONCE on a session-expiry errorCode."""
+        needed and re-logs-in EXACTLY ONCE on a session-expiry errorCode.
+
+        Any op outside the read-only ``_ALLOWED_OPS`` allowlist is refused HERE,
+        before any login or HTTP — a structural guard, since the JSON-RPC
+        endpoint would also accept order-placement ops."""
+        if op not in _ALLOWED_OPS:
+            raise BetfairApiError(f"betfair op {op!r} is not in the read-only allowlist")
         if self._session_token is None:
             await self.login()
         body = await self._rpc_once(op, params)
