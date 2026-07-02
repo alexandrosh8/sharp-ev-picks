@@ -179,6 +179,7 @@ _LOGIN_HTML = """<!doctype html>
       }
       button:hover { background: rgba(79, 199, 141, 0.18); box-shadow: 0 0 0 1px var(--pos); }
       button:focus-visible { outline: 2px solid var(--pos); outline-offset: 2px; }
+      button:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
       .err {
         color: var(--neg);
         font-size: 11px;
@@ -196,18 +197,24 @@ _LOGIN_HTML = """<!doctype html>
       <div class="brand"><span class="mark">▌</span>TAPE<span class="tick">.</span></div>
       <div class="sub">picks terminal · sign in</div>
       <label for="u">Username</label>
-      <input id="u" name="username" type="text" autocomplete="username" autofocus />
+      <input id="u" name="username" type="text" autocomplete="username" autofocus required />
       <label for="p">Password</label>
-      <input id="p" name="password" type="password" autocomplete="current-password" />
-      <button type="submit">Sign in</button>
+      <input id="p" name="password" type="password" autocomplete="current-password" required />
+      <button type="submit" id="login-submit">Sign in</button>
       <div class="err" id="err" role="alert"></div>
     </form>
     <script>
       "use strict";
       const form = document.getElementById("login-form");
       const errEl = document.getElementById("err");
+      const submitBtn = document.getElementById("login-submit");
       form.addEventListener("submit", async (ev) => {
         ev.preventDefault();
+        // double-submit guard: one in-flight attempt at a time. The button is
+        // re-enabled ONLY on failure so a wrong password can be retried; on
+        // success the page navigates away, so it stays disabled.
+        if (submitBtn.disabled) return;
+        submitBtn.disabled = true;
         errEl.textContent = "";
         const username = document.getElementById("u").value;
         const password = document.getElementById("p").value;
@@ -225,8 +232,10 @@ _LOGIN_HTML = """<!doctype html>
             res.status === 401
               ? "Invalid username or password"
               : "Sign-in failed (HTTP " + res.status + ")";
+          submitBtn.disabled = false;
         } catch (e) {
           errEl.textContent = "Sign-in failed — could not reach the server";
+          submitBtn.disabled = false;
         }
       });
     </script>

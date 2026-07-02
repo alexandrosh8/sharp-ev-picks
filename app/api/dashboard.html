@@ -306,6 +306,31 @@
         .filters #f-search { flex: 1 1 auto; width: auto; }
       }
 
+      /* ---- status-bar compaction (small phones ≤430px) --------------------
+         The summary-chip row becomes ONE non-wrapping, horizontally-scrollable
+         strip (was 3 wrapped rows ≈170px tall at 360px → target ≈90-100px).
+         The health dot + freshness stamp stay always visible on the top row;
+         the header auto-hide (scroll down/up) keeps working unchanged. */
+      @media (max-width: 430px) {
+        .cmdbar { gap: 4px 8px; padding: calc(env(safe-area-inset-top) + 6px) 10px 6px; }
+        .brand .sub { display: none; } /* tagline lives in the legend too */
+        .status { flex: 1 1 auto; justify-content: flex-end; }
+        #stamp {
+          min-width: 0; max-width: 46vw;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .sumchips {
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: none;
+          margin: 0 -10px;           /* edge-to-edge swipe strip */
+          padding: 0 10px 2px;
+        }
+        .sumchips::-webkit-scrollbar { display: none; }
+        .sumchips .chip { flex: 0 0 auto; }
+      }
+
       /* ---- pick cards (the tape) ------------------------------------------ */
       #cards { display: flex; flex-direction: column; }
       .group-h {
@@ -384,6 +409,46 @@
       }
       .gate-chip.warn { color: var(--warn); border-color: rgba(224, 163, 62, 0.4); }
       .gate-chip.info { color: var(--info); border-color: rgba(211, 160, 47, 0.4); }
+      /* quiet inline stat in the risk row (e.g. Match Confidence: 0.97) —
+         normal styling, mirrors .p-stats .stat; NOT a warning */
+      .p-risk .stat {
+        font-family: var(--mono); font-size: 11px; color: var(--faint);
+        font-variant-numeric: tabular-nums;
+      }
+      .p-risk .stat b { color: var(--bone); font-weight: 600; }
+
+      /* ---- manual settle (CLOSED cards only): small secondary control ------ */
+      .rr { display: grid; gap: 6px; justify-items: start; }
+      .rr-toggle {
+        background: transparent; border: 1px dashed var(--line); border-radius: 3px;
+        color: var(--dim); font-family: var(--mono); font-size: 10.5px;
+        letter-spacing: 0.05em; text-transform: uppercase;
+        padding: 5px 9px; min-height: 32px; cursor: pointer;
+      }
+      .rr-toggle:hover { border-color: var(--faint); color: var(--bone); }
+      .rr-form { display: flex; gap: 8px 10px; align-items: flex-end; flex-wrap: wrap; }
+      .rr-field { display: grid; gap: 3px; }
+      .rr-field label {
+        font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+        letter-spacing: 0.05em; color: var(--faint);
+      }
+      .rr-field input {
+        width: 92px; background: var(--s1); border: 1px solid var(--line);
+        border-radius: 3px; color: var(--bone); font: 13px var(--mono); padding: 8px 9px;
+      }
+      .rr-submit {
+        background: var(--s2); border: 1px solid var(--line); border-radius: 3px;
+        color: var(--bone); font-family: var(--mono); font-size: 11px;
+        text-transform: uppercase; letter-spacing: 0.06em;
+        padding: 8px 12px; min-height: 36px; cursor: pointer;
+      }
+      .rr-submit:hover { border-color: var(--faint); }
+      .rr-submit:disabled { opacity: 0.55; cursor: default; }
+      .rr-note { font-family: var(--mono); font-size: 11px; color: var(--pos); flex-basis: 100%; }
+      .rr-note.err { color: var(--neg); }
+      @media (max-width: 980px) {
+        .rr-toggle, .rr-submit { min-height: 44px; }
+      }
 
       /* ---- per-pick drift bar (fill vs fair vs close) --------------------- */
       .drift { position: relative; height: 26px; margin: 1px 0; }
@@ -1518,7 +1583,93 @@
             ft.appendChild(vg);
           }
           if (ft.childNodes.length) el.appendChild(ft);
+
+          // manual settle: only CLOSED cards (started, still unsettled) get the
+          // small "Record result" affordance — the manual path for leagues
+          // without a free results feed. It records the final score ONLY;
+          // nothing here places a bet.
+          if (inClosedTab(p) && p.event_id != null) el.appendChild(recordResultBlock(p));
           return el;
+        }
+
+        // "Record result" disclosure on a CLOSED card: expands to two labeled
+        // score inputs (pre-filled from the scraped score when present) and
+        // POSTs {home_score, away_score} to /events/{event_id}/result. Success
+        // re-fetches picks so the card re-renders settled; failure shows an
+        // inline error (never a silent fail); 401 rides authRequired().
+        function parseScraped(s) {
+          const m = /^\s*(\d{1,3})\s*-\s*(\d{1,3})\s*$/.exec(String(s == null ? "" : s));
+          return m ? { h: Number(m[1]), a: Number(m[2]) } : null;
+        }
+        function recordResultBlock(p) {
+          const wrap = document.createElement("div"); wrap.className = "rr";
+          const toggle = document.createElement("button");
+          toggle.type = "button"; toggle.className = "rr-toggle";
+          toggle.textContent = "✎ Record result";
+          toggle.setAttribute("aria-expanded", "false");
+          toggle.title = "Manually record the final score — settles this event's open picks. " +
+            "Result tracking only: this system never places bets.";
+          const form = document.createElement("form");
+          form.className = "rr-form"; form.hidden = true;
+          const pre = parseScraped(p.scraped_score);
+          const mkField = (labelText, id, val) => {
+            const box = document.createElement("span"); box.className = "rr-field";
+            const l = document.createElement("label"); l.htmlFor = id; l.textContent = labelText;
+            const inp = document.createElement("input");
+            inp.type = "number"; inp.id = id; inp.min = "0"; inp.max = "250"; inp.step = "1";
+            inp.required = true; inp.inputMode = "numeric";
+            if (val != null) inp.value = String(val);
+            box.append(l, inp); return { box, inp };
+          };
+          const fh = mkField("Home score", "rr-h-" + p.id, pre ? pre.h : null);
+          const fa = mkField("Away score", "rr-a-" + p.id, pre ? pre.a : null);
+          const submit = document.createElement("button");
+          submit.type = "submit"; submit.className = "rr-submit";
+          submit.textContent = "Record result";
+          const note = document.createElement("span");
+          note.className = "rr-note"; note.setAttribute("role", "status");
+          form.append(fh.box, fa.box, submit, note);
+          toggle.addEventListener("click", () => {
+            form.hidden = !form.hidden;
+            toggle.setAttribute("aria-expanded", String(!form.hidden));
+            if (!form.hidden) fh.inp.focus();
+          });
+          form.addEventListener("submit", async (ev) => {
+            ev.preventDefault();
+            const h = Number(fh.inp.value), a = Number(fa.inp.value);
+            if (!Number.isInteger(h) || !Number.isInteger(a) || h < 0 || a < 0 || h > 250 || a > 250) {
+              note.classList.add("err");
+              note.textContent = "Could not record result. (enter whole scores 0–250)";
+              return;
+            }
+            submit.disabled = true;
+            note.classList.remove("err"); note.textContent = "Recording…";
+            try {
+              const res = await fetchWithTimeout("/events/" + p.event_id + "/result", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ home_score: h, away_score: a }),
+              });
+              if (res.status === 401) { authRequired(); return; }
+              if (!res.ok) {
+                note.classList.add("err");
+                note.textContent = "Could not record result. (HTTP " + res.status + ")";
+                submit.disabled = false;
+                return;
+              }
+              const body = await res.json();
+              const n = body && body.settled != null ? body.settled : 0;
+              note.textContent = "Result recorded — " + n +
+                (n === 1 ? " pick" : " picks") + " settled. Refreshing…";
+              load(); // re-fetch so the card re-renders settled
+            } catch (e) {
+              note.classList.add("err");
+              note.textContent = "Could not record result. (" + errLabel(e) + ")";
+              submit.disabled = false;
+            }
+          });
+          wrap.append(toggle, form);
+          return wrap;
         }
 
         function mkStat(label, val) {
@@ -1570,6 +1721,27 @@
           } else {
             add("warn", "△ MISSING ANCHOR",
               "Anchor Source: none — no sharp book priced this selection at pick time. The fair value is model/consensus-derived; the weakest anchor state.");
+          }
+          // Match Confidence — cross-source anchor-link strength. The backend
+          // sends a STRING numeric (like every Decimal field) or null; null
+          // (consensus / missing-anchor / pre-column rows) renders NOTHING —
+          // the anchor badges above already carry that state, and printing
+          // "undefined" or a blank number would imply a strength we don't have.
+          const amc = numOf(p.anchor_match_confidence);
+          if (isFinite(amc)) {
+            const method = p.anchor_match_method ? String(p.anchor_match_method) : "—";
+            if (amc >= 0.95) {
+              // strong link: quiet inline stat, normal styling — no warning.
+              const mc = mkStat("Match Confidence:", amc.toFixed(2));
+              mc.title = "Cross-source anchor match confidence " + amc.toFixed(2) +
+                " (method: " + method + ") — how confidently the sharp anchor's fixture was linked to this event.";
+              row.appendChild(mc);
+            } else {
+              add("warn dashed", "△ WEAK MATCH",
+                "Anchor match confidence " + amc.toFixed(2) + " (method: " + method +
+                ") — the sharp anchor was linked to this fixture by a weaker cross-source match. " +
+                "Verify it is the same game before trusting the fair price.");
+            }
           }
           // freshness — Last Updated (re-price age)
           if (p.status === "alerted" && !hasStarted(p)) {

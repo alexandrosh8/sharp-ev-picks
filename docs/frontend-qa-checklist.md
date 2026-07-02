@@ -16,6 +16,8 @@ fine for the phone widths.
 Check at **360 / 390 / 430 / 768 / 1024 px**:
 
 - [ ] Top status bar wraps cleanly; summary chips (Source Freshness / Premium / Shadow / Open / ROI / CLV) visible, no overlap.
+- [ ] ≤430px: chips collapse to ONE non-wrapping horizontally swipeable strip (no wrap, momentum scroll, no visible scrollbar); total bar height ~90–100px at 360px; health dot + freshness stamp still visible on the top row; brand tagline hidden.
+- [ ] ≤430px: auto-hide still works (scroll down hides, up restores) and the chip strip scrolls horizontally without moving the page.
 - [ ] ≤980px: bottom section nav (PICKS/GAMES/PERF/DIAG) fixed, 44px+ targets; desktop top nav hidden.
 - [ ] Pick cards: no horizontal scroll; event names ellipsize; drift bar fits.
 - [ ] Focusing search/sort/tier on iOS does NOT zoom the page (16px inputs at ≤980px).
@@ -37,7 +39,11 @@ Check at **360 / 390 / 430 / 768 / 1024 px**:
 - [ ] Freshness: ● Last Updated Nm ago vs ○ STALE; display-only sports carry ▲ DISPLAY-ONLY.
 - [ ] Value-gone pick: faded + "◌ no value now", still listed (no survivorship pruning).
 - [ ] CLV chip states: pending / self-priced / n/a (fabricated or tautological) / dim indicative "consensus close" / trusted green-red; "provisional" tag on open picks with live CLV.
+- [ ] Match Confidence: ≥0.95 renders quiet "Match Confidence: X.XX" stat in the risk row (no warning); <0.95 renders dashed △ WEAK MATCH badge whose tooltip carries the value + method; null confidence renders nothing extra (never "undefined").
 - [ ] Settled: score, ✓ WON / ✕ LOST / ▣ PUSH / ∅ VOID glyph badges, Closing Line, p&l.
+- [ ] CLOSED card only: small dashed "✎ Record result" control (44px+ on mobile); expanding reveals labeled Home/Away score inputs pre-filled from the scraped score; LIVE/UNVERIFIED cards never show it.
+- [ ] Record result submit: success shows "Result recorded — N picks settled." then the card re-renders settled after the auto re-fetch; server error shows inline "Could not record result. (HTTP …)"; killed network shows the timeout variant; expired session redirects to /login.
+- [ ] Record result is keyboard-operable: Tab to the toggle, Enter expands, Tab through inputs, Enter submits.
 - [ ] Missing numeric fields render "—", never NaN/undefined (test a pick with null `decimal_odds` via devtools override).
 
 ## 4. Empty & error states (exact copy)

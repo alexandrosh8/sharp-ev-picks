@@ -218,10 +218,11 @@ def test_dashboard_fetches_are_timeout_guarded() -> None:
     assert 'fetchWithTimeout("/picks' in text
     assert 'fetchWithTimeout("/performance' in text
     assert 'fetchWithTimeout("/health' in text
-    # the mutating POST goes through the timeout helper too. The TAPE redesign is
-    # read-only (no manual settle button), so the surviving POST is /logout; it
-    # must still ride the helper (formatter may wrap the URL onto the next line).
+    # the mutating POSTs go through the timeout helper too: /logout and the
+    # manual record-result POST (/events/{id}/result) — a bare fetch( would
+    # reintroduce the indefinite hang (formatter may wrap the URL).
     assert re.search(r'fetchWithTimeout\(\s*"/logout', text)
+    assert re.search(r'fetchWithTimeout\(\s*"/events/"', text)
     # the raw fetch( primitive appears exactly once: inside the helper
     assert text.count("fetch(") == 1
     # in-flight guard: a new tick must not pile onto a hung load()
@@ -1371,3 +1372,99 @@ def test_dashboard_avoids_promotional_language() -> None:
     for m in re.finditer("guarante", joined):
         ctx = joined[max(0, m.start() - 40) : m.start()]
         assert "not a profit" in ctx or "never a profit" in ctx, ctx
+
+
+def test_dashboard_match_confidence_weak_badge_and_quiet_path() -> None:
+    """Anchor match-confidence surfacing (cross-source link strength):
+    < 0.95 renders the △ WEAK MATCH warn badge (same glyph+text family as
+    MISSING ANCHOR, never color-only) with the numeric value AND the
+    anchor_match_method in its tooltip; >= 0.95 renders a QUIET inline
+    'Match Confidence: X.XX' stat (normal styling, no warn class); null
+    renders nothing extra (the anchor badges already carry that state)."""
+    text = TestClient(make_app()).get("/").text
+    # weak-match badge marker: warn dashed + glyph + words
+    assert "△ WEAK MATCH" in text
+    assert '"warn dashed", "△ WEAK MATCH"' in text
+    # tooltip carries the numeric confidence and the match method
+    assert "Anchor match confidence" in text
+    assert "anchor_match_method" in text
+    # the quiet >= 0.95 path is a plain stat, NOT the warn badge: the quiet
+    # branch must call mkStat, and the 0.95 threshold gates the two paths
+    assert 'mkStat("Match Confidence:", amc.toFixed(2))' in text
+    assert "amc >= 0.95" in text
+    # defensive parse: string NUMERIC from the backend -> numOf + isFinite
+    assert "numOf(p.anchor_match_confidence)" in text
+    assert "isFinite(amc)" in text
+    # null path renders nothing: no unconditional confidence rendering, and
+    # the literal string "undefined" is never concatenated into the risk row
+    assert "p.anchor_match_confidence ||" not in text
+
+
+def test_dashboard_record_result_affordance_on_closed_cards() -> None:
+    """Manual-settle affordance: CLOSED (started, unsettled) cards carry a
+    small secondary 'Record result' disclosure that expands to two labeled
+    score inputs (pre-filled from the scraped score) and POSTs the backend's
+    exact body shape {home_score, away_score} to /events/{event_id}/result.
+    Success re-fetches picks; failure shows an inline error; 401 rides the
+    existing authRequired() path. Never rendered on LIVE cards."""
+    text = TestClient(make_app()).get("/").text
+    # gated to CLOSED cards only (started, unsettled) with a real event id
+    assert "inClosedTab(p) && p.event_id != null" in text
+    # labeled inputs (keyboard-accessible label[for] pairs)
+    assert '"Home score"' in text
+    assert '"Away score"' in text
+    assert "l.htmlFor = id" in text
+    # the exact endpoint + the backend's EventResultIn field names (ints)
+    assert '"/events/" + p.event_id + "/result"' in text
+    assert "home_score: h, away_score: a" in text
+    # success note + re-fetch; failure is an inline error, never silent
+    assert "Result recorded" in text
+    assert "Could not record result." in text
+    # 401 goes through the shared session-expiry path
+    assert "if (res.status === 401) { authRequired(); return; }" in text
+    # prefill parses the backend's "H-A" scraped_score string defensively
+    assert "parseScraped(p.scraped_score)" in text
+    # disclosure is collapsed by default and announces its expanded state
+    assert 'toggle.setAttribute("aria-expanded"' in text
+    # 44px+ touch targets on mobile for the two controls
+    assert ".rr-toggle, .rr-submit { min-height: 44px; }" in text
+
+
+def test_dashboard_statusbar_compacts_to_scroll_strip_on_small_phones() -> None:
+    """<=430px: the summary-chip row becomes ONE non-wrapping horizontally
+    scrollable strip (flex-wrap: nowrap + overflow-x: auto + touch scrolling)
+    so the status bar stays ~90-100px tall; the health dot + freshness stamp
+    stay visible; the scroll auto-hide keeps working (transform untouched)."""
+    text = TestClient(make_app()).get("/").text
+    assert "@media (max-width: 430px)" in text
+    compact = text.split("@media (max-width: 430px)", 1)[1]
+    compact = compact.split("@media", 1)[0]  # scope to this media block
+    assert "flex-wrap: nowrap;" in compact
+    assert "overflow-x: auto;" in compact
+    assert "-webkit-overflow-scrolling: touch;" in compact
+    # chips must not shrink into the strip
+    assert "flex: 0 0 auto;" in compact
+    # the auto-hide mechanism is untouched: same class hook + transform rule
+    assert ".cmdbar.hidden { transform: translateY(-100%); }" in text
+    assert "autoHideHeader" in text
+
+
+def test_login_page_hardened_against_double_submit() -> None:
+    """_LOGIN_HTML only (no auth-logic change): both fields are required with
+    proper autocomplete tokens, and the submit button disables on first submit
+    (re-enabled only on failure so a wrong password can be retried; success
+    navigates away)."""
+    from app.api.routes import _LOGIN_HTML
+
+    assert 'autocomplete="username"' in _LOGIN_HTML
+    assert 'autocomplete="current-password"' in _LOGIN_HTML
+    # required on BOTH inputs
+    assert _LOGIN_HTML.count("required />") == 2
+    # disable-on-submit guard markers
+    assert 'id="login-submit"' in _LOGIN_HTML
+    assert "if (submitBtn.disabled) return;" in _LOGIN_HTML
+    assert "submitBtn.disabled = true;" in _LOGIN_HTML
+    # failure paths re-enable so the user can retry after a 401
+    assert _LOGIN_HTML.count("submitBtn.disabled = false;") == 2
+    # error text still set via textContent (never innerHTML)
+    assert "innerHTML" not in _LOGIN_HTML
