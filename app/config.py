@@ -735,6 +735,13 @@ class Settings(BaseSettings):
     # freshness is one cycle length; the scrape itself is the floor. The
     # >=30s floor blocks hammering-by-typo on a free scraped source.
     poll_interval_seconds: int = Field(default=300, ge=30)
+    # WATCHDOG for a wedged poll cycle (incident 2026-07-02 23:38Z: a scrape
+    # await hung indefinitely; max_instances=1 then starved ALL later cycles —
+    # the HUNG log filter detects but nothing cancels). A per-sport cycle
+    # outliving this budget is cancelled with a loud warning and the next
+    # sport/cycle proceeds. Generous vs the ~4-minute full-slate norm; 0
+    # disables (pre-incident behavior).
+    poll_cycle_timeout_seconds: int = Field(default=900, ge=0)
     footballdata_league_codes: str = "E0"  # csv, European mmz4281 divisions
     footballdata_seasons: str = "2425,2526"  # csv, football-data 4-digit seasons
     # Optional: train on a "new leagues" country code (e.g. BRA) instead of the

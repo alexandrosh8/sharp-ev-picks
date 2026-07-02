@@ -12,7 +12,7 @@ orchestrator touches only this module.
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -79,6 +79,37 @@ _CONTINUOUS_POLL_JOBS = (
 #: cycle — escalated back to WARNING so the alert layer can see it. A single
 #: coalesce (count 1) stays INFO.
 _HUNG_CYCLE_SKIP_THRESHOLD = 3
+
+
+async def run_sport_cycle_guarded(
+    pipeline_fn: Callable[..., Awaitable[object]],
+    deps: object,
+    sport_key: str,
+    cycle_budget: int,
+) -> None:
+    """One per-sport poll cycle under the wedge WATCHDOG.
+
+    Incident 2026-07-02 23:38Z: a scrape await hung indefinitely; with
+    ``max_instances=1`` the wedged cycle starved every later cycle — the HUNG
+    log filter detects that state but nothing cancels it. A cycle outliving
+    ``cycle_budget`` seconds is cancelled with a loud warning and polling
+    resumes; cancellation is safe (the scrape/pipeline teardown already
+    tolerates it — same path as graceful shutdown). ``cycle_budget <= 0``
+    disables the watchdog (pre-incident behavior).
+    """
+    try:
+        if cycle_budget > 0:
+            await asyncio.wait_for(pipeline_fn(deps, sport_key), timeout=cycle_budget)
+        else:
+            await pipeline_fn(deps, sport_key)
+    except TimeoutError:
+        logger.warning(
+            "poll_odds WATCHDOG: %s cycle exceeded %ds and was cancelled — resuming",
+            sport_key,
+            cycle_budget,
+        )
+    except Exception as exc:
+        logger.error("poll_odds failed for %s: %s", sport_key, type(exc).__name__)
 
 
 class _PollSkipNoiseFilter(logging.Filter):
@@ -614,12 +645,11 @@ def build_scheduler(
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 
+        cycle_budget = settings.poll_cycle_timeout_seconds
+
         async def poll_odds() -> None:
             for sport_key in sport_keys:
-                try:
-                    await pipeline_fn(deps, sport_key)
-                except Exception as exc:
-                    logger.error("poll_odds failed for %s: %s", sport_key, type(exc).__name__)
+                await run_sport_cycle_guarded(pipeline_fn, deps, sport_key, cycle_budget)
 
         scheduler.add_job(
             poll_odds,
