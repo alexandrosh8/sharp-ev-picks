@@ -772,6 +772,15 @@ async def test_performance_report_aggregates(session, monkeypatch) -> None:  # t
     # headline numbers are PREMIUM-scoped, and the payload says so
     assert report["tier_scope"] == "premium"
     assert report["volume"]["n_settled"] == 0
+    # D4 evidence-quality diagnostics ride the same payload (tier-agnostic scope
+    # + per-stratum tautology tallies) — shape contract for the dashboard panel.
+    quality = report["clv_quality"]
+    assert quality["scope"] == "all_tiers"
+    assert quality["n_settled"] == 2
+    assert quality["clv_missing"] == 0
+    assert quality["clv_excluded_tautological"] == 0
+    assert quality["n_snapshot_close"] >= 1  # the WON pick's genuine snapshot close
+    assert isinstance(quality["strata"], list)  # Q2-shape strata (read-only SQL)
 
 
 async def test_performance_report_keeps_volume_out_of_headline(session) -> None:  # type: ignore[no-untyped-def]

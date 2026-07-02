@@ -322,6 +322,7 @@ def anchor_fair_probs(
     consensus_logit_pool: bool = False,
     liquidity: Mapping[str, Mapping[str, float]] | None = None,
     exchange_min_liquidity: float = 0.0,
+    exchange_demoted: bool = False,
 ) -> tuple[str, dict[str, float]] | None:
     """Trustworthy fair probabilities for one market, or None.
 
@@ -329,6 +330,8 @@ def anchor_fair_probs(
     and the live CLV true-up (closing fair probability per pick). Thin wrapper
     over :func:`anchor_fair_probs_with_provenance` that drops the P2-2
     devig-fallback flag — callers that need it use the provenance variant.
+    ``exchange_demoted`` is the Betfair staleness-guard demotion flag (default
+    False = inert; see the provenance variant's docstring).
     """
     result = anchor_fair_probs_with_provenance(
         prices,
@@ -339,6 +342,7 @@ def anchor_fair_probs(
         consensus_logit_pool=consensus_logit_pool,
         liquidity=liquidity,
         exchange_min_liquidity=exchange_min_liquidity,
+        exchange_demoted=exchange_demoted,
     )
     if result is None:
         return None
@@ -356,13 +360,22 @@ def anchor_fair_probs_with_provenance(
     consensus_logit_pool: bool = False,
     liquidity: Mapping[str, Mapping[str, float]] | None = None,
     exchange_min_liquidity: float = 0.0,
+    exchange_demoted: bool = False,
 ) -> tuple[str, dict[str, float], bool] | None:
     """Like :func:`anchor_fair_probs` but also returns whether the anchor devig
     FELL BACK to multiplicative (P2-2): ``(anchor_book, {selection: fair}, fell_back)``.
 
     The flag is recorded per pick (mint) and per close so the trusted sharp-CLV
     subset can drop ASYMMETRIC fallbacks (mint and close devigged by different
-    effective methods — a method artifact, not a real line move)."""
+    effective methods — a method artifact, not a real line move).
+
+    ``exchange_demoted`` (Betfair staleness guard, default False = inert): when
+    True, EXCHANGE candidates (commissioned books) are skipped in the named
+    sharp-anchor loop for THIS market — a fresh Betfair-API verdict found the
+    inline exchange price > threshold ticks stale — and anchoring falls through
+    to the next sharp book / consensus (fail-closed, the same demotion pattern
+    as the liquidity floor). Computed OUTSIDE the pure layer (the pipeline
+    resolves persisted verdicts); this module stays env/DB-free."""
     selections = list(prices.keys())
     if len(selections) < 2 or len(set(selections)) != len(selections):
         return None
@@ -374,6 +387,7 @@ def anchor_fair_probs_with_provenance(
         max_overround,
         liquidity=liquidity,
         exchange_min_liquidity=exchange_min_liquidity,
+        exchange_demoted=exchange_demoted,
     )
     if anchor_book is None:
         if consensus_logit_pool:
@@ -603,10 +617,24 @@ def _named_sharp_anchor(
     max_overround: float,
     liquidity: Mapping[str, Mapping[str, float]] | None = None,
     exchange_min_liquidity: float = 0.0,
+    exchange_demoted: bool = False,
 ) -> tuple[str | None, list[float] | None]:
     """First preferred sharp book that prices the FULL market with a sane
     overround. Returns the GROSS (displayed) anchor odds for the fair-probability
     devig.
+
+    Betfair staleness guard (``exchange_demoted``, default False = bit-identical):
+    when True, a fresh Betfair-API verdict found this event's inline exchange
+    price more than the configured tick threshold away from the live API price
+    — the inline exchange line is hours-stale evidence, not a trustworthy sharp
+    anchor. EVERY exchange candidate (commissioned book) is skipped via the
+    existing fail-closed ``continue`` pattern, so the market falls to the next
+    SHARP_BOOKS member (Pinnacle etc.) then ``_consensus_anchor`` — under
+    require_sharp_anchor a consensus-anchored market mints at the volume
+    (shadow) tier, never premium, never a hard drop. The flag is computed
+    OUTSIDE this pure layer (persisted verdicts, resolved at the composition
+    root); stale or missing verdicts never set it (fail-open on missing
+    evidence, fail-closed only on positive fresh disagreement).
 
     edge-ev-devig-P2-1: commission is a PAYOUT cost, not a probability signal, so
     the fair-probability estimate devigs the GROSS odds — netting commission before
@@ -665,6 +693,11 @@ def _named_sharp_anchor(
                     break
             if known_thin:
                 continue
+        if exchange_demoted and _norm(pref) in commissions:
+            # Exchange anchor under FRESH API disagreement (staleness guard):
+            # demote exactly like known-thin — skip to the next sharp book,
+            # then consensus (fail-closed; never a silent pass, never a drop).
+            continue
         # Gate on NET overround (membership unchanged); devig the GROSS odds.
         if 0.0 <= _overround(net_odds) <= max_overround:
             return raw_by_norm[pref], gross_odds

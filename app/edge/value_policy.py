@@ -159,6 +159,20 @@ class ValuePolicy:
     # API attach is fuzzy-matched at ingestion), so per-pick anchor match
     # confidence must stop claiming 1.0 (see pipeline._anchor_match_provenance).
     betfair_api_promote: bool = False
+    # BETFAIR STALENESS GUARD (mirrors Settings.value_betfair_staleness_guard /
+    # _shadow — composition root only). guard=False (the default) is BYTE-
+    # IDENTICAL: the pipeline never loads the verdict set. guard=True +
+    # shadow=True (the shadow-first rollout default): the fresh verdicts are
+    # loaded, would-demote is LOGGED and stamped on picks
+    # (anchor_staleness_decision), but anchoring is UNCHANGED. guard=True +
+    # shadow=False (enforce — only after measured demote-rate review; live
+    # data says ~40% of compared selections sit > 1 tick apart): an event
+    # whose FRESH verdict is 'demote' skips the exchange anchor for its H2H
+    # market and falls to the next sharp book / consensus (fail-closed; under
+    # require_sharp_anchor that mints at the volume tier, never premium,
+    # never a hard drop). Stale/missing verdicts NEVER demote.
+    betfair_staleness_guard: bool = False
+    betfair_staleness_shadow: bool = True
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:

@@ -19,10 +19,10 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from sqlalchemy import and_, or_, select, update
@@ -88,6 +88,28 @@ def _is_implausible_final(sport_key: str, home_score: int, away_score: int) -> b
     return False
 
 
+def _anchor_capture_time(
+    captured: Mapping[tuple[str, str], datetime | None], anchor_book: str
+) -> datetime | None:
+    """D3 close provenance: the capture time of the rows BEHIND the close fair.
+
+    For a named anchor book: the max ``captured_at`` over that book's own rows
+    in the market group (the anchor devigs the whole book, so its newest row
+    dates the close). For the consensus sentinel (no book named ``anchor_book``
+    exists in the group): the max over EVERY row that fed the median. None when
+    no timestamps were recorded — honest absence, never a fabricated now().
+    """
+    normalized = anchor_book.strip().lower()
+    anchor_rows = [
+        ts
+        for (_sel, book), ts in captured.items()
+        if ts is not None and book.strip().lower() == normalized
+    ]
+    if anchor_rows:
+        return max(anchor_rows)
+    return max((ts for ts in captured.values() if ts is not None), default=None)
+
+
 def _consistent_current_edge(pick: Pick, fair: float) -> Decimal | None:
     """current_edge kept consistent with a freshly-stamped fair (audit 2026-06-26):
     recompute against the pick's last-known current price so the dashboard Edge /
@@ -141,9 +163,13 @@ async def revalidate_open_picks(
             anchor_by_key[(event_id, str(market), sel)] = book
             fell_back_by_key[(event_id, str(market), sel)] = fb
     prices_by_key: dict[tuple[str, str, str], dict[str, float]] = {}
-    for (event_id, market, _detail), (prices, _captured) in grouped.items():
+    # D3 close provenance: the group's (selection, book) -> captured_at map per
+    # pick key, so the close writer can stamp WHEN the anchor rows were captured.
+    captured_by_key: dict[tuple[str, str, str], Mapping[tuple[str, str], datetime | None]] = {}
+    for (event_id, market, _detail), (prices, captured) in grouped.items():
         for sel, books in prices.items():
             prices_by_key[(event_id, str(market), sel)] = books
+            captured_by_key[(event_id, str(market), sel)] = captured
 
     if not fair_by_key:
         return 0
@@ -201,6 +227,14 @@ async def revalidate_open_picks(
                 # only if finalize_closing_from_snapshots later overwrites with a
                 # sharp anchor AND closing_odds (the snapshot-close marker).
                 pick.closing_anchor_type = anchor_type_for(close_anchor)
+                # D3 CLOSE PROVENANCE: the concrete anchor book + the capture time
+                # of the rows behind this re-scrape close (from the cycle's grouped
+                # timestamps). What later separates an ECHO of the mint anchor row
+                # (captured_at <= created_at) from a fresh-but-unmoved line.
+                pick.close_anchor_book = close_anchor[:64]
+                pick.close_snapshot_captured_at = _anchor_capture_time(
+                    captured_by_key.get(key, {}), close_anchor
+                )
                 # Stamp independence here too (audit #4): this path previously left
                 # close_independent_of_fill NULL, which the trusted-CLV gate admitted as
                 # "not circular". Record it so a re-scrape close can never leak in as
@@ -330,29 +364,51 @@ def select_offwindow_links(
     return links[:cap]
 
 
+#: D1 (close-evidence): kickoff-imminence window for the off-window scrape
+#: order. An event kicking off within this window is re-priced AHEAD of its
+#: band peers (zero-cost reorder — the link cap is unchanged) so its LAST
+#: pre-kickoff observation — the de-facto fallback close — is fresh.
+OFFWINDOW_CLOSE_BOOST_WINDOW = timedelta(minutes=60)
+
+
 def order_offwindow_refs(
-    rows: Sequence[tuple[str, str, str, str, datetime | None]],
+    rows: Sequence[tuple[Any, ...]],
+    now: datetime | None = None,
 ) -> list[str]:
     """Scrape order over (external_ref, market, selection, tier,
-    revalidation_attempted_at) open-pick rows: PREMIUM-bearing events first
-    — the alerted tier's CLV true-up cadence must not be diluted by the ~6x
-    larger volume shadow tier competing for the same link cap — then the
-    attempts round-robin inside each band (never-attempted events lead,
-    then stalest attempt: whoever waited longest goes next cycle)."""
+    revalidation_attempted_at[, starts_at]) open-pick rows: PREMIUM-bearing
+    events first — the alerted tier's CLV true-up cadence must not be diluted
+    by the ~6x larger volume shadow tier competing for the same link cap —
+    then (D1, zero-cost: same link cap) kickoff-imminent events (within
+    OFFWINDOW_CLOSE_BOOST_WINDOW of ``now``) ahead inside each band so their
+    de-facto fallback close is a fresh observation, then the attempts
+    round-robin (never-attempted events lead, then stalest attempt: whoever
+    waited longest goes next cycle). ``starts_at`` is an optional trailing
+    element and ``now`` optional — without both, imminence is simply neutral
+    (the pre-D1 order)."""
     has_premium: dict[str, bool] = {}
+    imminent: dict[str, bool] = {}
     attempts: dict[str, list[datetime]] = {}
-    for ref, _market, _selection, tier, attempted in rows:
+    for row in rows:
+        ref, _market, _selection, tier, attempted = row[:5]
+        starts_at = row[5] if len(row) > 5 else None
         has_premium[ref] = has_premium.get(ref, False) or tier == "premium"
+        imminent[ref] = imminent.get(ref, False) or (
+            now is not None
+            and starts_at is not None
+            and timedelta(0) <= starts_at - now <= OFFWINDOW_CLOSE_BOOST_WINDOW
+        )
         stamps = attempts.setdefault(ref, [])
         if attempted is not None:
             stamps.append(attempted)
 
-    def sort_key(ref: str) -> tuple[bool, bool, datetime]:
+    def sort_key(ref: str) -> tuple[bool, bool, bool, datetime]:
         # min over non-NULL stamps (SQL MIN semantics, matching the previous
         # query): an event is "never attempted" only when NO pick has one.
         stamps = attempts[ref]
         return (
             not has_premium[ref],
+            not imminent[ref],
             bool(stamps),
             min(stamps) if stamps else datetime.min.replace(tzinfo=UTC),
         )
@@ -454,6 +510,8 @@ async def revalidate_offwindow_picks(
                     Pick.selection,
                     Pick.tier,
                     Pick.revalidation_attempted_at,
+                    # D1: kickoff feeds the imminence reorder (fresh fallback close).
+                    Event.starts_at,
                 )
                 .join(Event, Pick.event_id == Event.id)
                 # NULL starts_at = kickoff unknown ("TBD"): we cannot
@@ -479,9 +537,9 @@ async def revalidate_offwindow_picks(
     # Premium-bearing events first, then the attempts round-robin (a dead
     # link that never re-prices would keep revalidated_at NULL forever,
     # sort first every cycle, and starve the queue — hence attempts).
-    refs = order_offwindow_refs([tuple(row) for row in pick_rows])
+    refs = order_offwindow_refs([tuple(row) for row in pick_rows], now=now)
     pairs_by_ref: dict[str, list[tuple[str, str]]] = {}
-    for ref, market, selection, _tier, _attempted in pick_rows:
+    for ref, market, selection, _tier, _attempted, _starts_at in pick_rows:
         pairs_by_ref.setdefault(ref, []).append((market, selection))
     segment_for = getattr(loader, "sport_segment", None)
     segment = segment_for(sport_key) if callable(segment_for) else None
@@ -791,6 +849,77 @@ async def capture_finished_scores(
     return written
 
 
+def _mint_anchor_matches_source(pick: Pick, source_book: str) -> bool:
+    """True when the pick's MINT anchor came from ``source_book`` (same source).
+
+    Prefers the concrete book name (``anchor_book``, when recorded) over the
+    collapsed ``anchor_type``: 'Betfair Exchange' vs 'Smarkets' are both type
+    'sharp' but are DIFFERENT sources. Only sharp/pinnacle mint anchors can
+    match — a consensus-minted pick has no single source to echo.
+    """
+    anchor_type = getattr(pick, "anchor_type", None)
+    if anchor_type not in ("pinnacle", "sharp"):
+        return False
+    anchor_book = getattr(pick, "anchor_book", None)
+    if anchor_book:
+        return anchor_book.strip().lower() == source_book.strip().lower()
+    # Pre-anchor_book rows: fall back to the collapsed type.
+    return anchor_type_for(source_book) == anchor_type
+
+
+def _drop_stale_sharp_echoes(
+    sharp_snaps: list[OddsSnapshotIn],
+    pick: Pick,
+    kickoff: datetime,
+    max_gap: timedelta,
+) -> list[OddsSnapshotIn]:
+    """D2 per-source sharp-close freshness/echo gate — TIGHTENING ONLY.
+
+    Drops a sharp-archive source's close rows when that source's own last
+    ``captured_at`` BOTH (a) exceeds ``max_gap`` before kickoff (the source
+    stopped observing the event long before the close) AND (b) predates the
+    pick's ``created_at`` while the MINT anchor was the SAME source — such a
+    row is provably the mint-anchor row re-read at settlement (an ECHO), not
+    independent close evidence; injecting it would outrank a fresh soft
+    consensus close in event_fair_probs and mint a fake same-source sharp
+    close (live audit 2026-07: pinnacle→pinnacle 76% tautological,
+    cross-source ~3%). The surviving set is ALWAYS a subset of the input —
+    this gate can only remove rows, never admit one the caller rejected.
+
+    A source whose staleness or echo status cannot be PROVEN (no captured_at,
+    no pick created_at) is kept — unprovable is not droppable.
+    """
+    created_at = getattr(pick, "created_at", None)
+    by_source: dict[str, list[OddsSnapshotIn]] = {}
+    for snap in sharp_snaps:
+        by_source.setdefault(snap.bookmaker, []).append(snap)
+    kept: list[OddsSnapshotIn] = []
+    for source_book, rows in by_source.items():
+        last = max((s.captured_at for s in rows if s.captured_at is not None), default=None)
+        if last is None:  # no timestamp -> staleness/echo unprovable -> keep
+            kept.extend(rows)
+            continue
+        stale = kickoff - last > max_gap
+        echo = (
+            created_at is not None
+            and last <= created_at
+            and _mint_anchor_matches_source(pick, source_book)
+        )
+        if stale and echo:
+            logger.info(
+                "pick %d: dropped %d stale mint-echo close row(s) from %r "
+                "(last capture %s before kickoff, predates pick creation) — "
+                "close falls to the remaining fresh set",
+                pick.id,
+                len(rows),
+                source_book,
+                kickoff - last,
+            )
+            continue
+        kept.extend(rows)
+    return kept
+
+
 # --- closing-line capture from our OWN odds_snapshots ------------------------
 # Scrape-coverage gate for the snapshot close: the EVENT's last pre-kickoff
 # snapshot must be at most this old at kickoff. This guards events that FELL
@@ -812,10 +941,20 @@ async def finalize_closing_from_snapshots(
     *,
     use_pinnacle_archive: bool = False,
     use_betfair_exchange: bool = False,
+    sharp_close_echo_gate: bool = True,
     value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> bool:
     """Recompute the pick's closing fair/CLV from our own odds_snapshots
     history instead of trusting the last pre-kickoff re-scrape write.
+
+    ``sharp_close_echo_gate`` (D2, ON by default — a correctness fix): before
+    injection, sharp-archive rows from a source that is BOTH stale (its own
+    last capture > ``max_gap`` before kickoff) AND provably the mint anchor's
+    echo (last capture predates the pick's creation, same source as the mint
+    anchor) are DROPPED, so the close falls to the fresh soft consensus with an
+    honest ``closing_anchor_type='consensus'`` instead of a fake same-source
+    sharp close. Tightening only: the gate never admits a row the ungated path
+    rejected. Disable via CLV_SHARP_CLOSE_ECHO_GATE=false.
 
     Returns True when the snapshot close was applied. False = NO coverage
     (kickoff unknown, event not scraped near kickoff, no anchorable close
@@ -862,6 +1001,11 @@ async def finalize_closing_from_snapshots(
         # on: event_fair_probs prefers Pinnacle (SHARP_BOOKS[0]) over Betfair (index
         # 2), so Pinnacle wins when both price the market.
         sharp_snaps.extend(await _betfair_exchange_close(session, pick, external_ref, kickoff))
+    if sharp_close_echo_gate and sharp_snaps:
+        # D2 (TIGHTENING only): drop provable stale mint-echo sources BEFORE the
+        # freshness verdict, so a 4-5h-old re-read of the mint anchor row can
+        # neither satisfy coverage nor outrank a fresh soft consensus close.
+        sharp_snaps = _drop_stale_sharp_echoes(sharp_snaps, pick, kickoff, max_gap)
     sharp_last = max(
         (s.captured_at for s in sharp_snaps if s.captured_at is not None), default=None
     )
@@ -926,9 +1070,13 @@ async def finalize_closing_from_snapshots(
         return False
     clv = clv_log(fill_eff, fair)
     books: dict[str, float] = {}
-    for (_event, market, _detail), (prices, _captured) in grouped.items():
+    # D3 close provenance: the matched group's (selection, book) -> captured_at
+    # map, so the writer below can stamp WHEN the anchor rows were captured.
+    captured_map: Mapping[tuple[str, str], datetime | None] = {}
+    for (_event, market, _detail), (prices, captured) in grouped.items():
         if str(market) == pick.market and pick.selection in prices:
             books = prices[pick.selection]
+            captured_map = captured
             break
     close_odds: float | None
     if pick.bookmaker in books:
@@ -958,6 +1106,12 @@ async def finalize_closing_from_snapshots(
         # snapshot-close marker), a sharp value here marks a genuine sharp
         # close the per-anchor and headline CLV can trust.
         pick.closing_anchor_type = anchor_type_for(close_anchor)
+        # D3 CLOSE PROVENANCE: the concrete anchor book + the max captured_at of
+        # the anchor rows behind the snapshot close. Together with created_at this
+        # separates an ECHO of the mint anchor row (captured_at <= created_at)
+        # from a fresh observation of a genuinely unmoved line (> created_at).
+        pick.close_anchor_book = close_anchor[:64]
+        pick.close_snapshot_captured_at = _anchor_capture_time(captured_map, close_anchor)
         # INDEPENDENCE provenance (P0-1/P0-3 + audit 2026-06-28): a close is
         # independent only when the fill book did NOT price its own close (CIRCULAR
         # otherwise: closing == fill, |clv_log|~0) AND the close fair MOVED from the

@@ -288,6 +288,89 @@ async def test_non_url_ref_excluded(factory) -> None:  # type: ignore[no-untyped
 
 
 # --------------------------------------------------------------------------- #
+# D1 CLOSE-BOOST BAND: imminent kickoffs sort FIRST (soonest first), capped at
+# boost_slots — a REALLOCATION of the same limit (zero added load); the
+# remainder keeps the never-captured/stalest rotation. Slots/window at 0 = the
+# plain pre-D1 rotation.
+# --------------------------------------------------------------------------- #
+async def test_close_boost_puts_imminent_events_first(factory) -> None:  # type: ignore[no-untyped-def]
+    # `soon` kicks off in 30m and was JUST captured — the plain rotation would
+    # put the never-captured far event first; the boost band flips that so the
+    # final pre-kickoff window is observed densely (the CLV close).
+    soon = f"https://www.oddsportal.com/football/soon/{uuid4()}"
+    far = f"https://www.oddsportal.com/football/far/{uuid4()}"
+    await _create_soccer_event(
+        factory, url=soon, home="Soon H", away="Soon A", starts_at=NOW + timedelta(minutes=30)
+    )
+    await _create_soccer_event(
+        factory, url=far, home="Far H", away="Far A", starts_at=NOW + timedelta(hours=8)
+    )
+    await _capture_betfair(
+        factory, url=soon, home="Soon H", away="Soon A", captured_at=NOW - timedelta(minutes=1)
+    )
+    targets = await select_betfair_targets(
+        factory, sport="soccer", now=NOW, window=timedelta(days=3), limit=20
+    )
+    order = [t.external_ref for t in targets]
+    assert order.index(soon) < order.index(far)
+    # Boost disabled (slots=0): the plain rotation is restored — the
+    # never-captured far event leads again.
+    plain = await select_betfair_targets(
+        factory, sport="soccer", now=NOW, window=timedelta(days=3), limit=20, boost_slots=0
+    )
+    plain_order = [t.external_ref for t in plain]
+    assert plain_order.index(far) < plain_order.index(soon)
+
+
+async def test_close_boost_cap_and_total_limit_respected(factory) -> None:  # type: ignore[no-untyped-def]
+    # 3 imminent events but only 1 boost slot: exactly one leads (the soonest);
+    # the rest fall back into the rotation, and the TOTAL never exceeds limit —
+    # the band reallocates the budget, it never raises it.
+    kicks = [NOW + timedelta(minutes=m) for m in (10, 20, 40)]
+    urls = []
+    for i, kick in enumerate(kicks):
+        url = f"https://www.oddsportal.com/football/boost{i}/{uuid4()}"
+        urls.append(url)
+        await _create_soccer_event(factory, url=url, home=f"BH{i}", away=f"BA{i}", starts_at=kick)
+    late = f"https://www.oddsportal.com/football/late/{uuid4()}"
+    await _create_soccer_event(
+        factory, url=late, home="Late H", away="Late A", starts_at=NOW + timedelta(hours=9)
+    )
+    targets = await select_betfair_targets(
+        factory,
+        sport="soccer",
+        now=NOW,
+        window=timedelta(days=3),
+        limit=2,
+        boost_slots=1,
+    )
+    assert len(targets) == 2  # total budget unchanged
+    assert targets[0].external_ref == urls[0]  # boost band: soonest kickoff first
+
+
+async def test_close_boost_remainder_keeps_rotation(factory) -> None:  # type: ignore[no-untyped-def]
+    # After the boost band, the remaining slots keep never-captured-first then
+    # stalest-capture rotation (same kickoff so rotation alone decides).
+    soon = f"https://www.oddsportal.com/football/rsoon/{uuid4()}"
+    await _create_soccer_event(
+        factory, url=soon, home="RS H", away="RS A", starts_at=NOW + timedelta(minutes=15)
+    )
+    kickoff = NOW + timedelta(hours=6)
+    never = f"https://www.oddsportal.com/football/rnever/{uuid4()}"
+    captured = f"https://www.oddsportal.com/football/rcap/{uuid4()}"
+    await _create_soccer_event(factory, url=never, home="RN H", away="RN A", starts_at=kickoff)
+    await _create_soccer_event(factory, url=captured, home="RC H", away="RC A", starts_at=kickoff)
+    await _capture_betfair(
+        factory, url=captured, home="RC H", away="RC A", captured_at=NOW - timedelta(hours=1)
+    )
+    targets = await select_betfair_targets(
+        factory, sport="soccer", now=NOW, window=timedelta(days=3), limit=20
+    )
+    order = [t.external_ref for t in targets]
+    assert order.index(soon) < order.index(never) < order.index(captured)
+
+
+# --------------------------------------------------------------------------- #
 # NULL-kickoff (TBD) events are excluded: we can't prove they haven't started,
 # and the pre-match Betfair row may be gone — don't burn the scarce budget.
 # --------------------------------------------------------------------------- #

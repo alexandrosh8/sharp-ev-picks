@@ -879,6 +879,17 @@ class Settings(BaseSettings):
     # actionable near slate — far-future fixtures carry thin/!absent exchange
     # liquidity and would dilute the per-cycle budget. 72h spans a normal slate.
     betfair_exchange_target_window_hours: int = Field(default=72, ge=1, le=336)
+    # D1 CLOSE-BOOST BAND (close-evidence package, 2026-07). Events kicking off
+    # within this many minutes are sorted FIRST in select_betfair_targets
+    # (soonest kickoff first), capped at `slots` of the SAME per-cycle budget —
+    # a pure REALLOCATION of the existing MAX_TARGETS_PER_CYCLE pages (zero
+    # added load; never raises the bound), so the dedicated Betfair capture
+    # observes the final pre-kickoff window densely enough to supply a genuine
+    # (non-echo) sharp close for CLV. The remaining slots keep the
+    # never-captured-first/stalest rotation. Either knob at 0 disables the
+    # band entirely (plain rotation — the pre-D1 behavior).
+    betfair_exchange_close_boost_window_minutes: int = Field(default=75, ge=0, le=1440)
+    betfair_exchange_close_boost_slots: int = Field(default=20, ge=0, le=200)
     # When true, the settlement-time snapshot close ALSO injects the captured
     # Betfair Exchange BACK close (EXACT match: the betfair event's external_ref
     # is deterministically "betfair:"+pick_ref, ADR-0015) so incremental CLV can
@@ -890,6 +901,15 @@ class Settings(BaseSettings):
     # Betfair (index 2), so Pinnacle wins where both price the market and Betfair
     # only fills the gap. Requires BETFAIR_EXCHANGE_ENABLED so a close exists.
     clv_use_betfair_exchange: bool = False
+    # D2 (close-evidence package, 2026-07): per-source sharp-close freshness/echo
+    # gate in finalize_closing_from_snapshots. ON by default — a CORRECTNESS fix:
+    # a sharp-archive source whose last capture is BOTH >4h stale at kickoff AND
+    # older than the pick's creation (while the mint anchor was the SAME source)
+    # is provably the mint-anchor row re-read at settlement, not close evidence;
+    # its rows are DROPPED so the close falls to the fresh soft consensus with an
+    # honest closing_anchor_type='consensus'. TIGHTENING only (it can only drop
+    # rows, never admit new ones). Escape hatch for rollback comparison only.
+    clv_sharp_close_echo_gate: bool = True
     # build #6 (plan C8): when true, each open-pick re-price also appends a row to
     # pick_line_drift (the vig-free fair + CLV-so-far at that moment), building the
     # full bet-time->close drift path. OFF by default -> the table stays empty and
@@ -958,6 +978,39 @@ class Settings(BaseSettings):
     # Max canonical candidate events handed to the matcher per cycle (bounds the
     # DB read + the per-cycle catalogue join cost).
     betfair_api_max_targets_per_cycle: int = Field(default=200, ge=1, le=1000)
+
+    # --- Betfair staleness guard (P3, 2026-07-02; defaults INERT) -------------
+    # Live COMPARE evidence: the inline (OddsPortal-scrape) Betfair anchor runs
+    # 2.3-9.1 h behind the API (api_fresher=100%) and only ~60% of compared
+    # selections sit within one tick. The guard demotes an inline exchange
+    # anchor when a CONFIDENT FRESH API verdict disagrees by more than the tick
+    # threshold — fail-closed to the next sharp book / consensus (volume tier
+    # under VALUE_REQUIRE_SHARP_ANCHOR), NEVER a hard pick drop. Verdicts are
+    # persisted by the API capture (betfair_anchor_verdicts); the MINT path only
+    # reads the DB — it never calls the Betfair API. Requires
+    # VALUE_BETFAIR_API_ENABLED (else no verdicts exist and the guard is
+    # trivially inert).
+    #
+    # MASTER enable. False (default) = byte-identical behavior: the verdict set
+    # is never loaded at mint.
+    value_betfair_staleness_guard: bool = False
+    # SHADOW-first rollout (same pattern as the steam gate above). True (the
+    # default): compute + persist decisions + LOG would-demote + stamp
+    # picks.anchor_staleness_decision, but do NOT alter anchoring. Enforce
+    # (False) only after a measured demote-rate review — live data says ~40%
+    # of compared selections are > 1 tick apart, so blind enforcement would
+    # demote a large fraction of Betfair anchors.
+    value_betfair_staleness_shadow: bool = True
+    # Demotion threshold in Betfair ticks (tick taken at the COARSER price —
+    # app/edge/betfair_ticks.py). |inline - api| beyond this many ticks on any
+    # selection => the event's verdict is 'demote'.
+    value_betfair_staleness_ticks: float = Field(default=1.0, gt=0.0)
+    # Verdict freshness TTL (seconds; default = 3 poll cycles of
+    # BETFAIR_API_POLL_INTERVAL_SECONDS). At READ time a verdict older than
+    # this is treated as ABSENT (stale_api => no-op): stale API evidence must
+    # never demote a live anchor (the API could have been down for hours) —
+    # only a FRESH, CONFIDENT verdict can demote.
+    value_betfair_staleness_verdict_ttl_seconds: int = Field(default=900, ge=1)
 
     # --- ESPN free results auto-settlement (read-only SCORES, never odds) ----
     # ESPN's public site API gives final scores for basketball / NFL / tennis
@@ -1394,6 +1447,8 @@ def value_policy(settings: Settings) -> ValuePolicy:
         moneyline_max_odds=settings.value_moneyline_max_odds,
         exchange_min_liquidity=settings.value_exchange_min_liquidity,
         betfair_api_promote=settings.value_betfair_api_promote,
+        betfair_staleness_guard=settings.value_betfair_staleness_guard,
+        betfair_staleness_shadow=settings.value_betfair_staleness_shadow,
     )
 
 

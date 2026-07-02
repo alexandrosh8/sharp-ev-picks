@@ -220,6 +220,7 @@ async def settle_open_picks(
     devig_method: DevigMethod | None = None,
     use_pinnacle_archive: bool = False,
     use_betfair_exchange: bool = False,
+    sharp_close_echo_gate: bool = True,
     value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> int:
     """Settle every alerted pick whose event finished and has a known score.
@@ -280,6 +281,7 @@ async def settle_open_picks(
                     devig_method,
                     use_pinnacle_archive=use_pinnacle_archive,
                     use_betfair_exchange=use_betfair_exchange,
+                    sharp_close_echo_gate=sharp_close_echo_gate,
                     value_policy=value_policy,
                 )
     if settled:
@@ -298,6 +300,7 @@ async def settle_event_picks(
     devig_method: DevigMethod | None = None,
     use_pinnacle_archive: bool = False,
     use_betfair_exchange: bool = False,
+    sharp_close_echo_gate: bool = True,
     value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
 ) -> tuple[int, int]:
     """Settle every open pick of one event from a user-entered final score
@@ -338,6 +341,7 @@ async def settle_event_picks(
                     devig_method,
                     use_pinnacle_archive=use_pinnacle_archive,
                     use_betfair_exchange=use_betfair_exchange,
+                    sharp_close_echo_gate=sharp_close_echo_gate,
                     value_policy=value_policy,
                 )
         else:
@@ -585,6 +589,9 @@ async def run_settlement_cycle(
                 devig_method=devig_method,
                 use_pinnacle_archive=use_pinnacle_archive,
                 use_betfair_exchange=use_betfair_exchange,
+                # D2 echo gate — composition-root parity (same lazy Settings read
+                # as the devig/value-policy resolution above).
+                sharp_close_echo_gate=settings.clv_sharp_close_echo_gate,
                 value_policy=settlement_value_policy,
             )
         if scraped:  # second pass: only feed-missed picks remain open (idempotent)
@@ -595,6 +602,9 @@ async def run_settlement_cycle(
                 devig_method=devig_method,
                 use_pinnacle_archive=use_pinnacle_archive,
                 use_betfair_exchange=use_betfair_exchange,
+                # D2 echo gate — composition-root parity (same lazy Settings read
+                # as the devig/value-policy resolution above).
+                sharp_close_echo_gate=settings.clv_sharp_close_echo_gate,
                 value_policy=settlement_value_policy,
             )
         await session.commit()

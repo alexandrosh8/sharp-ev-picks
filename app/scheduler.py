@@ -546,6 +546,36 @@ def build_scheduler(
                 "ENFORCING" if steam_gate_policy.enabled else "SHADOW (no tier change)",
                 steam_gate_policy.lookback_seconds,
             )
+        # Betfair staleness guard (P3): mint-time verdict reader — a DB read of
+        # betfair_anchor_verdicts with the freshness TTL applied (the mint path
+        # NEVER calls the Betfair API). Wired ONLY when the master flag is on
+        # (guard off => loader None => pipeline never loads verdicts,
+        # byte-identical). Soccer-only: the API capture covers soccer H2H (v1).
+        staleness_verdict_loader = None
+        if use_value and settings.value_betfair_staleness_guard and session_factory is not None:
+            from app.storage.repositories import load_betfair_staleness_verdicts
+
+            staleness_session_factory = session_factory
+            staleness_ttl = float(settings.value_betfair_staleness_verdict_ttl_seconds)
+
+            async def _staleness_verdicts(sport_key: str) -> Mapping[str, str]:
+                if sport_key != "soccer":
+                    return {}
+                return await load_betfair_staleness_verdicts(
+                    staleness_session_factory, ttl_seconds=staleness_ttl
+                )
+
+            staleness_verdict_loader = _staleness_verdicts
+            logger.info(
+                "betfair staleness guard ENABLED (%s, ticks=%.2f ttl=%.0fs) — fresh API "
+                "disagreement %s the inline exchange anchor",
+                "SHADOW: would-demote logged, anchoring unchanged"
+                if settings.value_betfair_staleness_shadow
+                else "ENFORCING",
+                settings.value_betfair_staleness_ticks,
+                staleness_ttl,
+                "would demote" if settings.value_betfair_staleness_shadow else "demotes",
+            )
         deps = PipelineDeps(
             loader=loader,
             model=model,
@@ -580,6 +610,7 @@ def build_scheduler(
             sharp_anchor_loader=sharp_anchor_loader,
             steam_policy=steam_gate_policy,
             steam_history_loader=steam_history_loader,
+            staleness_verdict_loader=staleness_verdict_loader,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 
@@ -927,6 +958,10 @@ def build_scheduler(
         bfx_session_factory = session_factory
         bfx_target_limit = settings.betfair_exchange_max_targets_per_cycle
         bfx_target_window = timedelta(hours=settings.betfair_exchange_target_window_hours)
+        # D1 close-boost band: reallocate (never raise) the same per-cycle budget
+        # so imminent kickoffs are captured densely enough for a genuine close.
+        bfx_boost_window = timedelta(minutes=settings.betfair_exchange_close_boost_window_minutes)
+        bfx_boost_slots = settings.betfair_exchange_close_boost_slots
 
         async def _betfair_targets(sport: str) -> list[MatchTarget]:
             # DB-sourced (decoupled from full-scrape completion): bounded +
@@ -938,6 +973,8 @@ def build_scheduler(
                 sport=sport,
                 window=bfx_target_window,
                 limit=bfx_target_limit,
+                boost_window=bfx_boost_window,
+                boost_slots=bfx_boost_slots,
             )
             return [
                 MatchTarget(
@@ -998,6 +1035,7 @@ def build_scheduler(
         from app.ingestion.betfair_api import (
             EVENT_TYPE_SOCCER,
             PROMOTED_BOOKMAKER,
+            AnchorVerdictObservation,
             ReferenceOdds,
             SourceLinkObservation,
             build_shadow_capture,
@@ -1142,6 +1180,37 @@ def build_scheduler(
                 ],
             )
 
+        # STALENESS-VERDICT sink (betfair_anchor_verdicts): persist each compared
+        # selection's inline-vs-API verdict (keep-latest upsert + retention
+        # sweep). Best effort, exactly the link-sink pattern — the capture wraps
+        # sink failures (type-name-only log); never gates the capture or the
+        # anchors. Always wired while the API capture runs, so shadow evidence
+        # accrues BEFORE VALUE_BETFAIR_STALENESS_GUARD is ever enabled; the
+        # mint-time guard is what the flag gates.
+        async def _betfair_api_verdict_sink(
+            observations: Sequence[AnchorVerdictObservation],
+        ) -> None:
+            from app.storage.repositories import AnchorVerdictIn, record_betfair_anchor_verdicts
+
+            await record_betfair_anchor_verdicts(
+                bfapi_session_factory,
+                [
+                    AnchorVerdictIn(
+                        event_ref=obs.event_ref,
+                        market=obs.market,
+                        selection_role=obs.selection_role,
+                        inline_price=obs.inline_price,
+                        api_price=obs.api_price,
+                        api_best_back_size=obs.api_best_back_size,
+                        tick_diff=obs.tick_diff,
+                        inline_captured_at=obs.inline_captured_at,
+                        api_captured_at=obs.api_captured_at,
+                        decision=obs.decision,
+                    )
+                    for obs in observations
+                ],
+            )
+
         betfair_api_capture = build_shadow_capture(
             enabled=settings.value_betfair_api_enabled,
             credentials=settings.betfair_api_credentials(),
@@ -1153,6 +1222,8 @@ def build_scheduler(
             promote=settings.value_betfair_api_promote,
             promote_sink=bfapi_promote_sink,
             link_sink=_betfair_api_link_sink,
+            verdict_sink=_betfair_api_verdict_sink,
+            verdict_ticks=settings.value_betfair_staleness_ticks,
         )
 
         async def capture_betfair_api_shadow() -> None:

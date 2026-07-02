@@ -81,6 +81,15 @@ class PickOut(InternalModel):
     # 'inline_betfair_canonical'. None/None = consensus anchor or model pick.
     anchor_match_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     anchor_match_method: str | None = None
+    # BETFAIR STALENESS GUARD mint stamp (observability ONLY — never gating):
+    # the effective per-event verdict the guard read at mint for this pick's
+    # H2H market: "pass" | "demote" | "no_api_match" | "no_api_price" |
+    # "stale_api" (over-TTL verdict — always a no-op; stale API evidence never
+    # demotes a live anchor). Under SHADOW a "demote" marks a WOULD-demote
+    # (anchor unchanged); under enforce it marks an actual exchange-anchor
+    # demotion (fell to the next sharp book / consensus). None = guard off,
+    # no verdict for the event, or non-H2H market.
+    anchor_staleness_decision: str | None = None
     # P2-2: did the anchor's devig FALL BACK to multiplicative when this pick's
     # MINT fair was computed (underround book / solver failure)? Persisted as
     # Pick.mint_devig_fell_back so the trusted CLV subset can drop ASYMMETRIC

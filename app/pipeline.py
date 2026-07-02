@@ -10,6 +10,7 @@ import math
 import uuid
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -324,6 +325,17 @@ SharpAnchorLoader = Callable[
 #: root, stubbed in tests. One line so ruff format is version-stable.
 SteamHistoryLoader = Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[Sequence[OddsSnapshotIn]]]
 
+#: Pick-time Betfair staleness-verdict reader (PipelineDeps.staleness_verdict_
+#: loader — the verdict_loader of the P3 design, sibling of sharp_anchor_loader):
+#: async (sport_key) -> {event_ref: effective decision} from the persisted
+#: betfair_anchor_verdicts table with the freshness TTL applied at READ time
+#: (over-TTL => 'stale_api', a no-op — stale API evidence never demotes a live
+#: anchor). STRICTLY a DB read: the mint path NEVER calls the Betfair API.
+#: Bound to repositories.load_betfair_staleness_verdicts at the composition
+#: root; stubbed in tests. A loader failure yields an empty map (type-only
+#: log) and NEVER blocks minting.
+StalenessVerdictLoader = Callable[[str], Awaitable[Mapping[str, str]]]
+
 
 @dataclass
 class PipelineDeps:
@@ -414,6 +426,16 @@ class PipelineDeps:
     # accumulates). Bound to a repository at the composition root; stubbed in
     # tests. Failure is isolated — a history-read error never breaks picking.
     steam_history_loader: SteamHistoryLoader | None = None
+    # OPTIONAL Betfair staleness-verdict reader (P3 guard; default None = no
+    # verdicts => guard inert). Consulted ONLY when value_policy.betfair_
+    # staleness_guard is True (guard off => never called, byte-identical).
+    # Under value_policy.betfair_staleness_shadow (default) the verdicts only
+    # log would-demote + stamp picks.anchor_staleness_decision; anchoring is
+    # unchanged. Enforce mode threads the fresh-demote event set into
+    # event_fair_probs -> _named_sharp_anchor (exchange skipped -> next sharp
+    # -> consensus, fail-closed). Failure is isolated: empty map + type-only
+    # log, NEVER blocks minting. Wired at the composition root; tests stub it.
+    staleness_verdict_loader: StalenessVerdictLoader | None = None
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
@@ -1016,12 +1038,53 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 sport_key,
                 len(extra),
             )
+    # BETFAIR STALENESS GUARD (P3): read the latest persisted API-vs-inline
+    # verdicts (a DB read — the mint path NEVER calls the Betfair API). Guard
+    # off (the default) => the loader is never called: byte-identical. The
+    # loader applies the freshness TTL at read time, so an over-TTL verdict
+    # arrives as 'stale_api' (a no-op — stale API evidence never demotes a
+    # live anchor); only a FRESH 'demote' can alter anchoring, and only when
+    # shadow mode is off. Loader failure => empty map, type-only log, minting
+    # proceeds untouched (fail-open on missing evidence).
+    staleness_verdicts: Mapping[str, str] = {}
+    if deps.value_policy.betfair_staleness_guard and deps.staleness_verdict_loader is not None:
+        try:
+            staleness_verdicts = await deps.staleness_verdict_loader(sport_key)
+        except Exception as exc:  # verdict read must NEVER block minting
+            logger.error(
+                "betfair staleness verdict load failed for %s: %s (guard no-op this cycle)",
+                sport_key,
+                type(exc).__name__,
+            )
+            staleness_verdicts = {}
+    demote_events = frozenset(
+        ref for ref, decision in staleness_verdicts.items() if decision == "demote"
+    )
+    enforced_demotions: frozenset[str] = frozenset()
+    if demote_events and deps.value_policy.betfair_staleness_shadow:
+        # SHADOW (rollout default): log the would-demote set + stamp the picks
+        # below, but leave anchoring UNCHANGED — measure before enforcing.
+        logger.info(
+            "betfair staleness guard SHADOW %s: would demote the exchange anchor on "
+            "%d event(s) (fresh API disagreement > threshold ticks) — anchoring unchanged",
+            sport_key,
+            len(demote_events),
+        )
+    elif demote_events:
+        enforced_demotions = demote_events
+        logger.info(
+            "betfair staleness guard %s: demoting the exchange anchor on %d event(s) "
+            "(fresh API disagreement) — falls to next sharp book / consensus",
+            sport_key,
+            len(demote_events),
+        )
     grouped = group_market_prices(anchor_snapshots)
     fair = event_fair_probs(
         grouped,
         deps.devig_method,
         deps.value_policy,
         liquidity_by_market=group_market_liquidity(anchor_snapshots),
+        exchange_demoted_events=enforced_demotions,
     )
     await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
@@ -1381,6 +1444,15 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 anchor_provenance,
                 api_promote_enabled=deps.value_policy.betfair_api_promote,
             )
+            # Betfair staleness-guard mint stamp (OBSERVABILITY only — never
+            # gates): the event's effective verdict read this cycle. Scoped to
+            # H2H (the only market the API capture covers, v1); None when the
+            # guard is off (verdicts never loaded) or no verdict exists. Under
+            # SHADOW a 'demote' stamp marks a WOULD-demote (anchoring
+            # unchanged); under enforce the anchor above already fell through.
+            anchor_staleness_decision = (
+                staleness_verdicts.get(event_id) if market is Market.H2H else None
+            )
             pick = PickOut(
                 pick_id=str(uuid.uuid4()),
                 sport=sport_key,  # one deps serves soccer AND basketball polls
@@ -1443,6 +1515,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 # Consensus = None/None (no cross-source match happened).
                 anchor_match_confidence=anchor_match_confidence,
                 anchor_match_method=anchor_match_method,
+                # Betfair staleness-guard verdict at mint (observability only).
+                anchor_staleness_decision=anchor_staleness_decision,
                 # P2-2: whether the anchor devig fell back to multiplicative for this
                 # MINT fair — the trusted CLV subset drops asymmetric mint/close fallbacks.
                 mint_devig_fell_back=v.sharp_devig_fell_back,
@@ -1765,6 +1839,7 @@ def event_fair_probs(
     *,
     fell_back_out: dict[tuple[str, Market, str | None], bool] | None = None,
     liquidity_by_market: LiquidityByMarket | None = None,
+    exchange_demoted_events: AbstractSet[str] | None = None,
 ) -> EventFairProbs:
     """Trustworthy (anchor_book, selection->fair) per (event, market, line).
 
@@ -1785,7 +1860,14 @@ def event_fair_probs(
     When ``fell_back_out`` is provided it is POPULATED (additively, by the same
     keys as the return) with the P2-2 devig-fallback flag per market — True when
     the anchor devig fell back to multiplicative. The return value is unchanged
-    (callers that ignore provenance pass nothing)."""
+    (callers that ignore provenance pass nothing).
+
+    ``exchange_demoted_events`` (Betfair staleness guard, P3) carries the event
+    refs whose FRESH persisted API verdict is 'demote': for those events' H2H
+    markets ONLY (v1 scope — the only market the API capture covers) the
+    exchange anchor is skipped inside ``_named_sharp_anchor`` (fail-closed to
+    the next sharp book / consensus). None / empty (the default, and always the
+    close/true-up path) leaves anchor selection bit-identical."""
     from app.edge.value import anchor_fair_probs_with_provenance, double_chance_fair
 
     out: EventFairProbs = {}
@@ -1802,6 +1884,11 @@ def event_fair_probs(
                     else None
                 ),
                 exchange_min_liquidity=value_policy.exchange_min_liquidity,
+                exchange_demoted=(
+                    market is Market.H2H
+                    and exchange_demoted_events is not None
+                    and event_id in exchange_demoted_events
+                ),
             )
             if result is not None:
                 book, fair, fell_back = result

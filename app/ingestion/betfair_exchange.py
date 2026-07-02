@@ -6,13 +6,19 @@ curl_cffi JSON/HTTP feed the main football scrape already reads
 (``app/ingestion/oddsportal_json.py``); this module only reads back the Betfair
 Exchange row (provider id ``"44"``) the generic loader skips, so it can keep its
 own ISOLATED capture (an INDEPENDENT archive that mints NO picks/alerts) and feed
-the matched-``volume`` liquidity gate the old DOM reader was uniquely built for.
+the ``volume`` liquidity gate the old DOM reader was uniquely built for. NOTE on
+semantics (volume decision 2026-07-02): ``volume["44"]`` is NOT matched volume —
+it is the displayed available GBP at the price (a best-back-depth proxy, hours
+stale by the time picks read it). Store-not-gate: it is honest display/diagnostic
+data; the only promotion path to gated liquidity is the Betfair API's own
+``availableToBack.size`` (see docs/decisions/betfair-volume-semantics-2026-07-02.md).
 
 WHY JSON, NOT PLAYWRIGHT (rebuild 2026-06-28): the prior reader drove a headless
 Chromium render of each match page to scrape the ``betting-exchanges`` DOM row —
 slow + heavy + DOM-fragile. The JSON feed already carries
 ``oddsdata.back[<E-key>].odds["44"]`` (the Betfair BACK price) and the matching
-``volume["44"]`` (matched £ liquidity), so the capture now rides the proven fast
+``volume["44"]`` (displayed available GBP at the price — a best-back-depth
+proxy, not matched volume), so the capture now rides the proven fast
 path: build the per-(event, market) ``.dat`` URL via ``build_feed_url``, GET it on
 the shared curl_cffi feed session, ``decrypt_feed_body`` it, and read the Betfair
 block. No browser, no Chromium, no hydration polling.
@@ -28,8 +34,9 @@ captured: the Betfair id 44 is absent from those feeds (only ~8 books quote them
 is absent it simply yields no row (never guesses, never crashes).
 
 Liquidity gate (the DOM reader's one unique guarantee, preserved): an outcome
-whose matched ``volume["44"]`` is below ``min_liquidity`` — or absent — is SKIPPED,
-so a thin/unbacked Betfair price never becomes a sharp anchor.
+whose displayed ``volume["44"]`` (available GBP at the price) is below
+``min_liquidity`` — or absent — is SKIPPED, so a thin/unbacked Betfair price
+never becomes a sharp anchor.
 
 Isolation + binding (unchanged, ADR-0015 v2): rows persist INLINE onto the
 canonical event (``external_ref`` == the OddsPortal match URL,
@@ -104,9 +111,10 @@ def _utc_now() -> datetime:
 
 
 def _coerce_liquidity(raw: Any) -> float | None:
-    """The feed's matched ``volume["44"]`` outcome value as a non-negative float,
-    or None when absent/garbled. A None feeds the gate as "no matched liquidity"
-    (the outcome is dropped), never an ungated price."""
+    """The feed's ``volume["44"]`` outcome value — the displayed available GBP
+    at the price (a best-back-depth proxy, NOT matched volume) — as a
+    non-negative float, or None when absent/garbled. A None feeds the gate as
+    "no displayed liquidity" (the outcome is dropped), never an ungated price."""
     if raw is None:
         return None
     try:
@@ -135,8 +143,9 @@ def parse_betfair_feed(
     feed key + outcome-index -> odds-label map (so the basketball moneyline binds
     to the event's bootstrap default like the main scrape), ``_outcome_at`` for the
     DICT-vs-LIST shape, ``_selections`` for the readable selection names, and
-    ``_market_for_key`` for the ``Market`` enum. The matched ``volume["44"]`` per
-    outcome drives the liquidity gate.
+    ``_market_for_key`` for the ``Market`` enum. The displayed ``volume["44"]``
+    per outcome (available GBP at the price — a best-back-depth proxy, not
+    matched volume) drives the liquidity gate.
 
     Benign-gap discipline (req #3): an empty/absent ``oddsdata.back`` block, a
     missing feed key, or an absent Betfair id 44 all yield ``[]`` — a thin/closed
@@ -188,8 +197,8 @@ def parse_betfair_feed(
             if betfair_volume is not None
             else None
         )
-        # Liquidity gate: an outcome with no matched volume (or below the floor) is
-        # dropped — the exchange's thin/unbacked prices never anchor a pick.
+        # Liquidity gate: an outcome with no displayed available GBP (or below the
+        # floor) is dropped — the exchange's thin/unbacked prices never anchor a pick.
         if liquidity is None or liquidity < min_liquidity:
             continue
         snapshots.append(

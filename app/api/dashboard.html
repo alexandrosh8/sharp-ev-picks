@@ -1008,6 +1008,24 @@
               <p class="muted" id="evidence-empty" style="margin:4px 0 0">
                 No stratified live evidence yet — it appears once settled picks accrue.
               </p>
+
+              <div class="sub-block">
+                <h3 class="evtitle">Evidence quality · close audit</h3>
+                <div class="muted" style="margin:4px 0 8px">
+                  How much of the settled sample the CLV guards excluded, and what
+                  kind of close each pick got. Exclusions keep the CLV read honest
+                  — an excluded close is unusable evidence, not a loss.
+                </div>
+                <div class="tscroll">
+                  <table aria-label="Evidence quality — close audit">
+                    <thead><tr>
+                      <th scope="col">Check</th><th scope="col" class="r">Reading</th>
+                    </tr></thead>
+                    <tbody id="evq-rows"></tbody>
+                  </table>
+                </div>
+                <p class="muted" id="evq-note" style="margin:4px 0 0">—</p>
+              </div>
             </div>
           </section>
         </div>
@@ -2354,17 +2372,80 @@
             ". Drift between claimed and realized flags a devig/calibration problem — monitor only.";
         }
 
+        // ===== evidence-quality panel (close audit, /performance clv_quality) =====
+        // Null-safe by design: during a deploy window an older backend serves no
+        // clv_quality — the panel renders an honest "not yet reported" state
+        // (em-dash rows, no undefined/NaN), never a fabricated zero.
+        function fmtMinutes(v) {
+          if (v == null || !isFinite(Number(v))) return "—";
+          const m = Number(v);
+          return m >= 120 ? (m / 60).toFixed(1) + "h" : Math.round(m) + "m";
+        }
+        function renderClvQuality(perf) {
+          const body = $("evq-rows"), note = $("evq-note");
+          if (!body || !note) return;
+          body.replaceChildren();
+          const q = perf ? perf.clv_quality : null;
+          const row = (label, value) => {
+            const tr = document.createElement("tr");
+            td(tr, label);
+            td(tr, value, "r");
+            body.appendChild(tr);
+          };
+          if (!q) {
+            ["Trusted sharp CLV n", "Tautological closes excluded", "Circular closes excluded",
+             "Fabricated closes excluded", "Settled without CLV", "Close source split",
+             "Close age p50 / p90", "Stale closes"].forEach((label) => row(label, "—"));
+            note.textContent = perf
+              ? "Evidence-quality metrics not yet reported by this backend version — the close audit fills in after the next deploy."
+              : "Evidence-quality metrics unavailable — GET /performance is failing.";
+            return;
+          }
+          const minN = Number(perf.min_headline_n) || 50;
+          const nSharp = Number(perf.n_sharp_close) || 0;
+          row("Trusted sharp CLV n", nSharp + " / " + minN +
+            (nSharp < minN ? " · CLV sample too small" : ""));
+          const nWithClv = (Number(q.n_settled) || 0) - (Number(q.clv_missing) || 0);
+          const taut = Number(q.clv_excluded_tautological) || 0;
+          row("Tautological closes excluded", String(taut) +
+            (q.tautological_rate != null && nWithClv > 0
+              ? " (" + (Number(q.tautological_rate) * 100).toFixed(0) + "% of " + nWithClv + " with CLV)"
+              : ""));
+          row("Circular closes excluded", String(Number(q.clv_excluded_circular) || 0));
+          row("Fabricated closes excluded", String(Number(q.clv_excluded_fabricated) || 0));
+          row("Settled without CLV", String(Number(q.clv_missing) || 0));
+          row("Close source split", (Number(q.n_snapshot_close) || 0) + " snapshot · " +
+            (Number(q.n_fallback_close) || 0) + " fallback");
+          const ageKnown = Number(q.n_close_age_known) || 0;
+          if (ageKnown > 0) {
+            row("Close age p50 / p90", fmtMinutes(q.close_age_p50_minutes) + " / " +
+              fmtMinutes(q.close_age_p90_minutes) + " before kickoff · n=" + ageKnown);
+            const gapH = (Number(q.stale_close_max_gap_minutes) || 240) / 60;
+            row("Stale closes (> " + gapH + "h)", (Number(q.n_stale_close) || 0) + " of " + ageKnown);
+          } else {
+            row("Close age p50 / p90", "— · provenance accruing");
+            row("Stale closes", "— · provenance accruing");
+          }
+          note.textContent =
+            "A tautological close re-encodes the pick-time price; a circular close was " +
+            "priced by the pick's own book; a fallback close is the last poll-time " +
+            "re-price, not a snapshot close. None of these count toward the sharp CLV " +
+            "evidence — the counts above show how much sample the guards removed.";
+        }
+
         function summarizePerf(perf) {
           if (perf) {
             LAST_PERF = perf; LAST_PERF_AT = new Date();
             fillHero(perf, false); fillSettled(perf);
             renderEvidence(perf.live_evidence);
             renderTierSplit(perf); renderBySport(perf); renderCalibration(perf.calibration);
+            renderClvQuality(perf);
             PERF_CARDS.forEach((id) => setCardStale(id, false));
           } else if (LAST_PERF) {
             fillHero(LAST_PERF, true); fillSettled(LAST_PERF);
             renderEvidence(LAST_PERF.live_evidence); // frozen payload, visibly demoted
             renderTierSplit(LAST_PERF); renderBySport(LAST_PERF); renderCalibration(LAST_PERF.calibration);
+            renderClvQuality(LAST_PERF);
             if (LAST_PERF.live_evidence && Number(LAST_PERF.live_evidence.n_settled)) {
               $("evidence-title").textContent += " · STALE — /performance failing, frozen at " + fmtTime(LAST_PERF_AT);
             }
@@ -2373,6 +2454,7 @@
             fillHero(null, false);
             renderEvidence(null);
             renderTierSplit(null); renderBySport(null); renderCalibration(null);
+            renderClvQuality(null);
             ["c-settled", "c-record", "c-pnl"].forEach((id) => ($(id).textContent = "—"));
             PERF_CARDS.forEach((id) => setCardStale(id, true, "GET /performance failing — no data loaded yet", "NO DATA"));
           }

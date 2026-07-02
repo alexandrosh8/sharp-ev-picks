@@ -47,6 +47,7 @@ from app.storage.repositories import (
     bet_band_observations,
     betfair_archive_capture_by_sport,
     betfair_inline_capture_by_sport,
+    betfair_staleness_metrics,
     create_dashboard_credentials,
     latest_available_games_with_events,
     latest_picks_with_events,
@@ -54,6 +55,7 @@ from app.storage.repositories import (
     performance_report,
     pinnacle_archive_capture_by_sport,
     shadow_match_rate_outcomes,
+    sharp_close_capture_density,
     source_link_metrics,
 )
 
@@ -1030,6 +1032,23 @@ async def resolution_match_rate(
     # auto-linked count, per-source averages, weak links (<0.95 confidence), and
     # the review-queue depth. Null-safe — empty tables yield zeros/empty maps.
     report["links"] = await source_link_metrics(session)
+    # D4 capture-density panel: final-hour sharp rows per source on recently
+    # kicked-off events — whether the D1 close-boost band is actually producing
+    # a fresh (non-echo) sharp close. Read-only; settled-close QUALITY lives on
+    # /performance ("clv_quality"), not here.
+    report["close_capture_density"] = await sharp_close_capture_density(session)
+    # Betfair STALENESS-GUARD diagnostics (P3): write-time decision counts
+    # (pass/demote/no_api_match/no_api_price), the fresh-vs-stale split at the
+    # read TTL, median tick distance and median inline->API freshness gap —
+    # the demote-rate instrument to review BEFORE flipping
+    # VALUE_BETFAIR_STALENESS_SHADOW off. Null-safe: an empty (or not yet
+    # migrated) verdict table yields zeros/None, never a 500.
+    from app.config import get_settings as _get_settings
+
+    report["betfair_staleness"] = await betfair_staleness_metrics(
+        session,
+        ttl_seconds=float(_get_settings().value_betfair_staleness_verdict_ttl_seconds),
+    )
     return report
 
 
@@ -1069,6 +1088,7 @@ async def settle_event(
         devig_method=devig,
         use_pinnacle_archive=settings.clv_use_pinnacle_archive,
         use_betfair_exchange=settings.clv_use_betfair_exchange,
+        sharp_close_echo_gate=settings.clv_sharp_close_echo_gate,
         value_policy=build_value_policy(settings),
     )
     await session.commit()
@@ -1171,6 +1191,7 @@ async def record_result(
                 devig,
                 use_pinnacle_archive=settings.clv_use_pinnacle_archive,
                 use_betfair_exchange=settings.clv_use_betfair_exchange,
+                sharp_close_echo_gate=settings.clv_sharp_close_echo_gate,
                 value_policy=build_value_policy(settings),
             )
             await session.commit()

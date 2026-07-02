@@ -48,6 +48,12 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
+from app.edge.betfair_ticks import (
+    _TICK_LADDER,
+    betfair_tick_size,
+    tick_distance,
+    within_one_tick,
+)
 from app.ingestion.base import EventTeams
 from app.resolution.matching import (
     AliasTable,
@@ -106,42 +112,60 @@ PROMOTED_BOOKMAKER = "betfair exchange"
 _TIMEOUT = 20.0
 
 
-# --- price-comparison math (PURE: numpy/stdlib-free, no IO) ------------------ #
-# The Betfair price-increment ("tick") ladder. The minimum quotable gap widens as
-# the price climbs; "within one tick" uses the COARSER (higher) of the two prices
-# so a near-agreement is never overstated. Source: Betfair price increments table.
-_TICK_LADDER: tuple[tuple[float, float], ...] = (
-    (2.0, 0.01),
-    (3.0, 0.02),
-    (4.0, 0.05),
-    (6.0, 0.10),
-    (10.0, 0.20),
-    (20.0, 0.50),
-    (30.0, 1.00),
-    (50.0, 2.00),
-    (100.0, 5.00),
-    (1000.0, 10.0),
-)
+# --- price-comparison math (PURE — lives in app/edge/betfair_ticks) ---------- #
+# The tick ladder + comparisons were RELOCATED verbatim to the pure-math
+# boundary (app/edge/betfair_ticks.py, staleness-guard package 2026-07-02) so
+# the mint-path guard can use them without importing an ingestion module. They
+# are imported at the top of this module and re-exported here so existing
+# consumers/tests keep their import path; the conservative coarser-tick +
+# None-propagation semantics are unchanged.
+__all__ = [
+    "_TICK_LADDER",
+    "betfair_tick_size",
+    "tick_distance",
+    "within_one_tick",
+]
+
+# Staleness-guard verdict decisions persisted per (event, market, selection)
+# by the API capture's verdict sink (betfair_anchor_verdicts). Only DEMOTE can
+# ever alter anchoring (and only when fresh + guard enforcing); every other
+# decision is a no-op at mint (fail-open on missing evidence, fail-closed only
+# on positive fresh disagreement). STALE_API is a READ-time classification (a
+# verdict older than the TTL) — the sink never writes it.
+VERDICT_PASS = "pass"
+VERDICT_DEMOTE = "demote"
+VERDICT_NO_API_MATCH = "no_api_match"
+VERDICT_NO_API_PRICE = "no_api_price"
+VERDICT_STALE_API = "stale_api"
 
 
-def betfair_tick_size(price: float) -> float:
-    """The Betfair minimum price increment at ``price`` (the exchange tick)."""
-    for upper, tick in _TICK_LADDER:
-        if price < upper:
-            return tick
-    return 10.0
+def verdict_decision(
+    inline_price: float | None,
+    api_price: float | None,
+    *,
+    max_ticks: float = 1.0,
+) -> str:
+    """Write-time staleness-guard decision for one selection (PURE).
 
-
-def within_one_tick(a: float | None, b: float | None) -> bool | None:
-    """True when two BACK prices are within one exchange tick of each other.
-
-    None when EITHER price is missing — an absent price is undefined, never a
-    silent "agree". The tick is taken at the coarser (higher) price so the test
-    is conservative (a wider band never inflates the agreement rate)."""
-    if a is None or b is None:
-        return None
-    tick = betfair_tick_size(max(a, b))
-    return abs(a - b) <= tick + 1e-9
+    * API price absent -> ``no_api_price`` (the API market had no backable
+      price for this runner — nothing to compare, never a demotion).
+    * Inline (scrape) price absent -> ``no_api_match`` (the API matched the
+      event but this selection has no inline reference row to compare — no
+      comparison possible, never a demotion).
+    * Both present -> ``demote`` when the tick distance (tick at the COARSER
+      price, app/edge/betfair_ticks.tick_distance) exceeds ``max_ticks``,
+      else ``pass``. The 1e-9 tolerance mirrors ``within_one_tick`` so a
+      boundary price (e.g. 2.00 vs 2.02 at tick 0.02) is a pass, never a
+      float-dust demotion.
+    """
+    if api_price is None:
+        return VERDICT_NO_API_PRICE
+    if inline_price is None:
+        return VERDICT_NO_API_MATCH
+    distance = tick_distance(inline_price, api_price)
+    if distance is None:  # unreachable given the guards above; fail open
+        return VERDICT_NO_API_PRICE
+    return VERDICT_DEMOTE if distance > max_ticks + 1e-9 else VERDICT_PASS
 
 
 @dataclass(frozen=True)
@@ -820,6 +844,35 @@ LinkSink = Callable[[Sequence[SourceLinkObservation]], Awaitable[None]]
 
 
 @dataclass(frozen=True)
+class AnchorVerdictObservation:
+    """One selection's staleness-guard verdict from a compare cycle: the inline
+    (OddsPortal-scrape) Betfair price vs the fresh API best-back price, with the
+    tick distance and the write-time decision (``verdict_decision``). Pure data
+    — the composition root persists these into betfair_anchor_verdicts
+    (keep-latest upsert per (event, market, selection)). The row IS the
+    diagnostic record; the mint-time guard only ever READS the table."""
+
+    event_ref: str  # canonical OddsPortal match URL
+    market: str  # 'h2h' (the only market the API capture covers, v1)
+    selection_role: str  # home | draw | away
+    inline_price: float | None
+    api_price: float | None
+    api_best_back_size: float | None  # £ available at best back — (i) cross-check
+    tick_diff: float | None  # |delta| in ticks at the coarser price
+    inline_captured_at: datetime | None
+    api_captured_at: datetime
+    decision: str  # pass | demote | no_api_match | no_api_price
+
+
+# OBSERVABILITY sink for per-selection staleness verdicts (betfair_anchor_
+# verdicts). Same contract as LinkSink: optional, best-effort, a tap never a
+# gate — never wired -> nothing recorded; failure -> type-only log, capture
+# continues. The MINT path never calls the Betfair API: it reads the latest
+# persisted verdicts from the DB (fresh-only, TTL at read time).
+VerdictSink = Callable[[Sequence[AnchorVerdictObservation]], Awaitable[None]]
+
+
+@dataclass(frozen=True)
 class BetfairApiShadowReport:
     """One shadow cycle's outcome: how many Betfair markets were fetched, how many
     matched a canonical event, how many did not, and the would-be anchor rows.
@@ -860,6 +913,8 @@ class BetfairApiShadowCapture:
         promote: bool = False,
         promote_sink: PromoteSink | None = None,
         link_sink: LinkSink | None = None,
+        verdict_sink: VerdictSink | None = None,
+        verdict_ticks: float = 1.0,
     ) -> None:
         self._client = client
         self._candidates_fn = candidates_fn
@@ -870,6 +925,12 @@ class BetfairApiShadowCapture:
         self._reference_odds_fn = reference_odds_fn
         # OBSERVABILITY tap (event_source_links): default None -> inert.
         self._link_sink = link_sink
+        # OBSERVABILITY tap (betfair_anchor_verdicts): default None -> inert.
+        # Demotion threshold in ticks (VALUE_BETFAIR_STALENESS_TICKS) — used
+        # only to compute the WRITE-time decision; the mint path re-reads the
+        # persisted rows and applies its own freshness TTL.
+        self._verdict_sink = verdict_sink
+        self._verdict_ticks = verdict_ticks
         # PROMOTION is default-OFF. When OFF the rows are tagged the NON-SHARP
         # SHADOW_BOOKMAKER and the sink is never invoked — byte-equivalent to the
         # measurement-only shadow. The sharp PROMOTED_BOOKMAKER is emitted ONLY
@@ -1037,12 +1098,16 @@ class BetfairApiShadowCapture:
         if self._reference_odds_fn is None or not matched_pairs:
             return None
         events: list[EventComparison] = []
+        verdicts: list[AnchorVerdictObservation] = []
         for market, ref in matched_pairs:
             reference = await self._reference(ref)
             if reference is None:
                 continue  # no existing anchor yet — nothing to compare against
             cmp = compare_event(market, reference, api_captured_at=now, event_ref=ref)
             events.append(cmp)
+            verdicts.extend(
+                self._verdicts_for(market, reference, cmp, api_captured_at=now, event_ref=ref)
+            )
             logger.info(
                 "betfair api COMPARE %s: dHome=%s dDraw=%s dAway=%s fresh_gap=%ss",
                 ref,
@@ -1051,7 +1116,59 @@ class BetfairApiShadowCapture:
                 _fmt_delta(cmp.away.delta),
                 _fmt_gap(cmp.freshness_gap_seconds),
             )
+        await self._record_verdicts(verdicts)
         return ComparisonAggregate.from_events(events)
+
+    def _verdicts_for(
+        self,
+        odds: BetfairMatchOdds,
+        reference: ReferenceOdds,
+        cmp: EventComparison,
+        *,
+        api_captured_at: datetime,
+        event_ref: str,
+    ) -> list[AnchorVerdictObservation]:
+        """Per-selection staleness verdicts for one compared event (PURE build).
+
+        Decision semantics live in ``verdict_decision``; the tick distance is
+        the pure ``app.edge.betfair_ticks.tick_distance`` at the coarser price.
+        The API best-back SIZE rides along so the verdict table doubles as the
+        empirical liquidity cross-check the volume-semantics decision asks for."""
+        sizes = {
+            "home": odds.home_back_size,
+            "draw": odds.draw_back_size,
+            "away": odds.away_back_size,
+        }
+        out: list[AnchorVerdictObservation] = []
+        for sel in cmp.selections:
+            out.append(
+                AnchorVerdictObservation(
+                    event_ref=event_ref,
+                    market="h2h",
+                    selection_role=sel.selection,
+                    inline_price=sel.ref_price,
+                    api_price=sel.api_price,
+                    api_best_back_size=sizes.get(sel.selection),
+                    tick_diff=tick_distance(sel.ref_price, sel.api_price),
+                    inline_captured_at=reference.captured_at,
+                    api_captured_at=api_captured_at,
+                    decision=verdict_decision(
+                        sel.ref_price, sel.api_price, max_ticks=self._verdict_ticks
+                    ),
+                )
+            )
+        return out
+
+    async def _record_verdicts(self, observations: Sequence[AnchorVerdictObservation]) -> None:
+        """Best-effort observability: route staleness verdicts to the (optional)
+        sink. NEVER breaks the capture — failure logs the exception type only
+        (no ids/URLs in the error path). Exactly the LinkSink pattern."""
+        if self._verdict_sink is None or not observations:
+            return
+        try:
+            await self._verdict_sink(observations)
+        except Exception as exc:
+            logger.warning("betfair api verdict sink failed: %s", type(exc).__name__)
 
     async def _maybe_promote(
         self, snapshots: Sequence[OddsSnapshotIn], teams_by_event: Mapping[str, EventTeams]
@@ -1114,6 +1231,8 @@ def build_shadow_capture(
     promote: bool = False,
     promote_sink: PromoteSink | None = None,
     link_sink: LinkSink | None = None,
+    verdict_sink: VerdictSink | None = None,
+    verdict_ticks: float = 1.0,
 ) -> BetfairApiShadowCapture | None:
     """Build the shadow capture, or None when the integration is INERT — i.e.
     disabled OR any credential blank. None means the scheduler adds NO job and no
@@ -1122,7 +1241,9 @@ def build_shadow_capture(
     ``reference_odds_fn`` (optional) wires the price comparison against the
     existing OddsPortal-sourced "betfair exchange" anchor. ``promote`` is the
     DEFAULT-OFF promotion flag; when false the capture is a measurement-only
-    shadow (non-sharp rows, nothing persisted) and ``promote_sink`` is ignored."""
+    shadow (non-sharp rows, nothing persisted) and ``promote_sink`` is ignored.
+    ``verdict_sink`` (optional, best-effort) persists per-selection staleness
+    verdicts (betfair_anchor_verdicts) computed at ``verdict_ticks``."""
     if not enabled or credentials is None:
         return None
     app_key, username, password = credentials
@@ -1140,4 +1261,6 @@ def build_shadow_capture(
         promote=promote,
         promote_sink=promote_sink,
         link_sink=link_sink,
+        verdict_sink=verdict_sink,
+        verdict_ticks=verdict_ticks,
     )

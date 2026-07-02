@@ -626,12 +626,43 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
             "by_source": {"pinnacle_arcadia": {"links": 2, "avg_confidence": 0.955}},
         }
 
+    async def fake_close_density(session, **_kw):  # type: ignore[no-untyped-def]
+        # D4 capture-density panel: final-hour sharp rows per source (Q5/Q6
+        # shape) — the shape contract of repositories.sharp_close_capture_density.
+        return {
+            "window_days": 7,
+            "final_window_minutes": 60,
+            "events_kicked_off": 40,
+            "sources": {
+                "betfair": {"final_window_rows": 12, "events_with_rows": 9},
+                "pinnacle": {"final_window_rows": 3, "events_with_rows": 2},
+            },
+        }
+
     monkeypatch.setattr(routes, "shadow_match_rate_outcomes", fake_outcomes)
     monkeypatch.setattr(routes, "pinnacle_archive_capture_by_sport", fake_capture)
     monkeypatch.setattr(routes, "betfair_archive_capture_by_sport", fake_betfair_capture)
     monkeypatch.setattr(routes, "betfair_inline_capture_by_sport", fake_betfair_inline_capture)
     monkeypatch.setattr(routes, "source_link_metrics", fake_link_metrics)
+    monkeypatch.setattr(routes, "sharp_close_capture_density", fake_close_density)
     body = TestClient(make_app()).get("/resolution/match-rate").json()
+    # Betfair STALENESS-GUARD diagnostics ride the same payload (P3). NOT
+    # stubbed — the real repositories.betfair_staleness_metrics runs and must
+    # be NULL-SAFE on an empty/absent verdict table: zeros + None medians,
+    # never a 500. (The demote-rate instrument for the shadow->enforce review.)
+    stale = body["betfair_staleness"]
+    assert stale["rows"] == 0
+    assert stale["decisions"] == {}
+    assert stale["fresh_decisions"] == {}
+    assert stale["stale_rows"] == 0
+    assert stale["median_tick_diff"] is None
+    assert stale["median_freshness_gap_seconds"] is None
+    assert stale["ttl_seconds"] > 0
+    # D4 capture-density panel rides the same payload (capture, not matching).
+    density = body["close_capture_density"]
+    assert density["events_kicked_off"] == 40
+    assert density["sources"]["betfair"]["events_with_rows"] == 9
+    assert density["sources"]["pinnacle"]["final_window_rows"] == 3
     # Cross-source link observability rides the same payload.
     assert body["links"]["auto_linked"] == 2
     assert body["links"]["review_queued"] == 1
@@ -715,6 +746,31 @@ def test_dashboard_legend_frames_clv_and_confidence() -> None:
     assert "data-tip" not in text
     assert "<footer>" not in text
     assert "Always confirm the live price" not in text
+
+
+def test_dashboard_has_evidence_quality_panel() -> None:
+    """Priority 7: the Performance view carries the evidence-quality (close
+    audit) panel rendered from /performance's clv_quality payload — trusted
+    sharp n with its floor, the guard exclusion tallies, the snapshot-vs-
+    fallback close split, and close-age once D3 provenance accrues. Sober
+    framing only (exclusions are honesty, not losses) and an explicit
+    'not yet reported' state when an older backend serves no clv_quality."""
+    text = TestClient(make_app()).get("/").text
+    assert "Evidence quality" in text
+    assert 'id="evq-rows"' in text
+    assert 'id="evq-note"' in text
+    assert 'aria-label="Evidence quality' in text
+    assert "renderClvQuality" in text
+    # panel row labels (JS copy)
+    assert "Tautological closes excluded" in text
+    assert "CLV sample too small" in text
+    assert "Close source split" in text
+    assert "Close age p50 / p90" in text
+    # deploy-window null-safety: honest absent state, no undefined/NaN
+    assert "not yet reported" in text
+    assert "provenance accruing" in text
+    # sober framing: an excluded close is unusable evidence, not a loss
+    assert "not a loss" in text
 
 
 def test_dashboard_has_archive_coverage_panel() -> None:

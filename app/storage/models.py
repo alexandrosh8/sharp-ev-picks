@@ -344,6 +344,28 @@ class Pick(Base):
     # treated as symmetric (not excluded).
     mint_devig_fell_back: Mapped[bool | None] = mapped_column(Boolean)
     close_devig_fell_back: Mapped[bool | None] = mapped_column(Boolean)
+    # D3 CLOSE PROVENANCE (close-evidence package, 2026-07). The concrete BOOK
+    # that anchored the close fair (close-side twin of the mint-side anchor_book;
+    # the consensus sentinel for a median close) and the CAPTURE TIME of the
+    # anchor rows behind it. Together they finally separate an ECHO of the mint
+    # anchor row (close_snapshot_captured_at <= created_at — the close merely
+    # re-read the line the pick was minted on) from a FRESH observation of a
+    # genuinely unmoved line (> created_at). Stamped by BOTH close writers
+    # (revalidate_open_picks + finalize_closing_from_snapshots); observability
+    # only for now — the tautology guard is NOT rekeyed on these until the
+    # deferred single-shot validation (ADR-0019 discipline). NULL = pre-column
+    # row / no close computed yet. Additive + nullable.
+    close_anchor_book: Mapped[str | None] = mapped_column(String(64))
+    close_snapshot_captured_at: Mapped[datetime | None]
+    # BETFAIR STALENESS GUARD mint stamp (observability ONLY — never gating).
+    # The effective per-event verdict the guard read at mint for this pick's
+    # market: 'pass' | 'demote' | 'no_api_match' | 'no_api_price' | 'stale_api'
+    # (a persisted verdict older than the TTL reads as stale_api => no-op). In
+    # SHADOW mode a 'demote' stamp marks a WOULD-demote (anchor unchanged); in
+    # enforce mode it marks an actual exchange-anchor demotion (fell to the
+    # next sharp book / consensus). NULL = guard off, no verdict for the
+    # event, non-H2H market, or pre-column row. Mirrors anchor_match_method.
+    anchor_staleness_decision: Mapped[str | None] = mapped_column(String(16))
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)
@@ -540,6 +562,51 @@ class MatchReviewQueue(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     reviewed_at: Mapped[datetime | None]
     review_status: Mapped[str] = mapped_column(String(16), server_default="pending")
+
+
+class BetfairAnchorVerdict(Base):
+    """Latest Betfair staleness-guard verdict per (event, market, selection).
+
+    Written by the read-only Betfair-API capture's verdict sink (a best-effort
+    tap on the existing per-cycle compare — app/ingestion/betfair_api.py):
+    each compared selection upserts ONE row (keep-latest per key), so the table
+    stays at ~slate size instead of append-only growth; a retention sweep in
+    the sink drops rows older than the retention window. The pick pipeline
+    reads the latest FRESH verdicts per event at mint (verdict_loader) — the
+    mint path NEVER calls the Betfair API. The row is simultaneously the
+    compare persistence, the mint-time input, and the provenance/diagnostic
+    record (P3/P4, staleness-guard package 2026-07-02).
+
+    ``decision`` is write-time: pass | demote | no_api_match | no_api_price
+    (stale_api is a READ-time classification — age > TTL — never stored).
+    """
+
+    __tablename__ = "betfair_anchor_verdicts"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_ref",
+            "market",
+            "selection_role",
+            name="uq_betfair_anchor_verdicts_selection",
+        ),
+        Index("idx_betfair_anchor_verdicts_api_captured", "api_captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    # Canonical OddsPortal match URL — same width as events.external_ref (the
+    # value it references by name; deliberately NOT an FK so a verdict write can
+    # never fail on event churn and the sink stays a tap).
+    event_ref: Mapped[str] = mapped_column(String(128))
+    market: Mapped[str] = mapped_column(String(64), server_default="h2h")
+    selection_role: Mapped[str] = mapped_column(String(16))  # home | draw | away
+    inline_price: Mapped[Decimal | None] = mapped_column(ODDS)  # scrape reference back
+    api_price: Mapped[Decimal | None] = mapped_column(ODDS)
+    api_best_back_size: Mapped[Decimal | None] = mapped_column(MONEY)  # £ @ best back
+    tick_diff: Mapped[Decimal | None] = mapped_column(METRIC)  # |delta| / coarser tick
+    inline_captured_at: Mapped[datetime | None]
+    api_captured_at: Mapped[datetime]
+    decision: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
 class PickLineDrift(Base):

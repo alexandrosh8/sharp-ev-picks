@@ -165,6 +165,63 @@ async def test_true_up_fills_clv_fields(factory) -> None:  # type: ignore[no-unt
         assert pick.close_independent_of_fill is True
 
 
+async def test_true_up_stamps_close_provenance(factory) -> None:  # type: ignore[no-untyped-def]
+    """D3 (close-evidence): the REVALIDATION writer stamps close_anchor_book +
+    close_snapshot_captured_at — persist -> read back round-trip. The anchor is
+    Pinnacle (closing_snapshots), captured at NOW, so the provenance must name
+    that book and carry that capture time (what later separates an echo,
+    captured_at <= created_at, from a fresh-but-unmoved close)."""
+    event_id = "evt-clv-close-provenance"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    loader = FakeLoader(closing_snapshots(event_id))
+    assert await true_up_clv(loader, factory, ["soccer"]) == 1
+
+    async with factory() as session:
+        pick = await session.scalar(select(Pick).where(Pick.reason_summary == "clv true-up test"))
+        assert pick is not None
+        assert pick.close_anchor_book == "Pinnacle"
+        # Round-trip: the anchor rows' capture time survives persist -> read
+        # (created_at is DB-stamped at insert, so no cross-clock comparison here;
+        # the echo-vs-fresh semantics are covered in tests/test_close_evidence.py).
+        assert pick.close_snapshot_captured_at == NOW
+
+
+def test_offwindow_order_boosts_imminent_kickoffs_inside_band() -> None:
+    """D1 zero-cost reorder: a kickoff within 60m of now goes ahead of its band
+    peers (fresh fallback close), while the premium band still leads overall and
+    rows WITHOUT a kickoff element (legacy 5-tuples) keep the old order."""
+    from app.clv_trueup import order_offwindow_refs
+
+    t_old = NOW - timedelta(days=2)
+    rows = [
+        # premium band: 'prem-late' waited longer (older attempt) but kicks off
+        # far away; 'prem-imminent' kicks off in 30m -> it must lead the band.
+        ("ref-prem-late", "h2h", "A", "premium", t_old, NOW + timedelta(hours=20)),
+        ("ref-prem-imminent", "h2h", "A", "premium", NOW, NOW + timedelta(minutes=30)),
+        # volume band: same rule inside the band.
+        ("ref-vol-imminent", "h2h", "A", "volume", NOW, NOW + timedelta(minutes=45)),
+        ("ref-vol-late", "h2h", "A", "volume", None, NOW + timedelta(hours=30)),
+    ]
+    order = order_offwindow_refs(rows, now=NOW)
+    assert order[0] == "ref-prem-imminent"  # imminent leads INSIDE the premium band
+    assert order[1] == "ref-prem-late"  # premium band still leads overall
+    assert order[2] == "ref-vol-imminent"
+    assert order[3] == "ref-vol-late"
+    # Legacy 5-tuples / no `now`: imminence is neutral — pre-D1 order preserved
+    # (never-attempted first, then stalest attempt).
+    legacy = order_offwindow_refs([row[:5] for row in rows])
+    assert legacy == ["ref-prem-late", "ref-prem-imminent", "ref-vol-late", "ref-vol-imminent"]
+
+
 async def test_true_up_marks_identical_archived_line_close_circular(factory) -> None:  # type: ignore[no-untyped-def]
     # Audit 2026-06-28 P1: when the close fair equals the pick-time fair (the SAME
     # archived sharp line reused), clv_log is a TAUTOLOGY — the persisted

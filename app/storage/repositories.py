@@ -6,14 +6,17 @@ then insert the pick. Picks are deduped by their natural key
 re-poll of the same market state never duplicates rows.
 """
 
+import contextlib
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -27,6 +30,7 @@ from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
 from app.settlement.outcomes import provisional_result
 from app.storage.models import (
+    BetfairAnchorVerdict,
     DashboardCredential,
     Event,
     EventSourceLink,
@@ -74,6 +78,16 @@ class BetfairTarget:
     starts_at: datetime | None
 
 
+#: D1 close-boost band defaults (close-evidence package, 2026-07): events
+#: kicking off within the window sort FIRST (soonest kickoff first), capped at
+#: the slot count — a pure REALLOCATION of the caller's existing ``limit``
+#: (never a raise), so the capture densely observes the final pre-kickoff
+#: window and a genuine (non-echo) sharp close exists for CLV. Overridable via
+#: BETFAIR_EXCHANGE_CLOSE_BOOST_WINDOW_MINUTES / _SLOTS (0 disables).
+BETFAIR_CLOSE_BOOST_WINDOW = timedelta(minutes=75)
+BETFAIR_CLOSE_BOOST_SLOTS = 20
+
+
 async def select_betfair_targets(
     session_factory: "async_sessionmaker",
     *,
@@ -81,9 +95,21 @@ async def select_betfair_targets(
     now: datetime | None = None,
     window: timedelta = timedelta(days=3),
     limit: int = 20,
+    boost_window: timedelta = BETFAIR_CLOSE_BOOST_WINDOW,
+    boost_slots: int = BETFAIR_CLOSE_BOOST_SLOTS,
 ) -> list[BetfairTarget]:
     """Bounded, rotating list of canonical ``sport`` events for the Betfair
-    Exchange capture to read THIS cycle — read-only (a single SELECT).
+    Exchange capture to read THIS cycle — read-only (SELECTs only).
+
+    CLOSE-BOOST BAND (D1, close-evidence package): events with
+    ``starts_at <= now + boost_window`` sort FIRST (soonest kickoff first),
+    capped at ``boost_slots`` — they are the fixtures whose final pre-kickoff
+    Betfair row becomes the CLV close, so they must not wait behind the
+    rotation while their market disappears. The REMAINDER of ``limit`` keeps
+    the never-captured-first/stalest rotation over everything else. This is a
+    pure reallocation of the same ``limit`` budget (zero added page load);
+    ``boost_slots == 0`` or a non-positive ``boost_window`` disables the band
+    (the plain pre-D1 rotation).
 
     DECOUPLING (prod fix): targets come from the warehouse, not from the loader's
     ``last_fetch_event_ids`` (populated only when a poll_odds full scrape
@@ -134,7 +160,7 @@ async def select_betfair_targets(
         )
         .exists()
     )
-    stmt = (
+    base = (
         select(
             Event.external_ref,
             home_t.name,
@@ -155,17 +181,35 @@ async def select_betfair_targets(
             Event.starts_at <= horizon,
             has_real_odds,
         )
-        # never-captured first (NULLS FIRST), then stalest capture, then soonest
-        # kickoff, then ref — a total, deterministic rotation order.
-        .order_by(
-            last_betfair.asc().nulls_first(),
-            Event.starts_at.asc(),
-            Event.external_ref.asc(),
-        )
-        .limit(limit)
     )
+    rows: list[Any] = []
     async with session_factory() as session:
-        rows = (await session.execute(stmt)).all()
+        # D1 CLOSE-BOOST BAND first: imminent kickoffs (soonest first), capped at
+        # boost_slots and never above the caller's limit — a reallocation, not a
+        # budget raise.
+        if boost_slots > 0 and boost_window > timedelta(0):
+            boost_stmt = (
+                base.where(Event.starts_at <= now + boost_window)
+                .order_by(Event.starts_at.asc(), Event.external_ref.asc())
+                .limit(min(boost_slots, limit))
+            )
+            rows = list((await session.execute(boost_stmt)).all())
+        remaining = limit - len(rows)
+        if remaining > 0:
+            # never-captured first (NULLS FIRST), then stalest capture, then
+            # soonest kickoff, then ref — a total, deterministic rotation order.
+            rotation_stmt = base.order_by(
+                last_betfair.asc().nulls_first(),
+                Event.starts_at.asc(),
+                Event.external_ref.asc(),
+            ).limit(limit)
+            taken = {row[0] for row in rows}
+            for row in (await session.execute(rotation_stmt)).all():
+                if row[0] in taken:
+                    continue  # already claimed by the boost band
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
     return [
         BetfairTarget(
             external_ref=ref,
@@ -465,6 +509,10 @@ async def latest_picks_with_events(
                 str(p.anchor_match_confidence) if p.anchor_match_confidence is not None else None
             ),
             "anchor_match_method": p.anchor_match_method,
+            # Betfair staleness-guard mint stamp (observability only): effective
+            # verdict at mint (pass/demote/no_api_match/no_api_price/stale_api);
+            # null = guard off / no verdict / non-H2H / pre-column row.
+            "anchor_staleness_decision": p.anchor_staleness_decision,
             # sport of the pick (soccer/basketball/tennis/american_football) +
             # human label, so the multi-sport picks table can badge each row and
             # tag UNVALIDATED (experimental) sports honestly.
@@ -788,6 +836,23 @@ CLV_IMPLAUSIBLE_LOG = 0.5
 # resolution) to preserve this module's no-Settings-import boundary.
 CLV_TAUTOLOGY_EPS = 1e-3
 
+# D4 close-age staleness threshold for the clv_quality diagnostics: a close whose
+# anchor rows were captured more than this many minutes before kickoff counts as
+# STALE (mirrors clv_trueup.SNAPSHOT_CLOSE_MAX_GAP = 4h; kept as a local constant
+# to preserve this module's no-Settings-import boundary). Diagnostics only —
+# nothing here gates or reclassifies a close.
+STALE_CLOSE_MAX_GAP_MINUTES = 240
+
+
+def _percentile(values: Sequence[float], q: float) -> float | None:
+    """Nearest-rank percentile (no numpy — this module stays stdlib-only for
+    math). None on an empty series — an honest absence, never a fabricated 0."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, max(0, math.ceil(q * len(ordered)) - 1))
+    return ordered[idx]
+
 
 def _clv_row_is_tautological(
     clv_log: Any,
@@ -964,6 +1029,13 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     # the series (not just the stake-weighted sum) is what makes significance possible.
     blended_clv_series: list[float] = []
     sharp_clv_series: list[float] = []
+    # D4 EVIDENCE-QUALITY tallies (diagnostics only — no gate/estimate changes):
+    # the per-row guard verdicts were previously computed and DISCARDED; the
+    # counts below make the exclusion mass visible under "clv_quality".
+    q_missing = q_tautological = q_fabricated = q_circular = 0
+    q_snapshot_close = q_fallback_close = 0
+    close_ages_minutes: list[float] = []
+    q_stale_close = 0
     for row in rows:
         (
             outcome,
@@ -985,6 +1057,11 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         # _devig_fallback_asymmetric treats it as symmetric (not excluded).
         mint_devig_fell_back = row[12] if len(row) > 12 else None
         close_devig_fell_back = row[13] if len(row) > 13 else None
+        # D3/D4 close provenance (trailing, feature-detected like the flags
+        # above): the close anchor rows' capture time + the event kickoff, so
+        # close AGE at kickoff is measurable once provenance accrues.
+        close_snapshot_captured_at = row[14] if len(row) > 14 else None
+        kickoff_at = row[15] if len(row) > 15 else None
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
@@ -1004,6 +1081,27 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             clv_log, closing_fair_probability, model_probability
         )
         clv_excluded = clv_fabricated or clv_tautological
+        # D4 tallies. Each guard is counted on its OWN verdict (a row can trip
+        # both); circular is "close priced by the fill book and not otherwise
+        # excluded" — the design's exclusive residual bucket.
+        if clv_log is None:
+            q_missing += 1
+        if clv_tautological:
+            q_tautological += 1
+        if clv_fabricated:
+            q_fabricated += 1
+        if clv_log is not None and close_independent is False and not clv_excluded:
+            q_circular += 1
+        if bool(has_snapshot_close):
+            q_snapshot_close += 1
+        elif clv_log is not None:
+            # A CLV without a snapshot close = the poll-time fallback close stood.
+            q_fallback_close += 1
+        if close_snapshot_captured_at is not None and kickoff_at is not None:
+            age_minutes = (kickoff_at - close_snapshot_captured_at).total_seconds() / 60.0
+            close_ages_minutes.append(age_minutes)
+            if age_minutes > STALE_CLOSE_MAX_GAP_MINUTES:
+                q_stale_close += 1
         if clv_log is not None and not clv_excluded:
             clv_weighted += stake * clv_log
             clv_stake += stake
@@ -1103,6 +1201,29 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         # BOTH strata on the CLEAN subset. At tiny live n the flags read False — honest.
         **_significance_fields("", blended_clv_series, beat_true, beat_known),
         **_significance_fields("sharp_", sharp_clv_series, sharp_beat_true, sharp_beat_known),
+        # D4 EVIDENCE-QUALITY diagnostics (labelling/observability only — every
+        # figure above is computed exactly as before). How much of the settled
+        # sample the CLV guards excluded and what kind of close each row got;
+        # close-age fields stay None/0 until D3 provenance accrues.
+        "clv_quality": {
+            "n_settled": n_settled,
+            "clv_missing": q_missing,
+            "clv_excluded_tautological": q_tautological,
+            "clv_excluded_fabricated": q_fabricated,
+            "clv_excluded_circular": q_circular,
+            # tautological share of the rows that HAVE a CLV — the headline
+            # exclusion rate the dashboard shows. None when no row has CLV.
+            "tautological_rate": (
+                q_tautological / (n_settled - q_missing) if n_settled > q_missing else None
+            ),
+            "n_snapshot_close": q_snapshot_close,
+            "n_fallback_close": q_fallback_close,
+            "n_close_age_known": len(close_ages_minutes),
+            "close_age_p50_minutes": _percentile(close_ages_minutes, 0.5),
+            "close_age_p90_minutes": _percentile(close_ages_minutes, 0.9),
+            "n_stale_close": q_stale_close,
+            "stale_close_max_gap_minutes": STALE_CLOSE_MAX_GAP_MINUTES,
+        },
     }
 
 
@@ -1179,6 +1300,16 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     if close_fb_attr is not None:
         close_fb_idx = len(select_cols)
         select_cols.append(close_fb_attr)  # P2-2 close devig-fallback provenance
+    # D3/D4 close provenance (feature-detected, same migration contract): the
+    # close anchor rows' capture time + the event kickoff feed the clv_quality
+    # close-age diagnostics (echo vs fresh-but-unmoved becomes measurable).
+    close_cap_attr = getattr(Pick, "close_snapshot_captured_at", None)
+    close_cap_idx = None
+    if close_cap_attr is not None:
+        close_cap_idx = len(select_cols)
+        select_cols.append(close_cap_attr)
+    starts_at_idx = len(select_cols)
+    select_cols.append(Event.starts_at)  # kickoff — the close-age clock
     rows = (
         await session.execute(
             select(*select_cols)
@@ -1208,6 +1339,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         has_snapshot_close = r[snapshot_idx] if snapshot_idx is not None else None
         mint_fell_back = r[mint_fb_idx] if mint_fb_idx is not None else None
         close_fell_back = r[close_fb_idx] if close_fb_idx is not None else None
+        close_captured_at = r[close_cap_idx] if close_cap_idx is not None else None
         return (
             r[0],
             r[1],
@@ -1223,6 +1355,8 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
             r[10],  # model_probability — TAUTOLOGY guard (pick-time fair)
             mint_fell_back,  # P2-2 mint devig-fallback provenance (or None)
             close_fell_back,  # P2-2 close devig-fallback provenance (or None)
+            close_captured_at,  # D3 close provenance — close-age diagnostics
+            r[starts_at_idx],  # kickoff — the close-age clock (D4)
         )
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
@@ -1236,12 +1370,19 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     # own forward CLV/ROI evidence. Each sport is gated on its OWN n inside
     # _aggregate_settled (MIN_HEADLINE_N), so a thin sport reads "insufficient".
     by_sport = _aggregate_settled_by_sport([(r[sport_idx], _settled_tuple(r)) for r in rows])
+    # D4 EVIDENCE QUALITY: tier-AGNOSTIC (the exclusion mass spans both tiers,
+    # matching the audit SQL's population) + per-stratum tautology tallies. Pure
+    # diagnostics — no headline/trusted figure above changes.
+    clv_quality = _aggregate_settled([_settled_tuple(r) for r in rows])["clv_quality"]
+    clv_quality["scope"] = "all_tiers"
+    clv_quality["strata"] = await clv_quality_strata(session)
     return {
         **premium,
         "n_pending": pending_by_tier.get("premium", 0),
         "tier_scope": "premium",
         "volume": volume,
         "by_sport": by_sport,
+        "clv_quality": clv_quality,
     }
 
 
@@ -1250,6 +1391,137 @@ def _ratio(numerator: Decimal, denominator: Decimal) -> str | None:
     if not denominator:
         return None
     return format((numerator / denominator).normalize(), "f")
+
+
+async def clv_quality_strata(
+    session: AsyncSession,
+    *,
+    days: int = 21,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """D4: per-stratum tautological-close tallies over recently settled picks —
+    the Q2 audit SQL shape (sport x market x mint anchor x close anchor x close
+    book), READ-ONLY. Same-source cells (consensus->consensus, pinnacle->
+    pinnacle) carry ~all tautologies; cross-source cells are ~0% — this split
+    is what makes the headline exclusion rate diagnosable instead of a single
+    opaque number. Rows are ordered most-tautological first and capped."""
+    since = datetime.now(tz=UTC) - timedelta(days=days)
+    taut_cond = and_(
+        Pick.closing_fair_probability.is_not(None),
+        Pick.model_probability.is_not(None),
+        func.abs(Pick.closing_fair_probability - Pick.model_probability) <= CLV_TAUTOLOGY_EPS,
+    )
+    n_taut = func.count().filter(taut_cond)
+    rows = (
+        await session.execute(
+            select(
+                Sport.key,
+                Pick.market,
+                Pick.anchor_type,
+                Pick.closing_anchor_type,
+                Pick.close_anchor_book,
+                func.count().label("n"),
+                n_taut.label("n_tautological"),
+            )
+            .select_from(ResultTracking)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .join(Sport, Event.sport_id == Sport.id)
+            .where(ResultTracking.settled_at >= since, Pick.clv_log.is_not(None))
+            .group_by(
+                Sport.key,
+                Pick.market,
+                Pick.anchor_type,
+                Pick.closing_anchor_type,
+                Pick.close_anchor_book,
+            )
+            .order_by(n_taut.desc(), func.count().desc())
+            .limit(limit)
+        )
+    ).all()
+    return [
+        {
+            "sport": sport,
+            "market": market,
+            "anchor_type": anchor_type,
+            "closing_anchor_type": closing_anchor_type,
+            "close_anchor_book": close_anchor_book,
+            "n": int(n),
+            "n_tautological": int(taut),
+            "tautological_rate": (int(taut) / int(n)) if n else None,
+        }
+        for sport, market, anchor_type, closing_anchor_type, close_anchor_book, n, taut in rows
+    ]
+
+
+async def sharp_close_capture_density(
+    session: AsyncSession,
+    *,
+    days: int = 7,
+    final_window: timedelta = timedelta(hours=1),
+) -> dict[str, Any]:
+    """D4 capture-density panel for /resolution/match-rate: how many FINAL-HOUR
+    sharp rows per source landed on recently kicked-off events (the Q5/Q6 audit
+    shape) — the instrument that says whether the D1 close-boost band is
+    actually producing a fresh sharp close to anchor on. READ-ONLY.
+
+    Betfair rows live INLINE on the canonical event (bookmaker 'Betfair%');
+    Pinnacle archive rows live on their own ``pinnacle_<sport>`` namespace
+    events — each source is counted on its own event population (no
+    cross-source matching here; this measures capture, not matching)."""
+    now = datetime.now(tz=UTC)
+    since = now - timedelta(days=days)
+
+    async def _density(*conds: Any) -> dict[str, int]:
+        row = (
+            await session.execute(
+                select(
+                    func.count(),
+                    func.count(func.distinct(OddsSnapshot.event_id)),
+                )
+                .select_from(OddsSnapshot)
+                .join(Event, OddsSnapshot.event_id == Event.id)
+                .join(Sport, Event.sport_id == Sport.id)
+                .where(
+                    Event.starts_at.is_not(None),
+                    Event.starts_at >= since,
+                    Event.starts_at <= now,
+                    OddsSnapshot.captured_at <= Event.starts_at,
+                    OddsSnapshot.captured_at >= Event.starts_at - final_window,
+                    *conds,
+                )
+            )
+        ).one()
+        return {"final_window_rows": int(row[0]), "events_with_rows": int(row[1])}
+
+    events_kicked_off = (
+        await session.scalar(
+            select(func.count(func.distinct(Event.id)))
+            .select_from(Event)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(OddsSnapshot, OddsSnapshot.event_id == Event.id)
+            .where(
+                Sport.key.not_like("pinnacle%"),
+                Event.starts_at.is_not(None),
+                Event.starts_at >= since,
+                Event.starts_at <= now,
+            )
+        )
+    ) or 0
+    return {
+        "window_days": days,
+        "final_window_minutes": int(final_window.total_seconds() // 60),
+        # canonical (non-archive) events with any odds history that kicked off
+        # in the window — the shared denominator for per-source coverage.
+        "events_kicked_off": int(events_kicked_off),
+        "sources": {
+            "betfair": await _density(
+                OddsSnapshot.bookmaker.ilike("betfair%"),
+                Sport.key.not_like("pinnacle%"),
+            ),
+            "pinnacle": await _density(Sport.key.like("pinnacle%")),
+        },
+    }
 
 
 async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
@@ -1880,6 +2152,254 @@ async def source_link_metrics(session: AsyncSession) -> dict[str, Any]:
             }
             for source, n, avg in by_source_rows
         },
+    }
+
+
+@dataclass(frozen=True)
+class AnchorVerdictIn:
+    """One Betfair staleness-guard verdict to persist (betfair_anchor_verdicts).
+
+    Neutral shape so the ingestion layer can emit verdicts without importing
+    the ORM (mirrors SourceLinkByRef). ``decision`` is the WRITE-time enum
+    (pass|demote|no_api_match|no_api_price); stale_api is a read-time
+    classification and is never stored."""
+
+    event_ref: str
+    market: str
+    selection_role: str
+    inline_price: float | None
+    api_price: float | None
+    api_best_back_size: float | None
+    tick_diff: float | None
+    inline_captured_at: datetime | None
+    api_captured_at: datetime
+    decision: str
+
+
+#: Verdict retention: rows whose api_captured_at is older than this are swept
+#: on every sink write. With keep-latest upserts the table sits at ~slate size
+#: (<= a few thousand rows); the sweep only clears events that left the window.
+BETFAIR_VERDICT_RETENTION = timedelta(days=7)
+
+
+async def record_betfair_anchor_verdicts(
+    session_factory: "async_sessionmaker",
+    rows: Sequence[AnchorVerdictIn],
+    *,
+    retention: timedelta = BETFAIR_VERDICT_RETENTION,
+) -> int:
+    """Keep-latest upsert of staleness verdicts + the retention sweep.
+
+    One row per (event_ref, market, selection_role): ON CONFLICT replaces the
+    stored verdict ONLY when the incoming api_captured_at is not older (a late
+    or replayed cycle can never regress a fresher verdict). Commits its own
+    short session (the composition-root sink shape, like record_source_links).
+    Raises on DB failure — the capture's verdict tap wraps this (type-only log,
+    never breaks the capture). Returns the number of rows offered."""
+    if not rows:
+        return 0
+    # Dedupe within the batch (two Betfair markets can match one canonical
+    # event): keep the LAST observation per key, or ON CONFLICT would hit the
+    # same row twice inside one statement (a Postgres error).
+    by_key: dict[tuple[str, str, str], AnchorVerdictIn] = {
+        (row.event_ref, row.market, row.selection_role): row for row in rows
+    }
+    values = [
+        {
+            "event_ref": row.event_ref,
+            "market": row.market,
+            "selection_role": row.selection_role,
+            "inline_price": (
+                Decimal(str(round(row.inline_price, 4))) if row.inline_price is not None else None
+            ),
+            "api_price": (
+                Decimal(str(round(row.api_price, 4))) if row.api_price is not None else None
+            ),
+            "api_best_back_size": (
+                Decimal(str(round(row.api_best_back_size, 2)))
+                if row.api_best_back_size is not None
+                else None
+            ),
+            "tick_diff": (
+                Decimal(str(round(row.tick_diff, 6))) if row.tick_diff is not None else None
+            ),
+            "inline_captured_at": row.inline_captured_at,
+            "api_captured_at": row.api_captured_at,
+            "decision": row.decision,
+        }
+        for row in by_key.values()
+    ]
+    stmt = pg_insert(BetfairAnchorVerdict).values(values)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_betfair_anchor_verdicts_selection",
+        set_={
+            "inline_price": stmt.excluded.inline_price,
+            "api_price": stmt.excluded.api_price,
+            "api_best_back_size": stmt.excluded.api_best_back_size,
+            "tick_diff": stmt.excluded.tick_diff,
+            "inline_captured_at": stmt.excluded.inline_captured_at,
+            "api_captured_at": stmt.excluded.api_captured_at,
+            "decision": stmt.excluded.decision,
+        },
+        where=(BetfairAnchorVerdict.api_captured_at <= stmt.excluded.api_captured_at),
+    )
+    cutoff = datetime.now(tz=UTC) - retention
+    async with session_factory() as session:
+        await session.execute(stmt)
+        await session.execute(
+            sa_delete(BetfairAnchorVerdict).where(BetfairAnchorVerdict.api_captured_at < cutoff)
+        )
+        await session.commit()
+    return len(values)
+
+
+#: Read-time staleness classification (mirrors app.ingestion.betfair_api's
+#: VERDICT_* constants; kept as local literals so this query module never
+#: imports the ingestion layer).
+_VERDICT_DEMOTE = "demote"
+_VERDICT_PASS = "pass"
+_VERDICT_STALE_API = "stale_api"
+
+
+async def load_betfair_staleness_verdicts(
+    session_factory: "async_sessionmaker",
+    *,
+    ttl_seconds: float,
+    market: str = "h2h",
+    now: datetime | None = None,
+) -> dict[str, str]:
+    """Latest EFFECTIVE per-event staleness verdict for the mint-time guard.
+
+    Returns ``{event_ref: decision}`` where decision aggregates the event's
+    per-selection rows with the freshness TTL applied at READ time:
+
+    * any FRESH (api_captured_at >= now - ttl) row with decision 'demote'
+      -> 'demote' (the only value that can ever alter anchoring);
+    * else any fresh 'pass' -> 'pass';
+    * else any fresh row -> its write-time decision (no_api_match/
+      no_api_price — no-ops, kept for the observability stamp);
+    * else (only over-TTL rows) -> 'stale_api' — the API could have been down
+      for hours; STALE EVIDENCE MUST NEVER DEMOTE A LIVE ANCHOR (direction
+      verified in the design), so stale_api is a no-op at mint.
+
+    READ-ONLY and DB-only: the mint path never calls the Betfair API. Raises
+    on DB failure — the pipeline's verdict loader wraps this (empty map +
+    type-only log; a verdict-read failure never blocks minting)."""
+    now = now or datetime.now(tz=UTC)
+    async with session_factory() as session:
+        result = await session.execute(
+            select(
+                BetfairAnchorVerdict.event_ref,
+                BetfairAnchorVerdict.decision,
+                BetfairAnchorVerdict.api_captured_at,
+            ).where(BetfairAnchorVerdict.market == market)
+        )
+        rows = result.all()
+    return effective_staleness_verdicts(
+        [(ref, decision, captured) for ref, decision, captured in rows],
+        ttl_seconds=ttl_seconds,
+        now=now,
+    )
+
+
+def effective_staleness_verdicts(
+    rows: Sequence[tuple[str, str, datetime | None]],
+    *,
+    ttl_seconds: float,
+    now: datetime,
+) -> dict[str, str]:
+    """PURE read-time aggregation behind ``load_betfair_staleness_verdicts``
+    (tested directly): (event_ref, decision, api_captured_at) rows -> the
+    per-event effective decision with the freshness TTL applied. An event whose
+    ONLY rows are over the TTL reads 'stale_api' — the direction check: STALE
+    API EVIDENCE NEVER DEMOTES, no matter how large the stored disagreement."""
+    cutoff = now - timedelta(seconds=ttl_seconds)
+    fresh_by_event: dict[str, list[str]] = {}
+    seen_events: set[str] = set()
+    for event_ref, decision, api_captured_at in rows:
+        seen_events.add(event_ref)
+        if api_captured_at is not None and api_captured_at >= cutoff:
+            fresh_by_event.setdefault(event_ref, []).append(decision)
+    out: dict[str, str] = {}
+    for event_ref in seen_events:
+        fresh = fresh_by_event.get(event_ref, [])
+        if not fresh:
+            out[event_ref] = _VERDICT_STALE_API
+        elif _VERDICT_DEMOTE in fresh:
+            out[event_ref] = _VERDICT_DEMOTE
+        elif _VERDICT_PASS in fresh:
+            out[event_ref] = _VERDICT_PASS
+        else:
+            out[event_ref] = fresh[0]
+    return out
+
+
+async def betfair_staleness_metrics(
+    session: AsyncSession, *, ttl_seconds: float = 900.0
+) -> dict[str, Any]:
+    """Staleness-guard diagnostics for GET /resolution/match-rate.
+
+    Write-time decision counts (all retained rows), the fresh-vs-stale split at
+    the read TTL, the median tick distance and the median inline->API freshness
+    gap. Read-only and NULL-SAFE: an empty or absent table yields zeros/None
+    (the endpoint must render before the migration/verdicts exist)."""
+    empty: dict[str, Any] = {
+        "rows": 0,
+        "decisions": {},
+        "fresh_decisions": {},
+        "stale_rows": 0,
+        "median_tick_diff": None,
+        "median_freshness_gap_seconds": None,
+        "ttl_seconds": ttl_seconds,
+    }
+    cutoff = datetime.now(tz=UTC) - timedelta(seconds=ttl_seconds)
+    try:
+        decision_rows = (
+            await session.execute(
+                select(BetfairAnchorVerdict.decision, func.count()).group_by(
+                    BetfairAnchorVerdict.decision
+                )
+            )
+        ).all()
+        fresh_rows = (
+            await session.execute(
+                select(BetfairAnchorVerdict.decision, func.count())
+                .where(BetfairAnchorVerdict.api_captured_at >= cutoff)
+                .group_by(BetfairAnchorVerdict.decision)
+            )
+        ).all()
+        median_tick = await session.scalar(
+            select(
+                func.percentile_cont(0.5).within_group(BetfairAnchorVerdict.tick_diff.asc())
+            ).where(BetfairAnchorVerdict.tick_diff.is_not(None))
+        )
+        median_gap = await session.scalar(
+            select(
+                func.percentile_cont(0.5).within_group(
+                    func.extract(
+                        "epoch",
+                        BetfairAnchorVerdict.api_captured_at
+                        - BetfairAnchorVerdict.inline_captured_at,
+                    ).asc()
+                )
+            ).where(BetfairAnchorVerdict.inline_captured_at.is_not(None))
+        )
+    except Exception as exc:  # absent table (pre-migration) -> honest zeros
+        logger.warning("betfair staleness metrics unavailable: %s", type(exc).__name__)
+        with contextlib.suppress(Exception):
+            await session.rollback()
+        return empty
+    decisions = {decision: int(n) for decision, n in decision_rows}
+    fresh = {decision: int(n) for decision, n in fresh_rows}
+    total = sum(decisions.values())
+    return {
+        "rows": total,
+        "decisions": decisions,
+        "fresh_decisions": fresh,
+        "stale_rows": total - sum(fresh.values()),
+        "median_tick_diff": float(median_tick) if median_tick is not None else None,
+        "median_freshness_gap_seconds": float(median_gap) if median_gap is not None else None,
+        "ttl_seconds": ttl_seconds,
     }
 
 
@@ -2802,6 +3322,11 @@ async def persist_pick(
                 else None
             ),
             anchor_match_method=pick.anchor_match_method,
+            # Betfair staleness-guard mint stamp (observability ONLY): the effective
+            # verdict the guard read for this pick's event at mint — would-demote
+            # under SHADOW, actual demotion under enforce. NULL when the guard is
+            # off / no verdict / non-H2H.
+            anchor_staleness_decision=pick.anchor_staleness_decision,
             # P2-2: mint-side devig-fallback provenance (close side stamped by the CLV
             # true-up) — the trusted CLV subset drops asymmetric mint/close fallbacks.
             mint_devig_fell_back=pick.mint_devig_fell_back,
@@ -2868,6 +3393,9 @@ async def persist_pick(
             else None
         )
         existing.anchor_match_method = pick.anchor_match_method
+        # the promoting detection's staleness verdict replaces the shadow row's
+        # (observability only — describes the alert the operator acts on)
+        existing.anchor_staleness_decision = pick.anchor_staleness_decision
         # the promoting detection's policy regime replaces the shadow row's: the
         # row now describes the premium alert the operator acts on, so its CLV must
         # attribute to the policy that promoted it (H3).
