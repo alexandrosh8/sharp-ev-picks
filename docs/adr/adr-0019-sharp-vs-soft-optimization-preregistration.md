@@ -71,3 +71,20 @@ Anything failing these stays OFF. H1 is already live; if fresh data REFUTES it
   never re-select on the 2025 data.
 - This ADR is the contract that prevents spent-holdout overfitting: any future
   session that "tunes up" these numbers on 2025 is violating it.
+
+
+## 2026-07-02 — fresh-2026 single-shot executed; slate SPENT
+
+The pre-registered single-shot ran once on the operator-supplied 2026 slate
+(train = 2025 rows of `data (1).tar` minus its 453 possibly-peeked 2026
+members; holdout = `data (2).tar`, 2026-Jan..Jun; hashes + member accounting
+in `docs/research/2026-07-02-fresh-2026-single-shot-header.md`).
+
+Outcome: **acceptance NOT met** — held-out n=13 (1X2) / n=3 (OU2.5) at the
+frozen thresholds (bar: n>=150), CLV point estimates negative with CIs
+straddling zero; a train->test bet-rate collapse (~20% -> ~0.45%) indicates a
+2026-window soft-fill/join coverage anomaly that suppressed holdout n. Per
+discipline: no re-runs, no tuning on this data. H1-H6 remain at shipped
+conservative settings. The 2026-Jan..Jun slate is SPENT for selection AND
+evaluation; the next single-shot requires a later, coverage-verified slate
+(2026-H2 or beyond) with the fill-coverage anomaly understood first.
