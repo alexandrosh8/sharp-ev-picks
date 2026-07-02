@@ -252,6 +252,11 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
     redis_url: str = "redis://localhost:6380/0"
+    # Bounded Redis socket timeouts (ops audit WP7): without them a blackholed
+    # Redis (dropped packets, wedged server) stalls poll_odds/alert dedupe
+    # INDEFINITELY inside the event loop. Connect + per-op read/write bounds.
+    redis_socket_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    redis_socket_timeout_seconds: float = Field(default=10.0, gt=0)
     # Mirrors docker-compose.yml's host-side app bind. It does not configure
     # uvicorn inside the container; it exists so public Docker binds fail fast
     # unless dashboard auth is enabled.
@@ -969,6 +974,14 @@ class Settings(BaseSettings):
     # within hours of kickoff; this bounds the catch-up window + request count
     # (days x feeds per cycle).
     espn_settle_days: int = Field(default=4, ge=1)
+    # TTL (seconds) for the in-process settlement FEED cache (ops audit WP7):
+    # the settle job runs every ~30s but football-data CSVs + ESPN scoreboards
+    # update on the order of minutes-hours — refetching ~36 CSVs + ~28 ESPN
+    # endpoints EVERY cycle (~2,880x/day each) is self-inflicted ban risk.
+    # Repeat cycles inside the TTL reuse the last non-empty fetch; an EMPTY
+    # fetch is never cached (a feed outage must be re-probed every cycle).
+    # 0 disables the cache (every cycle refetches).
+    settle_feed_ttl_seconds: int = Field(default=1800, ge=0)
     # Also auto-settle from the OddsPortal-SCRAPED final score (Event.scraped_*),
     # so leagues with no free results feed (minor soccer etc.) settle themselves
     # with NO manual entry — the score was already fetched at scrape time, and it

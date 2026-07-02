@@ -32,6 +32,8 @@ from app.storage.models import Event, ManualBetLog, Pick, ResultTracking, Sport,
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from app.config import Settings
+
 logger = logging.getLogger(__name__)
 
 # How far back the score book reaches. Anything older than this with no
@@ -447,6 +449,67 @@ async def _load_scraped_finals(session: AsyncSession, now: datetime) -> list[Fin
     ]
 
 
+# In-process TTL cache for the RESULT FEEDS (ops audit WP7): the settle job
+# runs every ~30s but football-data CSVs / ESPN scoreboards update far slower —
+# uncached, each cycle re-hits ~36 CSVs + ~28 ESPN endpoints (~2,880x/day each),
+# a self-inflicted ban risk on free feeds. Keyed by the full feed config (slugs,
+# seasons, date window, ESPN settings) so a config change never serves a stale
+# entry. Values: (fetched_at, scores). EMPTY results are never cached — the
+# silent-empty refusal in run_settlement_cycle must keep seeing live outages.
+_FEED_CACHE: dict[tuple[object, ...], tuple[datetime, list[FinalScore]]] = {}
+
+
+def clear_feed_cache() -> None:
+    """Drop all cached feed results (tests + operator tooling)."""
+    _FEED_CACHE.clear()
+
+
+async def _load_feed_scores(
+    client: httpx.AsyncClient,
+    slugs: Sequence[str],
+    seasons: Sequence[str],
+    now: datetime,
+    settings: "Settings",
+) -> list[FinalScore]:
+    """Load football-data CSV + ESPN scores, served from the TTL cache when a
+    fresh-enough fetch with the IDENTICAL feed config exists. Cache expiry is
+    judged against the caller's `now` (UTC-aware), matching the cycle clock."""
+    on_or_after = (now - SCORE_WINDOW).date()
+    key: tuple[object, ...] = (
+        tuple(slugs),
+        tuple(seasons),
+        on_or_after,  # rolls with now.date(): a date rollover splits the key
+        settings.espn_settle_enabled,
+        settings.espn_settle_sports,
+        settings.espn_settle_days,
+    )
+    ttl = settings.settle_feed_ttl_seconds
+    cached = _FEED_CACHE.get(key)
+    if ttl > 0 and cached is not None:
+        fetched_at, scores = cached
+        if (now - fetched_at).total_seconds() < ttl:
+            return list(scores)
+    scores = await load_scores(client, slugs, seasons, on_or_after=on_or_after)
+    # ESPN free scores add basketball / NFL / tennis auto-settlement (soccer
+    # already uses the football-data CSV feeds above). Read-only SCORES only —
+    # ESPN odds are soft and are NEVER used as a close.
+    if settings.espn_settle_enabled:
+        from app.ingestion.espn_scores import load_espn_scores
+
+        espn_sports = [s.strip() for s in settings.espn_settle_sports.split(",") if s.strip()]
+        espn_dates = [now.date() - timedelta(days=i) for i in range(settings.espn_settle_days)]
+        scores = [*scores, *await load_espn_scores(client, espn_sports, espn_dates)]
+    if ttl > 0 and scores:  # empty == outage: never cached, re-probed next cycle
+        # Drop expired entries so stale keys (e.g. yesterday's date window)
+        # never accumulate across long uptimes.
+        for stale_key in [
+            k for k, (at, _) in _FEED_CACHE.items() if (now - at).total_seconds() >= ttl
+        ]:
+            _FEED_CACHE.pop(stale_key, None)
+        _FEED_CACHE[key] = (now, list(scores))
+    return scores
+
+
 async def run_settlement_cycle(
     client: httpx.AsyncClient,
     session_factory: "async_sessionmaker",
@@ -490,16 +553,9 @@ async def run_settlement_cycle(
         await void_stale_null_kickoff_picks(session, now)
         await void_unsettleable_known_kickoff_picks(session, now)
         await session.commit()
-    scores = await load_scores(client, slugs, seasons, on_or_after=(now - SCORE_WINDOW).date())
-    # ESPN free scores add basketball / NFL / tennis auto-settlement (soccer
-    # already uses the football-data CSV feeds above). Read-only SCORES only —
-    # ESPN odds are soft and are NEVER used as a close.
-    if settings.espn_settle_enabled:
-        from app.ingestion.espn_scores import load_espn_scores
-
-        espn_sports = [s.strip() for s in settings.espn_settle_sports.split(",") if s.strip()]
-        espn_dates = [now.date() - timedelta(days=i) for i in range(settings.espn_settle_days)]
-        scores = [*scores, *await load_espn_scores(client, espn_sports, espn_dates)]
+    # TTL-cached feed load (ops audit WP7): repeat 30s cycles inside the TTL
+    # reuse the last non-empty fetch instead of re-hammering the free feeds.
+    scores = await _load_feed_scores(client, slugs, seasons, now, settings)
     # FEED/ESPN scores are authoritative + clean -> settle FIRST. Scraped final
     # scores (DOM-fragile) then settle ONLY the picks no feed reached, in an
     # idempotent SECOND pass, so a scrape can never override a feed result

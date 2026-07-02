@@ -30,6 +30,15 @@ from app.config import Settings
 
 _PW = "s3cret-test-pw"  # synthetic, in-process only
 
+# /setup is loopback-gated (WP7 hardening): present a direct loopback peer so
+# these tests keep exercising the first-run flow itself, not the gate
+# (tests/test_ops_security.py covers the gate).
+_LOOPBACK = ("127.0.0.1", 50000)
+
+
+def _client(app) -> TestClient:  # type: ignore[no-untyped-def]
+    return TestClient(app, follow_redirects=False, client=_LOOPBACK)
+
 
 async def _no_session() -> AsyncIterator[None]:
     yield None
@@ -74,7 +83,7 @@ def _build_app(monkeypatch, settings: Settings, *, created_ok: bool = True):  # 
 
 def test_unconfigured_root_redirects_to_setup(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, _ = _build_app(monkeypatch, _unconfigured_settings())
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     res = client.get("/", headers={"accept": "text/html"})
     assert res.status_code == 303
     assert res.headers["location"] == "/setup"
@@ -82,7 +91,7 @@ def test_unconfigured_root_redirects_to_setup(monkeypatch) -> None:  # type: ign
 
 def test_unconfigured_login_redirects_to_setup(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, _ = _build_app(monkeypatch, _unconfigured_settings())
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     res = client.get("/login", headers={"accept": "text/html"})
     assert res.status_code == 303
     assert res.headers["location"] == "/setup"
@@ -90,7 +99,7 @@ def test_unconfigured_login_redirects_to_setup(monkeypatch) -> None:  # type: ig
 
 def test_setup_page_served_only_while_unconfigured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, _ = _build_app(monkeypatch, _unconfigured_settings())
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     res = client.get("/setup")
     assert res.status_code == 200
     assert 'id="setup-form"' in res.text
@@ -101,7 +110,7 @@ def test_setup_page_served_only_while_unconfigured(monkeypatch) -> None:  # type
 
 def test_setup_post_creates_credential_and_signs_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, calls = _build_app(monkeypatch, _unconfigured_settings())
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     res = client.post("/setup", json={"username": "admin", "password": _PW})
     assert res.status_code == 200
     assert SESSION_COOKIE in res.cookies
@@ -119,7 +128,7 @@ def test_setup_post_creates_credential_and_signs_in(monkeypatch) -> None:  # typ
 def test_setup_post_is_one_shot_409_when_configured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, calls = _build_app(monkeypatch, _unconfigured_settings())
     set_active_credentials("admin", hash_password(_PW), "an-existing-secret")
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     res = client.post("/setup", json={"username": "admin", "password": "another-pw-9"})
     assert res.status_code == 409
     assert calls == []  # never reached the writer — no unauthenticated reset
@@ -128,7 +137,7 @@ def test_setup_post_is_one_shot_409_when_configured(monkeypatch) -> None:  # typ
 def test_setup_get_redirects_home_when_configured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, _ = _build_app(monkeypatch, _unconfigured_settings())
     set_active_credentials("admin", hash_password(_PW), "an-existing-secret")
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     res = client.get("/setup", headers={"accept": "text/html"})
     assert res.status_code == 303
     assert res.headers["location"] == "/"
@@ -136,7 +145,7 @@ def test_setup_get_redirects_home_when_configured(monkeypatch) -> None:  # type:
 
 def test_setup_rejects_short_password(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, calls = _build_app(monkeypatch, _unconfigured_settings())
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     res = client.post("/setup", json={"username": "admin", "password": "short"})
     assert res.status_code == 400
     assert calls == []  # rejected before writing
@@ -152,7 +161,7 @@ def test_setup_404_when_auth_disabled(monkeypatch) -> None:  # type: ignore[no-u
         app_env="local",
     )
     app, calls = _build_app(monkeypatch, settings)
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     res = client.post("/setup", json={"username": "admin", "password": _PW})
     assert res.status_code == 404
     assert calls == []
@@ -163,7 +172,7 @@ def test_cookie_from_setup_authenticates_dashboard(monkeypatch) -> None:  # type
     # generated session secret (NOT the blank .env one), so it validates and the
     # operator lands on the dashboard without a second login.
     app, _ = _build_app(monkeypatch, _unconfigured_settings())
-    client = TestClient(app, follow_redirects=False)
+    client = _client(app)
     assert client.post("/setup", json={"username": "admin", "password": _PW}).status_code == 200
     # TestClient carries the Set-Cookie forward.
     page = client.get("/", headers={"accept": "text/html"})

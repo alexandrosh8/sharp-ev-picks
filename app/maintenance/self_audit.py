@@ -249,6 +249,10 @@ async def self_audit_job(
         return -1
 
     # P0-4 dead-man's-switch: stateful across cycles, so it needs monitor_state.
+    # WP7 fix: with a dispatcher wired, the one-shot is consumed ONLY after a
+    # CONFIRMED dispatch (see _dispatch_anomalies) — a failed delivery must
+    # leave it armed so the next cycle retries instead of silently swallowing
+    # the exact alert that reports the outage.
     dead_man: Anomaly | None = None
     if monitor_state is not None:
         streak, alerted, dead_man = evaluate_dead_mans_switch(
@@ -258,7 +262,10 @@ async def self_audit_job(
             already_alerted=monitor_state.dead_man_alerted,
         )
         monitor_state.empty_odds_streak = streak
-        monitor_state.dead_man_alerted = alerted
+        if dispatcher is None or dead_man is None:
+            # nothing to deliver (or no channel to confirm against): keep the
+            # pre-existing consume-now semantics so logs stay one-shot too.
+            monitor_state.dead_man_alerted = alerted
 
     all_found = [*anomalies, *([dead_man] if dead_man is not None else [])]
     for anomaly in all_found:
@@ -272,6 +279,21 @@ async def self_audit_job(
     return len(all_found)
 
 
+def _dispatch_confirmed(result: object) -> bool:
+    """True when a dispatch result shows the alert REACHED a channel.
+
+    `skipped_duplicate` counts as confirmed — the idempotency store only keeps
+    the key when an earlier dispatch reached a channel (the dispatcher releases
+    the claim on total failure). A result without the DispatchResult delivery
+    surface (e.g. a bare stub returning None) is trusted as delivered."""
+    if not hasattr(result, "sink_results"):
+        return True
+    if bool(getattr(result, "skipped_duplicate", False)):
+        return True
+    sink_results = getattr(result, "sink_results", ()) or ()
+    return any(delivered for _name, delivered in sink_results)
+
+
 async def _dispatch_anomalies(
     anomalies: list[Anomaly],
     dead_man: Anomaly | None,
@@ -280,21 +302,35 @@ async def _dispatch_anomalies(
     now: datetime,
 ) -> None:
     """Dispatch alerts for newly-APPEARED anomalies (transition dedupe) plus the
-    already-one-shot dead-man's-switch. Per-alert failures are logged (type only)
-    and never propagate — alerting must not crash the monitor."""
+    dead-man's-switch one-shot. Per-alert failures are logged (type only) and
+    never propagate — alerting must not crash the monitor.
+
+    WP7 confirm-before-consume: dedupe/one-shot state flips ONLY on a confirmed
+    dispatch. An anomaly whose alert reached no sink is NOT marked active (so it
+    re-dispatches next cycle), and a failed dead-man's-switch delivery leaves
+    `dead_man_alerted` False so the switch retries instead of going silent."""
     prior = monitor_state.active_anomalies if monitor_state is not None else set()
     codes = {a.code for a in anomalies}
     to_send = [a for a in anomalies if a.code not in prior]
     if dead_man is not None:
         to_send.append(dead_man)
+    # Anomalies that PERSIST stay active; cleared ones drop out. Newly-seen
+    # codes join below only once their alert delivery is confirmed.
     if monitor_state is not None:
-        monitor_state.active_anomalies = codes
+        monitor_state.active_anomalies = codes & prior
     for anomaly in to_send:
+        confirmed = False
         try:
-            await dispatcher.dispatch(anomaly_alert(anomaly, now))
+            confirmed = _dispatch_confirmed(await dispatcher.dispatch(anomaly_alert(anomaly, now)))
         except Exception as exc:  # belt-and-braces — sinks shouldn't raise
             logger.error(
                 "self_audit alert dispatch failed for %s: %s",
                 anomaly.code,
                 type(exc).__name__,
             )
+        if monitor_state is None or not confirmed:
+            continue
+        if dead_man is not None and anomaly.code == dead_man.code:
+            monitor_state.dead_man_alerted = True
+        else:
+            monitor_state.active_anomalies.add(anomaly.code)

@@ -8,6 +8,7 @@ place a bet.
 import asyncio
 import logging
 import secrets
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -296,6 +297,71 @@ class _LoginIn(BaseModel):
     password: str
 
 
+# --- /login throttle (WP7 fix 4) --------------------------------------------
+# Each /login attempt burns a 600k-iteration PBKDF2 hash; unthrottled, a bot
+# gets free brute-force AND a cheap CPU-DoS on a 2-CPU box. Simple in-process
+# fixed window per source IP: after LOGIN_MAX_FAILURES failures inside
+# LOGIN_WINDOW_SECONDS the endpoint answers 429 BEFORE hashing. In-memory by
+# design (single-process app; a restart forgiving the window is acceptable).
+# Named constants rather than env — one-line promotion to Settings if needed.
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 300.0
+_LOGIN_THROTTLE_MAX_KEYS = 1024  # bounded memory even under spoofed-IP spray
+
+#: ip -> (window_start monotonic seconds, failures in window)
+_login_failures: dict[str, tuple[float, int]] = {}
+
+
+def reset_login_throttle() -> None:
+    """Clear all throttle state (tests)."""
+    _login_failures.clear()
+
+
+def _login_retry_after(ip: str, now: float | None = None) -> int | None:
+    """Whole seconds until `ip` may try again, or None when not throttled."""
+    now = time.monotonic() if now is None else now
+    entry = _login_failures.get(ip)
+    if entry is None:
+        return None
+    window_start, failures = entry
+    if now - window_start >= LOGIN_WINDOW_SECONDS or failures < LOGIN_MAX_FAILURES:
+        return None
+    return max(1, int(window_start + LOGIN_WINDOW_SECONDS - now) + 1)
+
+
+def _login_record_failure(ip: str, now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    entry = _login_failures.get(ip)
+    if entry is None or now - entry[0] >= LOGIN_WINDOW_SECONDS:
+        if len(_login_failures) >= _LOGIN_THROTTLE_MAX_KEYS:
+            # drop expired windows first; if a spray keeps it full, drop oldest
+            expired = [
+                k
+                for k, (start, _) in _login_failures.items()
+                if now - start >= LOGIN_WINDOW_SECONDS
+            ]
+            for key in expired:
+                _login_failures.pop(key, None)
+            while len(_login_failures) >= _LOGIN_THROTTLE_MAX_KEYS:
+                oldest = min(_login_failures, key=lambda k: _login_failures[k][0])
+                _login_failures.pop(oldest, None)
+        _login_failures[ip] = (now, 1)
+        return
+    _login_failures[ip] = (entry[0], entry[1] + 1)
+
+
+def _login_record_success(ip: str) -> None:
+    _login_failures.pop(ip, None)
+
+
+def _client_ip(request: Request) -> str:
+    """Throttle key: the DIRECT peer address only — X-Forwarded-For is
+    attacker-controlled and must never widen or reset someone else's window.
+    Behind a reverse proxy all requests share the proxy's address, which only
+    makes the guard STRICTER (fine for a single-operator dashboard)."""
+    return request.client.host if request.client is not None else "unknown"
+
+
 @router.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_form(request: Request) -> Response:
     from app.config import get_settings
@@ -330,15 +396,27 @@ def _session_response(
 
 
 @router.post("/login", include_in_schema=False)
-async def login_submit(payload: _LoginIn) -> Response:
+async def login_submit(payload: _LoginIn, request: Request) -> Response:
     from app.config import get_settings
 
     settings = get_settings()
+    # WP7 fix 4: answer 429 BEFORE the expensive hash once this source address
+    # has exhausted its failure window (brute-force + PBKDF2-CPU-DoS guard).
+    ip = _client_ip(request)
+    retry_after = _login_retry_after(ip)
+    if retry_after is not None:
+        return JSONResponse(
+            {"detail": "too many failed attempts — try again later"},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
     # authenticate() runs a 600k-iteration PBKDF2 hash — offload it to a worker
     # thread so a burst of login attempts can't block the event loop (and with
     # it every other request + the scheduler) until the hashes finish.
     if not await asyncio.to_thread(authenticate, payload.username, payload.password):
+        _login_record_failure(ip)
         return JSONResponse({"detail": "invalid credentials"}, status_code=401)
+    _login_record_success(ip)
     creds = current_credentials()
     if creds is None:  # unconfigured (race): nothing to sign with
         return JSONResponse({"detail": "invalid credentials"}, status_code=401)
@@ -550,10 +628,37 @@ class _SetupIn(BaseModel):
     password: str
 
 
+# WP7 fix 5: headers whose PRESENCE proves the request came through a proxy.
+# They are never trusted for their VALUE (trivially spoofable) — only as
+# evidence that the peer is not the operator's own direct loopback connection.
+_PROXY_EVIDENCE_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded")
+
+
+def _setup_request_is_local(request: Request) -> bool:
+    """True only for a DIRECT loopback connection with no proxy evidence.
+
+    The config-time /setup guard keys off APP_HOST_BIND, which a reverse proxy
+    (Traefik) bypasses: the proxy dials 127.0.0.1 so the peer address LOOKS
+    local while the real client is the public internet. Per-request defence:
+    any Forwarded-style header ⇒ proxied ⇒ denied, and a non-loopback peer ⇒
+    denied. X-Forwarded-For is never read for its value — a spoofed
+    'X-Forwarded-For: 127.0.0.1' cannot grant access, only deny it."""
+    if any(header in request.headers for header in _PROXY_EVIDENCE_HEADERS):
+        return False
+    if request.client is None:  # in-process test app; real servers set the peer
+        return True
+    host = request.client.host.strip().strip("[]").lower()
+    return host in ("localhost", "::1", "::ffff:127.0.0.1") or host.startswith("127.")
+
+
 @router.get("/setup", response_class=HTMLResponse, include_in_schema=False)
-async def setup_form() -> Response:
+async def setup_form(request: Request) -> Response:
     from app.config import get_settings
 
+    # WP7 fix 5: first-run credential claim only over direct loopback — a
+    # reverse-proxied (public) visitor must never even learn /setup exists.
+    if not _setup_request_is_local(request):
+        return JSONResponse({"detail": "not found"}, status_code=404)
     # /setup exists ONLY while auth is enabled and no credential is set yet.
     # Once configured it disappears — changing the password later must go
     # through an authenticated path, never this unauthenticated endpoint.
@@ -565,11 +670,16 @@ async def setup_form() -> Response:
 @router.post("/setup", include_in_schema=False)
 async def setup_submit(
     payload: _SetupIn,
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
     from app.config import get_settings
 
     settings = get_settings()
+    # WP7 fix 5: same direct-loopback gate as the GET — the POST is the part
+    # that actually claims the admin credential.
+    if not _setup_request_is_local(request):
+        return JSONResponse({"detail": "not found"}, status_code=404)
     if not settings.dashboard_auth_enabled:
         return JSONResponse({"detail": "auth is disabled"}, status_code=404)
     if auth_is_configured():
@@ -650,7 +760,7 @@ def _poll_health(
 
 
 @router.get("/health")
-async def health(response: Response) -> dict[str, Any]:
+async def health(request: Request, response: Response) -> dict[str, Any]:
     from app.config import get_settings
     from app.maintenance.upstream_watch import LAST_CHECK
     from app.pipeline import LAST_POLL
@@ -663,6 +773,14 @@ async def health(response: Response) -> dict[str, Any]:
         LAST_POLL, datetime.now(tz=UTC), settings.poll_interval_seconds
     )
     response.status_code = http_status
+    # WP7 fix 5: /health stays public for liveness (compose healthcheck /
+    # external watchdog: status + HTTP code), but the DETAIL — dependency
+    # versions in `upstream`, poll internals, strategy edge floors — is for
+    # the authenticated dashboard only. is_authenticated() is True when
+    # dashboard auth is disabled (local dev keeps the full payload) and False
+    # for anonymous visitors once auth is enabled (public Traefik exposure).
+    if not is_authenticated(request):
+        return {"status": status, "mode": "picks-only"}
     return {
         "status": status,
         "mode": "picks-only",

@@ -173,3 +173,102 @@ async def test_self_audit_job_no_dispatcher_is_safe(monkeypatch) -> None:  # typ
         _NO_FACTORY, dispatcher=None, monitor_state=sa.SelfAuditMonitorState()
     )
     assert count == 1
+
+
+# --- WP7 fix 2: the one-shot/dedupe state must flip AFTER delivery, not before #
+
+
+class _ShapedResult:
+    """Mimics app.notifications.dispatcher.DispatchResult's delivery surface."""
+
+    def __init__(self, *, skipped_duplicate: bool, delivered: bool) -> None:
+        self.skipped_duplicate = skipped_duplicate
+        self.sink_results = (("telegram", delivered),)
+
+
+class _ScriptedDispatcher:
+    """Returns a scripted DispatchResult per call; captures dispatched pick_ids."""
+
+    def __init__(self, results: list[_ShapedResult]) -> None:
+        self._results = results
+        self.sent: list[str] = []
+
+    async def dispatch(self, alert):  # type: ignore[no-untyped-def]
+        self.sent.append(alert.pick_id)
+        return self._results.pop(0)
+
+
+async def test_anomaly_alert_retries_next_cycle_when_no_sink_delivered(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return [sa.Anomaly("ERROR", "stale_odds", "odds stale")], 5
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    disp = _ScriptedDispatcher(
+        [
+            _ShapedResult(skipped_duplicate=False, delivered=False),  # Telegram down
+            _ShapedResult(skipped_duplicate=False, delivered=True),  # back up
+            _ShapedResult(skipped_duplicate=False, delivered=True),  # (unused if deduped)
+        ]
+    )
+    state = sa.SelfAuditMonitorState()
+
+    # cycle 1: dispatch reaches NO sink -> the anomaly must NOT be marked active
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
+    assert disp.sent == ["self-audit-stale_odds"]
+    assert "stale_odds" not in state.active_anomalies  # alert not consumed by failure
+
+    # cycle 2: retried and delivered -> marked active
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
+    assert disp.sent == ["self-audit-stale_odds", "self-audit-stale_odds"]
+    assert "stale_odds" in state.active_anomalies
+
+    # cycle 3: still ongoing -> deduped, no third send
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
+    assert disp.sent == ["self-audit-stale_odds", "self-audit-stale_odds"]
+
+
+async def test_dead_mans_switch_retries_next_cycle_when_no_sink_delivered(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return [], 0  # zero fresh odds rows every cycle
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    disp = _ScriptedDispatcher(
+        [
+            _ShapedResult(skipped_duplicate=False, delivered=False),  # total failure
+            _ShapedResult(skipped_duplicate=False, delivered=True),  # retry lands
+        ]
+    )
+    state = sa.SelfAuditMonitorState()
+
+    # K=1: the switch trips on the first empty cycle, but delivery FAILS ->
+    # the one-shot must stay unconsumed so the next cycle retries.
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=1)
+    assert disp.sent == ["self-audit-dead_mans_switch"]
+    assert state.dead_man_alerted is False
+
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=1)
+    assert disp.sent == ["self-audit-dead_mans_switch", "self-audit-dead_mans_switch"]
+    assert state.dead_man_alerted is True
+
+    # delivered once -> quiet while the outage persists (no spam)
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=1)
+    assert disp.sent == ["self-audit-dead_mans_switch", "self-audit-dead_mans_switch"]
+
+
+async def test_dead_mans_switch_one_shot_consumed_on_skipped_duplicate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return [], 0
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    # The idempotency store already holds the key: skipped_duplicate means the
+    # alert REACHED the channel earlier — the one-shot must be consumed.
+    disp = _ScriptedDispatcher([_ShapedResult(skipped_duplicate=True, delivered=False)])
+    state = sa.SelfAuditMonitorState()
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=1)
+    assert state.dead_man_alerted is True

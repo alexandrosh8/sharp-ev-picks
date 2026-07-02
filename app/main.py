@@ -12,13 +12,52 @@ from redis.asyncio import Redis
 
 from app.api.auth import install_auth, set_active_credentials
 from app.api.routes import router
-from app.config import exposure_ledger, get_settings
+from app.config import Settings, exposure_ledger, get_settings
 from app.database import create_engine, create_session_factory
 from app.ingestion.oddsportal import install_scrape_future_handler
 from app.scheduler import build_scheduler, seed_exposure_ledger
 from app.storage.repositories import load_dashboard_credentials
 
 logger = logging.getLogger(__name__)
+
+#: Bounded SIGTERM grace (ops audit WP7): scheduling stops immediately, then
+#: in-flight jobs get this long to finish before shutdown proceeds anyway —
+#: never an unbounded wait, never an instant teardown under an in-flight cycle.
+SCHEDULER_SHUTDOWN_GRACE_SECONDS = 20.0
+
+
+def build_redis_client(settings: Settings) -> Redis:
+    """Redis client with EXPLICIT socket timeouts (ops audit WP7): without
+    them a blackholed Redis (dropped packets, hung server) stalls the event
+    loop's dedupe/poll paths indefinitely; with them a dead Redis surfaces as
+    a bounded TimeoutError the jobs already log-and-survive."""
+    return Redis.from_url(
+        settings.redis_url,
+        socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+        socket_timeout=settings.redis_socket_timeout_seconds,
+    )
+
+
+async def _shutdown_scheduler_gracefully(scheduler: object, grace_seconds: float) -> None:
+    """Stop scheduling NEW runs immediately, then wait (bounded) for in-flight
+    job futures so SIGTERM does not tear the HTTP/Redis/DB clients out from
+    under a mid-cycle job (ops audit WP7). APScheduler's AsyncIOExecutor keeps
+    its running futures in `_pending_futures`; duck-typed so a bare test fake
+    (or a future APScheduler) degrades to a plain non-blocking shutdown."""
+    pending: set[asyncio.Future[object]] = set()
+    for executor in getattr(scheduler, "_executors", {}).values():
+        pending |= set(getattr(executor, "_pending_futures", ()) or ())
+    scheduler.shutdown(wait=False)  # type: ignore[attr-defined]
+    pending = {f for f in pending if not f.done()}
+    if not pending:
+        return
+    _done, not_done = await asyncio.wait(pending, timeout=grace_seconds)
+    if not_done:
+        logger.warning(
+            "scheduler shutdown: %d job(s) still running after %.0fs grace — proceeding",
+            len(not_done),
+            grace_seconds,
+        )
 
 
 def _silence_url_logging() -> None:
@@ -59,7 +98,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.error("dashboard credential load failed: %s", type(exc).__name__)
 
     http_client = httpx.AsyncClient()
-    redis = Redis.from_url(settings.redis_url)
+    redis = build_redis_client(settings)
     # The exposure ledger is in-memory: seed it from today's persisted picks
     # BEFORE the scheduler starts, or a mid-day restart doubles the day's
     # recommendable exposure (re-detections reserve-then-release to ~0).
@@ -91,7 +130,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        scheduler.shutdown(wait=False)
+        # Bounded graceful stop BEFORE closing the clients the jobs depend on:
+        # tearing down httpx/Redis/engine under an in-flight cycle turns a
+        # routine SIGTERM into spurious mid-cycle errors (ops audit WP7).
+        await _shutdown_scheduler_gracefully(scheduler, SCHEDULER_SHUTDOWN_GRACE_SECONDS)
         if arcadia_http_client is not None:
             await arcadia_http_client.aclose()
         await http_client.aclose()
@@ -100,10 +142,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    # Ops audit WP7: no public API schema in production — /docs, /redoc and
+    # /openapi.json enumerate every endpoint (incl. manual-settlement routes)
+    # to anonymous visitors behind the reverse proxy. Local/dev keeps them.
+    production = get_settings().app_env == "production"
     app = FastAPI(
         title="betting-ai — manual-betting +EV picks (decision support)",
         description=("Generates +EV picks for manual review. This system NEVER places bets."),
         lifespan=lifespan,
+        docs_url=None if production else "/docs",
+        redoc_url=None if production else "/redoc",
+        openapi_url=None if production else "/openapi.json",
     )
     app.include_router(router)
     install_auth(app)

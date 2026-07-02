@@ -28,6 +28,19 @@ def make_app() -> FastAPI:
     return app
 
 
+@pytest.fixture(autouse=True)
+def _health_detail_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    # make_app() bypasses require_dashboard_auth, but /health checks
+    # is_authenticated() inline, which reads the HOST .env — on a prod host
+    # (DASHBOARD_AUTH_ENABLED=true) the body is redacted and the detail
+    # assertions below would fail while passing in CI. Pin the same bypass so
+    # this module is deterministic everywhere; the redaction contract itself
+    # is covered in tests/test_ops_security.py.
+    from app.api import routes
+
+    monkeypatch.setattr(routes, "is_authenticated", lambda request: True)
+
+
 def test_health_reports_picks_only_mode() -> None:
     from app.pipeline import LAST_POLL
 

@@ -60,3 +60,13 @@ def _ensure_test_database() -> None:
     # (the majority of the suite) are unaffected.
     with contextlib.suppress(Exception):
         asyncio.run(_bootstrap())
+
+
+@pytest.fixture(autouse=True)
+def _isolate_login_throttle() -> None:
+    """The /login throttle (WP7) is module-global in-process state keyed by the
+    client address; TestClient defaults every test to the same 'testclient'
+    peer, so failed-login tests would otherwise bleed 429s into each other."""
+    from app.api.routes import reset_login_throttle
+
+    reset_login_throttle()
