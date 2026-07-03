@@ -40,22 +40,27 @@
          No frameworks, no CDNs, system fonts.
          =================================================================== */
       :root {
-        /* surfaces — cool graphite */
-        --bg: #0d1014;
-        --s1: #12161c;
-        --s2: #171c23;
-        --s3: #1e242d;
-        --line: #262d37;
-        /* text (>=4.5:1 on --s2) */
-        --bone: #e8ebef;
-        --dim: #a8b0ba;
-        --faint: #7d8590;
-        /* semantic — one accent, desaturated states */
-        --pos: #3fb984; /* the ONE accent — +EV green */
-        --warn: #d9a441;
-        --neg: #d95d52;
-        --info: #5d9bd4;
-        --neutral: #8a93a0;
+        /* surfaces — deep ink-blue instrument panel (never pure black) */
+        --bg: #0b1220;
+        --s1: #111c30;
+        --s2: #16223a;
+        --s3: #182740;
+        --line: #24344f;
+        /* text (>=4.5:1 on --s1/--s2) */
+        --bone: #dce6f5;
+        --dim: #a9bfd9;
+        --faint: #8ca0be;
+        /* semantic — signal (amber) is the PRICED EDGE / premium accent,
+           used sparingly; trust (green) is positive/settled-won/healthy;
+           risk (red) negative/degraded; info (blue) neutral-informational.
+           Shadow/stale/weak/missing-anchor/display-only/untrusted states
+           render desaturated (--faint/--dim) — never signal's amber. */
+        --signal: #e8b34b;
+        --pos: #4fd1a1; /* trust */
+        --warn: #9c8f74; /* desaturated — deliberately NOT amber-adjacent */
+        --neg: #e06c75; /* risk */
+        --info: #6fa8dc;
+        --neutral: #8ca0be;
         /* type scale (mono for numerals, sans for prose) */
         --fs-xs: 10px;
         --fs-sm: 11.5px;
@@ -155,6 +160,7 @@
         color: var(--faint);
       }
       .viewnav { display: flex; gap: 2px; }
+      .viewnav .side-wm { display: none; }
       .viewnav button {
         background: transparent;
         border: 1px solid transparent;
@@ -168,6 +174,35 @@
         color: var(--bone);
         border-color: var(--faint);
         background: var(--s3);
+      }
+      /* ---- desktop left sidebar (>=1024px) --------------------------------
+         a second, independent nav surface (mobile keeps the bottom tabbar).
+         Pulled out of the (transform-animated) status bar so autoHideHeader
+         never drags a persistent sidebar off-screen. */
+      @media (min-width: 1024px) {
+        .viewnav {
+          position: fixed; left: 0; top: 0; bottom: 0; z-index: 45;
+          flex-direction: column; align-items: stretch; gap: 2px;
+          width: 178px; padding: 20px 10px 20px;
+          border-right: 1px solid var(--line);
+          background: var(--s1);
+          overflow-y: auto;
+        }
+        .viewnav .side-wm {
+          display: block;
+          font-family: var(--mono); font-weight: 700; letter-spacing: 0.22em;
+          font-size: 14px; color: var(--bone); padding: 2px 10px 18px;
+        }
+        .viewnav .side-wm .tick { color: var(--signal); }
+        .viewnav button {
+          text-align: left; border-radius: var(--radius); padding: 10px 12px;
+          min-height: 40px;
+        }
+        .viewnav button[aria-current="true"] {
+          border-left: 2px solid var(--signal); padding-left: 10px;
+        }
+        .cmdbar { padding-left: 198px; }
+        main { margin-left: 178px; }
       }
       .cmd-grow { flex: 1 1 10px; }
       .status { display: inline-flex; align-items: baseline; gap: 10px; min-width: 0; }
@@ -403,7 +438,8 @@
         padding: 6px 2px 0;
       }
       .pick {
-        padding: var(--sp-4);
+        position: relative;
+        padding: var(--sp-4) var(--sp-4) var(--sp-4) calc(var(--sp-4) + 12px);
         background: var(--s1);
         border: 1px solid var(--line);
         border-radius: var(--radius-lg);
@@ -411,19 +447,32 @@
         gap: 7px;
         align-content: start;
       }
-      /* premium carries the single-accent 2px left rule; shadow never does */
-      .pick.prem { border-left: 2px solid var(--pos); }
       .pick.gone { opacity: 0.55; }
       .pick:hover { border-color: var(--faint); }
-      /* Shadow (volume) cards are visibly NON-actionable: muted, dashed left
-         rail, hatched — never confusable with a Premium card. */
+      /* Shadow (volume) cards are visibly NON-actionable: muted, hatched —
+         never confusable with a Premium card (the spine also never carries
+         the signal amber for these rows — see .spine.shadow below). */
       .pick.shadow {
         opacity: 0.85;
-        border-left: 3px dashed var(--faint);
         background: repeating-linear-gradient(
-          -45deg, transparent 0 14px, rgba(38, 45, 55, 0.25) 14px 16px
+          -45deg, transparent 0 14px, rgba(36, 52, 79, 0.3) 14px 16px
         );
       }
+      /* ---- evidence spine — the signature element ---------------------
+         a segmented rail on the left edge of every pick: four segments
+         physically encode the evidence chain anchor -> freshness -> match
+         -> close. A full amber spine = premium, fully evidenced. Hollow /
+         desaturated segments show exactly which link is weak. Shadow rows
+         NEVER render a segment in the signal amber (structural honesty). */
+      .spine {
+        position: absolute; left: 6px; top: 10px; bottom: 10px; width: 4px;
+        display: flex; flex-direction: column; gap: 3px;
+      }
+      .spine .seg { flex: 1; min-height: 3px; background: var(--line); border-radius: 1px; }
+      .spine .seg.on { background: var(--signal); }
+      .spine .seg.half { background: var(--signal); opacity: 0.4; }
+      .spine .seg.muted { background: var(--faint); opacity: 0.5; }
+      .spine .seg.off { background: var(--line); }
       .p-top { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
       .p-ko { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: nowrap; }
       .p-ko small { display: block; color: var(--faint); font-size: 10.5px; }
@@ -465,8 +514,18 @@
         text-transform: uppercase; color: var(--faint);
         border: 1px dashed var(--line); border-radius: 3px; padding: 1px 4px;
       }
-      .gate-chip.warn { color: var(--warn); border-color: rgba(217, 164, 65, 0.4); }
-      .gate-chip.info { color: var(--info); border-color: rgba(93, 155, 212, 0.4); }
+      .gate-chip.warn { color: var(--warn); border-color: rgba(156,143,116, 0.4); }
+      .gate-chip.info { color: var(--info); border-color: rgba(111,168,220, 0.4); }
+      /* collapsible technical detail (gate chips / anchor stats) — the spine
+         carries the primary evidence signal; this is the on-demand backup */
+      .det-toggle {
+        background: transparent; border: 0; color: var(--faint);
+        font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em;
+        text-transform: uppercase; padding: 2px 0; min-height: 28px;
+        cursor: pointer; text-align: left; align-self: flex-start;
+      }
+      .det-toggle:hover { color: var(--dim); }
+      .det-body { display: grid; gap: 6px; padding-top: 2px; }
       /* quiet inline stat in the risk row (e.g. Match Confidence: 0.97) —
          normal styling, mirrors .p-stats .stat; NOT a warning */
       .p-risk .stat {
@@ -516,11 +575,11 @@
       }
       .drift .gap {
         position: absolute; top: 8px; height: 10px;
-        background: rgba(63, 185, 132, 0.18);
+        background: rgba(79,209,161, 0.18);
         border-left: 1px solid var(--pos); border-right: 1px solid var(--pos);
       }
       .drift .gap.neg {
-        background: rgba(217, 93, 82, 0.16);
+        background: rgba(224,108,117, 0.16);
         border-left-color: var(--neg); border-right-color: var(--neg);
       }
       .drift .mk {
@@ -580,10 +639,12 @@
         padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line);
         white-space: nowrap; text-transform: uppercase;
       }
-      .badge.pos { color: var(--pos); border-color: rgba(63,185,132,.4); background: rgba(63,185,132,.08); }
-      .badge.neg { color: var(--neg); border-color: rgba(217,93,82,.4); background: rgba(217,93,82,.07); }
-      .badge.warn { color: var(--warn); border-color: rgba(217,164,65,.4); }
-      .badge.info { color: var(--info); border-color: rgba(93,155,212,.4); }
+      .badge.pos { color: var(--pos); border-color: rgba(79,209,161,.4); background: rgba(79,209,161,.08); }
+      /* the priced edge — premium accent, used sparingly (never on shadow/stale/weak/missing-anchor/display-only) */
+      .badge.signal { color: var(--signal); border-color: rgba(232,179,75,.45); background: rgba(232,179,75,.09); }
+      .badge.neg { color: var(--neg); border-color: rgba(224,108,117,.4); background: rgba(224,108,117,.07); }
+      .badge.warn { color: var(--warn); border-color: rgba(156,143,116,.4); }
+      .badge.info { color: var(--info); border-color: rgba(111,168,220,.4); }
       .badge.neu { color: var(--faint); }
       .badge.dashed { border-style: dashed; }
       .clv-chip { font-size: 11px; padding: 2px 7px; font-weight: 600; }
@@ -616,9 +677,9 @@
         border: 1px solid var(--line); border-radius: 3px; padding: 4px 7px;
         background: var(--s2); white-space: nowrap;
       }
-      .chip.ok { color: var(--pos); border-color: rgba(63,185,132,.35); }
-      .chip.warn { color: var(--warn); border-color: rgba(217,164,65,.35); }
-      .chip.err { color: var(--neg); border-color: rgba(217,93,82,.4); }
+      .chip.ok { color: var(--pos); border-color: rgba(79,209,161,.35); }
+      .chip.warn { color: var(--warn); border-color: rgba(156,143,116,.35); }
+      .chip.err { color: var(--neg); border-color: rgba(224,108,117,.4); }
       .chip.info { color: var(--info); }
       .sub-block { margin-top: 14px; }
       .sub-block > .sb-head {
@@ -651,7 +712,7 @@
       .closeband {
         border-bottom: 1px solid var(--line);
         background:
-          radial-gradient(120% 120% at 100% 0, rgba(63, 185, 132, 0.06), transparent 52%),
+          radial-gradient(120% 120% at 100% 0, rgba(79,209,161, 0.06), transparent 52%),
           linear-gradient(180deg, var(--s2), var(--s1));
         position: relative;
       }
@@ -690,7 +751,7 @@
       .pm-count { font-family: var(--mono); font-size: 13px; color: var(--bone); }
       .pm-track { display: flex; gap: 2px; }
       .pm-seg { height: 8px; flex: 1; background: var(--s3); border-radius: 1px; }
-      .pm-seg.on { background: rgba(63, 185, 132, 0.55); }
+      .pm-seg.on { background: rgba(79,209,161, 0.55); }
       .pm-seg.full { background: var(--pos); }
       .pm-note { font-family: var(--mono); font-size: 10.5px; color: var(--faint); line-height: 1.5; margin-top: 6px; }
       .clvaxis { position: relative; margin: 20px 0 4px; height: 58px; }
@@ -704,17 +765,17 @@
       }
       .clvaxis .posfill {
         position: absolute; top: 27px; height: 6px; border-radius: 1px;
-        background: linear-gradient(90deg, rgba(63,185,132,0.18), rgba(63,185,132,0.6));
+        background: linear-gradient(90deg, rgba(79,209,161,0.18), rgba(79,209,161,0.6));
       }
       .clvaxis .negfill {
         position: absolute; top: 27px; height: 6px; border-radius: 1px;
-        background: linear-gradient(90deg, rgba(217,93,82,0.6), rgba(217,93,82,0.18));
+        background: linear-gradient(90deg, rgba(224,108,117,0.6), rgba(224,108,117,0.18));
       }
       .clvaxis .mk {
         position: absolute; top: 23px; width: 3px; height: 14px; background: var(--pos);
-        transform: translateX(-50%); box-shadow: 0 0 0 3px rgba(63,185,132,0.18);
+        transform: translateX(-50%); box-shadow: 0 0 0 3px rgba(79,209,161,0.18);
       }
-      .clvaxis .mk.neg { background: var(--neg); box-shadow: 0 0 0 3px rgba(217,93,82,0.18); }
+      .clvaxis .mk.neg { background: var(--neg); box-shadow: 0 0 0 3px rgba(224,108,117,0.18); }
       .clvaxis .mk .cap {
         position: absolute; top: -18px; left: 50%; transform: translateX(-50%); white-space: nowrap;
         font-family: var(--mono); font-size: 11px; color: var(--bone);
@@ -743,8 +804,8 @@
         flex: 1; min-height: 2px; background: var(--s3);
         border-top: 2px solid var(--faint); border-radius: 2px 2px 0 0;
       }
-      .dist .bars > span.pos { background: rgba(63,185,132,.16); border-top-color: var(--pos); }
-      .dist .bars > span.neg { background: rgba(217,93,82,.14); border-top-color: var(--neg); }
+      .dist .bars > span.pos { background: rgba(79,209,161,.16); border-top-color: var(--pos); }
+      .dist .bars > span.neg { background: rgba(224,108,117,.14); border-top-color: var(--neg); }
       .dist .ax {
         display: flex; justify-content: space-between; margin-top: 4px;
         font-family: var(--mono); font-size: 9.5px; color: var(--faint);
@@ -910,6 +971,9 @@
           flex-wrap: nowrap; overflow-x: auto;
           -webkit-overflow-scrolling: touch; scrollbar-width: none;
           padding-bottom: 2px;
+          /* right-edge fade: hints that the chip rail swipes */
+          mask-image: linear-gradient(to right, #000 92%, transparent);
+          -webkit-mask-image: linear-gradient(to right, #000 92%, transparent);
         }
         .p-risk::-webkit-scrollbar { display: none; }
         .p-risk .badge, .p-risk .gate-chip, .p-risk .stat { flex: 0 0 auto; }
@@ -930,18 +994,23 @@
       ⚠ Odds data is stale. Picks should not be treated as current.
     </div>
 
+    <!-- desktop sidebar nav (>=1024px) — a second, independent nav surface
+         from the mobile bottom tabbar below; pulled outside the transform-
+         animated status bar so auto-hide-on-scroll never drags it away. -->
+    <nav class="viewnav" id="viewnav" aria-label="Sections">
+      <span class="side-wm" aria-hidden="true">TAPE<span class="tick">.</span></span>
+      <button type="button" data-view="overview" aria-current="true">Overview</button>
+      <button type="button" data-view="picks" aria-current="false">Picks</button>
+      <button type="button" data-view="games" aria-current="false">Games</button>
+      <button type="button" data-view="performance" aria-current="false">Evidence</button>
+      <button type="button" data-view="diagnostics" aria-current="false">Ops</button>
+    </nav>
+
     <header class="cmdbar" id="statusbar" aria-label="System status">
       <div class="brand">
         <h1 class="wm">TAPE<span class="tick">.</span></h1>
         <span class="sub">picks only · manual betting decision support</span>
       </div>
-      <nav class="viewnav" id="viewnav" aria-label="Sections">
-        <button type="button" data-view="overview" aria-current="true">Overview</button>
-        <button type="button" data-view="picks" aria-current="false">Picks</button>
-        <button type="button" data-view="games" aria-current="false">Games</button>
-        <button type="button" data-view="performance" aria-current="false">Performance</button>
-        <button type="button" data-view="diagnostics" aria-current="false">Diagnostics</button>
-      </nav>
       <span class="cmd-grow"></span>
       <div class="status" aria-live="polite">
         <span class="eng" id="eng"><span class="dot"></span><span id="eng-label">CONNECTING</span></span>
@@ -1108,7 +1177,7 @@
 
       <!-- ==================== PERFORMANCE ============================== -->
       <section class="view" id="view-performance" aria-labelledby="perf-h" hidden>
-        <h2 class="vh" id="perf-h">Performance</h2>
+        <h2 class="vh" id="perf-h">Evidence — proof of edge &amp; data quality</h2>
         <section class="closeband" id="theclose" aria-label="The close — evidence of edge">
           <div class="close-inner">
             <div class="hero-top">
@@ -1238,7 +1307,7 @@
            8-column freshness table is demoted to a collapsed detail
            disclosure (phones read per-sport summary cards instead). -->
       <section class="view" id="view-diagnostics" aria-labelledby="diag-h" hidden>
-        <h2 class="vh" id="diag-h">Diagnostics — why are there few (or no) premium picks?</h2>
+        <h2 class="vh" id="diag-h">Ops — sources, coverage &amp; proxy health</h2>
         <div class="pad tilegrid cols2" id="diaggrid">
           <section class="tile" id="tile-ingest" aria-labelledby="ingest-h">
             <div class="tile-h">
@@ -1344,9 +1413,10 @@
     </main>
 
     <!-- MOBILE: fixed bottom SECTION nav (<=980px) — thumb-reachable switcher
-         between Overview / Picks / Games / Performance / Diagnostics.
-         Hidden on desktop. F2: no placeholder glyphs — the only badge is the
-         live-premium count on PICKS, rendered ONLY when data is present. -->
+         between Overview / Picks / Games / Evidence / Ops.
+         Hidden on desktop (the left sidebar is the >=1024px nav surface).
+         F2: no placeholder glyphs — the only badge is the live-premium
+         count on PICKS, rendered ONLY when data is present. -->
     <nav class="tabbar" id="navbar" aria-label="Sections (mobile)">
       <button type="button" data-view="overview" aria-current="true">
         <span class="lbl">OVR</span>
@@ -1358,10 +1428,10 @@
         <span class="lbl">GAMES</span>
       </button>
       <button type="button" data-view="performance" aria-current="false">
-        <span class="lbl">PERF</span>
+        <span class="lbl">EVID</span>
       </button>
       <button type="button" data-view="diagnostics" aria-current="false">
-        <span class="lbl">DIAG</span>
+        <span class="lbl">OPS</span>
       </button>
     </nav>
 
@@ -1671,18 +1741,50 @@
           return wrap;
         }
 
+        // ===== evidence spine — the signature element =================
+        // A segmented rail on the left edge of every pick, physically
+        // encoding the evidence chain anchor -> freshness -> match -> close.
+        // A full amber spine = premium, fully evidenced; hollow/desaturated
+        // segments show exactly which link is weak. Shadow rows never carry
+        // the signal amber (structural honesty — decorative only, the same
+        // trust facts already ride the risk-row badges / detail disclosure).
+        function evidenceSpine(p) {
+          const wrap = document.createElement("div");
+          wrap.className = "spine"; wrap.setAttribute("aria-hidden", "true");
+          const premium = tierOf(p) !== "volume";
+          const seg = (state) => {
+            const s = document.createElement("span");
+            s.className = "seg " + (premium ? state : (state === "off" ? "off" : "muted"));
+            return s;
+          };
+          const at = p.anchor_type;
+          wrap.appendChild(seg(at === "pinnacle" || at === "sharp" ? "on" : at === "consensus" ? "half" : "off"));
+          const fresh = p.status !== "alerted" ? "on" : (isVerified(p) && !valueGone(p) ? "on" : "off");
+          wrap.appendChild(seg(fresh));
+          const amc = numOf(p.anchor_match_confidence);
+          wrap.appendChild(seg(!isFinite(amc) ? "off" : amc >= 0.95 ? "on" : "half"));
+          wrap.appendChild(seg(
+            p.close_independent_of_fill === true ? "on" :
+            p.close_independent_of_fill === false ? "off" : "half"
+          ));
+          return wrap;
+        }
+
         // ===== one pick card ========================================
-        // Card anatomy (mobile-first): top = kickoff, event/league, tier+state
-        // badges; selection row = selection/market/book; drift bar; price row =
-        // Offered/Fair Odds + Fair Probability + Edge/EV + confidence; risk
-        // row = Anchor Source + Last Updated freshness + validation state;
-        // footer = Suggested Stake + shadow/value-gone flags.
+        // Card anatomy (mobile-first): evidence spine (left rail); top =
+        // kickoff, event/league, tier+state badges; selection row =
+        // selection/market/book; drift bar; price row = Offered/Fair Odds +
+        // Fair Probability + Edge/EV + confidence; risk row = Anchor Source +
+        // Last Updated freshness + validation state (primary) plus a
+        // collapsible technical detail (gate chips / anchor stats);
+        // footer = Suggested Stake + shadow/value-gone flags + copy summary.
         function pickCard(p) {
           const settledView = p.status === "settled" || inClosedTab(p);
           const el = document.createElement("article");
           el.className = "pick" + (valueGone(p) ? " gone" : "") + (tierOf(p) === "volume" ? " shadow" : "");
           if (tierOf(p) !== "volume") el.classList.add("prem");
           el.setAttribute("role", "listitem");
+          el.appendChild(evidenceSpine(p));
 
           // top: kickoff + match + tier/status badges
           const top = document.createElement("div"); top.className = "p-top";
@@ -1800,7 +1902,7 @@
             const eff = p.current_edge == null ? numOf(p.edge) : Number(p.current_edge);
             const es = mkStat("Edge", isFinite(eff) ? spct(eff) : "—");
             const floor = edgeFloor(p);
-            es.querySelector("b").style.color = eff >= floor ? "var(--pos)" : eff > 0 ? "var(--warn)" : "var(--neg)";
+            es.querySelector("b").style.color = eff >= floor ? "var(--signal)" : eff > 0 ? "var(--warn)" : "var(--neg)";
             es.title = "Live edge = de-vigged fair − implied. Premium ≥3%, volume ≥1.5%; ≤0 = no value now.";
             st.appendChild(es);
             const conf = p.confidence_rating || {};
@@ -1843,6 +1945,11 @@
 
           // risk row: Anchor Source + freshness (Last Updated) + validation
           el.appendChild(riskRow(p));
+          // collapsible technical detail: raw reason_summary + anchor/match
+          // provenance — the spine + risk-row badges already carry the
+          // headline trust signal; this is the on-demand backup.
+          const det = technicalDetail(p);
+          if (det) el.appendChild(det);
 
           // footer: Suggested Stake (informational) + shadow/value-gone flags
           const ft = document.createElement("div"); ft.className = "p-stats foot";
@@ -2000,7 +2107,7 @@
         function tierBadge(p) {
           const isVol = tierOf(p) === "volume";
           const b = document.createElement("span");
-          b.className = "badge " + (isVol ? "neu dashed" : "pos");
+          b.className = "badge " + (isVol ? "neu dashed" : "signal");
           b.textContent = isVol ? "SHADOW" : "PREMIUM";
           b.title = isVol
             ? "Shadow (volume tier): tracked — not actionable. Never alerted or sized; kept purely as CLV evidence."
@@ -2129,6 +2236,46 @@
             out.push({ label: label, cls: cls, title: s });
           });
           return out;
+        }
+
+        // Collapsible technical detail: raw reason_summary + anchor/match
+        // provenance + confidence reasons + the tier's edge floor. Built via
+        // textContent/createElement only — no markup-injection sink.
+        // Returns null when there's nothing extra to show.
+        function technicalDetail(p) {
+          const bits = [];
+          if (p.reason_summary) bits.push(["Reason", String(p.reason_summary)]);
+          if (p.anchor_match_method) bits.push(["Match method", String(p.anchor_match_method)]);
+          const amc = numOf(p.anchor_match_confidence);
+          if (isFinite(amc)) bits.push(["Match confidence", amc.toFixed(3)]);
+          const conf = p.confidence_rating;
+          if (conf && Array.isArray(conf.reasons) && conf.reasons.length) {
+            bits.push(["Confidence reasons", conf.reasons.join("; ")]);
+          }
+          if (p.edge_floor != null) bits.push(["Edge floor (tier)", String(p.edge_floor)]);
+          if (!bits.length) return null;
+
+          const wrap = document.createElement("div");
+          const toggle = document.createElement("button");
+          toggle.type = "button"; toggle.className = "det-toggle";
+          toggle.textContent = "▸ Technical detail";
+          toggle.setAttribute("aria-expanded", "false");
+          const body = document.createElement("div");
+          body.className = "det-body"; body.hidden = true;
+          bits.forEach((pair) => {
+            const row = document.createElement("div"); row.className = "stat";
+            const lbl = document.createTextNode(pair[0] + ": ");
+            const val = document.createElement("b"); val.textContent = pair[1];
+            row.append(lbl, val);
+            body.appendChild(row);
+          });
+          toggle.addEventListener("click", () => {
+            body.hidden = !body.hidden;
+            toggle.setAttribute("aria-expanded", String(!body.hidden));
+            toggle.textContent = (body.hidden ? "▸" : "▾") + " Technical detail";
+          });
+          wrap.append(toggle, body);
+          return wrap;
         }
 
         // ===== render the tape ======================================
