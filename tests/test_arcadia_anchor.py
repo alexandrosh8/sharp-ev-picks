@@ -375,6 +375,20 @@ def test_guards_clear_on_valid_setup(tmp_path: Path, aliases: AliasTable) -> Non
 
 
 # --------------------------------------------------------------------------- #
+# H2 frozen-eval constants (split design frozen 2026-07-03)
+# --------------------------------------------------------------------------- #
+def test_frozen_eval_constants_match_the_adr() -> None:
+    """The pure-prospective single-shot loads parameters from these pinned
+    constants — never free CLI numbers. Values are the ADR-0019 frozen H2
+    thresholds and the POWER devig default; changing them voids the
+    pre-registration."""
+    from app.backtesting.arcadia_anchor import FROZEN_EVAL_DEVIG, FROZEN_EVAL_THRESHOLDS
+
+    assert FROZEN_EVAL_THRESHOLDS == {"1x2": 0.010, "ou25": 0.005}
+    assert FROZEN_EVAL_DEVIG == "power"
+
+
+# --------------------------------------------------------------------------- #
 # Live-path isolation
 # --------------------------------------------------------------------------- #
 def test_validation_path_does_not_touch_live_pick_minting() -> None:

@@ -182,8 +182,39 @@ rejected counts with reasons, missing-anchor rate ≤50%, stale-anchor rate
 5% bet-rate multiplier) vs the n≥150 bar. Any failure or guard violation ⇒
 `DO-NOT-RUN`.
 
-### Open decision deferred to sign-off (NOT frozen here)
-The train/test split design for H2 (within-H2 split date vs 2025-train with a
-cross-anchor-source caveat) — ARCADIA history begins 2026-06-17, so no
-same-anchor train window predates H2. To be frozen at operator sign-off,
-before the slate exists.
+### H2 train/test design — FROZEN 2026-07-03 (adversarially evaluated)
+
+**Pure prospective single-shot — no train side.** No selection of any kind
+occurs on any 2026 data. The evaluated configuration is exactly the
+pre-registered frozen H1–H6 values (config hash `6abe1a31…`, live and
+unchanged), whose entire selection history is 2024-07..2025-12 data. All
+ARCADIA-anchored, preflight-PASS rows with kickoff 2026-07-01..2026-12-31
+form ONE held-out slate, read once via `--frozen-eval` (frozen parameters
+loaded from `app/backtesting/arcadia_anchor.py::FROZEN_EVAL_THRESHOLDS` /
+`FROZEN_EVAL_DEVIG` — never free CLI numbers). The runbook's TRAIN-sweep step
+is replaced by: parameters = the frozen values; any parameter grid printed is
+descriptive visibility ONLY and may never be selected from, on this or any
+later slate. The acceptance-clause-2 baseline is the zero-threshold
+(bet-everything) null computed on the same held-out rows with the frozen
+POWER devig. Acceptance clause 4 (PBO) is redefined for this design as
+satisfied by construction (no selection performed); the 2024-25 CSCV number
+is carried in the run header for reference. H3 is reported as "not exercised"
+(no selection step exists to apply it to); H6's agreement-gate row is
+DESCOPED from this run unless its variant is implemented and committed before
+the slate exists. 2025 football-data PS*-anchored rows MUST NOT appear on any
+side of this run (spent for selection; anchor source non-comparable to
+ARCADIA). After the single reading the H2 slate is SPENT for selection AND
+evaluation.
+
+Why this design (over a within-H2 split or a 2025-train side): a 2025 train
+sweep is re-selection on the spent holdout (forbidden above) against a
+non-comparable anchor; a within-H2 sweep re-opens selection on 2026 data,
+overrides the frozen H2/H4 values via the max-train-ROI chooser, introduces a
+free split-date parameter, and halves n. The prospective design has zero
+selection on the slate by construction, maximal n, and a pre-registered
+rollback path (H1) if refuted. Honest weaknesses accepted: a REJECT is less
+diagnosable (mitigated by the descriptive grid), and the run confirms the
+incumbent config — which is precisely what a prospective validation is.
+
+*Operator sign-off of this amendment (one signature covers anchor source +
+this split design) remains the final gate before the run.*

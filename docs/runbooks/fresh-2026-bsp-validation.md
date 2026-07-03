@@ -78,15 +78,24 @@ exists so the eventual run is mechanical, not improvised.
 ## The single-shot command (one invocation, both markets)
 
 ```bash
+# H2 form (split design FROZEN 2026-07-03: pure prospective, no train side —
+# see the ADR-0019 amendment). --frozen-eval replaces the split date entirely;
+# parameters come from the pinned constants, never the CLI.
 uv run python scripts/value_backtest.py \
   --source betfair-bsp \
-  --betfair-bsp-tar /path/to/2026_data.tar \
-  --betfair-bsp-split-date 2026-01-01 \
+  --betfair-bsp-tar /path/to/2026H2_data.tar \
+  --anchor-dataset data/validation/arcadia/<export>.csv \
+  --frozen-eval \
   --fill-universe soft \
   --markets 1x2,ou25 \
   --max-odds 5.0 \
-  | tee "docs/research/$(date -u +%F)-fresh-2026-single-shot.log"
+  | tee "docs/research/$(date -u +%F)-h2-single-shot.log"
 ```
+
+Header additions for the H2 run: record the arcadia dataset sha256 + its
+manifest and preflight-marker hashes alongside the tar sha256; state
+"parameters = pre-registered frozen values (config hash), no selection on
+2026 data" — there is no "chosen on TRAIN" line in this design.
 
 Notes:
 

@@ -716,6 +716,41 @@ def _apply_arcadia_anchor(
     return joined_rows
 
 
+def _frozen_eval(
+    rows: list[dict],
+    kind: str,
+    min_odds: float,
+    max_odds: float,
+) -> None:
+    """H2 PURE-PROSPECTIVE single-shot (ADR-0019 amendment, split design frozen
+    2026-07-03): NO train side, NO selection on any 2026 data. Evaluates the
+    pre-registered frozen (devig=POWER, per-market threshold) pair once on ALL
+    rows, against the zero-threshold bet-everything baseline on the SAME rows.
+    The parameter grid printed afterwards is DESCRIPTIVE VISIBILITY ONLY — it
+    may never be selected from, on this or any later slate."""
+    from app.backtesting.arcadia_anchor import FROZEN_EVAL_THRESHOLDS
+
+    thr = FROZEN_EVAL_THRESHOLDS[kind]
+    print(f"\n[{kind}] FROZEN-EVAL (prospective single-shot): {len(rows)} joined rows")
+    print(f"parameters = pre-registered frozen values: devig=power thr={thr:.3f} (no selection)")
+    baseline = Stats.from_bets(bets_for(rows, 0.0, DevigMethod.POWER, (kind,), min_odds, max_odds))
+    stats = Stats.from_bets(
+        bets_for(rows, thr, DevigMethod.POWER, (kind,), min_odds, max_odds),
+        with_roi_ci=True,
+    )
+    print(_fmt(baseline, "0.000 (baseline null)"))
+    print(_fmt(stats, f"{thr:.3f} (FROZEN)", baseline))
+    if kind == "1x2":
+        # H1 band check: [5.0, inf) must stay CLV-negative held-out.
+        band = Stats.from_bets(bets_for(rows, thr, DevigMethod.POWER, (kind,), 5.0, 1000.0))
+        print(_fmt(band, "  H1 band [5.0,inf)", baseline))
+    print("descriptive grid (VISIBILITY ONLY — never selectable, slate is spent after reading):")
+    for dm in (DevigMethod.POWER, DevigMethod.SHIN, DevigMethod.ODDS_RATIO):
+        for t in (0.005, 0.010, 0.020):
+            s = Stats.from_bets(bets_for(rows, t, dm, (kind,), min_odds, max_odds))
+            print(_fmt(s, f"  {dm.value[:5]}/{t:.3f}"))
+
+
 async def run_betfair_bsp(args: argparse.Namespace) -> None:
     """Backtest CLV vs a TRUE SHARP CLOSE — the Betfair Starting Price / settled
     pre-in-play exchange close — joined onto football-data PRE-MATCH prices.
@@ -886,7 +921,10 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
         joined_1x2 = _apply_arcadia_anchor(
             joined_1x2, arcadia_rows, aliases=aliases, market_type="1x2"
         )
-    _run_market("1x2", joined_1x2, stats_1x2, "fd Max + Betfair MATCH_ODDS close")
+    if args.frozen_eval:
+        _frozen_eval(joined_1x2, "1x2", min_odds, max_odds)
+    else:
+        _run_market("1x2", joined_1x2, stats_1x2, "fd Max + Betfair MATCH_ODDS close")
 
     # --- ou25 (OVER_UNDER_25) — totals validated vs the BSP close -----------
     if ou_markets:
@@ -895,7 +933,10 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
             joined_ou = _apply_arcadia_anchor(
                 joined_ou, arcadia_rows, aliases=aliases, market_type="ou25"
             )
-        _run_market("ou25", joined_ou, stats_ou, "fd Max + Betfair OVER_UNDER_25 close")
+        if args.frozen_eval:
+            _frozen_eval(joined_ou, "ou25", min_odds, max_odds)
+        else:
+            _run_market("ou25", joined_ou, stats_ou, "fd Max + Betfair OVER_UNDER_25 close")
     else:
         print("\n[ou25] No OVER_UNDER_25 markets available — skipped.")
 
@@ -1291,6 +1332,15 @@ async def main() -> None:
         help="explicit path to a Betfair Basic historical .tar (streamed, not extracted)",
     )
     p.add_argument(
+        "--frozen-eval",
+        action="store_true",
+        help=(
+            "H2 PURE-PROSPECTIVE single-shot (ADR-0019 frozen split design): no "
+            "train side, no selection — evaluate the pre-registered frozen "
+            "parameters once on ALL joined rows. Requires --anchor-dataset."
+        ),
+    )
+    p.add_argument(
         "--anchor-dataset",
         default="",
         help=(
@@ -1375,6 +1425,8 @@ async def main() -> None:
     args = p.parse_args()
     if args.anchor_dataset and args.source != "betfair-bsp":
         p.error("--anchor-dataset is VALIDATION-ONLY and requires --source betfair-bsp")
+    if args.frozen_eval and not args.anchor_dataset:
+        p.error("--frozen-eval requires --anchor-dataset (the pre-registered H2 anchor slate)")
     if args.source == "beatthebookie":
         await run_beatthebookie(args)
         return

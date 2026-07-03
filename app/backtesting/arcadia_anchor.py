@@ -82,6 +82,14 @@ ACCEPTANCE_MIN_N_PER_MARKET = 150  # ADR-0019 acceptance bar (unchanged)
 # deliberately pessimistic 5% so "reachable" is never optimistic).
 EXPECTED_BET_RATE_ESTIMATE = 0.05
 
+# H2 SPLIT DESIGN (frozen 2026-07-03): PURE PROSPECTIVE — no train side, no
+# selection on any 2026 data. The single-shot evaluates exactly these
+# pre-registered values (selection history = 2024-07..2025-12 only) once on
+# the whole preflight-PASS H2 slate; the runbook's train sweep is replaced by
+# a descriptive-only grid that may never be selected from.
+FROZEN_EVAL_THRESHOLDS: dict[str, float] = {"1x2": 0.010, "ou25": 0.005}
+FROZEN_EVAL_DEVIG = "power"
+
 # Config freeze: sha256 over the ADR-0019 frozen live values, computed with the
 # runbook's exact recipe on 2026-07-03 (value_devig=power,
 # value_moneyline_max_odds=5.0, value_min_edge=0.03,
