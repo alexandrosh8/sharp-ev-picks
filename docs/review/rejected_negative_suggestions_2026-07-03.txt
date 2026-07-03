@@ -1,0 +1,8 @@
+# Rejected alias candidates — NEGATIVE-alias suggestions (human consideration
+# only; add the vetted ones to the _NOT_ADDED list in
+# tests/test_resolution_nameform_aliases.py so they stay distinct forever):
+# _NOT_ADDED_CANDIDATES = [
+#     ('Gremio Juventus', 'Juventus SC'),  # weak_similarity|city_club_ambiguity|known_false_pattern — REVERSED during apply (2026-07-03): dry-run patch revealed normalize_name('Juventus SC') strips the 'sc' club-form token to bare 'juventus', colliding with the existing 'Juventus FC' (Turin) canonical — the tool appended 'Gremio Juventus' under Juventus Turin. Wrong-game unsafe as a global seed alias regardless of fixture evidence (2 exact Catarinense-2 co-occurrences stand). Same class as AC-0073 Racing: needs league/country-scoped aliasing (matcher tech-debt). Golden _NOT_ADDED entry kept. [operator-delegated AI review 2026-07-03, escalation round]
+#     ('Sabah Baku', 'Sabah FK'),  # city_club_ambiguity — Archive canonical 'Sabah FK' spans two real teams (Azerbaijani club + Malaysia President Cup U20 side). More fixtures cannot fix a two-team canonical; fix is archive-side split/dedupe, not an alias. [operator-delegated AI review 2026-07-03, escalation round]
+#     ('Racing', 'Racing Beirut'),  # weak_similarity|city_club_ambiguity|known_false_pattern — Global 'racing -> Racing Beirut' alias is the CD-Nacional pitfall verbatim (bare generic base merges every Racing worldwide). Recall needs league/country-scoped aliasing — tracked as matcher tech-debt, not approvable under the current mechanism. [operator-delegated AI review 2026-07-03, escalation round]
+# ]

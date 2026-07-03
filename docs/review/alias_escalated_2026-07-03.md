@@ -26,6 +26,17 @@ have accrued a NEW co-occurring fixture since the 2026-07-02 vetting.
 Approval bar reminder (from the batch process): >= 2 distinct co-occurring fixtures,
 no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 
+
+> **RESOLVED 2026-07-03 (operator-delegated review).** Decisions are inline per row.
+> Outcome: **9 applied** (AC-0017, AC-0021, AC-0023, AC-0028, AC-0053, AC-0056,
+> AC-0058, AC-0076 + Turriff as AC-0087), **3 rejected** (AC-0073, AC-0030,
+> AC-0014 — the last REVERSED during apply when the dry-run patch exposed a
+> normalization collision routing Gremio Juventus under Juventus Turin),
+> **6 deferred** (needs-more-evidence, re-export next batch). Reviewed CSV:
+> `alias_candidates_escalated_2026-07-03.csv`. Verification: full pytest green;
+> differential matcher run over 1,887 live fixtures (old vs new seed) = 11
+> decision flips, ALL intended recoveries, 0 unintended merges.
+
 ---
 
 ## A. Known-false-flagged "tempted" pairs (7)
@@ -46,8 +57,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   in SFM) — the name overlap is exactly the trap the known-false list encodes. The
   H/A inversion is a classic wrong-fixture symptom. Require an authoritative roster/
   schedule source naming the OddsPortal side before any golden-list change.
-- human_decision:
-- reviewer_notes:
+- human_decision: **needs-more-evidence**
+- reviewer_notes: H/A inversion + two historical SFM franchises; requires authoritative roster/schedule source. Re-export next batch.
 
 ### 2. AC-0014 — `Gremio Juventus` (oddsportal) <> `Juventus SC` (pinnacle_soccer)
 - **Sport/league/country:** soccer / Catarinense 2 / Brazil
@@ -64,8 +75,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   the golden entry appears to encode generic Juventus-collision fear (Juventus
   Turin/Mooca) that a league-scoped check refutes here. If approved, the
   `_NOT_ADDED` pair must be consciously removed in the same commit with a test.
-- human_decision:
-- reviewer_notes:
+- human_decision: **reject (mechanism-unsafe)**
+- reviewer_notes: REVERSED from tentative-approve during apply: normalize_name('Juventus SC') strips 'sc' to bare 'juventus' — collides with the 'Juventus FC' (Turin) canonical; dry-run patch appended Gremio Juventus under Juventus Turin. Needs scoped aliasing (tech-debt, same class as AC-0073). Golden _NOT_ADDED entry KEPT with explanatory comment.
 
 ### 3. AC-0017 — `Annan` (oddsportal) <> `Annan Athletic` (pinnacle_soccer)
 - **Sport/league/country:** soccer / Club Friendly / World (club is Scottish L2)
@@ -79,8 +90,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 - **Recommended decision: approve (operator token-class exception).** "Annan" has
   exactly one senior club (Annan Athletic FC); no competing "Annan <other>" exists
   in either namespace. Low residual risk; document the exception in reviewer_notes.
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED**
+- reviewer_notes: Token-class exception: only one senior Annan club exists. In batch 2026-07-03.
 
 ### 4. AC-0053 — `Minnesota 2` (oddsportal) <> `Minnesota United II` (pinnacle_soccer)
 - **Sport/league/country:** soccer / MLS Next Pro / USA
@@ -96,8 +107,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   both as {reserve}), and MLS Next Pro has exactly one Minnesota entry (MNUFC2).
   The 'united' trap (e.g. "Minnesota" vs "Minnesota United" as different clubs)
   does not apply when both names carry the reserve marker and the league is closed.
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED**
+- reviewer_notes: Reserve markers agree both sides (trailing 2 = II); MLS Next Pro has one Minnesota entry. In batch 2026-07-03.
 
 ### 5. AC-0058 — `Playford Patriots` (oddsportal) <> `Playford City` (pinnacle_soccer) — **UPGRADED (new fixture)**
 - **Sport/league/country:** soccer / NPL South Australia / Australia
@@ -114,8 +125,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 - **Recommended decision: approve, conditional on golden/known-false amendment.**
   Three aligned fixtures across two weeks in a one-club-per-town league is strong;
   the known-false entry looks like a stale rename guard. Amend it deliberately.
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED**
+- reviewer_notes: 3 co-occurrences; known-false entry was a stale rename guard ('Playford City Patriots SC') — amended in tools/alias_vetting.py + tests. In batch 2026-07-03.
 
 ### 6. AC-0076 — `Redlands` (oddsportal) <> `Redlands United` (pinnacle_soccer) — **UPGRADED (new fixture)**
 - **Sport/league/country:** soccer / Queensland Premier League / Australia
@@ -131,8 +142,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 - **Recommended decision: approve, conditional on golden/known-false amendment.**
   Same reasoning as AC-0058: three aligned QPL fixtures, single plausible club
   (Redlands United FC). The 'united' generic fear is refuted by league scoping.
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED**
+- reviewer_notes: 3 co-occurrences, one plausible club; known-false + golden entries amended. In batch 2026-07-03.
 
 ### 7. AC-0073 — `Racing` (oddsportal) <> `Racing Beirut` (pinnacle_soccer) *(reconstructed 7th known-false)*
 - **Sport/league/country:** soccer / Lebanon PL context / Lebanon
@@ -149,8 +160,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   would merge every bare "Racing" worldwide into the Lebanese club. The correct fix
   is league/country-scoped aliasing (not currently supported by aliases_seed.json)
   — track as matcher tech-debt, do not approve under the current mechanism.
-- human_decision:
-- reviewer_notes:
+- human_decision: **reject**
+- reviewer_notes: Global bare-Racing alias is the CD-Nacional pitfall; scoped-alias mechanism is tracked tech-debt.
 
 ---
 
@@ -168,8 +179,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   only opponent is itself unproven (evidence circularity).
 - **Recommended decision: needs-more-evidence.** Austrian season restart will
   produce clean co-occurrences quickly; nothing forces an exception now.
-- human_decision:
-- reviewer_notes:
+- human_decision: **needs-more-evidence**
+- reviewer_notes: Evidence circularity (only opponent itself unvetted). Re-export next batch.
 
 ### 9. AC-0021 — `Din. Zagreb` (oddsportal) <> `Dinamo Zagreb` (pinnacle_soccer)
 - **Sport/league/country:** soccer / Club Friendly / World (Croatia)
@@ -185,8 +196,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   abbreviation class (`Din.` -> `Dinamo`) is benign, and Dinamo's European/league
   fixtures are high-value for Pinnacle anchoring. If the operator prefers strict
   rules: needs-more-evidence (a 2nd fixture is days away).
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED**
+- reviewer_notes: Operator-delegated 1-fixture exception: 'Din.' -> 'Dinamo' unique expansion. In batch 2026-07-03.
 
 ### 10. AC-0023 — `Grasshoppers` (oddsportal) <> `Grasshopper Club Zurich` (pinnacle_soccer)
 - **Sport/league/country:** soccer / Club Friendly / World (Switzerland)
@@ -197,8 +208,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 - **Why escalated:** unambiguous name, blocked purely by count.
 - **Recommended decision: approve (operator 1-fixture exception)** — same reasoning
   as AC-0021 (unique club, benign name form); strict alternative: needs-more-evidence.
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED**
+- reviewer_notes: Operator-delegated 1-fixture exception: unique club worldwide. In batch 2026-07-03.
 
 ### 11. AC-0027 — `Plzen` (oddsportal) <> `Viktoria Plzen` (pinnacle_soccer)
 - **Sport/league/country:** soccer / Club Friendly / World (Czechia)
@@ -213,8 +224,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 - **Recommended decision: needs-more-evidence.** Unlike AC-0021/0023 the pick-side
   name is a bare CITY (generic-base class) and the single opponent is itself a
   flagged pair. Wait for a league fixture with a vetted opponent.
-- human_decision:
-- reviewer_notes:
+- human_decision: **needs-more-evidence**
+- reviewer_notes: Bare city name + flagged opponent. Re-export next batch.
 
 ### 12. AC-0028 — `Queen's Park` (oddsportal) <> `Queens Park` (pinnacle_soccer)
 - **Sport/league/country:** soccer / Club Friendly / World (Scotland)
@@ -230,8 +241,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   in this bare form. Worth also checking whether `normalize_name` SHOULD already
   fold apostrophes — if it does and this pair still queued, that is a normalization
   bug to fix instead of an alias.
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED**
+- reviewer_notes: Operator-delegated 1-fixture exception: apostrophe-only. Normalization check done 2026-07-03: normalize_name maps apostrophe to a space (queen s park != queens park) — alias is the correct fix, not a normalization change. In batch 2026-07-03.
 
 ### 13. AC-0045 — `Benjamin Aceval` (oddsportal) <> `Club Doctor Benjamín Aceval` (pinnacle_soccer) *(reconstructed 9th thin row)*
 - **Sport/league/country:** soccer / Division Intermedia / Paraguay
@@ -244,8 +255,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 - **Recommended decision: needs-more-evidence.** Name is effectively unique
   (a town-named club), but Division Intermedia plays weekly — the 2nd fixture will
   accrue within days; no reason to spend an exception.
-- human_decision:
-- reviewer_notes:
+- human_decision: **needs-more-evidence**
+- reviewer_notes: Weekly league; 2nd fixture imminent. Re-export next batch.
 
 ### 14. AC-0056 — `NE Metrostars` (oddsportal) <> `MetroStars` (pinnacle_soccer) — **UPGRADED: now approvable on existing rules**
 - **Sport/league/country:** soccer / NPL South Australia / Australia
@@ -260,8 +271,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   "North Eastern MetroStars", so `NE` is a benign truncation).
 - **Why escalated:** was thin (1 fixture) at vetting time.
 - **Recommended decision: approve** (on existing rules, next batch).
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED**
+- reviewer_notes: Meets >=2 bar on existing rules (Para Hills Knights 06-27 + West Torrens Birkalla 07-04). In batch 2026-07-03.
 
 ### 15. AC-0074 — `Zhenis` (oddsportal) <> `Zhenys` (pinnacle_soccer)
 - **Sport/league/country:** soccer / Premier League / Kazakhstan
@@ -276,8 +287,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   but the women-league reuse means approval should wait for a 2nd men's-league
   co-occurrence AND a check that the women's events carry the women marker in both
   namespaces.
-- human_decision:
-- reviewer_notes:
+- human_decision: **needs-more-evidence**
+- reviewer_notes: Women-league 'Zhenys' reuse is a marker hazard; wait for 2nd men's co-occurrence + marker check. Re-export next batch.
 
 ### 16. AC-0081 — `ML Vitebsk` (oddsportal) <> `Maxline Vitebsk` (pinnacle_soccer)
 - **Sport/league/country:** soccer / Vysshaya Liga / Belarus
@@ -289,8 +300,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 - **Why escalated:** benign-expansion class, blocked purely by count.
 - **Recommended decision: needs-more-evidence** (weekly league; 2nd fixture is
   imminent). If the operator wants it now, the expansion class is low-risk.
-- human_decision:
-- reviewer_notes:
+- human_decision: **needs-more-evidence**
+- reviewer_notes: Weekly league; benign-expansion can wait. Re-export next batch.
 
 ---
 
@@ -311,8 +322,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
   `Utd -> United` is a pure benign-expansion class with the identical town prefix;
   wrong-club risk is effectively nil, and approving silences a recurring audit
   false-flag. Strict alternative: wait for the next Turriff co-occurrence.
-- human_decision:
-- reviewer_notes:
+- human_decision: **approve — APPLIED** (as AC-0087 in batch 2026-07-03)
+- reviewer_notes: Operator-delegated 1-fixture exception: Utd->United benign expansion, identical town prefix; silences the recurring self_audit wrong_game_anchor false-flag.
 
 ---
 
@@ -330,8 +341,8 @@ no unresolved risk flag, or an explicit operator exception with reviewer_notes.
 - **Recommended decision: reject as an alias.** More fixtures cannot fix a canonical
   key that points at two teams; the fix is archive-side (split/dedupe the `Sabah FK`
   canonical), not an alias. Kept here so the temptation is documented.
-- human_decision:
-- reviewer_notes:
+- human_decision: **reject**
+- reviewer_notes: Two-team canonical ('Sabah FK'); fix is archive-side split, not an alias.
 
 ---
 

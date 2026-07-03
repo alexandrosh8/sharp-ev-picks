@@ -89,8 +89,12 @@ _KNOWN_FALSE_RAW: tuple[tuple[str, str], ...] = (
     ("Jazz Pori", "Jazz"),
     ("Gigantes San Francisco", "Indios de San Francisco de Macoris"),
     ("Bayswater", "Bayswater City"),
-    ("Redlands", "Redlands United"),
-    ("Playford Patriots", "Playford City"),
+    # 2026-07-03 escalation review: Redlands/Redlands United and Playford
+    # Patriots/Playford City removed on fixture evidence (see docs/review/
+    # alias_candidates_escalated_2026-07-03.csv and the matching _NOT_ADDED
+    # amendment) — vetted same-club aliases. Gremio Juventus/Juventus SC STAYS:
+    # normalize_name("Juventus SC") -> bare "juventus" collides with the Turin
+    # canonical (wrong-game unsafe as a seed alias; needs scoped aliasing).
     ("FC Kharkiv", "Metalist Kharkiv"),
     ("Zaglebie", "Zaglebie Lubin"),
     ("Gremio Juventus", "Juventus SC"),

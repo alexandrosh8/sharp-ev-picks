@@ -80,13 +80,25 @@ _NOT_ADDED: list[tuple[str, str]] = [
     ("Jazz Pori", "Jazz"),  # cross-sport Jazz (Utah Jazz) collision
     ("Gigantes San Francisco", "Indios de San Francisco de Macoris"),  # distinct clubs
     ("Bayswater", "Bayswater City"),  # bare + disambiguating "City"
-    ("Redlands", "Redlands United"),  # bare + disambiguating "United"
-    ("Playford Patriots", "Playford City"),  # "City" — possibly distinct clubs
+    # 2026-07-03 escalation review: two pairs REMOVED from this list on
+    # fixture evidence (operator-delegated review, docs/review/
+    # alias_candidates_escalated_2026-07-03.csv) — they are now vetted aliases:
+    #   Redlands/Redlands United (3 aligned QPL fixtures; one club),
+    #   Playford Patriots/Playford City (3 aligned NPL-SA fixtures; club is
+    #     "Playford City Patriots SC" — the entry was a stale rename guard).
     # 2026-07-01 push: deliberately EXCLUDED near-misses (distinct clubs / bare
     # ambiguous) — must stay distinct even though they shared a kickoff + a token.
     ("FC Kharkiv", "Metalist Kharkiv"),  # distinct Kharkiv clubs
     ("Zaglebie", "Zaglebie Lubin"),  # bare "Zaglebie" — Lubin vs Sosnowiec
-    ("Gremio Juventus", "Juventus SC"),  # distinct clubs sharing "Juventus"
+    # 2026-07-03: Gremio Juventus/Juventus SC STAYS here despite 2 aligned
+    # Catarinense-2 fixtures — normalize_name("Juventus SC") strips the "sc"
+    # club-form token to bare "juventus", colliding with the "Juventus FC"
+    # (Turin) canonical; a seed alias would anchor Gremio picks to Turin
+    # closes. Needs league/country-scoped aliasing (same class as Racing).
+    (
+        "Gremio Juventus",
+        "Juventus SC",
+    ),  # "Juventus SC" normalizes to bare "juventus" = Turin collision
     ("Brevard SC", "Brevard Fire"),  # distinct Brevard clubs
     ("Zielona Gora", "Lechia Zielona Gora"),  # bare city name — ambiguous
     ("Galanta", "Slovan Galanta"),  # bare "Galanta" — disambiguating prefix
