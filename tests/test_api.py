@@ -835,21 +835,17 @@ def test_dashboard_renders_known_kickoff_and_clean_tbd() -> None:
     assert "time to be confirmed" in text
 
 
-def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
-    """Live-evidence panel + execution helper on the dashboard: honest-n
-    insufficient states, hidden-until-served panel, the 'ok >=' odds-floor
-    line, and the textContent discipline still holding."""
+def test_dashboard_live_evidence_tile_removed_and_min_odds_helper() -> None:
+    """Operator 2026-07-03 Performance rework: the stratified live-evidence
+    table was REMOVED from the dashboard (its by-tier / by-sport strata
+    repeated the Premium-vs-Shadow and By-sport tiles). The /performance
+    live_evidence payload itself is unchanged (see
+    test_performance_payload_includes_live_evidence). The per-pick execution
+    helper ('ok >=' odds floor) stays."""
     text = TestClient(make_app()).get("/").text
-    assert 'id="evidence-panel"' in text
-    assert "renderEvidence" in text
-    assert "if (!Number(ev.n_settled))" in text
-    assert "function setEvidenceGroupOpen" in text
-    assert 'button.className = "evtoggle"' in text
-    assert 'button.addEventListener("click"' in text
-    assert 'button.setAttribute("aria-expanded", String(open))' in text
-    assert "tr.dataset.evGroup = groupKey" in text
-    assert "insufficient data (n<" in text  # explicit per-stratum state
-    assert "Live evidence" in text
+    assert 'id="evidence-panel"' not in text
+    assert "renderEvidence" not in text
+    assert "evtoggle" not in text
     # execution helper line in the odds column
     assert "min_acceptable_odds" in text
     assert "still +EV down to" in text
@@ -1272,8 +1268,10 @@ def test_dashboard_has_results_tab_and_clv_scorecard() -> None:
     # RESULTS is the router's fallback branch + the count wiring
     assert ": inResultsTab(p)" in text
     assert "results: scoped.filter(inResultsTab)" in text
-    # the scorecard relocated to the hero band: W-L-P record + % beat close (sharp)
-    assert "Record W-L-P" in text
+    # the scorecard: beat-close stays on the hero band; the W-L-P record lives
+    # ONLY in the Settled Ledger tile since the 2026-07-03 dedup (the hero
+    # duplicated Settled / Record / P&L verbatim — operator feedback)
+    assert "Record · W-L-P" in text
     assert "Beat close · sharp" in text
     assert "beat close" in text
     assert "innerHTML" not in text
@@ -1344,6 +1342,88 @@ def test_dashboard_tape_has_persisted_sort_control() -> None:
     assert "SORT_KEYS[savedSortCol]" in text
     # display-only reorder, never a second server fetch / no XSS sink
     assert "innerHTML" not in text
+
+
+def test_dashboard_single_filter_row_with_date_picker_and_date_sort() -> None:
+    """Operator 2026-07-03 item 1: the second Picks row (the ALL DATES /
+    per-day chip rail) is GONE. One filter row total: the custom date picker
+    input moved into the top filter row to the RIGHT of the SORT dropdown
+    (same hash persistence: #d=YYYY-MM-DD), and the SORT dropdown gained a
+    newest-kickoff-first option."""
+    text = TestClient(make_app()).get("/").text
+    # the chip rail and its renderer are fully removed
+    assert "daterail" not in text
+    assert "datechips" not in text
+    assert "renderDateRail" not in text
+    # the date picker lives INSIDE the .filters row, after the sort select
+    filters = text[text.index('class="filters"') : text.index("</div>", text.index('id="f-date"'))]
+    assert 'id="f-date"' in filters
+    assert filters.index('id="f-sort"') < filters.index('id="f-date"')
+    # newest-kickoff-first sort option + comparator (TBD kickoffs last)
+    assert '<option value="kickoff_desc">' in text
+    assert "kickoff_desc: koDescCmp" in text
+    assert "const koDescCmp" in text
+    # date filter behaviour unchanged: hash persistence + local-date scoping
+    assert "function parseHashDate" in text
+    assert '$("f-date").addEventListener("change"' in text
+    assert "#d=" in text
+    # tab counts still recompute from the scoped set
+    assert "results: scoped.filter(inResultsTab)" in text
+
+
+def test_dashboard_per_market_summarized_top5() -> None:
+    """Operator 2026-07-03 item 3b: the Per-market column must not dump 120+
+    market:count tokens inline (basketball alt lines destroyed the layout).
+    The cell shows the top 5 markets by count + '(+N more markets, M rows)';
+    the full list rides the title tooltip."""
+    text = TestClient(make_app()).get("/").text
+    assert "function summarizePerMarket" in text
+    assert "entries.slice(0, 5)" in text
+    assert " more markets, " in text
+    # the table cell uses the summary + tooltip, not the raw join
+    assert "summarizePerMarket(info.per_market)" in text
+    assert "pmCell.title = pmSum.title" in text
+
+
+def test_health_includes_redacted_proxy_pool() -> None:
+    """Operator 2026-07-03 item 5: the proxy tile reads /health (eager, every
+    cycle, no DB) — /resolution/match-rate is slow enough on live to hit the
+    dashboard's fetch abort, which left the tile permanently '—'. The payload
+    is the same REDACTED registry diagnostics (indices/counters/class names;
+    never a URL, IP, or credential)."""
+    body = TestClient(make_app()).get("/health").json()
+    pool = body["proxy_pool"]
+    for key in (
+        "configured",
+        "healthy",
+        "quarantined",
+        "dead",
+        "failovers_15m",
+        "failovers_1h",
+        "verdict",
+        "dominant_failure_class",
+    ):
+        assert key in pool
+    assert pool["verdict"] in ("Proxy pool healthy", "Proxy pool degraded")
+    # no secrets: the whole blob must not smell like a URL or credential
+    import json as _json
+
+    blob = _json.dumps(pool)
+    assert "http" not in blob
+    assert "@" not in blob
+
+
+def test_dashboard_proxy_tile_renders_eagerly_from_health() -> None:
+    """The proxy tile is fed from summarizeHealth (runs on every load cycle),
+    not gated behind the lazy/slow match-rate fetch; the match-rate fetch got
+    a longer abort so the coverage headline survives the slow endpoint."""
+    text = TestClient(make_app()).get("/").text
+    assert "renderProxyPool(health && health.proxy_pool" in text
+    # the old coupling is gone: renderMatchDetail no longer feeds the tile
+    assert "renderProxyPool(a && a.proxy_pool" not in text
+    # the heavy endpoint gets its own longer timeout
+    assert "MATCHRATE_TIMEOUT_MS" in text
+    assert re.search(r'fetchWithTimeout\("/resolution/match-rate[^)]*MATCHRATE_TIMEOUT_MS', text)
 
 
 def test_dashboard_information_architecture_and_required_states() -> None:

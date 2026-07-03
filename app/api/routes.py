@@ -774,6 +774,7 @@ def _poll_health(
 @router.get("/health")
 async def health(request: Request, response: Response) -> dict[str, Any]:
     from app.config import get_settings
+    from app.ingestion.proxy_health import get_registry as _get_proxy_registry
     from app.maintenance.upstream_watch import LAST_CHECK
     from app.pipeline import LAST_POLL
 
@@ -815,6 +816,13 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
         # tier-resolved `edge_floor`; these are the global fallback.
         "value_min_edge": get_settings().value_min_edge,
         "value_volume_min_edge": get_settings().value_volume_min_edge,
+        # Proxy-pool health for the Diagnostics tile — REDACTED (indices,
+        # counters, exception class names; never a URL/IP/credential) and
+        # process-local (no DB), so it is cheap here. It ALSO rides
+        # /resolution/match-rate, but that endpoint is slow enough on live
+        # (10s+ under scrape load) to hit the dashboard's fetch abort — the
+        # tile reads THIS eager, every-cycle payload instead (2026-07-03).
+        "proxy_pool": _get_proxy_registry().diagnostics(configured=len(settings.scraper_proxies())),
     }
 
 

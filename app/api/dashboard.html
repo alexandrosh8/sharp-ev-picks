@@ -763,83 +763,71 @@
         .hero-stats .hstat .v { font-size: 15px; }
         .dist .bars { height: 32px; margin-top: 5px; }
       }
-      .ledger-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
-      .ledger-grid .cell { background: var(--s1); padding: 11px 12px; }
-      .ledger-grid .cell .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 600; color: var(--bone); }
-      .ledger-grid .cell .v.neg { color: var(--neg); }
-      .ledger-grid .cell .k { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); margin-top: 3px; }
-      .cell.stale { outline: 1px solid var(--warn); outline-offset: -1px; position: relative; }
-      .cell.stale::after { content: attr(data-flag); position: absolute; top: 4px; right: 5px; font-family: var(--mono); font-size: 9px; color: var(--warn); letter-spacing: 0.06em; }
+      /* one labeled metric per row inside a tile (no run-on stat strips) */
+      .metriclist { display: grid; }
+      .metric {
+        display: flex; justify-content: space-between; align-items: baseline;
+        gap: 14px; padding: 10px 0; border-top: 1px solid var(--line);
+        position: relative; min-width: 0;
+      }
+      .metric:first-child { border-top: 0; padding-top: 2px; }
+      .metric .k {
+        font-family: var(--mono); font-size: var(--fs-xs); text-transform: uppercase;
+        letter-spacing: 0.06em; color: var(--faint);
+      }
+      .metric .v {
+        font-family: var(--mono); font-variant-numeric: tabular-nums;
+        font-size: 17px; font-weight: 600; color: var(--bone); text-align: right;
+      }
+      .metric .v.neg { color: var(--neg); }
+      .metric.stale { outline: 1px solid var(--warn); outline-offset: -1px; }
+      .metric.stale::after { content: attr(data-flag); position: absolute; top: 2px; right: 0; font-family: var(--mono); font-size: 9px; color: var(--warn); letter-spacing: 0.06em; }
 
-      /* ---- live-evidence panel ---------------------------------------------- */
-      .evpanel { padding: 2px 0 4px; }
-      .evtitle {
-        font-family: var(--mono); font-size: 11px; text-transform: uppercase;
-        letter-spacing: 0.08em; color: var(--dim); margin: 0 0 4px; font-weight: 600;
-      }
-      table.evtable { width: 100%; border-collapse: collapse; }
-      .evtable th, .evtable td {
-        text-align: left; padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line);
-        font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dim);
-      }
-      .evtable th { color: var(--faint); font-weight: 600; text-transform: uppercase; font-size: 9.5px; letter-spacing: 0.05em; }
-      .evtable td.r, .evtable th.r { text-align: right; padding-right: 0; }
-      .evtable tr.evgroup td { border-bottom: 0; padding-top: 7px; }
-      .evtoggle {
-        display: inline-flex; align-items: center; gap: 6px; width: 100%;
-        background: transparent; border: 0; color: var(--dim); cursor: pointer;
-        font-family: var(--mono); font-size: 10.5px; text-transform: uppercase;
-        letter-spacing: 0.06em; padding: 8px 0; min-height: 44px;
-      }
-      .evtoggle .evmark { color: var(--faint); }
-      .evtoggle .evcount { margin-left: auto; color: var(--faint); }
-      .evtable td.evinsuf { color: var(--faint); font-style: italic; }
+      /* honest "insufficient / unavailable" table cells */
+      td.evinsuf { color: var(--faint); font-style: italic; }
 
-      /* ---- date rail (F1: navigate picks by date) --------------------------- */
-      .daterail {
-        display: flex; gap: 6px; align-items: center;
-        padding: 8px 14px 0;
+      /* ---- date filter input (lives in the ONE top filter row) -------------
+         explicit width: a <input type=date> collapses to ~14px when allowed
+         to shrink inside a nowrap flex strip */
+      .filters #f-date {
+        flex: 0 0 auto; width: 10.5em;
+        padding: 4px 6px; color-scheme: dark;
       }
-      .datechips {
-        display: flex; gap: 4px; flex: 1; min-width: 0;
-        overflow-x: auto;
-        scroll-snap-type: x proximity;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
-      }
-      .datechips::-webkit-scrollbar { display: none; }
-      .datechips button {
-        flex: 0 0 auto; scroll-snap-align: center;
-        background: var(--s1); border: 1px solid var(--line);
-        color: var(--dim); font-size: 11px; letter-spacing: 0.04em;
-        text-transform: uppercase; padding: 6px 10px; min-height: 40px;
-        border-radius: var(--radius);
-      }
-      .datechips button[aria-pressed="true"] {
-        color: var(--bone); border-color: var(--faint); background: var(--s3);
-      }
-      .daterail input[type="date"] {
-        flex: 0 0 auto; min-height: 40px; padding: 4px 6px;
-        color-scheme: dark;
+      /* small phones: the filter controls ride ONE momentum-scroll line —
+         the date picker must never break the ≤430px single-line strip */
+      @media (max-width: 430px) {
+        .filters {
+          flex-wrap: nowrap; overflow-x: auto;
+          -webkit-overflow-scrolling: touch; scrollbar-width: none;
+          padding-bottom: 2px;
+        }
+        .filters::-webkit-scrollbar { display: none; }
+        .filters > * { flex: 0 0 auto; }
+        .filters #f-search { flex: 0 1 34vw; min-width: 100px; }
       }
 
-      /* ---- tile system (Overview / Performance / Diagnostics) --------------- */
-      .tilegrid { display: grid; grid-template-columns: 1fr; gap: var(--sp-3); }
-      @media (min-width: 1024px) {
-        .tilegrid.cols2 { grid-template-columns: 1fr 1fr; }
-        .tile.wide { grid-column: 1 / -1; }
-      }
+      /* ---- tile system (Overview / Performance / Diagnostics) ---------------
+         Generous spacing by design (operator 2026-07-03: "too close layout"):
+         wider grid gaps, roomier tile padding, clearer tile headers. */
+      .tilegrid { display: grid; grid-template-columns: 1fr; gap: var(--sp-4); }
       .tile {
         background: var(--s1); border: 1px solid var(--line);
         border-radius: var(--radius-lg); padding: var(--sp-4); min-width: 0;
       }
+      @media (min-width: 1024px) {
+        .tilegrid.cols2 { grid-template-columns: 1fr 1fr; }
+        .tilegrid { gap: var(--sp-5); }
+        .tile.wide { grid-column: 1 / -1; }
+        .tile { padding: var(--sp-5); }
+      }
       .tile-h {
         display: flex; align-items: center; gap: 8px;
-        margin: 0 0 var(--sp-3);
+        margin: 0 0 var(--sp-4); padding-bottom: var(--sp-2);
+        border-bottom: 1px solid var(--line);
       }
       .tile-h h3, .tile-h h2 {
-        font-family: var(--mono); font-size: var(--fs-xs); letter-spacing: 0.1em;
-        text-transform: uppercase; color: var(--faint); font-weight: 600;
+        font-family: var(--mono); font-size: var(--fs-sm); letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--dim); font-weight: 600;
         margin: 0; flex: 1; min-width: 0;
       }
       .tile-h .chip { flex: 0 0 auto; }
@@ -925,7 +913,7 @@
         }
         .p-risk::-webkit-scrollbar { display: none; }
         .p-risk .badge, .p-risk .gate-chip, .p-risk .stat { flex: 0 0 auto; }
-        .copybtn, .datechips button, .daterail input[type="date"] { min-height: 44px; }
+        .copybtn { min-height: 44px; }
       }
 
       @media (prefers-reduced-motion: reduce) {
@@ -1033,19 +1021,18 @@
                 <option value="default">Best on top</option>
                 <option value="confidence">Confidence</option>
                 <option value="edge">Edge</option>
-                <option value="kickoff">Kickoff</option>
+                <option value="kickoff">Kickoff · soonest</option>
+                <option value="kickoff_desc">Kickoff · newest first</option>
                 <option value="clv">CLV</option>
               </select>
+              <!-- date filter (one filter row): picking a date scopes the tape
+                   to that LOCAL kickoff date; persisted in location.hash
+                   (#d=YYYY-MM-DD) so back/refresh keep it; clear = all dates. -->
+              <input type="date" id="f-date" aria-label="Filter picks by date"
+                title="Show only picks kicking off on this date (your local date). Clear to show all dates." />
             </div>
           </div>
           <div class="cmdnote" id="tape-note" hidden></div>
-          <!-- F1: date navigation — pressing a date filters the tape to picks
-               whose LOCAL kickoff date matches; persisted in location.hash
-               (#d=YYYY-MM-DD) so back/refresh keep the selection. -->
-          <div class="daterail" id="daterail" role="toolbar" aria-label="Filter picks by date">
-            <div class="datechips" id="datechips"></div>
-            <input type="date" id="f-date" aria-label="Jump to a date" />
-          </div>
           <div id="tabs" role="tablist" aria-label="Pick views">
             <button type="button" role="tab" data-status="live" aria-selected="true" aria-controls="cards">LIVE</button>
             <button type="button" role="tab" data-status="unverified" aria-selected="false" aria-controls="cards">UNVERIFIED</button>
@@ -1170,11 +1157,12 @@
         <div class="pad tilegrid cols2" id="perftiles">
           <section class="tile" id="tile-ledger" aria-labelledby="settled-h">
             <div class="tile-h"><h2 id="settled-h">Settled Ledger · premium</h2></div>
-            <div class="ledger-grid">
-              <div class="cell" id="card-record"><div class="v" id="c-record">—</div><div class="k">Record · W-L-P</div></div>
-              <div class="cell" id="card-pnl"><div class="v" id="c-pnl">—</div><div class="k">P&amp;L / ROI (units)</div></div>
-              <div class="cell" id="card-settled"><div class="v" id="c-settled">—</div><div class="k">Settled (all-time)</div></div>
-              <div class="cell" id="card-open"><div class="v" id="c-open">—</div><div class="k" id="c-open-k">Open · premium verified</div></div>
+            <!-- one metric block per row (operator 2026-07-03: no run-on strips) -->
+            <div class="metriclist">
+              <div class="metric" id="card-record"><span class="k">Record · W-L-P</span><span class="v" id="c-record">—</span></div>
+              <div class="metric" id="card-pnl"><span class="k">P&amp;L / ROI (units)</span><span class="v" id="c-pnl">—</span></div>
+              <div class="metric" id="card-settled"><span class="k">Settled (all-time)</span><span class="v" id="c-settled">—</span></div>
+              <div class="metric" id="card-open"><span class="k" id="c-open-k">Open · premium verified</span><span class="v" id="c-open">—</span></div>
             </div>
             <div class="muted" style="margin-top:10px">
               Stake-weighted ROI &amp; record are recorded as final scores arrive —
@@ -1216,35 +1204,12 @@
 
           <section class="tile" id="tile-calibration" aria-labelledby="calib-h">
             <div class="tile-h"><h3 id="calib-h">Calibration monitor · bet band</h3></div>
-            <p class="muted" id="calib-note" style="margin:0">—</p>
-          </section>
-
-          <section class="tile" id="tile-evidence" aria-labelledby="evidence-h">
-            <div class="tile-h"><h3 id="evidence-h">Live evidence</h3></div>
-            <!-- stratified live-evidence panel: hidden until /performance serves
-                 live_evidence; renders per-stratum CLV/ROI with honest-n
-                 suppression (the VALUE_ML_FILTER-flip instrument). Shadow-only. -->
-            <div class="evpanel" id="evidence-panel" style="display:none">
-              <div class="evtitle" id="evidence-title">Live evidence</div>
-              <div class="muted" style="margin:4px 0 8px">
-                Stratified CLV / beat-close / ROI over your settled picks — the
-                VALUE_ML_FILTER readiness instrument. Each stratum reports its n;
-                a thin stratum reads "insufficient data" instead of noise.
-                Shadow-only: changes no pick.
-              </div>
-              <div class="tscroll">
-                <table class="evtable" aria-label="Live evidence by slice">
-                  <thead><tr>
-                    <th scope="col">Slice</th><th scope="col" class="r">n</th><th scope="col" class="r">n CLV</th>
-                    <th scope="col" class="r">CLV</th><th scope="col" class="r">Beat</th><th scope="col" class="r">ROI</th>
-                  </tr></thead>
-                  <tbody id="evidence-rows"></tbody>
-                </table>
-              </div>
-            </div>
-            <p class="muted" id="evidence-empty" style="margin:4px 0 0">
-              No stratified live evidence yet — it appears once settled picks accrue.
-            </p>
+            <!-- one metric per row; renderCalibration fills rows + the note.
+                 (The old stratified live-evidence table was removed here —
+                 operator 2026-07-03: its by-tier / by-sport strata repeated the
+                 Premium-vs-Shadow and By-sport tiles.) -->
+            <div class="metriclist" id="calib-rows"></div>
+            <p class="muted" id="calib-note" style="margin:8px 0 0">—</p>
           </section>
 
           <section class="tile" id="tile-closeaudit" aria-labelledby="evq-h">
@@ -1312,32 +1277,41 @@
               <h3 id="funnel-h">Pick funnel · why few premium picks</h3>
               <span class="chip" id="diag-funnel-verdict">—</span>
             </div>
-            <div class="chips" id="ing-chips" style="margin-bottom:6px"></div>
+            <!-- (the per-sport ingestion chip row was removed here — it was the
+                 THIRD rendering of the same per-sport ingestion numbers on this
+                 page, after the summary cards and the detail table) -->
             <p class="muted" id="whyfew" style="margin:4px 0 0">—</p>
           </section>
 
+          <!-- verdict-first like the other tiles: header + headline chip when
+               collapsed; the per-sport table is a plain [+] Detail disclosure
+               (was a chip-inside-chip toggle duplicating the tile title). -->
           <section class="tile" id="tile-sharpcov" aria-labelledby="cov-h">
-            <div class="tile-h"><h3 id="cov-h">Sharp-close coverage</h3></div>
-            <button class="sb-head" id="toggle-archive" aria-expanded="false" aria-controls="archive-panel" style="border-top:0;padding-top:0">
-              <span class="mk">[+]</span><span class="grow">Sharp-close coverage</span>
-              <span class="mono" id="archive-count" style="color:var(--dim)">—</span>
-            </button>
-            <div class="panel" id="archive-panel" hidden>
-              <div class="muted" id="coverage-state" hidden style="margin-bottom:6px;color:var(--warn)">
-                Sharp anchor coverage is unavailable or insufficient.
+            <div class="tile-h">
+              <h3 id="cov-h">Sharp-close coverage</h3>
+              <span class="chip" id="archive-count">—</span>
+            </div>
+            <div class="muted" id="coverage-state" hidden style="margin:0 0 6px;color:var(--warn)">
+              Sharp anchor coverage is unavailable or insufficient.
+            </div>
+            <div class="sub-block" style="margin-top:6px">
+              <button class="sb-head" id="toggle-archive" aria-expanded="false" aria-controls="archive-panel">
+                <span class="mk">[+]</span><span class="grow">Detail · per-sport coverage</span>
+              </button>
+              <div class="panel" id="archive-panel" hidden>
+                <div class="muted" id="archive-purpose"></div>
+                <div class="tscroll">
+                  <table aria-label="Pinnacle sharp-close archive coverage by sport">
+                    <thead><tr>
+                      <th scope="col">Sport</th><th scope="col" class="r">Captured</th>
+                      <th scope="col" class="r">Ours</th><th scope="col" class="r">Close found</th>
+                    </tr></thead>
+                    <tbody id="archive-rows"></tbody>
+                  </table>
+                </div>
+                <div class="muted" id="archive-capture" hidden style="margin-top:6px"></div>
+                <div class="muted" id="archive-betfair" hidden style="margin-top:6px"></div>
               </div>
-              <div class="muted" id="archive-purpose"></div>
-              <div class="tscroll">
-                <table aria-label="Pinnacle sharp-close archive coverage by sport">
-                  <thead><tr>
-                    <th scope="col">Sport</th><th scope="col" class="r">Captured</th>
-                    <th scope="col" class="r">Ours</th><th scope="col" class="r">Close found</th>
-                  </tr></thead>
-                  <tbody id="archive-rows"></tbody>
-                </table>
-              </div>
-              <div class="muted" id="archive-capture" hidden style="margin-top:6px"></div>
-              <div class="muted" id="archive-betfair" hidden style="margin-top:6px"></div>
             </div>
           </section>
 
@@ -2170,11 +2144,10 @@
           return d;
         }
         function render() {
-          renderDateRail();
           const tier = $("f-tier").value;
           const q = $("f-search").value.trim().toLowerCase();
-          // F1: the date rail scopes the whole tape (counts included) to the
-          // selected LOCAL kickoff date; TBD-kickoff picks only show on "All".
+          // the date picker scopes the whole tape (counts included) to the
+          // selected LOCAL kickoff date; TBD-kickoff picks only show unscoped.
           const inScope = (p) =>
             (!SELECTED_DATE || (p.starts_at != null && dkey(p.starts_at) === SELECTED_DATE)) &&
             (!tier || tierOf(p) === tier) &&
@@ -2287,10 +2260,15 @@
         const effEdge = (p) => { const v = Number(p.current_edge ?? p.edge); return isFinite(v) ? v : -Infinity; };
         const koTime = (p) => (p.starts_at == null ? Infinity : new Date(p.starts_at).getTime());
         const clvVal = (p) => (p.clv_log == null ? -Infinity : Number(p.clv_log));
+        // newest kickoff first ("from last"), TBD-kickoff picks last
+        const koDescCmp = (a, b) =>
+          (b.starts_at == null ? -Infinity : koTime(b)) -
+          (a.starts_at == null ? -Infinity : koTime(a));
         const SORT_KEYS = {
           confidence: (a, b) => confLevel(b) - confLevel(a) || effEdge(b) - effEdge(a),
           edge: (a, b) => effEdge(b) - effEdge(a),
           kickoff: (a, b) => koTime(a) - koTime(b),
+          kickoff_desc: koDescCmp,
           clv: (a, b) => clvVal(b) - clvVal(a),
         };
         function sortRows(rows, key) {
@@ -2298,15 +2276,13 @@
           // default: best-on-top for live/unverified; results/closed sort by
           // most-recent kickoff (TBD last) so the per-day dividers group cleanly.
           if (STATUS_TAB === "live" || STATUS_TAB === "unverified") rows.sort(SORT_KEYS.confidence);
-          else rows.sort((a, b) =>
-            (b.starts_at == null ? -Infinity : koTime(b)) -
-            (a.starts_at == null ? -Infinity : koTime(a)));
+          else rows.sort(koDescCmp);
         }
 
-        // ===== F1: date navigation (rail + hash persistence) =========
+        // ===== date filter (picker in the top filter row + hash) =====
         // Selecting a date filters the tape client-side on the pick's LOCAL
         // kickoff date; the choice rides in location.hash (#d=YYYY-MM-DD) so
-        // back/refresh keep it. "All dates" clears the filter.
+        // back/refresh keep it. Clearing the picker shows all dates.
         function parseHashDate() {
           const m = /[#&]d=(\d{4}-\d{2}-\d{2})/.exec(location.hash || "");
           return m ? m[1] : null;
@@ -2323,40 +2299,6 @@
           const fd = $("f-date");
           if (fd && fd.value !== (SELECTED_DATE || "")) fd.value = SELECTED_DATE || "";
           render();
-        }
-        let RAIL_CENTERED = false;
-        function renderDateRail() {
-          const rail = $("datechips");
-          if (!rail) return;
-          const keep = rail.scrollLeft; // 30s re-render must not yank the strip
-          const dates = new Set();
-          PICKS.forEach((p) => {
-            if (p.starts_at != null) { const k = dkey(p.starts_at); if (k) dates.add(k); }
-          });
-          const tk = todayKey();
-          dates.add(tk);
-          if (SELECTED_DATE) dates.add(SELECTED_DATE);
-          rail.replaceChildren();
-          const addChip = (label, value, title) => {
-            const b = document.createElement("button");
-            b.type = "button"; b.textContent = label;
-            b.setAttribute("aria-pressed", String(value === SELECTED_DATE));
-            if (title) b.title = title;
-            b.addEventListener("click", () => setDate(value === SELECTED_DATE ? null : value));
-            rail.appendChild(b);
-            return b;
-          };
-          addChip("All dates", null, "Show every pick regardless of kickoff date.");
-          let todayBtn = null;
-          Array.from(dates).sort().forEach((k) => {
-            const b = addChip(k === tk ? "TODAY" : fmtDay(k + "T12:00:00"), k,
-              "Picks kicking off " + k + " (your local date).");
-            if (k === tk) todayBtn = b;
-          });
-          if (!RAIL_CENTERED && todayBtn && dates.size > 1) {
-            RAIL_CENTERED = true;
-            rail.scrollLeft = Math.max(0, todayBtn.offsetLeft - rail.clientWidth / 2);
-          } else rail.scrollLeft = keep;
         }
 
         function emptyState() {
@@ -2442,28 +2384,14 @@
             ? "Sufficient sharp-close sample — headline is live."
             : "Sharp closes settling toward the sufficiency floor.";
 
-          // quiet stats strip
+          // quiet stats strip — ONE hero stat only. Settled / record / P&L-ROI
+          // were removed here (operator 2026-07-03): they duplicated the
+          // Settled Ledger tile below verbatim. The blended all-closes CLV
+          // lives only in the Evidence-quality close audit (renderClvQuality).
           stats.replaceChildren();
-          const won = Number(perf.won) || 0, lost = Number(perf.lost) || 0;
-          const pushVoid = (Number(perf.push) || 0) + (Number(perf.void) || 0);
-          const hw = Number(perf.half_won) || 0, hl = Number(perf.half_lost) || 0;
-          const record = won + "-" + lost + "-" + pushVoid +
-            (hw || hl ? " (½:" + hw + "W " + hl + "L)" : "");
-          const pnl = Number(perf.total_pnl);
-          const pnlText = perf.n_settled && isFinite(pnl)
-            ? (pnl >= 0 ? "+" : "") + pnl.toFixed(2) +
-              (perf.roi !== null && perf.roi !== undefined ? " / " + spct(perf.roi) : "")
-            : "—";
           const beat = sharpOk && perf.sharp_beat_close_rate != null
             ? (Number(perf.sharp_beat_close_rate) * 100).toFixed(0) + "%" : "—";
-
-          // ONE CLV altitude on the hero: the sharp headline above. The blended
-          // all-closes figure (indicative, non-evidential) now lives only in
-          // the Evidence-quality close audit — see renderClvQuality.
           addStat(stats, beat, "Beat close · sharp", stale, false);
-          addStat(stats, String(perf.n_settled), "Settled", stale, false);
-          addStat(stats, record, "Record W-L-P", stale, false);
-          addStat(stats, pnlText, "P&L / ROI · units", stale, isFinite(pnl) && pnl < 0);
 
           if (stale) {
             heroSub.textContent += " · STALE — /performance failing, frozen at " +
@@ -2557,146 +2485,15 @@
         }
         const PERF_CARDS = ["card-settled", "card-record", "card-pnl"];
 
-        // ===== stratified live-evidence panel ======================
-        // Honesty contract (mirrors app/backtesting/live_evidence.py): every
-        // stratum shows its n; a stratum whose CLV sample is under min_n shows
-        // "insufficient data (n<min_n)" INSTEAD of point estimates. The panel
-        // hides entirely on payloads without the section (older API).
-        const EVIDENCE_GROUP_OPEN = {};
+        // (The stratified live-evidence table was removed 2026-07-03 — its
+        // by-tier / by-sport strata duplicated the Premium-vs-Shadow and
+        // By-sport tiles. The /performance live_evidence payload is unchanged.)
         function td(tr, text, cls) {
           const c = document.createElement("td");
           if (cls) c.className = cls;
           c.textContent = text;
           tr.appendChild(c);
           return c;
-        }
-        function setEvidenceGroupOpen(key, open) {
-          EVIDENCE_GROUP_OPEN[key] = !!open;
-          const button = document.querySelector('[data-ev-toggle="' + key + '"]');
-          if (button) {
-            button.setAttribute("aria-expanded", String(EVIDENCE_GROUP_OPEN[key]));
-            const marker = button.querySelector(".evmark");
-            if (marker) marker.textContent = EVIDENCE_GROUP_OPEN[key] ? "[-]" : "[+]";
-          }
-          document.querySelectorAll('[data-ev-group="' + key + '"]').forEach((row) => {
-            row.hidden = !EVIDENCE_GROUP_OPEN[key];
-          });
-        }
-        function evGroupRow(tbody, key, label, count) {
-          const open = EVIDENCE_GROUP_OPEN[key] !== false;
-          const tr = document.createElement("tr");
-          tr.className = "evgroup";
-          const cell = document.createElement("td");
-          cell.colSpan = 6;
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "evtoggle";
-          button.dataset.evToggle = key;
-          button.setAttribute("aria-expanded", String(open));
-          button.title = "Show/hide " + label;
-          const marker = document.createElement("span");
-          marker.className = "evmark";
-          marker.textContent = open ? "[-]" : "[+]";
-          const name = document.createElement("span");
-          name.textContent = " " + label;
-          const rows = document.createElement("span");
-          rows.className = "evcount";
-          rows.textContent = count + " rows";
-          button.append(marker, name, rows);
-          button.addEventListener("click", () => {
-            setEvidenceGroupOpen(key, EVIDENCE_GROUP_OPEN[key] === false);
-          });
-          cell.appendChild(button);
-          tr.appendChild(cell);
-          tbody.appendChild(tr);
-          return open;
-        }
-        function evRow(tbody, groupKey, open, label, s, minN) {
-          const tr = document.createElement("tr");
-          tr.dataset.evGroup = groupKey;
-          tr.hidden = !open;
-          td(tr, label);
-          td(tr, String(s.n), "r");
-          td(tr, String(s.n_clv), "r");
-          if (!s.sufficient) {
-            const cell = td(tr, "insufficient data (n<" + minN + ")", "evinsuf");
-            cell.colSpan = 3;
-            cell.classList.add("r");
-            cell.title = "fewer than " + minN + " CLV-revalidated settled picks in this stratum — " +
-              "point estimates would be noise; the row fills in as live evidence accumulates";
-          } else {
-            const swclv = s.stake_weighted_clv_log === null ? "—"
-              : (() => { const p = (Math.exp(Number(s.stake_weighted_clv_log)) - 1) * 100; return (p >= 0 ? "+" : "") + p.toFixed(1) + "%"; })();
-            td(tr, swclv, "r");
-            td(tr, s.beat_close_rate === null ? "—" : (Number(s.beat_close_rate) * 100).toFixed(0) + "%", "r");
-            td(tr, s.roi === null ? "—" : (Number(s.roi) >= 0 ? "+" : "") + (Number(s.roi) * 100).toFixed(1) + "%", "r");
-          }
-          tbody.appendChild(tr);
-        }
-        function renderEvidence(ev) {
-          const panel = $("evidence-panel");
-          const emptyNote = $("evidence-empty");
-          if (!ev) { panel.style.display = "none"; emptyNote.hidden = false; return; }
-          if (!Number(ev.n_settled)) { panel.style.display = "none"; emptyNote.hidden = false; return; }
-          emptyNote.hidden = true;
-          const minN = Number(ev.min_n) || 50;
-          const tbody = $("evidence-rows");
-          tbody.replaceChildren();
-          $("evidence-title").textContent = "Live evidence — how your " + ev.n_settled + " settled picks performed";
-          // Below the floor EVERY stratum reads "insufficient data" — show one
-          // clear accumulating line instead of a wall of identical rows.
-          if (Number(ev.n_settled) < minN) {
-            const tr = document.createElement("tr");
-            const cell = td(tr, "Accumulating — " + ev.n_settled + " / " + minN +
-              " settled picks. The CLV strata fill in once ≥ " + minN +
-              " results are recorded (a smaller sample is too noisy to read). For per-match detail use the RESULTS tab.", "evinsuf");
-            cell.colSpan = 6;
-            tbody.appendChild(tr);
-            panel.style.display = "";
-            return;
-          }
-          const SCORE_LABELS = {
-            score_ge_q: "ML score ≥ q*" + (ev.q_star !== null ? " (" + Number(ev.q_star).toFixed(3) + ")" : ""),
-            score_lt_q: "ML score < q*",
-            scored: "ML scored (no q* configured)",
-            unscored: "unscored (out of model scope)",
-          };
-          // Hide the model-score slice when nothing is actually scored.
-          const scoreKeys = Object.keys(ev.by_score || {});
-          const meaningfulScore = scoreKeys.some((k) => k !== "unscored");
-          if (scoreKeys.length && meaningfulScore) {
-            const open = evGroupRow(tbody, "score", "by ML score bucket", scoreKeys.length);
-            scoreKeys.forEach((k) => evRow(tbody, "score", open, SCORE_LABELS[k] || k, ev.by_score[k], minN));
-          }
-          const tierKeys = Object.keys(ev.by_tier || {});
-          if (tierKeys.length) {
-            const open = evGroupRow(tbody, "tier", "by tier", tierKeys.length);
-            tierKeys.forEach((k) => evRow(tbody, "tier", open, k, ev.by_tier[k], minN));
-          }
-          // by_anchor === null means the anchor_type dimension is unavailable.
-          if (ev.by_anchor) {
-            const anchorKeys = Object.keys(ev.by_anchor);
-            if (anchorKeys.length) {
-              const open = evGroupRow(tbody, "anchor", "by anchor", anchorKeys.length);
-              anchorKeys.forEach((k) => evRow(tbody, "anchor", open, k, ev.by_anchor[k], minN));
-            }
-          }
-          // by_close_anchor === null means the close-anchor dimension is unavailable.
-          if (ev.by_close_anchor) {
-            const caKeys = Object.keys(ev.by_close_anchor);
-            if (caKeys.length) {
-              const open = evGroupRow(tbody, "close_anchor", "by close anchor", caKeys.length);
-              caKeys.forEach((k) => evRow(tbody, "close_anchor", open, k, ev.by_close_anchor[k], minN));
-            }
-          }
-          if (ev.by_sport) {
-            const spKeys = Object.keys(ev.by_sport);
-            if (spKeys.length) {
-              const open = evGroupRow(tbody, "ev_sport", "by sport", spKeys.length);
-              spKeys.forEach((k) => evRow(tbody, "ev_sport", open, SPORT_LABELS[k] || k, ev.by_sport[k], minN));
-            }
-          }
-          panel.style.display = "";
         }
 
         function fillSettled(perf) {
@@ -2765,7 +2562,14 @@
           });
         }
         function renderCalibration(cal) {
-          const el = $("calib-note");
+          const rows = $("calib-rows"), el = $("calib-note");
+          rows.replaceChildren();
+          const metric = (k, v) => {
+            const d = document.createElement("div"); d.className = "metric";
+            const a = document.createElement("span"); a.className = "k"; a.textContent = k;
+            const b = document.createElement("span"); b.className = "v"; b.textContent = v;
+            d.append(a, b); rows.appendChild(d);
+          };
           if (!cal) { el.textContent = "Calibration monitor unavailable in this payload."; return; }
           if (cal.insufficient) {
             el.textContent = "Insufficient data — " + (Number(cal.n) || 0) +
@@ -2773,11 +2577,13 @@
               "). The reliability read fills in as premium results accrue.";
             return;
           }
-          el.textContent = "Bet band odds " + odds2(cal.band_lo_odds) + "–" + odds2(cal.band_hi_odds) +
-            ": n=" + cal.n + ", claimed fair " + ratePct(cal.mean_pred) + " vs realized " + ratePct(cal.base_rate) +
-            " · ECE " + (cal.ece == null ? "—" : Number(cal.ece).toFixed(3)) +
-            " · Brier " + (cal.brier == null ? "—" : Number(cal.brier).toFixed(3)) +
-            ". Drift between claimed and realized flags a devig/calibration problem — monitor only.";
+          // one metric per row (no run-on sentence strip)
+          metric("Bet band · odds", odds2(cal.band_lo_odds) + "–" + odds2(cal.band_hi_odds));
+          metric("Settled in band · n", String(cal.n));
+          metric("Claimed fair vs realized", ratePct(cal.mean_pred) + " vs " + ratePct(cal.base_rate));
+          metric("ECE", cal.ece == null ? "—" : Number(cal.ece).toFixed(3));
+          metric("Brier", cal.brier == null ? "—" : Number(cal.brier).toFixed(3));
+          el.textContent = "Drift between claimed and realized flags a devig/calibration problem — monitor only.";
         }
 
         // ===== evidence-quality panel (close audit, /performance clv_quality) =====
@@ -2863,22 +2669,16 @@
           if (perf) {
             LAST_PERF = perf; LAST_PERF_AT = new Date();
             fillHero(perf, false); fillSettled(perf);
-            renderEvidence(perf.live_evidence);
             renderTierSplit(perf); renderBySport(perf); renderCalibration(perf.calibration);
             renderClvQuality(perf);
             PERF_CARDS.forEach((id) => setCardStale(id, false));
           } else if (LAST_PERF) {
             fillHero(LAST_PERF, true); fillSettled(LAST_PERF);
-            renderEvidence(LAST_PERF.live_evidence); // frozen payload, visibly demoted
             renderTierSplit(LAST_PERF); renderBySport(LAST_PERF); renderCalibration(LAST_PERF.calibration);
             renderClvQuality(LAST_PERF);
-            if (LAST_PERF.live_evidence && Number(LAST_PERF.live_evidence.n_settled)) {
-              $("evidence-title").textContent += " · STALE — /performance failing, frozen at " + fmtTime(LAST_PERF_AT);
-            }
             PERF_CARDS.forEach((id) => setCardStale(id, true, "GET /performance failing — frozen at " + fmtTime(LAST_PERF_AT), "STALE"));
           } else {
             fillHero(null, false);
-            renderEvidence(null);
             renderTierSplit(null); renderBySport(null); renderCalibration(null);
             renderClvQuality(null);
             ["c-settled", "c-record", "c-pnl"].forEach((id) => ($(id).textContent = "—"));
@@ -3074,13 +2874,14 @@
         }
 
         // ===== health chips + staleness + diagnostics ================
-        function chip(text, state, tip) {
-          const c = document.createElement("span"); c.className = "chip" + (state ? " " + state : "");
-          c.textContent = text; if (tip) c.title = tip; return c;
-        }
         function summarizeHealth(health, errLabel) {
           LAST_HEALTH = health;
-          const poll = $("chip-poll"), win = $("chip-window"), ing = $("ing-chips"), deps = $("chip-deps");
+          // Proxy-pool health rides the (auth-gated) full /health payload —
+          // eager + refreshed every cycle. It moved OFF /resolution/match-rate
+          // (2026-07-03): that endpoint is slow enough on live to hit the
+          // client fetch abort, which left this tile permanently "—".
+          renderProxyPool(health && health.proxy_pool ? health.proxy_pool : null);
+          const poll = $("chip-poll"), win = $("chip-window"), deps = $("chip-deps");
           if (!health) {
             HEALTH_DEGRADED = false;
             setChip("diag-ingest-verdict", "UNKNOWN", "warn",
@@ -3088,7 +2889,6 @@
             poll.className = "chip warn"; poll.textContent = "health: unavailable";
             poll.title = "GET /health failed (" + errLabel + ") — poll freshness cannot be assessed.";
             win.className = "chip"; win.textContent = "verified ≤ " + fmtDur(verifiedWindowMs());
-            ing.replaceChildren(chip("ingestion: unknown", "warn", "GET /health failed — snapshot counts unavailable"));
             deps.style.display = "none";
             setChip("sb-fresh", "Source Freshness ?", "warn", "GET /health failed — freshness unknown.");
             $("stale-banner").hidden = false;
@@ -3134,25 +2934,6 @@
             ? "Open picks count VERIFIED when re-priced within the value freshness window (" + MAX_ODDS_AGE_S + "s); beyond it they drop to UNVERIFIED."
             : "Verified window — /health hasn't reported the freshness window; using max(45m, 3×poll interval).";
 
-          ing.replaceChildren();
-          const keys = Object.keys(polls).sort();
-          if (!keys.length) ing.appendChild(chip("ingestion: no cycles yet", null, "no completed poll cycle since app start"));
-          keys.forEach((sport) => {
-            const info = polls[sport] || {};
-            const snaps = Number(info.snapshots || 0);
-            const matches = info.matches_found == null ? null : Number(info.matches_found);
-            const ageMin = Math.round((Date.now() - new Date(info.finished_at).getTime()) / 60000);
-            const tip = sport + " — last cycle " + (isNaN(ageMin) ? "?" : ageMin + "m ago") + ": " + snaps +
-              " odds snapshots" + (matches !== null ? " from " + matches + " listed matches" : "") + ", " +
-              Number(info.picks || 0) + " premium picks" + (info.volume_picks ? " (+" + Number(info.volume_picks) + " volume shadow)" : "");
-            if (info.degraded) {
-              ing.appendChild(chip(sport + ": 0 odds / " + (matches == null ? "?" : matches) + " m", "err",
-                "SCRAPER DEGRADED — " + (matches == null ? "matches" : matches + " matches") + " listed but ZERO odds parsed. Check app logs.\n\n" + tip));
-            } else {
-              ing.appendChild(chip(sport + ": " + snaps + " odds" + (matches !== null ? " / " + matches + "m" : ""),
-                snaps > 0 ? "ok" : null, tip));
-            }
-          });
           const up = health.upstream || {};
           if (up.error) { deps.style.display = ""; deps.className = "chip warn"; deps.textContent = "dep check failing"; deps.title = "dependency update check failing: " + up.error; }
           else deps.style.display = "none";
@@ -3194,6 +2975,23 @@
           });
         }
 
+        // Per-market blob summary (operator 2026-07-03): basketball carries
+        // 120+ market:count tokens (alt totals/handicaps) which destroyed the
+        // table layout. Show the top 5 by count + "(+N more markets, M rows)";
+        // the full list rides the cell's title tooltip.
+        function summarizePerMarket(pm) {
+          const entries = Object.entries(pm || {});
+          if (!entries.length) return { text: "—", title: "" };
+          entries.sort((a, b) => b[1] - a[1]);
+          const top = entries.slice(0, 5);
+          let text = top.map((e) => e[0] + ":" + e[1]).join(" ");
+          if (entries.length > top.length) {
+            const restRows = entries.slice(top.length).reduce((s, e) => s + Number(e[1] || 0), 0);
+            text += " (+" + (entries.length - top.length) + " more markets, " + restRows + " rows)";
+          }
+          return { text: text, title: entries.map((e) => e[0] + ":" + e[1]).join(" · ") };
+        }
+
         // per-sport Source Freshness table + the "why few premium picks" funnel
         function renderDiagnostics(health) {
           renderSportCards(health);
@@ -3223,9 +3021,10 @@
             td(tr, info.matches_found == null ? "—" : String(info.matches_found), "r");
             td(tr, String(Number(info.picks) || 0), "r");
             td(tr, String(Number(info.volume_picks) || 0), "r");
-            const pm = info.per_market || {};
-            const pmKeys = Object.keys(pm);
-            td(tr, pmKeys.length ? pmKeys.map((k) => k + ":" + pm[k]).join(" ") : "—");
+            const pmSum = summarizePerMarket(info.per_market);
+            const pmCell = td(tr, pmSum.text);
+            pmCell.style.whiteSpace = "nowrap"; // aligned columns; .tscroll scrolls
+            if (pmSum.title) pmCell.title = pmSum.title;
             let state = "ok", stateCls = null;
             if (info.degraded) { state = "DEGRADED — listed matches but zero odds parsed"; stateCls = "evinsuf"; }
             else if (!Number(info.snapshots)) { state = "no odds captured"; stateCls = "evinsuf"; }
@@ -3356,22 +3155,23 @@
           });
         }
 
-        // ===== coverage (lazy) ======================================
+        // ===== coverage (headline eager, table lazy) =================
         function setCoverageHeadline(a) {
-          const el = $("archive-count"); el.style.color = "var(--dim)";
           const cov = a && a.coverage_summary;
           const state = $("coverage-state");
           if (cov && typeof cov.headline === "string") {
-            el.textContent = cov.headline;
-            el.title = "Of upcoming scraped fixtures (next 7d), the share carrying a captured Betfair back price (" +
+            const insufficient = cov.betfair_rate == null && cov.pinnacle_rate == null;
+            setChip("archive-count", cov.headline, insufficient ? "warn" : null,
+              "Of upcoming scraped fixtures (next 7d), the share carrying a captured Betfair back price (" +
               (cov.betfair_captured || 0) + "/" + (cov.betfair_scraped || 0) + ") and a strict-matched Pinnacle close (" +
-              (cov.pinnacle_matched || 0) + "/" + (cov.pinnacle_scraped || 0) + ").";
-            state.hidden = !(cov.betfair_rate == null && cov.pinnacle_rate == null);
+              (cov.pinnacle_matched || 0) + "/" + (cov.pinnacle_scraped || 0) + ").");
+            state.hidden = !insufficient;
             return;
           }
           state.hidden = false; // Sharp anchor coverage is unavailable or insufficient.
           const total = Number(a && a.total) || 0;
-          el.textContent = (a ? a.matched : 0) + " / " + total + " matched"; el.removeAttribute("title");
+          setChip("archive-count", (a ? a.matched : 0) + " / " + total + " matched", null,
+            "Strict-matched picks over the Pinnacle sharp-close archive.");
         }
         function renderArchive() {
           const a = ARCHIVE; if (!a) return;
@@ -3413,10 +3213,12 @@
         }
         // Proxy pool — quarantine-registry health (indices only; null-safe:
         // an older backend simply omits proxy_pool and the tile stays "—").
+        // Sourced from the eager /health fetch (every cycle) — NOT from the
+        // slow /resolution/match-rate endpoint (root cause of the empty tile).
         function renderProxyPool(p) {
           const el = $("proxy-detail"); if (!el) return;
           if (!p || typeof p !== "object") {
-            setChip("diag-proxy-verdict", "—", null, "Proxy-pool health not reported by this backend.");
+            setChip("diag-proxy-verdict", "—", null, "Proxy-pool health not reported by /health yet.");
             el.textContent = "—";
             return;
           }
@@ -3437,8 +3239,9 @@
           el.textContent = text;
         }
         // Match Confidence — the strict cross-source event-match diagnostic
+        // (proxy-pool rendering moved to summarizeHealth — /health is the
+        // eager, every-cycle source; this payload's copy is ignored)
         function renderMatchDetail(a) {
-          renderProxyPool(a && a.proxy_pool ? a.proxy_pool : null);
           const el = $("match-detail");
           const tbody = $("match-rows"); tbody.replaceChildren();
           if (!a || !Number(a.total)) {
@@ -3471,16 +3274,23 @@
             tbody.appendChild(tr);
           }
         }
+        // /resolution/match-rate is the HEAVIEST endpoint (10s+ measured on
+        // live under scrape load): give it a longer abort than the default
+        // 15s — the old shared timeout silently killed the fetch, which left
+        // the coverage headline (and, before it moved to /health, the proxy
+        // tile) permanently empty.
+        const MATCHRATE_TIMEOUT_MS = 45000;
         async function loadArchive() {
-          ARCHIVE_LOADING = true; $("archive-count").style.color = "var(--dim)"; $("archive-count").textContent = "loading…";
+          ARCHIVE_LOADING = true; setChip("archive-count", "loading…");
           try {
-            const res = await fetchWithTimeout("/resolution/match-rate?days=180");
+            const res = await fetchWithTimeout("/resolution/match-rate?days=180", undefined, MATCHRATE_TIMEOUT_MS);
             if (res.status === 401) { throw authRequired(); }
             if (!res.ok) throw new Error("HTTP " + res.status);
             ARCHIVE = await res.json(); ARCHIVE_LOADED = true; ARCHIVE_ERR = false; renderArchive();
           } catch (err) {
             ARCHIVE_ERR = true;
-            $("archive-count").style.color = "var(--neg)"; $("archive-count").textContent = "coverage unavailable";
+            setChip("archive-count", "coverage unavailable", "err",
+              "GET /resolution/match-rate failed — expand the detail to retry.");
             $("coverage-state").hidden = false;
             renderWhyFew(null);
           } finally { ARCHIVE_LOADING = false; }
@@ -3489,7 +3299,7 @@
           if (ARCHIVE_LOADED || ARCHIVE_LOADING) { if (ARCHIVE) setCoverageHeadline(ARCHIVE); return; }
           ARCHIVE_LOADING = true;
           try {
-            const res = await fetchWithTimeout("/resolution/match-rate?days=180");
+            const res = await fetchWithTimeout("/resolution/match-rate?days=180", undefined, MATCHRATE_TIMEOUT_MS);
             if (res.status === 401) { throw authRequired(); }
             if (!res.ok) throw new Error("HTTP " + res.status);
             ARCHIVE = await res.json(); ARCHIVE_LOADED = true; ARCHIVE_ERR = false;
@@ -3499,16 +3309,17 @@
           } catch (err) {
             // header shows the unavailable state; expanding the panel retries
             ARCHIVE_ERR = true;
-            $("archive-count").textContent = "unavailable — expand to retry";
+            setChip("archive-count", "unavailable — expand to retry", "warn",
+              "GET /resolution/match-rate failed or timed out — it retries next cycle, or expand the detail to retry now.");
           }
           finally { ARCHIVE_LOADING = false; }
         }
 
         // ===== fetch loop ===========================================
         const FETCH_TIMEOUT_MS = 15000;
-        function fetchWithTimeout(url, opts) {
+        function fetchWithTimeout(url, opts, timeoutMs) {
           const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+          const timer = setTimeout(() => ctrl.abort(), timeoutMs || FETCH_TIMEOUT_MS);
           return fetch(url, Object.assign({}, opts, { signal: ctrl.signal })).finally(() => clearTimeout(timer));
         }
         const isTimeout = (e) => !!e && (e.name === "AbortError" || e.name === "TimeoutError");
@@ -3624,12 +3435,11 @@
             b.setAttribute("aria-current", String(b.dataset.view === view));
           });
           try { localStorage.setItem("pt_view", view); } catch (e) {}
-          // entering Games/Diagnostics auto-expands their primary panel
+          // entering Games auto-expands its primary panel. (Diagnostics no
+          // longer force-opens the coverage table — the tile is verdict-first:
+          // headline chip collapsed, [+] Detail on demand.)
           if (view === "games") {
             if ($("games-panel").hidden) $("toggle-games").click();
-          }
-          if (view === "diagnostics") {
-            if ($("archive-panel").hidden) $("toggle-archive").click();
           }
           window.scrollTo(0, 0);
         }
