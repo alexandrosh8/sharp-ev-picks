@@ -15,15 +15,7 @@ from app.resolution import EventCandidate, default_aliases, match_event, match_e
 
 # (feed form, pinnacle/canonical form, real opponent from the observed fixture)
 _BATCH: list[tuple[str, str, str]] = [
-    ('Annan', 'Annan Athletic', 'Gretna 2008'),
-    ('Din. Zagreb', 'Dinamo Zagreb', 'Grosuplje'),
-    ('Grasshoppers', 'Grasshopper Club Zurich', 'Cham'),
-    ("Queen's Park", 'Queens Park', 'Clyde'),
-    ('Minnesota 2', 'Minnesota United II', 'Los Angeles FC 2'),
-    ('NE Metrostars', 'MetroStars', 'Para'),
-    ('Playford Patriots', 'Playford City', 'FK Beograd'),
-    ('Redlands', 'Redlands United', 'Logan Lightning'),
-    ('Turriff Utd', 'Turriff United', 'Cove Rangers'),
+    ('Belconnen Utd.', 'Belconnen United', 'Canberra Juventus'),
 ]
 
 _KO = datetime(2026, 7, 2, 18, 0, tzinfo=UTC)

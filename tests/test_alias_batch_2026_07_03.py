@@ -24,6 +24,8 @@ _BATCH: list[tuple[str, str, str]] = [
     ("Playford Patriots", "Playford City", "FK Beograd"),
     ("Redlands", "Redlands United", "Logan Lightning"),
     ("Turriff Utd", "Turriff United", "Cove Rangers"),
+    # Follow-up same day (AC-0088): 2 exact co-occurrences, Turriff class.
+    ("Belconnen Utd.", "Belconnen United", "Canberra Juventus"),
 ]
 
 _KO = datetime(2026, 7, 2, 18, 0, tzinfo=UTC)
