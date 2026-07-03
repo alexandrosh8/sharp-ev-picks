@@ -813,6 +813,18 @@ class Settings(BaseSettings):
     # Empty = scrape from the host IP. Format: comma-separated host|port|user|pass
     # quads. SecretStr so the credentials stay out of logs/repr.
     scraper_proxy_pool: SecretStr = SecretStr("")
+    # --- Proxy-pool robustness (audit 2026-07-03 §5: "No quarantine anywhere —
+    # dead proxies are retried forever"). Shared in-process health registry
+    # (app/ingestion/proxy_health.py) used by all three rotation sites.
+    # Consecutive transport failures on ONE pool index before it is quarantined.
+    proxy_quarantine_threshold: int = Field(default=3, ge=1)
+    # Quarantine cooldown; after it the index is HALF-OPEN (single probe).
+    proxy_quarantine_seconds: int = Field(default=900, ge=1)
+    # Cap on the per-target Betfair feed failover sweep (audit: "the Betfair
+    # sweep tries all 14 slots (betfair_exchange.py:325) with no cap").
+    # Mirrors oddsportal.py's _MAX_PROXY_FAILOVER=3 pattern, wider because the
+    # feed GET is far cheaper than a Chromium listing relaunch.
+    proxy_max_failover_betfair: int = Field(default=6, ge=1)
     # When true, the settlement-time snapshot close ALSO injects the STRICT
     # cross-source match's Pinnacle ARCHIVE close (app/resolution, ADR-0013), so
     # incremental CLV anchors on a real sharp close. OFF by default: it changes

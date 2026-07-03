@@ -34,6 +34,7 @@ from app.ingestion.base import (
 # Sourced from the cycle orchestrator so both modules agree on one value. The
 # session module imports only from app.schemas, so this is not circular.
 from app.ingestion.oddsportal_json_session import PINNED_IMPERSONATE as _JSON_IMPERSONATE
+from app.ingestion.proxy_health import ProxyHealthRegistry, get_registry
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 
@@ -853,7 +854,12 @@ async def _default_json_scrape(
 
     from curl_cffi.requests import AsyncSession
 
-    session_kwargs: dict[str, Any] = {"impersonate": _JSON_IMPERSONATE}
+    # Explicit (connect, read) timeout: a dead proxy costs seconds, not the
+    # curl_cffi 30s default (see _JSON_FEED_TIMEOUT).
+    session_kwargs: dict[str, Any] = {
+        "impersonate": _JSON_IMPERSONATE,
+        "timeout": _JSON_FEED_TIMEOUT,
+    }
     if proxy is not None and proxy.url:
         # curl_cffi takes credentials inline in the proxy URL; build it here at
         # the call boundary (never logged) from the separated ScraperProxy
@@ -895,6 +901,16 @@ def _proxy_with_creds(proxy: ScraperProxy) -> str:
 # proxies and starve the rest of the scrape cycle.
 _MAX_PROXY_FAILOVER = 3
 
+# Explicit curl_cffi timeout for the JSON-feed sessions (audit 2026-07-03 §5:
+# "no explicit timeout passed — curl_cffi default 30 verified"; a dead proxy
+# then stalled a slot the full 30s). curl_cffi tuple semantics (verified in
+# curl_cffi 0.15.0, requests/utils.py): (connect, read) maps to
+# CONNECTTIMEOUT_MS=connect and TIMEOUT_MS=connect+read TOTAL — so a dead
+# proxy (connect refused/blackholed) now costs 8s, and a stalled transfer at
+# most 33s total. The JSON path's tenacity budget (4 attempts, backoff <=8s)
+# stays coherent: worst case per match stays bounded at ~2.5 min.
+_JSON_FEED_TIMEOUT: tuple[float, float] = (8.0, 25.0)
+
 
 class OddsPortalLoader:
     """OddsLoader over OddsHarvester's upcoming-matches scraper."""
@@ -921,6 +937,7 @@ class OddsPortalLoader:
         listing_scrape_fn: ScrapeFn | None = None,
         json_concurrency: int = 8,
         listing_concurrency: int = 1,
+        proxy_health: ProxyHealthRegistry | None = None,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -972,6 +989,12 @@ class OddsPortalLoader:
         # travel via separate proxy_user/proxy_pass kwargs, never in the URL.
         self._proxy_pool = tuple(proxy_pool)
         self._proxy_cursor = 0
+        # Shared per-index health/quarantine registry (audit 2026-07-03 §5):
+        # quarantined indices are SKIPPED in every rotation below; when ALL are
+        # quarantined the registry fails OPEN to the full pool. Injectable for
+        # tests; defaults to the process singleton so the Betfair capture and
+        # this loader share one failure memory for the same pool.
+        self._proxy_health = proxy_health if proxy_health is not None else get_registry()
         # Liveness contract read by app/pipeline._record_poll: listing count
         # of the last fetch_odds per sport key. "Matches listed but zero odds
         # parsed" is the selector-break/anti-bot signature — the pipeline
@@ -1100,17 +1123,29 @@ class OddsPortalLoader:
 
         return BookmakerRegistry()
 
-    def _next_proxy(self) -> ScraperProxy | None:
-        """One rotating proxy for a JSON per-match fetch (advances the cursor),
-        or None when the pool is empty (direct host IP). Mirrors the Playwright
-        failover rotation so both paths share the pool fairly; creds stay in the
+    def _next_proxy_indexed(self) -> tuple[int, ScraperProxy] | None:
+        """One rotating proxy AND its pool index for a JSON per-match fetch, or
+        None when the pool is empty (direct host IP). Quarantined indices are
+        SKIPPED via the shared health registry (fail-open to plain round-robin
+        when every index is quarantined — never worse than before). The cursor
+        advances past the picked index so rotation stays fair; creds stay in the
         ScraperProxy fields and are only inlined at the request boundary."""
         pool = self._proxy_pool
         if not pool:
             return None
-        proxy = pool[self._proxy_cursor % len(pool)]
-        self._proxy_cursor = (self._proxy_cursor + 1) % len(pool)
-        return proxy
+        n = len(pool)
+        order = [(self._proxy_cursor + offset) % n for offset in range(n)]
+        idx = self._proxy_health.select(order)
+        if idx is None:  # unreachable with a non-empty pool; keep mypy honest
+            idx = order[0]
+        self._proxy_cursor = (idx + 1) % n
+        return idx, pool[idx]
+
+    def _next_proxy(self) -> ScraperProxy | None:
+        """`_next_proxy_indexed` without the index (callers that cannot
+        attribute an outcome to a slot, e.g. the cycle-level session)."""
+        picked = self._next_proxy_indexed()
+        return picked[1] if picked is not None else None
 
     async def _json_odds_for_url(
         self,
@@ -1135,22 +1170,30 @@ class OddsPortalLoader:
         # (no Playwright fallback); they carry no real match page.
         if not match_url.startswith("http"):
             return None
+        picked = self._next_proxy_indexed()
         try:
             snaps = await self._json_scrape(
                 match_url,
                 markets=markets,
                 directory=self._directory,
                 now=now,
-                proxy=self._next_proxy(),
+                proxy=picked[1] if picked is not None else None,
                 registry=registry,
             )
         except Exception as exc:  # decrypt / HTTP / TLS / envelope -> scrape gap
+            # Attribute the failure to the pool index (audit §5: JSON-path
+            # failures weren't attributed to a proxy). Class name only.
+            if picked is not None:
+                self._proxy_health.record_failure(picked[0], type(exc).__name__)
             logger.info(
                 "oddsportal JSON feed failed for a match (%s) — skipping it "
                 "(scrape gap, no fallback)",
                 type(exc).__name__,
             )
             return None
+        if picked is not None:
+            # Transport-clean (even if the feed was empty) — the proxy worked.
+            self._proxy_health.record_success(picked[0])
         if not snaps:
             # Off-window / empty feed / unresolved registry -> scrape gap (skip).
             return None
@@ -1181,6 +1224,9 @@ class OddsPortalLoader:
             # max_clients MUST be >= the semaphore N or curl_cffi serialises the
             # surplus in-flight handles, silently defeating the concurrency.
             "max_clients": max(self._json_concurrency, 10),
+            # Explicit (connect, read) timeout — a dead/stalled hop costs
+            # seconds, not curl_cffi's 30s default (see _JSON_FEED_TIMEOUT).
+            "timeout": _JSON_FEED_TIMEOUT,
         }
         proxy = self._next_proxy()
         if proxy is not None and proxy.url:
@@ -1219,11 +1265,25 @@ class OddsPortalLoader:
             "now": now,
             "registry": registry,
         }
+        picked: tuple[int, ScraperProxy] | None = None
         if session is not None:
             kwargs["session"] = session
         else:
-            kwargs["proxy"] = self._next_proxy()
-        snaps = await self._json_scrape(match_url, **kwargs)
+            # Per-match rotating proxy: quarantined indices are skipped and the
+            # outcome is attributed to the slot (audit §5 — JSON fan-out
+            # failures weren't attributed to a proxy index). tenacity re-invokes
+            # this per attempt, so a transient failure fails over to the NEXT
+            # healthy index rather than retrying the same dead IP.
+            picked = self._next_proxy_indexed()
+            kwargs["proxy"] = picked[1] if picked is not None else None
+        try:
+            snaps = await self._json_scrape(match_url, **kwargs)
+        except Exception as exc:
+            if picked is not None:
+                self._proxy_health.record_failure(picked[0], type(exc).__name__)
+            raise
+        if picked is not None:
+            self._proxy_health.record_success(picked[0])
         return list(snaps)
 
     async def _json_cycle_snapshots(
@@ -1412,12 +1472,17 @@ class OddsPortalLoader:
         if not pool:
             return await scrape(**kwargs)
         n = len(pool)
-        tries = min(n, _MAX_PROXY_FAILOVER)
         pinned = proxy_start_index is not None
         base = self._proxy_cursor if proxy_start_index is None else proxy_start_index
+        # Quarantined indices are SKIPPED (audit §5: "the dead slot re-enters
+        # next lap"); the registry fails OPEN to the full rotation when every
+        # index is quarantined, so this can never do worse than the old sweep.
+        candidates = self._proxy_health.filter_rotation([(base + k) % n for k in range(n)])
+        tries = min(len(candidates), _MAX_PROXY_FAILOVER)
         result: Any = None
+        idx = base
         for attempt in range(tries):
-            idx = (base + attempt) % n
+            idx = candidates[attempt]
             proxy = pool[idx]
             try:
                 result = await scrape(
@@ -1427,6 +1492,7 @@ class OddsPortalLoader:
                     proxy_pass=proxy.password,
                 )
             except Exception as exc:  # network / anti-bot / timeout -> try next proxy
+                self._proxy_health.record_failure(idx, type(exc).__name__)
                 logger.warning(
                     "oddsportal scrape via proxy #%d failed (%s); trying next",
                     idx,
@@ -1434,6 +1500,9 @@ class OddsPortalLoader:
                 )
                 result = None
                 continue
+            # Exception-free = the proxy TRANSPORT worked (a 0-result is a
+            # slate/page question, not a dead proxy) — count it healthy.
+            self._proxy_health.record_success(idx)
             if getattr(result, "success", None):
                 if not pinned:
                     self._proxy_cursor = (idx + 1) % n  # advance past the winner
@@ -1454,7 +1523,7 @@ class OddsPortalLoader:
                 "oddsportal match scrape via proxy #%d returned 0 results; trying next", idx
             )
         if not pinned:
-            self._proxy_cursor = (self._proxy_cursor + tries) % n  # skip the proxies just tried
+            self._proxy_cursor = (idx + 1) % n  # advance past the last index tried
         return result
 
     async def fetch_odds(self, sport_key: str) -> list[OddsSnapshotIn]:

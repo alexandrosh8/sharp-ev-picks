@@ -1049,6 +1049,16 @@ async def resolution_match_rate(
         session,
         ttl_seconds=float(_get_settings().value_betfair_staleness_verdict_ttl_seconds),
     )
+    # Proxy-pool health (audit 2026-07-03 §5): the shared quarantine registry,
+    # REDACTED — pool indices, counters, and exception class names only; never
+    # a proxy URL/IP/credential. Auth-gated with the rest of this endpoint.
+    # A degraded pool slows the scrape but the 600s odds-age gate discards
+    # stale candidates — the payload's fixed wording says exactly that.
+    from app.ingestion.proxy_health import get_registry as _get_proxy_registry
+
+    report["proxy_pool"] = _get_proxy_registry().diagnostics(
+        configured=len(_get_settings().scraper_proxies())
+    )
     return report
 
 

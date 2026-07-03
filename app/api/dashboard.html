@@ -1341,6 +1341,14 @@
             </div>
           </section>
 
+          <section class="tile" id="tile-proxypool" aria-labelledby="proxy-h">
+            <div class="tile-h">
+              <h3 id="proxy-h">Proxy pool · scrape egress health</h3>
+              <span class="chip" id="diag-proxy-verdict">—</span>
+            </div>
+            <p class="muted" id="proxy-detail" style="margin:4px 0 0">—</p>
+          </section>
+
           <section class="tile" id="tile-matchconf" aria-labelledby="match-h">
             <div class="tile-h">
               <h3 id="match-h">Match Confidence · strict cross-source event matching</h3>
@@ -3403,8 +3411,34 @@
           renderMatchDetail(a);
           renderWhyFew(null);
         }
+        // Proxy pool — quarantine-registry health (indices only; null-safe:
+        // an older backend simply omits proxy_pool and the tile stays "—").
+        function renderProxyPool(p) {
+          const el = $("proxy-detail"); if (!el) return;
+          if (!p || typeof p !== "object") {
+            setChip("diag-proxy-verdict", "—", null, "Proxy-pool health not reported by this backend.");
+            el.textContent = "—";
+            return;
+          }
+          const degraded = p.verdict === "Proxy pool degraded";
+          setChip("diag-proxy-verdict", degraded ? "DEGRADED" : "OK", degraded ? "warn" : "ok", p.verdict || "");
+          const bits = [
+            (Number(p.healthy) || 0) + "/" + (Number(p.configured) || 0) + " proxies healthy",
+            (Number(p.quarantined) || 0) + " quarantined" + (Number(p.dead) ? " (" + Number(p.dead) + " dead)" : ""),
+            "failovers: " + (Number(p.failovers_15m) || 0) + " in 15m · " + (Number(p.failovers_1h) || 0) + " in 1h",
+          ];
+          if (p.dominant_failure_class) bits.push("dominant failure: " + p.dominant_failure_class);
+          let text = bits.join(" · ") + ".";
+          if (degraded) {
+            // Operator-spec wording from the backend, verbatim: a degraded pool
+            // slows scraping; the freshness gate discards stale candidates.
+            text += " " + [p.freshness, p.picks, p.action].filter(Boolean).join(". ") + ".";
+          }
+          el.textContent = text;
+        }
         // Match Confidence — the strict cross-source event-match diagnostic
         function renderMatchDetail(a) {
+          renderProxyPool(a && a.proxy_pool ? a.proxy_pool : null);
           const el = $("match-detail");
           const tbody = $("match-rows"); tbody.replaceChildren();
           if (!a || !Number(a.total)) {

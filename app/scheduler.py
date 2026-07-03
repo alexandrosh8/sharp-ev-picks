@@ -355,6 +355,16 @@ def build_scheduler(
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
 
+    # Apply the Settings-derived proxy quarantine knobs to the process-shared
+    # health registry (audit 2026-07-03 §5) BEFORE any rotation site is built —
+    # env is read only in app/config.py; the values travel as plain args.
+    from app.ingestion.proxy_health import configure_registry
+
+    configure_registry(
+        threshold=settings.proxy_quarantine_threshold,
+        cooldown_seconds=float(settings.proxy_quarantine_seconds),
+    )
+
     loader: OddsLoader | None = None
     model: ProbabilityModel = NullModel()
     sport_keys: tuple[str, ...] = ()
@@ -1024,6 +1034,9 @@ def build_scheduler(
             reader=BetfairExchangeReader(
                 min_liquidity=settings.betfair_exchange_min_liquidity,
                 proxy_pool=settings.scraper_proxies(),
+                # Cap the per-target failover sweep (audit §5: it tried all 14
+                # slots) — PROXY_MAX_FAILOVER_BETFAIR, default 6.
+                max_failover=settings.proxy_max_failover_betfair,
             ),
             session_factory=session_factory,
             targets_fn=_betfair_targets,

@@ -84,6 +84,17 @@ def _isolate_login_throttle() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_proxy_health_registry() -> None:
+    """The shared proxy-health registry (app/ingestion/proxy_health.py) is
+    module-global in-process state; failover tests that fail the same pool
+    index in several tests would otherwise accumulate consecutive failures
+    across tests, quarantine the slot, and change later tests' rotation."""
+    from app.ingestion.proxy_health import reset_registry_for_tests
+
+    reset_registry_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_settlement_feed_cache() -> None:
     """The settle-feed TTL cache (WP7) is module-global in-process state keyed
     by feed config; an earlier test's SUCCESSFUL fetch would otherwise be

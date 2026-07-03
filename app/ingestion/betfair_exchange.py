@@ -69,6 +69,7 @@ from app.ingestion.oddsportal_json import (
     decrypt_feed_body,
     extract_bootstrap_tokens,
 )
+from app.ingestion.proxy_health import ProxyHealthRegistry, get_registry
 from app.schemas.odds import OddsSnapshotIn
 
 if TYPE_CHECKING:
@@ -253,6 +254,11 @@ _FEED_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
     "Accept": "application/json,text/plain,*/*",
 }
+# Explicit curl_cffi session timeout (audit 2026-07-03 §5: no timeout was
+# passed, so a dead proxy stalled the sequential target loop 30s per hit).
+# Tuple semantics verified in curl_cffi 0.15.0 (requests/utils.py): (connect,
+# read) -> CONNECTTIMEOUT_MS=connect, TIMEOUT_MS=connect+read TOTAL.
+_FEED_TIMEOUT: tuple[float, float] = (8.0, 25.0)
 
 
 class BetfairExchangeReader:
@@ -273,6 +279,8 @@ class BetfairExchangeReader:
         feed_loader: FeedLoader | None = None,
         geo: str = "GB",
         lang: str = "en",
+        max_failover: int = 6,
+        proxy_health: ProxyHealthRegistry | None = None,
     ) -> None:
         self._min_liquidity = min_liquidity
         self._proxy_pool = tuple(proxy_pool)
@@ -280,6 +288,15 @@ class BetfairExchangeReader:
         self._feed_loader = feed_loader or self._network_load
         self._geo = geo
         self._lang = lang
+        # Cap on the per-target failover sweep (audit 2026-07-03 §5: "the
+        # Betfair sweep tries all 14 slots (betfair_exchange.py:325) with no
+        # cap") — mirrors oddsportal.py's _MAX_PROXY_FAILOVER pattern. Wired
+        # from Settings.proxy_max_failover_betfair at the composition root.
+        self._max_failover = max(1, max_failover)
+        # Shared per-index health/quarantine registry (same pool indices as the
+        # main scrape, so a slot dead there is skipped here too). Injectable
+        # for tests; defaults to the process singleton.
+        self._proxy_health = proxy_health if proxy_health is not None else get_registry()
 
     async def read_snapshots(
         self, target: MatchTarget, *, sport: str, now: datetime
@@ -323,10 +340,22 @@ class BetfairExchangeReader:
         pool: Sequence[ScraperProxy | None] = self._proxy_pool or (None,)
         n = len(pool)
         rotation = [(self._proxy_cursor + offset) % n for offset in range(n)]
+        if self._proxy_pool:
+            # Skip quarantined indices (shared registry; fails OPEN to the full
+            # rotation when all are quarantined), then CAP the sweep (audit §5:
+            # "the Betfair sweep tries all 14 slots ... with no cap" — each dead
+            # hit stalled the sequential per-target loop).
+            rotation = self._proxy_health.filter_rotation(rotation)[: self._max_failover]
         last_exc: Exception | None = None
         for slot in rotation:
             proxy = pool[slot]
-            session_kwargs: dict[str, Any] = {"impersonate": _IMPERSONATE}
+            # Explicit (connect, read) timeout: curl_cffi 0.15.0 maps the tuple
+            # to CONNECTTIMEOUT_MS=8s and TIMEOUT_MS=33s TOTAL (connect+read) —
+            # a dead proxy costs 8s, not the 30s library default (audit §5).
+            session_kwargs: dict[str, Any] = {
+                "impersonate": _IMPERSONATE,
+                "timeout": _FEED_TIMEOUT,
+            }
             if proxy is not None and proxy.url:
                 # Credentials are inlined ONLY at the request boundary, never
                 # logged (the loader's logs are type/index-only).
@@ -335,10 +364,14 @@ class BetfairExchangeReader:
             try:
                 async with AsyncSession(**session_kwargs) as session:
                     feeds = await self._load_with_session(session, match_url, markets)
+                if self._proxy_pool:
+                    self._proxy_health.record_success(slot)
                 self._proxy_cursor = (slot + 1) % n
                 return feeds
             except Exception as exc:  # network / TLS / timeout -> failover
                 last_exc = exc
+                if self._proxy_pool:
+                    self._proxy_health.record_failure(slot, type(exc).__name__)
                 logger.warning(
                     "betfair exchange feed load via proxy slot %d failed (%s); trying next",
                     slot if self._proxy_pool else -1,
@@ -347,7 +380,7 @@ class BetfairExchangeReader:
                 continue
         if last_exc is not None:
             raise BetfairExchangeError(
-                f"betfair exchange feed load failed after {n} proxy attempts "
+                f"betfair exchange feed load failed after {len(rotation)} proxy attempts "
                 f"({type(last_exc).__name__})"
             ) from last_exc
         return []
