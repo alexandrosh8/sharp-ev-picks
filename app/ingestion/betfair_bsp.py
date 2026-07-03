@@ -799,6 +799,11 @@ def attach_betfair_close(
             new_row["PSCD"] = str(close.draw_close)
             new_row["MaxCD"] = str(close.draw_close)
         new_row["BetfairMarketId"] = match.ref
+        # Exact UTC kickoff from the Betfair market definition — provenance for
+        # the VALIDATION-ONLY ARCADIA anchor join (fd Date alone is day-grain).
+        matched_ko = by_ref[match.ref].kickoff_utc
+        if matched_ko is not None:
+            new_row["_betfair_kickoff_utc"] = matched_ko.isoformat()
         joined.append(new_row)
 
     return joined, JoinStats(
@@ -892,6 +897,9 @@ def attach_betfair_ou_close(
         new_row["MaxC>2.5"] = str(ou.over_close)
         new_row["MaxC<2.5"] = str(ou.under_close)
         new_row["BetfairOuMarketId"] = match.ref
+        matched_ou_ko = by_ref[match.ref].kickoff_utc
+        if matched_ou_ko is not None:
+            new_row["_betfair_kickoff_utc"] = matched_ou_ko.isoformat()
         joined.append(new_row)
 
     return joined, JoinStats(

@@ -88,3 +88,102 @@ discipline: no re-runs, no tuning on this data. H1-H6 remain at shipped
 conservative settings. The 2026-Jan..Jun slate is SPENT for selection AND
 evaluation; the next single-shot requires a later, coverage-verified slate
 (2026-H2 or beyond) with the fill-coverage anomaly understood first.
+
+
+## 2026-07-03 AMENDMENT — H2 validation protocol (ARCADIA anchor), FROZEN
+
+Prepared ahead of data per operator instruction; the future H2 run is
+mechanical against these rules. Code mirror (constants + fail-closed logic):
+`app/backtesting/arcadia_anchor.py`; exporter/preflight:
+`scripts/arcadia_anchor_export.py`; wiring: `scripts/value_backtest.py
+--anchor-dataset` (betfair-bsp source only). **Operator sign-off on this
+amendment is required BEFORE the H2 slate exists.** Changing any frozen value
+below after sign-off voids the pre-registration.
+
+### Independent sharp-anchor source
+- **Source:** the project's own Pinnacle ARCADIA capture in `odds_snapshots`
+  (`pinnacle_soccer` namespace; `anchor_source = "pinnacle_arcadia"`).
+  Independent of the Betfair BSP under evaluation (different venue).
+  football-data PS* columns are DEAD after 2026-01-15 and are replaced, not
+  supplemented. Betfair non-BSP snapshots are NOT a permitted anchor
+  (same-market circularity).
+
+### Eligibility (frozen)
+- **Date range:** kickoffs 2026-07-01 .. 2026-12-31 (UTC).
+- **Sports:** soccer only.
+- **Leagues:** any league present in BOTH the ARCADIA capture and the BSP
+  archive that survives the fail-closed event match — no league whitelist;
+  league evidence is enforced via the country-token contradiction veto plus
+  full participant+kickoff identity (stricter than free-text league equality).
+- **Markets:** `1x2` (from `h2h`, 3 outcomes) and `ou25` (from
+  `over_under_2_5`, 2 outcomes), period = full match. All other market keys
+  are exported as rejected rows (`unsupported_market`).
+
+### Anchor definition + freshness (frozen)
+- **Anchor** = LAST complete outcome set (all outcomes at one `captured_at`)
+  with `3600s <= kickoff - captured_at <= 86400s`. Older ⇒ `anchor_stale`;
+  none in window ⇒ `anchor_missing`; superseded sets are exported rejected.
+- **Same-source close (secondary only):** last complete set in the final hour
+  (`0 <= kickoff - captured_at < 3600s`). It NEVER substitutes the BSP close
+  in the headline CLV (same-source exclusion), and is excluded entirely when
+  separated from the anchor by < 1800s (`close_tautological`).
+- `freshness_seconds = kickoff - captured_at` rides every row.
+
+### Event/market matching (fail-closed; frozen)
+- Event: `match_event_hardened_scored`, orientation LOCKED
+  (`allow_orientation_flip=False`), kickoff window **±60 min** (vs the live
+  360-min accept drift), one-sided women/youth/reserve marker = veto,
+  country-token league contradiction = veto, ≥2 acceptable source events =
+  `event_ambiguous` reject.
+- Market: exact `market_type` + `period` + `line` + `selection` equality.
+  1x2 selections resolve by alias-canonical equality only (never fuzzy);
+  unresolved = rejected.
+- **Hard rejections (closed vocabulary):** `unsupported_market`,
+  `incomplete_outcome_set`, `selection_unresolved`, `window_ineligible`,
+  `sport_ineligible`, `anchor_stale`, `anchor_superseded`, `anchor_missing`,
+  `close_tautological`, `event_unmatched`, `event_ambiguous`,
+  `kickoff_out_of_window`, `market_mismatch`, `line_mismatch`,
+  `selection_mismatch`. Missing/stale/ambiguous anchors are REJECTIONS —
+  never a fallback price. Rejected rows are exported with reasons, never
+  silently dropped.
+
+### Metrics + acceptance (unchanged from the base ADR)
+- Per market, HELD-OUT only: n (rows/clusters), mean `clv_log` ± cluster-
+  robust SE (ddof=1) and 2-SE CI, bootstrap ROI CI vs baseline, PBO/CSCV;
+  H1 band check; per-month join/anchor coverage in the header.
+- **Acceptance:** CI lower bound > 0 AND ROI CI not worse than baseline AND
+  n ≥ 150 per market AND PBO not elevated. **Failure conditions:** any
+  acceptance clause failing, preflight not PASS, any contamination-guard
+  violation, or per-month anchor coverage < 80% in any test month.
+
+### Required artifacts + hashes (frozen)
+- Exporter dataset CSV (all rows incl. rejected) + `.manifest.json` (git SHA,
+  dataset sha256, config sha256, environment fingerprint, window, counts) +
+  `.preflight.json` marker — under `data/validation/arcadia/`, never
+  overwritten.
+- **Config hash (frozen):**
+  `6abe1a319fc4abfc3df0dbff8dfaf7aecce6b3c94eaae993b14efaa1fbceb20c`
+  (runbook recipe over value_devig=power, value_moneyline_max_odds=5.0,
+  value_min_edge=0.03, value_volume_min_edge=0.015, fractional_kelly=0.25).
+  A drifted live config is a guard STOP.
+- **Environment hash:** python version + platform fingerprint in the
+  manifest; the run header must record `uv --version` and `git rev-parse
+  HEAD` on a clean tree.
+- **Spent-slate guard (sha256 hard STOPs):** data.tar `02dfcbfd62c733da…`,
+  data (1).tar `7315dcbf1ccdabe0…`, data (2).tar `9123d3203f79e33a…`,
+  combined_train2025_holdout2026.tar `dbcc3000dbf6dabe…` (full values in
+  `app/backtesting/arcadia_anchor.py::SPENT_DATA_SHA256S`).
+
+### Preflight (mandatory; DO-NOT-RUN gate)
+`scripts/arcadia_anchor_export.py preflight` must PASS before any validation
+run: per-month event/market coverage (≥300 usable events/month), usable +
+rejected counts with reasons, missing-anchor rate ≤50%, stale-anchor rate
+≤20%, match-confidence distribution, expected sample size (frozen pessimistic
+5% bet-rate multiplier) vs the n≥150 bar. Any failure or guard violation ⇒
+`DO-NOT-RUN`.
+
+### Open decision deferred to sign-off (NOT frozen here)
+The train/test split design for H2 (within-H2 split date vs 2025-train with a
+cross-anchor-source caveat) — ARCADIA history begins 2026-06-17, so no
+same-anchor train window predates H2. To be frozen at operator sign-off,
+before the slate exists.

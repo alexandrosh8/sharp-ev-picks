@@ -33,6 +33,15 @@ exists so the eventual run is mechanical, not improvised.
 4. **Symlink trap:** `data/betfair/bsp/incoming/data2026.tar` is a symlink to
    the SPENT `data (2).tar` (sha256 `9123d320…`) — do not mistake it for a
    fresh slate; DO-NOT-RUN check 3's sha256 lookup catches it.
+5. **The H2 tooling now EXISTS (built 2026-07-03, ADR-0019 amendment):**
+   frozen protocol + fail-closed matcher + guards in
+   `app/backtesting/arcadia_anchor.py`; exporter/preflight in
+   `scripts/arcadia_anchor_export.py` (`export` then `preflight` — the
+   preflight must print PASS, else DO-NOT-RUN); the future single-shot adds
+   `--anchor-dataset <csv>` to the command below (betfair-bsp source only;
+   spent-slate sha256 + frozen-config-hash + preflight-marker guards refuse
+   otherwise). Operator sign-off on the amendment (incl. the H2 split
+   design) is still REQUIRED before the run.
 
 ---
 

@@ -52,7 +52,7 @@ from app.ingestion.oddspapi import OddsPapiGame, load_oddspapi_dir
 from app.ingestion.sbr_nba import load_sbr_nba_dir
 from app.ingestion.tennis_data import TennisMatchRow, load_tennis_dir
 from app.probabilities.devig import DevigMethod, devig
-from app.resolution.matching import default_aliases
+from app.resolution.matching import AliasTable, default_aliases
 
 
 def _f(x: object) -> float | None:
@@ -597,6 +597,125 @@ async def run_beatthebookie(args: argparse.Namespace) -> None:
     )
 
 
+def _arcadia_guard_and_load(args: argparse.Namespace, tar_path: Path | None) -> list:
+    """VALIDATION-ONLY: load the ARCADIA anchor dataset behind the ADR-0019
+    contamination guards. Any violation prints DO-NOT-RUN and exits — the
+    guards are a hard STOP, never a warning."""
+    import hashlib as _hashlib
+    import json as _json
+
+    from app.backtesting.arcadia_anchor import (
+        evaluate_contamination_guards,
+        read_dataset,
+    )
+
+    dataset_path = Path(args.anchor_dataset)
+    marker_path = dataset_path.with_suffix(".preflight.json")
+    manifest_path = dataset_path.with_suffix(".manifest.json")
+    preflight = _json.loads(marker_path.read_text()) if marker_path.is_file() else None
+    manifest = _json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+    dataset_sha = (
+        _hashlib.sha256(dataset_path.read_bytes()).hexdigest() if dataset_path.is_file() else None
+    )
+    input_shas: list[str] = []
+    if tar_path is not None and tar_path.is_file():
+        print(f"[arcadia] hashing validation input {tar_path} (spent-slate guard)...")
+        digest = _hashlib.sha256()
+        with tar_path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 22), b""):
+                digest.update(chunk)
+        input_shas.append(digest.hexdigest())
+
+    def _config_sha256() -> str:
+        from app.config import Settings
+
+        s = Settings()
+        keys = (
+            "value_devig",
+            "value_moneyline_max_odds",
+            "value_min_edge",
+            "value_volume_min_edge",
+            "fractional_kelly",
+        )
+        payload = _json.dumps({k: str(getattr(s, k)) for k in keys}, sort_keys=True)
+        return _hashlib.sha256(payload.encode()).hexdigest()
+
+    violations = evaluate_contamination_guards(
+        dataset_path=dataset_path,
+        dataset_sha256=dataset_sha,
+        input_sha256s=input_shas,
+        window_start=(
+            date.fromisoformat(manifest["window_start"]) if "window_start" in manifest else None
+        ),
+        window_end=(
+            date.fromisoformat(manifest["window_end"]) if "window_end" in manifest else None
+        ),
+        config_sha256=_config_sha256(),
+        output_dir=dataset_path.parent if dataset_path.parent.name else None,
+        preflight=preflight,
+        preflight_dataset_sha256=(preflight or {}).get("dataset_sha256"),
+        anchor_source=manifest.get("anchor_source", "pinnacle_arcadia"),
+    )
+    if violations:
+        print("\nDO-NOT-RUN — ARCADIA anchor contamination guards tripped:")
+        for v in violations:
+            print(f"  - {v}")
+        raise SystemExit(2)
+    rows = read_dataset(dataset_path)
+    print(f"[arcadia] anchor dataset loaded: {len(rows)} rows (guards clear)")
+    return rows
+
+
+def _apply_arcadia_anchor(
+    joined_rows: list[dict],
+    anchor_rows: list,
+    *,
+    aliases: AliasTable,
+    market_type: str,
+) -> list[dict]:
+    """Replace the (dead post-2026-01) football-data PS* anchor columns with
+    fail-closed-matched ARCADIA anchors. Rows without an accepted anchor lose
+    the anchor columns and fall out of the bet universe — no fake price."""
+    from datetime import datetime as _dt
+
+    from app.backtesting.arcadia_anchor import ValidationFixture, attach_arcadia_anchor
+
+    column_map = (
+        {"home": "PSH", "draw": "PSD", "away": "PSA"}
+        if market_type == "1x2"
+        else {"over": "P>2.5", "under": "P<2.5"}
+    )
+
+    def _fixture(row: dict, selection: str) -> ValidationFixture | None:
+        raw_ko = row.get("_betfair_kickoff_utc")
+        if not raw_ko:
+            return None  # no exact UTC kickoff -> fail closed
+        return ValidationFixture(
+            sport="soccer",
+            league=str(row.get("Div") or ""),
+            home=str(row.get("HomeTeam") or ""),
+            away=str(row.get("AwayTeam") or ""),
+            kickoff=_dt.fromisoformat(raw_ko),
+            market_type=market_type,
+            period="match",
+            line=2.5 if market_type == "ou25" else None,
+            selection=selection,
+        )
+
+    attached, reasons = attach_arcadia_anchor(
+        joined_rows,
+        anchor_rows,
+        aliases=aliases,
+        fixture_builder=_fixture,
+        column_map=column_map,
+    )
+    print(
+        f"[arcadia:{market_type}] anchor attached to {attached}/{len(joined_rows)} rows; "
+        f"rejections: {dict(reasons.most_common())}"
+    )
+    return joined_rows
+
+
 async def run_betfair_bsp(args: argparse.Namespace) -> None:
     """Backtest CLV vs a TRUE SHARP CLOSE — the Betfair Starting Price / settled
     pre-in-play exchange close — joined onto football-data PRE-MATCH prices.
@@ -751,13 +870,31 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
             test_label=f"test ({label})",
         )
 
+    # --- VALIDATION-ONLY ARCADIA anchor override (ADR-0019 2026-07-03) ------
+    # football-data's PS* Pinnacle columns are dead after 2026-01-15; for the
+    # H2 slate the pre-registered anchor is the warehouse's own ARCADIA
+    # capture. Loaded ONLY behind --anchor-dataset + the contamination guards
+    # (spent-slate sha256, frozen config hash, preflight PASS marker). Without
+    # the flag this path is byte-identical to before.
+    arcadia_rows: list | None = None
+    if getattr(args, "anchor_dataset", ""):
+        arcadia_rows = _arcadia_guard_and_load(args, tar_path)
+
     # --- 1x2 (MATCH_ODDS) — the committed sharp-CLV anchor path -------------
     joined_1x2, stats_1x2 = attach_betfair_close(fd_rows, markets, aliases=aliases)
+    if arcadia_rows is not None:
+        joined_1x2 = _apply_arcadia_anchor(
+            joined_1x2, arcadia_rows, aliases=aliases, market_type="1x2"
+        )
     _run_market("1x2", joined_1x2, stats_1x2, "fd Max + Betfair MATCH_ODDS close")
 
     # --- ou25 (OVER_UNDER_25) — totals validated vs the BSP close -----------
     if ou_markets:
         joined_ou, stats_ou = attach_betfair_ou_close(fd_rows, ou_markets, aliases=aliases)
+        if arcadia_rows is not None:
+            joined_ou = _apply_arcadia_anchor(
+                joined_ou, arcadia_rows, aliases=aliases, market_type="ou25"
+            )
         _run_market("ou25", joined_ou, stats_ou, "fd Max + Betfair OVER_UNDER_25 close")
     else:
         print("\n[ou25] No OVER_UNDER_25 markets available — skipped.")
@@ -1154,6 +1291,17 @@ async def main() -> None:
         help="explicit path to a Betfair Basic historical .tar (streamed, not extracted)",
     )
     p.add_argument(
+        "--anchor-dataset",
+        default="",
+        help=(
+            "VALIDATION-ONLY (betfair-bsp source): path to an exported ARCADIA "
+            "Pinnacle anchor CSV (scripts/arcadia_anchor_export.py). Replaces the "
+            "dead-post-2026-01 football-data PS* anchor columns via the "
+            "fail-closed matcher. Requires a PASS .preflight.json marker and "
+            "clears the ADR-0019 contamination guards or refuses with DO-NOT-RUN."
+        ),
+    )
+    p.add_argument(
         "--betfair-bsp-split-date",
         default="2025-01-01",
         help=(
@@ -1225,6 +1373,8 @@ async def main() -> None:
         ),
     )
     args = p.parse_args()
+    if args.anchor_dataset and args.source != "betfair-bsp":
+        p.error("--anchor-dataset is VALIDATION-ONLY and requires --source betfair-bsp")
     if args.source == "beatthebookie":
         await run_beatthebookie(args)
         return
