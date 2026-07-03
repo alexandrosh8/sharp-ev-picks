@@ -99,7 +99,14 @@ class ProxyHealthRegistry:
     # --- recording ---------------------------------------------------------- #
     def record_success(self, index: int) -> None:
         """A request through pool ``index`` completed transport-clean: reset the
-        consecutive-failure streak and lift any quarantine/half-open claim."""
+        consecutive-failure streak and lift any quarantine/half-open claim.
+
+        KNOWN, ACCEPTED race (review 2026-07-03, deferred): a success recorded
+        by an attempt that STARTED before a quarantine was armed clears that
+        quarantine on completion. Fixing it needs per-attempt tokens; the
+        window is seconds wide, the cleared slot just re-quarantines after
+        `threshold` failures, and a genuinely-working proxy being un-quarantined
+        is the desired outcome anyway."""
         slot = self._slots.setdefault(index, ProxySlotHealth())
         slot.successes += 1
         slot.consecutive_failures = 0
@@ -125,9 +132,14 @@ class ProxyHealthRegistry:
             slot.probe_claimed_until = None
 
     # --- selection ---------------------------------------------------------- #
-    def _eligible(self, index: int, now: datetime) -> bool:
+    def _eligible(self, index: int, now: datetime, *, claim: bool) -> bool:
         """Is ``index`` usable right now? Healthy -> yes. Quarantined -> no.
-        Half-open -> yes ONCE per claim window (this check CLAIMS the probe)."""
+        Half-open -> yes while unclaimed; with ``claim=True`` the check also
+        TAKES the single probe claim. Only attempt-coupled selection may claim
+        (review 2026-07-03: filter_rotation claimed for every listed index but
+        its callers attempt only a prefix and exit on first success — the claim
+        was burned with no probe sent, then instantly re-claimed by the next
+        sweep, starving a recovered slot out of rotation past the cooldown)."""
         slot = self._slots.get(index)
         if slot is None:
             return True  # never seen = healthy
@@ -136,10 +148,11 @@ class ProxyHealthRegistry:
             return True
         if state == "quarantined":
             return False
-        # half-open: grant a single probe per claim window.
+        # half-open: a single probe per claim window.
         if slot.probe_claimed_until is not None and now < slot.probe_claimed_until:
             return False
-        slot.probe_claimed_until = now + timedelta(seconds=self.half_open_claim_seconds)
+        if claim:
+            slot.probe_claimed_until = now + timedelta(seconds=self.half_open_claim_seconds)
         return True
 
     def _note_fail_open(self, pool_size: int) -> None:
@@ -156,24 +169,39 @@ class ProxyHealthRegistry:
             )
 
     def filter_rotation(self, order: Sequence[int]) -> list[int]:
-        """The eligible indices of ``order``, in order. FAIL-OPEN: when every
-        index is quarantined, the FULL rotation is returned unchanged (with a
-        throttled type-only WARNING) — never let the registry make things worse."""
+        """The eligible indices of ``order``: healthy slots first in rotation
+        order, then UNCLAIMED half-open slots at the tail (last-resort probes —
+        a capped sweep prefers proven transports; this call never claims the
+        probe, so an unattempted listing costs the slot nothing). FAIL-OPEN:
+        when every index is quarantined, the FULL rotation is returned
+        unchanged (throttled type-only WARNING) — never let the registry make
+        things worse."""
         now = self.clock()
-        out = [index for index in order if self._eligible(index, now)]
+        healthy: list[int] = []
+        half_open: list[int] = []
+        for index in order:
+            if not self._eligible(index, now, claim=False):
+                continue
+            slot = self._slots.get(index)
+            if slot is not None and slot.state(now) == "half_open":
+                half_open.append(index)
+            else:
+                healthy.append(index)
+        out = healthy + half_open
         if out or not order:
             return out
         self._note_fail_open(len(order))
         return list(order)
 
     def select(self, order: Sequence[int]) -> int | None:
-        """The first eligible index of ``order`` (claiming a half-open probe),
-        or fail-open ``order[0]`` when all are quarantined; None for empty."""
+        """The first eligible index of ``order`` (CLAIMING a half-open probe —
+        this path is attempt-coupled: the returned index is always tried), or
+        fail-open ``order[0]`` when all are quarantined; None for empty."""
         if not order:
             return None
         now = self.clock()
         for index in order:
-            if self._eligible(index, now):
+            if self._eligible(index, now, claim=True):
                 return index
         self._note_fail_open(len(order))
         return order[0]
@@ -186,12 +214,20 @@ class ProxyHealthRegistry:
         now = self.clock()
         slots: list[dict[str, Any]] = []
         quarantined = 0
+        probing = 0
         dead = 0
         for index in sorted(self._slots):
             slot = self._slots[index]
             state = slot.state(now)
-            if state == "quarantined":
-                quarantined += 1
+            # Review 2026-07-03: a half-open slot is UNPROVEN, not healthy —
+            # folding it into "healthy" flapped the verdict to "Proxy pool
+            # healthy" every cooldown for a permanently dead proxy. It counts
+            # as `probing` (and stays dead-annotated) until a probe SUCCEEDS.
+            if state in ("quarantined", "half_open"):
+                if state == "quarantined":
+                    quarantined += 1
+                else:
+                    probing += 1
                 idle = (
                     slot.last_success_at is None
                     or (now - slot.last_success_at).total_seconds() > DEAD_AFTER_SECONDS
@@ -220,11 +256,12 @@ class ProxyHealthRegistry:
         failovers_15m = sum(1 for ts, _cls in recent_1h if ts >= cut_15m)
         class_counts = Counter(cls for _ts, cls in recent_1h)
         dominant = class_counts.most_common(1)[0][0] if class_counts else None
-        degraded = quarantined > 0
+        degraded = (quarantined + probing) > 0
         return {
             "configured": configured,
-            "healthy": max(configured - quarantined, 0),
+            "healthy": max(configured - quarantined - probing, 0),
             "quarantined": quarantined,
+            "probing": probing,
             "dead": dead,
             "failovers_15m": failovers_15m,
             "failovers_1h": len(recent_1h),

@@ -3226,7 +3226,7 @@
           setChip("diag-proxy-verdict", degraded ? "DEGRADED" : "OK", degraded ? "warn" : "ok", p.verdict || "");
           const bits = [
             (Number(p.healthy) || 0) + "/" + (Number(p.configured) || 0) + " proxies healthy",
-            (Number(p.quarantined) || 0) + " quarantined" + (Number(p.dead) ? " (" + Number(p.dead) + " dead)" : ""),
+            (Number(p.quarantined) || 0) + " quarantined" + (Number(p.probing) ? " · " + Number(p.probing) + " probing" : "") + (Number(p.dead) ? " (" + Number(p.dead) + " dead)" : ""),
             "failovers: " + (Number(p.failovers_15m) || 0) + " in 15m · " + (Number(p.failovers_1h) || 0) + " in 1h",
           ];
           if (p.dominant_failure_class) bits.push("dominant failure: " + p.dominant_failure_class);

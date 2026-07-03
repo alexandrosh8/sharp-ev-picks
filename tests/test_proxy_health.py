@@ -89,6 +89,66 @@ def test_half_open_probe_success_restores_slot() -> None:
     assert registry.select([0, 1]) == 0
 
 
+def test_filter_rotation_does_not_burn_half_open_probe() -> None:
+    # Review 2026-07-03 (major): filter_rotation used to CLAIM the half-open
+    # probe for every listed index, but its callers attempt only a prefix and
+    # exit on first success — the claim was consumed with no probe sent, and
+    # the next sweep re-claimed it, starving a recovered slot out of rotation
+    # far past the cooldown design. filter_rotation must be claim-free.
+    registry, clock = make_registry(threshold=3, cooldown_seconds=900.0)
+    for _ in range(3):
+        registry.record_failure(0, "ConnectionError")
+    clock.advance(901)  # half-open
+    assert registry.filter_rotation([0, 1]) == [1, 0]  # listed, claim NOT burned
+    assert registry.filter_rotation([0, 1]) == [1, 0]  # ...repeatedly
+    assert registry.select([0, 1]) == 0  # the probe is still grantable
+
+
+def test_filter_rotation_excludes_actively_claimed_probe() -> None:
+    # While a selector holds the single half-open probe claim, sweep callers
+    # must not pile onto the unproven slot.
+    registry, clock = make_registry(threshold=3, cooldown_seconds=900.0)
+    for _ in range(3):
+        registry.record_failure(0, "ConnectionError")
+    clock.advance(901)
+    assert registry.select([0, 1]) == 0  # claims the probe
+    assert registry.filter_rotation([0, 1]) == [1]
+
+
+def test_filter_rotation_orders_half_open_last() -> None:
+    # Half-open slots are last-resort probes for sweep callers: healthy slots
+    # keep rotation order, unproven slots go to the tail (a capped sweep
+    # prefers proven transports; the high-frequency select() path probes).
+    registry, clock = make_registry(threshold=3, cooldown_seconds=900.0)
+    for _ in range(3):
+        registry.record_failure(1, "ConnectionError")
+    clock.advance(901)
+    assert registry.filter_rotation([1, 2, 3]) == [2, 3, 1]
+
+
+def test_diagnostics_half_open_is_probing_not_healthy() -> None:
+    # Review 2026-07-03 (minor): a half-open slot was folded into "healthy",
+    # flapping /health to "Proxy pool healthy" every cooldown for a dead proxy.
+    # Unproven slots count as `probing`, the verdict stays degraded, and the
+    # dead annotation persists through the half-open window.
+    registry, clock = make_registry(threshold=3, cooldown_seconds=900.0)
+    for _ in range(3):
+        registry.record_failure(4, "TimeoutError")
+    diag = registry.diagnostics(configured=2)
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (1, 0, 1)
+    clock.advance(901)  # half-open — still unproven
+    diag = registry.diagnostics(configured=2)
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 1, 1)
+    assert diag["healthy"] == 1
+    assert diag["verdict"] == "Proxy pool degraded"
+    assert diag["action"] == "Replace or expand proxy pool"
+    registry.record_success(4)  # probe passed — NOW it is healthy
+    diag = registry.diagnostics(configured=2)
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 0, 0)
+    assert diag["healthy"] == 2
+    assert diag["verdict"] == "Proxy pool healthy"
+
+
 def test_all_quarantined_fails_open_to_full_rotation() -> None:
     # The registry must NEVER make availability worse than blind round-robin.
     registry, _clock = make_registry(threshold=1)
