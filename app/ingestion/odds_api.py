@@ -140,13 +140,22 @@ class OddsApiClient:
                         # fair. Totals share the point across Over/Under; spreads are
                         # ±point opposite sides of the SAME line -> normalize via abs
                         # so the two sides group together.
+                        # Parser audit 2026-07-03 F2: a bare number ("2.5") is
+                        # persisted verbatim by snapshot_market_key but cannot
+                        # be reversed by market_from_snapshot_key -> the row is
+                        # silently skipped in every close/devig reconstruction.
+                        # Emit the OddsPortal key vocabulary instead (the
+                        # reverse mapper's single source of truth). Grouping is
+                        # unchanged: totals share the point across Over/Under;
+                        # spreads keep abs so both sides of one line stay one
+                        # devig group (side identity rides the selection).
                         detail: str | None
                         if point is None:
                             detail = None
                         elif mapped is Market.SPREADS:
-                            detail = str(abs(float(point)))
+                            detail = f"asian_handicap_{_key_number(abs(float(point)))}"
                         else:
-                            detail = str(float(point))
+                            detail = f"over_under_{_key_number(float(point))}"
                         snapshots.append(
                             OddsSnapshotIn(
                                 event_id=event_id,
@@ -162,10 +171,19 @@ class OddsApiClient:
         return snapshots
 
 
+def _key_number(value: float) -> str:
+    """2.5 -> "2_5"; 10.25 -> "10_25" — the OddsPortal market-key number form."""
+    return f"{value:g}".replace(".", "_")
+
+
 def _parse_ts(raw: str) -> datetime | None:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # Parser audit 2026-07-03 F10: an offset-less string parsed NAIVE and
+    # flowed into captured_at (naive datetime = bug). The API documents UTC;
+    # coerce explicitly like the OddsPortal parser does.
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)

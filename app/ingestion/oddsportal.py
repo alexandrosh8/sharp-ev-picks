@@ -2094,11 +2094,19 @@ def _parse_ts(raw: Any) -> datetime | None:
     if not raw:
         return None
     text = str(raw).strip()
-    # epoch seconds (odds-history rows)
+    # epoch seconds (odds-history rows). Guarded to a plausible range (2001..
+    # 2096) so an all-digit DATE string ("20260703") can never mis-parse as a
+    # 1970s epoch (parser audit 2026-07-03 F9); such strings fall through to
+    # the string parsers below.
     try:
-        return datetime.fromtimestamp(float(text), tz=UTC)
-    except (ValueError, OverflowError, OSError):
-        pass
+        epoch = float(text)
+    except ValueError:
+        epoch = None
+    if epoch is not None and 1e9 <= epoch < 4e9:
+        try:
+            return datetime.fromtimestamp(epoch, tz=UTC)
+        except (ValueError, OverflowError, OSError):
+            pass
     cleaned = text.replace("Z", "+00:00")
     if cleaned.endswith(" UTC"):
         cleaned = cleaned[:-4]

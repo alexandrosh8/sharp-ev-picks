@@ -442,7 +442,14 @@ def _pick_market_keys(sport_key: str, market: str, selection: str) -> tuple[str,
     loader's config intersection drops whichever does not exist."""
     basketball = sport_key == "basketball"
     if market == "h2h":
-        return ("home_away",) if basketball else ("1x2",)
+        if basketball:
+            return ("home_away",)
+        if sport_key == "tennis":
+            # Tennis snapshots only ever carry "match_winner" (matching audit
+            # 2026-07-03): returning "1x2" narrowed the off-window re-scrape
+            # to a key that cannot exist, silently starving tennis re-pricing.
+            return ("match_winner",)
+        return ("1x2",)
     if market in ("btts", "dnb"):
         return (market,)
     if market == "double_chance":

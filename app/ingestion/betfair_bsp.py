@@ -107,6 +107,12 @@ class BetfairMarketClose:
     settled: bool
     bsp_reconciled: bool
     runners: tuple[BetfairRunner, ...]
+    # Parser audit 2026-07-03 F4: both ride every marketDefinition and were
+    # dropped. event_id joins an event's markets exactly (OU<->MATCH_ODDS)
+    # without name re-matching; settled_time_utc is the settlement timestamp
+    # the settler wants. Optional with defaults so pre-F4 caches still load.
+    event_id: str | None = None
+    settled_time_utc: datetime | None = None
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -142,18 +148,55 @@ def _epoch_ms_to_utc(pt: object) -> datetime | None:
     return datetime.fromtimestamp(pt / 1000.0, tz=UTC)
 
 
-def _best_back(rc: dict) -> Decimal | None:
-    """Best available-to-back price from a runner change: ``bdatb`` (display)
-    then ``batb``, level-0 ``[level, price, size]`` -> price; else ``ltp``."""
-    for key in ("bdatb", "batb"):
-        ladder = rc.get(key)
-        if isinstance(ladder, list) and ladder:
-            level0 = ladder[0]
-            if isinstance(level0, (list, tuple)) and len(level0) >= 2:
-                price = _to_decimal(level0[1])
-                if price is not None:
-                    return price
-    return _to_decimal(rc.get("ltp"))
+class _RunnerLadder:
+    """Per-runner ATB ladder state. Stream ``batb``/``bdatb`` entries are
+    per-LEVEL DELTAS (``[level, price, size]`` — only changed levels arrive;
+    size 0 removes a level), NOT a full snapshot. Reading ``ladder[0]`` of a
+    delta message as best-back mis-prices any market whose file carries ATB
+    updates (parser audit 2026-07-03 F1): a level-1-only update was read as
+    the best price, and a level-0 removal fell back to a stale ``ltp``.
+    Maintain the ladder, read the lowest populated level."""
+
+    __slots__ = ("levels", "ltp")
+
+    def __init__(self) -> None:
+        self.levels: dict[str, dict[int, Decimal]] = {"bdatb": {}, "batb": {}}
+        self.ltp: Decimal | None = None
+
+    def apply(self, rc: dict) -> None:
+        for key in ("bdatb", "batb"):
+            deltas = rc.get(key)
+            if not isinstance(deltas, list):
+                continue
+            book = self.levels[key]
+            for entry in deltas:
+                if not isinstance(entry, (list, tuple)) or len(entry) < 3:
+                    continue
+                try:
+                    level = int(entry[0])
+                except (TypeError, ValueError):
+                    continue
+                price = _to_decimal(entry[1])
+                try:
+                    size = float(entry[2])
+                except (TypeError, ValueError):
+                    size = 0.0
+                if price is None or size <= 0:
+                    book.pop(level, None)
+                else:
+                    book[level] = price
+        ltp = _to_decimal(rc.get("ltp"))
+        if ltp is not None:
+            self.ltp = ltp
+
+    def best_back(self) -> Decimal | None:
+        """Displayed ATB first, raw ATB second (lowest populated level = best
+        available), last-traded price as the final fallback."""
+        for key in ("bdatb", "batb"):
+            book = self.levels[key]
+            if book:
+                return book[min(book)]
+        return self.ltp
 
 
 def _won(status: str) -> bool | None:
@@ -173,9 +216,16 @@ def parse_market_stream(lines: Iterable[str]) -> BetfairMarketClose | None:
     ``rc`` is applied, so it is genuinely the last pre-in-play price)."""
     market_id: str | None = None
     latest_def: dict | None = None
-    running: dict[int, Decimal] = {}
+    ladders: dict[int, _RunnerLadder] = {}
     pre_inplay: dict[int, Decimal] | None = None
     in_play_utc: datetime | None = None
+
+    def _prices_now() -> dict[int, Decimal]:
+        return {
+            sid: price
+            for sid, ladder in ladders.items()
+            if (price := ladder.best_back()) is not None
+        }
 
     for line in lines:
         if not line or not line.strip():
@@ -198,7 +248,7 @@ def parse_market_stream(lines: Iterable[str]) -> BetfairMarketClose | None:
                 latest_def = mdef
                 # in-play turn: snapshot prices from PRIOR messages once only.
                 if mdef.get("inPlay") is True and pre_inplay is None:
-                    pre_inplay = dict(running)
+                    pre_inplay = _prices_now()
                     in_play_utc = _epoch_ms_to_utc(pt)
             for rc in mc.get("rc", []) or []:
                 if not isinstance(rc, dict):
@@ -206,9 +256,7 @@ def parse_market_stream(lines: Iterable[str]) -> BetfairMarketClose | None:
                 sid = rc.get("id")
                 if not isinstance(sid, int):
                     continue
-                price = _best_back(rc)
-                if price is not None:
-                    running[sid] = price
+                ladders.setdefault(sid, _RunnerLadder()).apply(rc)
 
     if latest_def is None:
         return None
@@ -216,7 +264,7 @@ def parse_market_stream(lines: Iterable[str]) -> BetfairMarketClose | None:
     if not isinstance(raw_runners, list) or not raw_runners:
         return None
 
-    snapshot = pre_inplay if pre_inplay is not None else running
+    snapshot = pre_inplay if pre_inplay is not None else _prices_now()
     runners: list[BetfairRunner] = []
     for rd in raw_runners:
         if not isinstance(rd, dict):
@@ -265,6 +313,8 @@ def parse_market_stream(lines: Iterable[str]) -> BetfairMarketClose | None:
         settled=str(latest_def.get("status") or "") == "CLOSED",
         bsp_reconciled=bool(latest_def.get("bspReconciled")),
         runners=tuple(runners),
+        event_id=_str_field("eventId"),
+        settled_time_utc=_parse_market_time(latest_def.get("settledTime")),
     )
 
 
@@ -515,7 +565,11 @@ def load_betfair_tar(
                 if et != event_type_id or mt != market_type:
                     continue  # skip cheaply — non-matching market never fully parsed
                 market = parse_market_stream(lines)
-                if market is not None and market.runners:
+                # BSP inventory 2026-07-03: the peek reads the FIRST definition
+                # but the record carries the LAST — a mixed-definition stream
+                # must be classified by its final type or it lands in the
+                # wrong cache (match_odds cache measured only 76% pure).
+                if market is not None and market.runners and market.market_type == market_type:
                     markets.append(market)
     except (tarfile.TarError, OSError) as exc:
         logger.warning("betfair tar read aborted after %d members: %s", scanned, type(exc).__name__)
@@ -577,8 +631,10 @@ def load_betfair_tar_by_type(
                 if et != event_type_id or mt is None or mt not in wanted:
                     continue  # skip cheaply — non-matching member never fully parsed
                 market = parse_market_stream(lines)
-                if market is not None and market.runners:
-                    buckets[mt].append(market)
+                # Bucket by the record's FINAL market_type, not the first-seen
+                # peek (see load_betfair_tar — same mixed-definition hazard).
+                if market is not None and market.runners and market.market_type in wanted:
+                    buckets[str(market.market_type)].append(market)
                     kept += 1
     except (tarfile.TarError, OSError) as exc:
         logger.warning("betfair tar read aborted after %d members: %s", scanned, type(exc).__name__)
@@ -602,6 +658,8 @@ def _market_to_dict(m: BetfairMarketClose) -> dict:
         "in_play_utc": m.in_play_utc.isoformat() if m.in_play_utc else None,
         "settled": m.settled,
         "bsp_reconciled": m.bsp_reconciled,
+        "event_id": m.event_id,
+        "settled_time_utc": m.settled_time_utc.isoformat() if m.settled_time_utc else None,
         "runners": [
             {
                 "selection_id": r.selection_id,
@@ -649,6 +707,8 @@ def _market_from_dict(d: dict) -> BetfairMarketClose:
         settled=bool(d.get("settled")),
         bsp_reconciled=bool(d.get("bsp_reconciled")),
         runners=runners,
+        event_id=(str(d["event_id"]) if d.get("event_id") else None),
+        settled_time_utc=_dt_from_iso(d.get("settled_time_utc")),
     )
 
 

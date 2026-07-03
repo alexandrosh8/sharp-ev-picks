@@ -551,3 +551,97 @@ def test_attach_betfair_close_joins_and_rejects_result_mismatch() -> None:
     assert float(row["PSCA"]) == 3.80
     # pre-match Max prices preserved untouched
     assert row["MaxH"] == "2.20"
+
+
+# --------------------------------------------------------------------------- #
+# Parser audit 2026-07-03 — F1 (ATB delta ladders) + F4 (settledTime/eventId)
+# --------------------------------------------------------------------------- #
+def test_atb_deltas_are_ladder_updates_not_snapshots() -> None:
+    """Stream batb entries are per-LEVEL DELTAS: a level-1-only update must not
+    displace the standing level-0 best, and a level-0 removal falls to the
+    next populated level — never to a stale ltp."""
+    active = [
+        _runner(HOME_ID, "Arsenal", 1),
+        _runner(AWAY_ID, "Chelsea", 2),
+        _runner(DRAW_SELECTION_ID, "The Draw", 3),
+    ]
+    settled = [
+        _runner(HOME_ID, "Arsenal", 1, status="WINNER"),
+        _runner(AWAY_ID, "Chelsea", 2, status="LOSER"),
+        _runner(DRAW_SELECTION_ID, "The Draw", 3, status="LOSER"),
+    ]
+    lines = [
+        _mcm(
+            1_700_000_000_000,
+            market_def=_market_def(in_play=False, status="OPEN", runners=active),
+            rc=[
+                {"id": HOME_ID, "batb": [[0, 2.00, 50.0], [1, 1.98, 80.0]], "ltp": 5.0},
+                _rc(AWAY_ID, back=4.00),
+                _rc(DRAW_SELECTION_ID, back=3.50),
+            ],
+        ),
+        # level-1-only delta: best back stays 2.00 (the old parser read 1.96)
+        _mcm(1_700_000_030_000, rc=[{"id": HOME_ID, "batb": [[1, 1.96, 90.0]]}]),
+        # level-0 removal: best falls to level 1 (1.96), NOT the stale ltp 5.0
+        _mcm(1_700_000_060_000, rc=[{"id": HOME_ID, "batb": [[0, 0, 0]]}]),
+        _mcm(
+            1_700_000_120_000,
+            market_def=_market_def(in_play=True, status="OPEN", runners=active),
+        ),
+        _mcm(
+            1_700_000_900_000,
+            market_def=_market_def(in_play=True, status="CLOSED", runners=settled),
+        ),
+    ]
+    market = parse_market_stream(lines)
+    assert market is not None
+    by_id = {r.selection_id: r for r in market.runners}
+    assert by_id[HOME_ID].close_price == Decimal("1.96")
+    assert by_id[AWAY_ID].close_price == Decimal("4.00")
+
+
+def test_settled_time_and_event_id_are_captured_and_cached(tmp_path: Path) -> None:
+    lines = _soccer_stream(with_bsp=False)
+    import json as _json
+
+    # graft eventId + settledTime onto the final CLOSED definition
+    last = _json.loads(lines[-1])
+    mdef = last["mc"][0]["marketDefinition"]
+    mdef["eventId"] = "28202626"
+    mdef["settledTime"] = "2026-06-28T20:05:38.000Z"
+    lines[-1] = _json.dumps(last)
+
+    market = parse_market_stream(lines)
+    assert market is not None
+    assert market.event_id == "28202626"
+    assert market.settled_time_utc == datetime(2026, 6, 28, 20, 5, 38, tzinfo=UTC)
+
+    from app.ingestion.betfair_bsp import read_market_cache, write_market_cache
+
+    cache = tmp_path / "cache.jsonl.gz"
+    write_market_cache(cache, [market])
+    (back,) = read_market_cache(cache)
+    assert back.event_id == "28202626"
+    assert back.settled_time_utc == market.settled_time_utc
+
+
+def test_pre_f4_cache_lines_still_load(tmp_path: Path) -> None:
+    """Caches written before the event_id/settled_time_utc fields must load
+    with None defaults (the on-disk jsonl.gz caches are expensive to rebuild)."""
+    import gzip
+    import json as _json
+
+    from app.ingestion.betfair_bsp import _market_to_dict, read_market_cache
+
+    market = parse_market_stream(_soccer_stream())
+    assert market is not None
+    old_dict = _market_to_dict(market)
+    old_dict.pop("event_id")
+    old_dict.pop("settled_time_utc")
+    cache = tmp_path / "old.jsonl.gz"
+    with gzip.open(cache, "wt", encoding="utf-8") as fh:
+        fh.write(_json.dumps(old_dict) + "\n")
+    (back,) = read_market_cache(cache)
+    assert back.event_id is None
+    assert back.settled_time_utc is None
+    assert back.market_type == "MATCH_ODDS"

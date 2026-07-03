@@ -222,3 +222,91 @@ def test_season_url_validates_league() -> None:
     assert season_url("E0", "2425").endswith("/2425/E0.csv")
     with pytest.raises(ValueError):
         season_url("XX9", "2425")
+
+
+# --------------------------------------------------------------------------- #
+# Parser audit 2026-07-03 — F2 / F9 / F10 + the tennis market-key fix
+# --------------------------------------------------------------------------- #
+@pytest.mark.anyio
+async def test_odds_api_details_are_reverse_mappable_market_keys() -> None:
+    """F2: details must be the OddsPortal key vocabulary — a bare number
+    ("2.5") persists via snapshot_market_key but market_from_snapshot_key
+    cannot reverse it, silently dropping the row from every close/devig
+    reconstruction."""
+    payload = [
+        {
+            "id": "evt-keys",
+            "bookmakers": [
+                {
+                    "key": "pinnacle",
+                    "last_update": "2026-06-10T12:00:00Z",
+                    "markets": [
+                        {
+                            "key": "totals",
+                            "outcomes": [
+                                {"name": "Over", "price": 1.9, "point": 2.5},
+                                {"name": "Under", "price": 1.9, "point": 2.5},
+                            ],
+                        },
+                        {
+                            "key": "spreads",
+                            "outcomes": [
+                                {"name": "Alpha", "price": 1.9, "point": -1.5},
+                                {"name": "Beta", "price": 1.9, "point": 1.5},
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload))
+
+    client = make_client(httpx.MockTransport(handler), ("k",))
+    snaps = await client.fetch_odds("soccer_epl")
+    detail = {s.selection: s.market_detail for s in snaps}
+    assert detail["Over 2.5"] == "over_under_2_5"
+    assert detail["Alpha -1.5"] == "asian_handicap_1_5"
+
+    from app.storage.repositories import market_from_snapshot_key
+
+    assert market_from_snapshot_key("over_under_2_5") == (Market.TOTALS, "over_under_2_5")
+    reversed_spread = market_from_snapshot_key("asian_handicap_1_5")
+    assert reversed_spread is not None and reversed_spread[0] is Market.SPREADS
+
+
+def test_odds_api_parse_ts_coerces_naive_to_utc() -> None:
+    """F10: an offset-less timestamp must never flow naive into captured_at."""
+    from datetime import UTC, datetime
+
+    from app.ingestion.odds_api import _parse_ts
+
+    parsed = _parse_ts("2026-06-10T12:00:00")
+    assert parsed == datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+    assert parsed is not None and parsed.tzinfo is not None
+    assert _parse_ts("2026-06-10T12:00:00Z") == datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+
+
+def test_oddsportal_parse_ts_never_reads_digit_dates_as_epoch() -> None:
+    """F9: an all-digit DATE string must not parse as a 1970s epoch."""
+    from datetime import UTC, datetime
+
+    from app.ingestion.oddsportal import _parse_ts
+
+    # falls through the epoch guard and parses as the compact ISO DATE it is
+    # (pre-fix: epoch-first read it as 1970-08-23)
+    assert _parse_ts("20260703") == datetime(2026, 7, 3, tzinfo=UTC)
+    assert _parse_ts("1751500000") == datetime.fromtimestamp(1_751_500_000, tz=UTC)
+    assert _parse_ts("2026-07-03 12:00:00 UTC") == datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+
+
+def test_pick_market_keys_tennis_maps_to_match_winner() -> None:
+    """Matching audit 2026-07-03: tennis snapshots only carry match_winner;
+    returning "1x2" narrowed the off-window re-scrape to a nonexistent key."""
+    from app.clv_trueup import _pick_market_keys
+
+    assert _pick_market_keys("tennis", "h2h", "Player One") == ("match_winner",)
+    assert _pick_market_keys("soccer", "h2h", "Alpha FC") == ("1x2",)
+    assert _pick_market_keys("basketball", "h2h", "Team A") == ("home_away",)

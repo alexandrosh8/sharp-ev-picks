@@ -787,8 +787,18 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
         tar_path = Path(args.betfair_bsp_tar)
     elif (bsp_dir / "data.tar").is_file():
         tar_path = bsp_dir / "data.tar"
+
+    def _typed(markets: list, market_type: str) -> list:
+        """BSP inventory 2026-07-03: caches built before the peek-vs-final
+        bucketing fix carry up to ~24% wrong-type rows — filter on read."""
+        kept = [m for m in markets if m.market_type == market_type]
+        dropped = len(markets) - len(kept)
+        if dropped:
+            print(f"(cache hygiene: dropped {dropped} non-{market_type} rows)")
+        return kept
+
     if cache_path.is_file():
-        markets = read_market_cache(cache_path)
+        markets = _typed(read_market_cache(cache_path), "MATCH_ODDS")
         print(f"Loaded {len(markets)} cached soccer MATCH_ODDS markets from {cache_path}")
     elif tar_path is not None:
         print(f"Streaming soccer MATCH_ODDS from tar: {tar_path} (one-time ~90-min scan)")
@@ -802,8 +812,14 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
     # OVER_UNDER_25 + ASIAN_HANDICAP closes (separate caches; MATCH_ODDS untouched
     # and not re-scanned). A missing cache triggers a ONE-TIME combined tar pass
     # that extracts only the still-missing types in a single ~5 GB read.
-    ou_markets = read_market_cache(ou_cache_path) if ou_cache_path.is_file() else []
-    ah_markets = read_market_cache(ah_cache_path) if ah_cache_path.is_file() else []
+    ou_markets = (
+        _typed(read_market_cache(ou_cache_path), "OVER_UNDER_25") if ou_cache_path.is_file() else []
+    )
+    ah_markets = (
+        _typed(read_market_cache(ah_cache_path), "ASIAN_HANDICAP")
+        if ah_cache_path.is_file()
+        else []
+    )
     need_types = []
     if not ou_markets:
         need_types.append("OVER_UNDER_25")
