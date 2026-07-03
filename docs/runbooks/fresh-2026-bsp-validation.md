@@ -10,6 +10,32 @@ exists so the eventual run is mechanical, not improvised.
 
 ---
 
+## 2026-07-03 UPDATE — read BEFORE planning the H2 run
+
+(Read-only readiness investigation: `docs/research/2026-07-03-bsp-h2-slate-readiness.md`.)
+
+1. **The anchor source is DEAD past 2026-01-15 (blocking).** football-data.co.uk
+   stopped publishing the Pinnacle columns (`PSH/PSD/PSA`, `PSCH/PSCD/PSCA`,
+   `P>2.5`/`PC>2.5`) — 0% populated from 2026-01-16 onward in every league
+   (soft columns B365/Max/Avg/BFE remain ~100%). Running the command below on
+   any 2026-H2 tar reproduces the n≈0 failure by construction. A replacement
+   independent sharp anchor (recommended: the warehouse's own Pinnacle ARCADIA
+   capture, live since 2026-06-17) requires a NEW anchor loader + an
+   operator-signed amended pre-registration BEFORE the H2 slate exists.
+2. **`--betfair-bsp-split-date 2026-01-01` is no longer valid.** The 2026
+   Jan–Jun slate is SPENT for selection AND evaluation (ADR-0019 appendix);
+   the H2 split design is an open pre-registration decision.
+3. **Mandatory coverage pre-check (new DO-NOT-RUN condition 6).** Before any
+   run, record per-month anchor/fill/join counts of the join source in the
+   output header; **STOP if any test-window month has <80% anchor coverage.**
+   The 2026-07-02 run burned its slate on exactly this omission (bet rate
+   20% → 0.45% was a vanished-anchor artifact, mechanically confirmed).
+4. **Symlink trap:** `data/betfair/bsp/incoming/data2026.tar` is a symlink to
+   the SPENT `data (2).tar` (sha256 `9123d320…`) — do not mistake it for a
+   fresh slate; DO-NOT-RUN check 3's sha256 lookup catches it.
+
+---
+
 ## DO-NOT-RUN conditions (check ALL before executing anything)
 
 1. **Not a fresh slate.** The tar contains no 2026 data, is truncated, or
