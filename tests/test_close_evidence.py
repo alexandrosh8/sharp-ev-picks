@@ -253,6 +253,46 @@ async def test_cross_source_stale_close_untouched_by_gate(monkeypatch) -> None: 
     assert pick.close_anchor_book == "Betfair Exchange"
 
 
+async def test_finalize_sub4h_same_source_echo_excluded_even_when_fair_jitters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A3 blind spot: a pick minted <4h before kickoff whose same-source close
+    # rows predate its creation. The rows are NOT stale (within max_gap of
+    # kickoff) so the D2 gate keeps them — and the fair here MOVED past the
+    # tautology epsilon (0.45 mint vs ~0.436 SHIN close), so the value-delta
+    # guard does not fire either. Yet no observation of that source exists
+    # after the pick was minted: the close is provably the mint anchor row
+    # re-read with arithmetic jitter, and must be EXCLUDED (stale_echo, boolean
+    # False), never promoted to trusted.
+    created_at = KICKOFF - timedelta(minutes=90)
+    echo_at = created_at - timedelta(minutes=30)  # kickoff - 2h: fresh, pre-creation
+    assert KICKOFF - echo_at <= SNAPSHOT_CLOSE_MAX_GAP  # never trips the D2 stale arm
+    _stub_reads(monkeypatch, echo_at)
+    pick = _pick(created_at=created_at)  # minted on the Betfair anchor, fair 0.45
+    assert await _finalize(pick) is True
+    assert pick.closing_anchor_type == "sharp"  # the echo rows still anchor the close
+    assert pick.close_snapshot_captured_at == echo_at
+    assert pick.close_snapshot_captured_at <= pick.created_at
+    assert pick.close_independent_of_fill is False
+    assert pick.close_exclusion_reason == "stale_echo"
+
+
+async def test_finalize_sub4h_cross_source_pre_creation_close_stays_trusted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Scope guard for the A3 fix: the SAME timing, but the mint anchor was the
+    # soft consensus — the pre-creation Betfair close is CROSS-source evidence
+    # (change-only semantics) and must keep its trusted verdict.
+    created_at = KICKOFF - timedelta(minutes=90)
+    echo_at = created_at - timedelta(minutes=30)
+    _stub_reads(monkeypatch, echo_at)
+    pick = _pick(anchor_type="consensus", anchor_book=None, created_at=created_at)
+    assert await _finalize(pick) is True
+    assert pick.closing_anchor_type == "sharp"
+    assert pick.close_independent_of_fill is True
+    assert pick.close_exclusion_reason == "trusted"
+
+
 # --------------------------------------------------------------------------- #
 # D3 helper: _anchor_capture_time
 # --------------------------------------------------------------------------- #

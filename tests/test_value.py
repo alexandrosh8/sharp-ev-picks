@@ -872,6 +872,135 @@ def test_close_exclusion_reason_asymmetric_devig_fallback() -> None:
     assert _reason(mint_devig_fell_back=True, close_devig_fell_back=True) == "trusted"
 
 
+def test_close_exclusion_reason_stale_echo_moved_same_source_pre_creation() -> None:
+    # A3 sub-4h blind spot: the close anchor is the SAME SOURCE that anchored
+    # the mint and its rows were captured at/before the pick's creation — a
+    # provable mint-row echo. Even when the recomputed fair JITTERS past the
+    # tautology epsilon (different book set / consensus composition at
+    # finalize), no new market observation exists: stale_echo, never trusted.
+    from datetime import UTC, datetime, timedelta
+
+    created = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    echo = {
+        "close_captured_at": created - timedelta(minutes=1),
+        "pick_created_at": created,
+    }
+    # Named same-source echo (mint Betfair -> close Betfair), fair moved 0.05.
+    assert (
+        _reason(
+            close_anchor_book="Betfair Exchange",
+            mint_anchor_book="Betfair Exchange",
+            mint_anchor_type="sharp",
+            **echo,
+        )
+        == "stale_echo"
+    )
+    # Consensus -> consensus echo: every row feeding the close median predates
+    # the pick, and the mint was the same soft-median source (live pick 2418:
+    # capture 25h pre-creation, |move| 0.0048, previously classified trusted).
+    from app.edge.value import CONSENSUS_ANCHOR
+
+    assert (
+        _reason(
+            close_anchor_book=CONSENSUS_ANCHOR,
+            mint_anchor_book=CONSENSUS_ANCHOR,
+            mint_anchor_type="consensus",
+            **echo,
+        )
+        == "stale_echo"
+    )
+    # Pre-anchor_book rows: collapsed-type fallback (mirrors
+    # clv_trueup._mint_anchor_matches_source).
+    assert (
+        _reason(
+            close_anchor_book="Pinnacle",
+            mint_anchor_book=None,
+            mint_anchor_type="pinnacle",
+            **echo,
+        )
+        == "stale_echo"
+    )
+
+
+def test_close_exclusion_reason_moved_cross_source_pre_creation_stays_trusted() -> None:
+    # A close from a DIFFERENT source than the mint anchor is genuine
+    # independent evidence even when captured before the pick existed
+    # (change-only close semantics) — the echo guard must not demote it.
+    from datetime import UTC, datetime, timedelta
+
+    from app.edge.value import CLOSE_REASON_TRUSTED
+
+    created = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    echo = {
+        "close_captured_at": created - timedelta(minutes=1),
+        "pick_created_at": created,
+    }
+    assert (
+        _reason(
+            close_anchor_book="Pinnacle",
+            mint_anchor_book="Betfair Exchange",
+            mint_anchor_type="sharp",
+            **echo,
+        )
+        == CLOSE_REASON_TRUSTED
+    )
+    # Unknown mint anchor: the echo is unprovable -> not droppable.
+    assert (
+        _reason(close_anchor_book="Pinnacle", mint_anchor_book=None, mint_anchor_type=None, **echo)
+        == CLOSE_REASON_TRUSTED
+    )
+    # Capture AFTER creation: a fresh observation, never an echo.
+    assert (
+        _reason(
+            close_anchor_book="Pinnacle",
+            mint_anchor_book="Pinnacle",
+            mint_anchor_type="pinnacle",
+            close_captured_at=created + timedelta(minutes=30),
+            pick_created_at=created,
+        )
+        == CLOSE_REASON_TRUSTED
+    )
+
+
+def test_persisted_close_independent_rejects_moved_same_source_mint_echo() -> None:
+    # A3: the BOOLEAN (the trusted-subset gate input) must also demote the
+    # provable moved-fair mint echo — the reason alone is observability only.
+    from datetime import UTC, datetime, timedelta
+
+    from app.edge.value import persisted_close_independent
+
+    created = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    base: dict[str, Any] = {
+        "close_anchor_book": "Betfair Exchange",
+        "fill_book": "SoftBook",
+        "pick_fair": 0.40,
+        "closing_fair": 0.45,  # moved -> passed the old gates
+    }
+    assert (
+        persisted_close_independent(
+            **base,
+            mint_anchor_book="Betfair Exchange",
+            mint_anchor_type="sharp",
+            close_captured_at=created - timedelta(minutes=1),
+            pick_created_at=created,
+        )
+        is False
+    )
+    # Cross-source pre-creation close stays independent.
+    assert (
+        persisted_close_independent(
+            **base,
+            mint_anchor_book="Pinnacle",
+            mint_anchor_type="pinnacle",
+            close_captured_at=created - timedelta(minutes=1),
+            pick_created_at=created,
+        )
+        is True
+    )
+    # Back-compat: callers that pass no echo provenance get the old verdict.
+    assert persisted_close_independent(**base) is True
+
+
 def test_close_exclusion_reason_vocabulary_is_closed_and_column_safe() -> None:
     # Every reason the classifier can return is in the closed vocabulary and
     # fits the picks.close_exclusion_reason String(32) column.

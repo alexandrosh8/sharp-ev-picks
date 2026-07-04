@@ -245,6 +245,9 @@ async def revalidate_open_picks(
                 # clv_log a tautology that re-encodes the pick-time edge — gating on the
                 # VALUE DELTA (not the anchor BOOK NAME) recovers a legitimate same-book
                 # moved-line close yet still drops the identical-line tautology.
+                # A3: mint-anchor + capture-time kwargs — a PROVABLE mint echo
+                # (same source, captured at/before pick creation) is demoted
+                # even when the fair jittered past the tautology epsilon.
                 pick.close_independent_of_fill = persisted_close_independent(
                     close_anchor_book=close_anchor,
                     fill_book=pick.bookmaker,
@@ -254,6 +257,10 @@ async def revalidate_open_picks(
                         else None
                     ),
                     closing_fair=closing_fair,
+                    mint_anchor_book=pick.anchor_book,
+                    mint_anchor_type=pick.anchor_type,
+                    close_captured_at=pick.close_snapshot_captured_at,
+                    pick_created_at=pick.created_at,
                 )
                 # A4: persist the SPECIFIC reason beside the boolean (closed
                 # vocabulary, observability only — the boolean above stays the
@@ -272,6 +279,8 @@ async def revalidate_open_picks(
                     close_devig_fell_back=pick.close_devig_fell_back,
                     close_captured_at=pick.close_snapshot_captured_at,
                     pick_created_at=pick.created_at,
+                    mint_anchor_book=pick.anchor_book,
+                    mint_anchor_type=pick.anchor_type,
                 )
             books = prices_by_key.get(key) or {}
             # The pick's own book is the actionable price; if it dropped the
@@ -1148,6 +1157,10 @@ async def finalize_closing_from_snapshots(
         # that the book-name same-source test structurally dropped, while still
         # rejecting the identical-line tautology. Stamped beside the anchor type so the
         # trusted sharp subset can exclude both circular and tautological closes.
+        # A3: the mint-anchor + capture-time kwargs let the classifier demote a
+        # PROVABLE mint echo (same source, captured at/before pick creation)
+        # even when the recomputed fair jittered past the tautology epsilon —
+        # the sub-4h blind spot where the D2 stale arm never fires.
         pick.close_independent_of_fill = persisted_close_independent(
             close_anchor_book=close_anchor,
             fill_book=pick.bookmaker,
@@ -1155,6 +1168,10 @@ async def finalize_closing_from_snapshots(
                 float(pick.model_probability) if pick.model_probability is not None else None
             ),
             closing_fair=fair,
+            mint_anchor_book=pick.anchor_book,
+            mint_anchor_type=pick.anchor_type,
+            close_captured_at=pick.close_snapshot_captured_at,
+            pick_created_at=pick.created_at,
         )
         # A4: persist the SPECIFIC reason beside the boolean (closed vocabulary,
         # observability only — the boolean above stays the trusted-subset gate
@@ -1171,6 +1188,8 @@ async def finalize_closing_from_snapshots(
             close_devig_fell_back=pick.close_devig_fell_back,
             close_captured_at=pick.close_snapshot_captured_at,
             pick_created_at=pick.created_at,
+            mint_anchor_book=pick.anchor_book,
+            mint_anchor_type=pick.anchor_type,
         )
     if close_odds is not None and close_odds > 1.0:
         pick.closing_odds = Decimal(f"{close_odds:.4f}")

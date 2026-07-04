@@ -179,12 +179,63 @@ def close_moved_from_pick_fair(pick_fair: float | None, closing_fair: float) -> 
     return abs(closing_fair - pick_fair) > CLV_TAUTOLOGY_EPS
 
 
+def close_is_mint_echo(
+    *,
+    mint_anchor_book: str | None,
+    mint_anchor_type: str | None,
+    close_anchor_book: str,
+    close_captured_at: datetime | None,
+    pick_created_at: datetime | None,
+) -> bool:
+    """Whether the close is PROVABLY the mint anchor row re-read (A3, 2026-07-04).
+
+    True only when BOTH hold: (1) the close anchor rows were captured at or
+    before the pick's creation — no observation of that source exists after the
+    pick was minted; and (2) the close anchor is the SAME SOURCE that anchored
+    the mint (same named book, both the consensus median, or — for pre-
+    ``anchor_book`` rows — the same collapsed sharp type, mirroring
+    ``clv_trueup._mint_anchor_matches_source``). Such a "close" carries zero
+    post-mint market information; any fair delta from the mint fair is
+    arithmetic jitter (book-set/median composition at finalize), not movement.
+
+    Sub-4h blind spot this closes: the D2 injection gate drops an echo source
+    only when it is ALSO stale (> max_gap before kickoff), so a pick minted
+    close to kickoff keeps its echo rows — and when the recomputed fair jitters
+    past ``CLV_TAUTOLOGY_EPS`` the value-delta guard does not fire either,
+    promoting the echo to trusted (live picks 2316/2418, measured 2026-07-04).
+
+    Unprovable is not droppable (same rule as the D2 gate): missing capture or
+    creation time, an unknown mint anchor, or a DIFFERENT source (genuine
+    cross-source evidence under change-only close semantics) => False. Pure.
+    """
+    if close_captured_at is None or pick_created_at is None:
+        return False
+    if close_captured_at > pick_created_at:
+        return False  # observed after the pick existed — a real close observation
+    if not close_anchor_book or close_anchor_book == CONSENSUS_ANCHOR:
+        # A consensus close whose newest feeding row predates the pick echoes a
+        # consensus mint: the same soft-median source, re-read.
+        return mint_anchor_book == CONSENSUS_ANCHOR or (
+            not mint_anchor_book and (mint_anchor_type or "") == ANCHOR_TYPE_CONSENSUS
+        )
+    if mint_anchor_book and mint_anchor_book != CONSENSUS_ANCHOR:
+        return _norm(mint_anchor_book) == _norm(close_anchor_book)
+    # Pre-anchor_book rows: only the collapsed sharp type is known.
+    if mint_anchor_type in (ANCHOR_TYPE_PINNACLE, ANCHOR_TYPE_SHARP):
+        return anchor_type_for(close_anchor_book) == mint_anchor_type
+    return False
+
+
 def persisted_close_independent(
     *,
     close_anchor_book: str,
     fill_book: str,
     pick_fair: float | None,
     closing_fair: float,
+    mint_anchor_book: str | None = None,
+    mint_anchor_type: str | None = None,
+    close_captured_at: datetime | None = None,
+    pick_created_at: datetime | None = None,
 ) -> bool:
     """The value persisted to ``picks.close_independent_of_fill`` (audit 2026-06-28).
 
@@ -199,8 +250,23 @@ def persisted_close_independent(
     by a later, moved Pinnacle close — Betfair 0.471->0.516) that the old book-name
     same-source test structurally dropped (Pinnacle is SHARP_BOOKS[0] for both pick
     and close, so every Pinnacle-anchored pick was excluded), while still rejecting
-    the identical-line tautology that the book test let through. Pure function."""
+    the identical-line tautology that the book test let through. Pure function.
+
+    A3 (2026-07-04): a PROVABLE mint echo (``close_is_mint_echo`` — same source
+    as the mint anchor, captured at/before pick creation) is excluded even when
+    the fair jittered past the tautology epsilon: no post-mint observation
+    exists, so the delta is arithmetic, not movement. The echo provenance
+    kwargs default to None — callers that cannot supply them get the prior
+    verdict unchanged (unprovable is not droppable)."""
     if not close_is_independent_of_fill(close_anchor_book, fill_book):
+        return False
+    if close_is_mint_echo(
+        mint_anchor_book=mint_anchor_book,
+        mint_anchor_type=mint_anchor_type,
+        close_anchor_book=close_anchor_book,
+        close_captured_at=close_captured_at,
+        pick_created_at=pick_created_at,
+    ):
         return False
     return close_moved_from_pick_fair(pick_fair, closing_fair)
 
@@ -239,6 +305,8 @@ def close_exclusion_reason(
     close_devig_fell_back: bool | None = None,
     close_captured_at: datetime | None = None,
     pick_created_at: datetime | None = None,
+    mint_anchor_book: str | None = None,
+    mint_anchor_type: str | None = None,
 ) -> str:
     """Classify WHY a close is excluded from trusted CLV — or 'trusted'.
 
@@ -258,6 +326,10 @@ def close_exclusion_reason(
     4. ``tautological`` — unmoved close fair without a provable echo (fresh
        observation of a genuinely static line, or capture times unknown):
        clv_log re-encodes the pick-time edge either way.
+    4b. ``stale_echo`` (moved-fair variant, A3 2026-07-04) — the fair DID move
+       past the epsilon, but the close is a provable mint echo
+       (``close_is_mint_echo``: same source as the mint anchor, captured at or
+       before pick creation): the delta is arithmetic jitter, not movement.
     5. ``asymmetric_devig_fallback`` — mint and close fairs were devigged by
        DIFFERENT effective methods (exactly one fell back to multiplicative):
        the CLV is a devig-method artifact. A None flag on either side is
@@ -287,6 +359,15 @@ def close_exclusion_reason(
         ):
             return "stale_echo"
         return "tautological"
+    if close_is_mint_echo(
+        mint_anchor_book=mint_anchor_book,
+        mint_anchor_type=mint_anchor_type,
+        close_anchor_book=close_anchor_book,
+        close_captured_at=close_captured_at,
+        pick_created_at=pick_created_at,
+    ):
+        # 4b: moved-fair mint echo — same source, no post-mint observation.
+        return "stale_echo"
     if (
         mint_devig_fell_back is not None
         and close_devig_fell_back is not None
