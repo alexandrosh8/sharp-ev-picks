@@ -475,6 +475,13 @@
               </table>
             </div>
           </section>
+          <section class="tile wide2" aria-labelledby="sportready-h">
+            <div class="tile-h"><h3 id="sportready-h">Sport readiness</h3></div>
+            <div id="sport-readiness"></div>
+            <p class="muted">Shadow-first policy: basketball, NFL and tennis promote only on
+              trusted CLV, source agreement, freshness, coverage and sample size — never on
+              small-sample ROI or all-closes CLV.</p>
+          </section>
         </div>
         <p class="safety"><b>Suggested stake fractions are informational only.</b> <b>This system never places bets</b> — the operator reviews the evidence here and places any bet themselves. CLV and ROI figures are not a profit guarantee.</p>
       </section>
@@ -507,6 +514,8 @@
           <section class="tile" aria-labelledby="h2-h">
             <div class="tile-h"><h3 id="h2-h">H2 validation readiness</h3></div>
             <p class="muted" id="h2-readiness">—</p>
+            <p class="muted" id="h6-status">Agreement gate (H6): shadow-only — implemented in the
+              validation harness; tolerance (0.02 proposed) awaits operator sign-off. Monitor-only.</p>
           </section>
         </div>
       </section>
@@ -1367,6 +1376,33 @@
             ml.appendChild(metricEl("ECE", fmtNum(cal.ece, 3)));
             ml.appendChild(metricEl("Brier", fmtNum(cal.brier, 3)));
             cs.appendChild(ml);
+          }
+
+          const sr = $("sport-readiness"); sr.replaceChildren();
+          const bySport = (perf && perf.by_sport) || {};
+          const SPORT_STATUS = {
+            soccer: ["Validated", "tag-cyan", "premium-eligible under the live gates"],
+            basketball: ["Shadow", "tag-warm", "evidence accruing — promotion premature"],
+            tennis: ["Shadow", "tag-warm", "settlement convention + capture parser pending"],
+            american_football: ["Shadow", "tag-warm", "negligible capture — visibility only"],
+          };
+          const sportKeys = Object.keys(SPORT_STATUS).filter((k) => k === "soccer" || bySport[k]);
+          if (sportKeys.length === 0) {
+            const p1 = document.createElement("p"); p1.className = "muted";
+            p1.textContent = "No per-sport data yet.";
+            sr.appendChild(p1);
+          } else {
+            sportKeys.forEach((k) => {
+              const info = SPORT_STATUS[k];
+              const agg = bySport[k] || {};
+              const row = document.createElement("div"); row.className = "kickoff-row";
+              const nm = document.createElement("span"); nm.className = "kr-t mono"; nm.textContent = k.replace("_", " ");
+              const st = document.createElement("span"); st.className = "tag " + info[1]; st.textContent = info[0];
+              const note = document.createElement("span"); note.className = "kr-s";
+              const n = Number(agg.n_settled);
+              note.textContent = (Number.isFinite(n) && n > 0 ? n + " settled · " : "") + info[2];
+              row.append(nm, st, note); sr.appendChild(row);
+            });
           }
 
           const tb = $("tier-rows"); tb.replaceChildren();
