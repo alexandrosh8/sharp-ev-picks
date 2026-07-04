@@ -242,13 +242,12 @@ def test_singleton_configure_and_reset() -> None:
 
 
 def test_dashboard_has_proxy_pool_tile() -> None:
-    # Diagnostics view carries the proxy-pool tile (verdict-first chip + a
-    # null-safe renderer for the /resolution/match-rate proxy_pool field).
+    # Sources view carries the proxy-pool row in the source matrix (a
+    # null-safe renderer fed straight from the /health proxy_pool payload).
     from tests.test_api import make_app
 
     text = TestClient(make_app()).get("/").text
-    assert 'id="tile-proxypool"' in text
-    assert 'id="diag-proxy-verdict"' in text
-    assert 'id="proxy-detail"' in text
-    assert "renderProxyPool" in text
+    assert 'id="view-sources"' in text
+    assert 'id="source-rows"' in text
+    assert "function renderProxyRow" in text
     assert "proxy_pool" in text

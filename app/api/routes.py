@@ -76,19 +76,19 @@ _LOGIN_HTML = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>TAPE — sign in</title>
+    <title>SignalDesk — sign in</title>
     <style>
       :root {
-        --bg: #0d1014;
-        --surface-1: #12161c;
-        --surface-2: #171c23;
-        --line: #262d37;
-        --text: #e8ebef;
-        --dim: #a8b0ba;
-        --faint: #7d8590;
-        --pos: #3fb984;
-        --neg: #d95d52;
-        --info: #5d9bd4;
+        --bg: #0e1116;
+        --surface-1: #151a22;
+        --surface-2: #1b222d;
+        --line: #2a3340;
+        --text: #e6ebf2;
+        --dim: #93a1b5;
+        --faint: #627083;
+        --pos: #57c7e3;
+        --neg: #d97a82;
+        --info: #93a1b5;
         --radius: 4px;
         --radius-sm: 4px;
         --font-display:
@@ -196,8 +196,10 @@ _LOGIN_HTML = """<!doctype html>
   </head>
   <body>
     <form class="card" id="login-form" method="post" autocomplete="off">
-      <div class="brand"><span class="mark">▌</span>TAPE<span class="tick">.</span></div>
-      <div class="sub">picks terminal · sign in</div>
+      <div class="brand">
+        <span class="mark">&#9670;</span>SignalDesk<span class="tick">.</span>
+      </div>
+      <div class="sub">trading console · sign in</div>
       <label for="u">Username</label>
       <input id="u" name="username" type="text" autocomplete="username" autofocus required />
       <label for="p">Password</label>
@@ -456,7 +458,7 @@ _SETUP_HTML = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>TAPE — first-run setup</title>
+    <title>SignalDesk — first-run setup</title>
     <style>
       :root {
         --bg: #0d1014;
@@ -576,7 +578,9 @@ _SETUP_HTML = """<!doctype html>
   </head>
   <body>
     <form class="card" id="setup-form" method="post" autocomplete="off">
-      <div class="brand"><span class="mark">▌</span>TAPE<span class="tick">.</span></div>
+      <div class="brand">
+        <span class="mark">&#9670;</span>SignalDesk<span class="tick">.</span>
+      </div>
       <div class="sub">first run · create your admin password</div>
       <label for="u">Username</label>
       <input id="u" name="username" type="text" autocomplete="username" value="admin" />
