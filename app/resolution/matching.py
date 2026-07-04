@@ -321,6 +321,25 @@ def oddsportal_slug_names(external_ref: str) -> tuple[str, str] | None:
     return home, away
 
 
+def marker_safe_slug_names(external_ref: str, home: str, away: str) -> tuple[str, str] | None:
+    """`oddsportal_slug_names`, refused when the slug LOSES a distinguishing
+    marker (women/youth/reserve) the display names carry.
+
+    The slug drops the women-league "W" suffix etc., so matching on it would
+    pseudo-merge a women's/youth pick onto the marker-less men's/senior
+    fixture — the wrong-game class the close-attach path categorically
+    refuses. Use this anywhere the slug is tried as a fallback match key.
+    """
+    slug = oddsportal_slug_names(external_ref)
+    if slug is None:
+        return None
+    display_markers = distinguishing_markers(home) | distinguishing_markers(away)
+    slug_markers = distinguishing_markers(slug[0]) | distinguishing_markers(slug[1])
+    if display_markers <= slug_markers:
+        return slug
+    return None
+
+
 class AliasTable:
     """Deterministic `{normalized_alias -> canonical_normalized}` map.
 

@@ -12,6 +12,7 @@ from app.resolution.matching import (
     EventCandidate,
     default_aliases,
     distinguishing_markers,
+    marker_safe_slug_names,
     match_event,
     normalize_name,
     oddsportal_slug_names,
@@ -33,6 +34,31 @@ def test_oddsportal_slug_names_none_for_non_oddsportal_refs() -> None:
     assert oddsportal_slug_names("1631993947") is None  # Pinnacle numeric ref
     assert oddsportal_slug_names("betfair:abc-123") is None
     assert oddsportal_slug_names("") is None
+
+
+def test_marker_safe_slug_names_refuses_marker_losing_slugs() -> None:
+    # The slug drops the women "W" suffix the display names carry: matching on
+    # it would pseudo-merge the women's fixture onto the men's/senior archive
+    # event (the wrong-game class the close-attach guard already refuses).
+    # marker_safe_slug_names must return None, not the marker-less slug.
+    ref = "https://www.oddsportal.com/basketball/h2h/los-angeles-sparks-Ia6UdBZF/new-york-liberty-h4iAv3Jl/#UVVsCGdR"
+    assert marker_safe_slug_names(ref, "Los Angeles Sparks W", "New York Liberty W") is None
+    # One-sided marker loss is enough to refuse.
+    assert marker_safe_slug_names(ref, "Los Angeles Sparks W", "New York Liberty") is None
+
+
+def test_marker_safe_slug_names_passes_marker_free_and_marker_retaining_slugs() -> None:
+    # Marker-free display names: the slug is a cleaner key, hand it through.
+    ref = "https://www.oddsportal.com/basketball/h2h/cangrejeros-de-santurce-Yi6Va0d4/indios-de-mayaguez-Y3WmYnZn/#x"
+    assert marker_safe_slug_names(ref, "Cangrejeros de Santurce", "Indios de Mayaguez") == (
+        "cangrejeros de santurce",
+        "indios de mayaguez",
+    )
+    # Slug RETAINS the marker the display carries: safe, hand it through.
+    ref_w = "https://www.oddsportal.com/basketball/h2h/sparks-w-Ia6UdBZF/liberty-w-h4iAv3Jl/#z"
+    assert marker_safe_slug_names(ref_w, "Sparks W", "Liberty W") == ("sparks w", "liberty w")
+    # Non-OddsPortal refs stay None regardless of markers.
+    assert marker_safe_slug_names("1631993947", "Arsenal", "Chelsea") is None
 
 
 def test_distinguishing_markers_flag_women_youth_reserve() -> None:
