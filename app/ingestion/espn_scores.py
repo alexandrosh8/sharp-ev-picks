@@ -129,21 +129,31 @@ def parse_tennis_scoreboard(data: dict) -> list[FinalScore]:
     """FinalScores (as SET scores) from an ESPN tennis scoreboard.
 
     Tennis nests events[].groupings[].competitions[]; each competition's
-    competitors carry an athlete displayName and per-set `linescores` (games
-    won per set) but no aggregate score. We emit FinalScore(home_player,
-    away_player, date, sets_home, sets_away) — settling match_winner (h2h) AND
-    over_under_sets (totals: sets_home + sets_away) through the same outcome math.
+    competitors carry an athlete displayName, a `winner` boolean and per-set
+    `linescores` (games won per set) but no aggregate score. We emit
+    FinalScore(home_player, away_player, date, sets_home, sets_away) —
+    settling match_winner (h2h) AND over_under_sets (totals) through the same
+    outcome math.
+
+    Abnormal completions follow TENNIS_SETTLEMENT_CONVENTION
+    ("pinnacle_one_set", app/settlement/outcomes.py): walkover or abandonment
+    before one completed set -> completion="void"; retirement/default after
+    >=1 completed set with an ESPN winner flag -> completion="retired" +
+    winner_side. Tennis auto-settlement only grades payloads that
+    affirmatively look complete/classifiable: a "final" without a complete
+    best-of set pattern, or a retirement without a winner flag, is COUNTED
+    and logged but not emitted — the pick stays open for manual
+    /events/{id}/result entry. Never guess.
     """
     scores: list[FinalScore] = []
+    unclassifiable = 0  # finals we refuse to grade (left for manual settlement)
     for event in data.get("events") or []:
         for grouping in event.get("groupings") or []:
             for comp in grouping.get("competitions") or []:
                 if not _is_final(comp):
                     continue
-                if _is_abnormal_completion(comp):
-                    continue  # retirement/walkover/default -> never a set score
                 md = _match_date(comp.get("date") or event.get("date") or "")
-                sides: dict[str, tuple[str, list[float]]] = {}
+                sides: dict[str, tuple[str, list[float], bool]] = {}
                 for c in comp.get("competitors") or []:
                     ha = c.get("homeAway")
                     name = (c.get("athlete") or {}).get("displayName")
@@ -153,18 +163,47 @@ def parse_tennis_scoreboard(data: dict) -> list[FinalScore]:
                         if x.get("value") is not None
                     ]
                     if ha in ("home", "away") and name:
-                        sides[ha] = (str(name), lines)
+                        sides[ha] = (str(name), lines, c.get("winner") is True)
                 if md is None or "home" not in sides or "away" not in sides:
                     continue
-                (hn, hl), (an, al) = sides["home"], sides["away"]
+                (hn, hl, hw), (an, al, aw) = sides["home"], sides["away"]
                 hs, a_s = _sets_won(hl, al)
-                # Emit only a COMPLETE best-of pattern: 2 winner sets (Bo3) or
-                # 3 (Bo5). Anything else (0 sets, 1 set, a tie) is a partial
-                # match — emit nothing, the pick stays pending and ages into
-                # the existing void path rather than settling on a fragment.
+                if _is_abnormal_completion(comp):
+                    # Retirement / walkover / default (ESPN still flags these
+                    # completed=True). Classify per the declared convention.
+                    if hs + a_s == 0:
+                        # Walkover or abandoned before one completed set: VOID
+                        # everything. Never graded as a win for anyone.
+                        scores.append(FinalScore(hn, an, md, 0, 0, completion="void"))
+                    elif hw != aw:  # exactly one advancing player flagged
+                        scores.append(
+                            FinalScore(
+                                hn,
+                                an,
+                                md,
+                                hs,
+                                a_s,
+                                completion="retired",
+                                winner_side="home" if hw else "away",
+                            )
+                        )
+                    else:
+                        unclassifiable += 1  # >=1 set but no winner flag: never guess
+                    continue
+                # Normal final: emit only a COMPLETE best-of pattern — 2 winner
+                # sets (Bo3) or 3 (Bo5). Anything else (0 sets, 1 set, a tie)
+                # is a suspicious/partial payload — refuse to grade it.
                 if max(hs, a_s) not in (2, 3) or hs == a_s:
+                    unclassifiable += 1
                     continue
                 scores.append(FinalScore(hn, an, md, hs, a_s))
+    if unclassifiable:
+        logger.warning(
+            "tennis scoreboard: %d final-flagged match(es) not affirmatively "
+            "classifiable (incomplete set pattern or retirement without a winner "
+            "flag) — left unsettled for manual entry",
+            unclassifiable,
+        )
     return scores
 
 

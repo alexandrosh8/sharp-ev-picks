@@ -173,6 +173,7 @@ def _tennis_comp(
     status: dict | None = None,
     home: str = "Player A",
     away: str = "Player B",
+    winner: str | None = None,  # "home" | "away" | None (no winner flag at all)
 ) -> dict:
     return {
         "events": [
@@ -188,11 +189,13 @@ def _tennis_comp(
                                 "competitors": [
                                     {
                                         "homeAway": "home",
+                                        **({"winner": winner == "home"} if winner else {}),
                                         "athlete": {"displayName": home},
                                         "linescores": [{"value": v} for v in home_lines],
                                     },
                                     {
                                         "homeAway": "away",
+                                        **({"winner": winner == "away"} if winner else {}),
                                         "athlete": {"displayName": away},
                                         "linescores": [{"value": v} for v in away_lines],
                                     },
@@ -206,17 +209,51 @@ def _tennis_comp(
     }
 
 
-def test_parse_tennis_skips_retired_and_walkover_matches() -> None:
-    # A retirement/walkover is NOT a normal completed match: the set score is
-    # meaningless for over_under_sets and often for match_winner too. ESPN
-    # still flags these completed=True, so the detail text must gate them out
-    # (the pick stays pending and ages into the existing void path).
-    retired = {"type": {"name": "STATUS_RETIRED", "completed": True, "detail": "Ret."}}
-    assert parse_tennis_scoreboard(_tennis_comp([6.0, 3.0], [4.0, 1.0], status=retired)) == []
-    walkover = {"type": {"name": "STATUS_FINAL", "completed": True, "shortDetail": "W/O"}}
-    assert parse_tennis_scoreboard(_tennis_comp([], [], status=walkover)) == []
-    defaulted = {"type": {"name": "STATUS_FINAL", "completed": True, "detail": "Defaulted"}}
-    assert parse_tennis_scoreboard(_tennis_comp([6.0, 2.0], [2.0, 0.0], status=defaulted)) == []
+_RETIRED = {"type": {"name": "STATUS_RETIRED", "completed": True, "detail": "Ret."}}
+_WALKOVER = {"type": {"name": "STATUS_FINAL", "completed": True, "shortDetail": "W/O"}}
+_DEFAULTED = {"type": {"name": "STATUS_FINAL", "completed": True, "detail": "Defaulted"}}
+
+
+def test_parse_tennis_retirement_after_one_set_grades_advancing_player() -> None:
+    # TENNIS_SETTLEMENT_CONVENTION "pinnacle_one_set": retirement after >=1
+    # completed set emits completion="retired" + the ESPN winner flag's side —
+    # the settler grades h2h to the advancing player and voids other markets.
+    got = parse_tennis_scoreboard(
+        _tennis_comp([6.0, 3.0], [4.0, 1.0], status=_RETIRED, winner="home")
+    )
+    assert got == [
+        FinalScore(
+            "Player A", "Player B", date(2024, 2, 1), 1, 0, completion="retired", winner_side="home"
+        )
+    ]
+    # Default (disqualification) after a completed set follows the same rule.
+    got = parse_tennis_scoreboard(
+        _tennis_comp([2.0, 6.0], [6.0, 3.0], status=_DEFAULTED, winner="away")
+    )
+    assert got == [
+        FinalScore(
+            "Player A", "Player B", date(2024, 2, 1), 1, 1, completion="retired", winner_side="away"
+        )
+    ]
+
+
+def test_parse_tennis_walkover_and_early_abandonment_void() -> None:
+    # Walkover (no play) and retirement BEFORE one completed set -> VOID all
+    # markets. A walkover must NEVER grade as a win for anyone.
+    assert parse_tennis_scoreboard(_tennis_comp([], [], status=_WALKOVER, winner="home")) == [
+        FinalScore("Player A", "Player B", date(2024, 2, 1), 0, 0, completion="void")
+    ]
+    # Mid-first-set retirement: 3-1 games is not a completed set -> void too.
+    assert parse_tennis_scoreboard(_tennis_comp([3.0], [1.0], status=_RETIRED, winner="home")) == [
+        FinalScore("Player A", "Player B", date(2024, 2, 1), 0, 0, completion="void")
+    ]
+
+
+def test_parse_tennis_retirement_without_winner_flag_left_unsettled() -> None:
+    # >=1 completed set but NO ESPN winner flag: the advancing player cannot
+    # be affirmatively determined -> emit nothing (never guess); the pick
+    # stays open for manual settlement.
+    assert parse_tennis_scoreboard(_tennis_comp([6.0, 3.0], [4.0, 1.0], status=_RETIRED)) == []
 
 
 def test_parse_tennis_does_not_count_leading_partial_set() -> None:

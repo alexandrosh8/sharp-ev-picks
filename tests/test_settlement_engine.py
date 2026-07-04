@@ -837,3 +837,120 @@ async def test_run_settlement_cycle_refuses_when_providers_empty(factory, caplog
         refreshed = await session.get(Pick, pick_id)
         assert refreshed is not None
         assert refreshed.status == "alerted"
+
+
+# --- tennis retirement/walkover convention (pinnacle_one_set) ------------------
+
+# Past the tennis settle floor (6h) so the picks are settle-eligible at NOW.
+TENNIS_KICKOFF = NOW - timedelta(hours=7)
+
+
+async def seed_tennis_pick(session, event_id: str, home: str, away: str, market, selection):  # type: ignore[no-untyped-def]
+    teams = EventTeams(home=home, away=away, league="atp-test", starts_at=TENNIS_KICKOFF)
+    pick_out = make_pick(event_id, market=market, selection=selection).model_copy(
+        update={"sport": "tennis", "event": f"{home} vs {away}"}
+    )
+    assert await persist_pick(session, pick_out, teams, "value", "test-v")
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == event_id, Pick.market == str(market))
+        .order_by(Pick.id.desc())
+    )
+    assert pick is not None
+    return pick
+
+
+async def test_tennis_clean_final_settles_h2h_normally(session) -> None:  # type: ignore[no-untyped-def]
+    # A normally-completed match (completion defaults to "full") grades
+    # through the unchanged score path: 2-0 sets -> home h2h WON.
+    home, away = "Clean Aces", "Clean Rally"
+    pick = await seed_tennis_pick(session, "evt-ten-clean", home, away, Market.H2H, home)
+    book = ScoreBook([FinalScore(home, away, TENNIS_KICKOFF.date(), 2, 0)])
+    assert await settle_open_picks(session, book, NOW) == 1
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "won"
+    assert row.pnl == Decimal("22.00")  # 20 @ 2.10
+
+
+async def test_tennis_retirement_grades_advancing_player_and_voids_totals(session) -> None:  # type: ignore[no-untyped-def]
+    # pinnacle_one_set: retirement after >=1 completed set -> h2h graded to
+    # the ADVANCING player (never from the partial set score), totals VOID.
+    home, away = "Ret Alpha", "Ret Beta"
+    p_win = await seed_tennis_pick(session, "evt-ten-ret", home, away, Market.H2H, home)
+    p_tot = await seed_tennis_pick(session, "evt-ten-ret", home, away, Market.TOTALS, "Over 2.5")
+    book = ScoreBook(
+        [
+            FinalScore(
+                home, away, TENNIS_KICKOFF.date(), 1, 0, completion="retired", winner_side="home"
+            )
+        ]
+    )
+    assert await settle_open_picks(session, book, NOW) == 2
+    won = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == p_win.id))
+    assert won is not None
+    assert won.outcome == "won"
+    assert won.pnl == Decimal("22.00")
+    assert (won.home_score, won.away_score) == (1, 0)  # completed sets at retirement
+    void = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == p_tot.id))
+    assert void is not None
+    assert void.outcome == "void"
+    assert void.pnl == Decimal("0.00")
+    ev = await session.scalar(select(Event).where(Event.external_ref == "evt-ten-ret"))
+    assert ev is not None
+    assert ev.status == "finished"  # the match IS over — retirement ends it
+
+
+async def test_tennis_retirement_grades_pick_on_retiring_player_lost(session) -> None:  # type: ignore[no-untyped-def]
+    # The pick backed the player who retired: LOST — even though that player
+    # led the completed sets 1-0 (the advancing flag decides, not the score).
+    home, away = "Ret Gamma", "Ret Delta"
+    pick = await seed_tennis_pick(session, "evt-ten-ret-lost", home, away, Market.H2H, home)
+    book = ScoreBook(
+        [
+            FinalScore(
+                home, away, TENNIS_KICKOFF.date(), 1, 0, completion="retired", winner_side="away"
+            )
+        ]
+    )
+    assert await settle_open_picks(session, book, NOW) == 1
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "lost"
+    assert row.pnl == Decimal("-20.00")
+
+
+async def test_tennis_walkover_voids_all_markets_and_leaves_event_unfinished(session) -> None:  # type: ignore[no-untyped-def]
+    # Walkover / abandoned before one completed set: EVERY market voids with
+    # pnl 0, no score is persisted, and the never-played event is NOT flipped
+    # to 'finished' (mirrors the stale-void paths). A walkover must never
+    # grade as a win.
+    home, away = "WO Echo", "WO Foxtrot"
+    pick = await seed_tennis_pick(session, "evt-ten-wo", home, away, Market.H2H, home)
+    book = ScoreBook([FinalScore(home, away, TENNIS_KICKOFF.date(), 0, 0, completion="void")])
+    assert await settle_open_picks(session, book, NOW) == 1
+    await session.refresh(pick)
+    assert pick.status == "settled"
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "void"
+    assert row.pnl == Decimal("0.00")
+    assert row.home_score is None
+    assert row.away_score is None
+    ev = await session.scalar(select(Event).where(Event.external_ref == "evt-ten-wo"))
+    assert ev is not None
+    assert ev.status == "scheduled"
+
+
+async def test_soccer_settlement_regression_unchanged_by_completion_fields(session) -> None:  # type: ignore[no-untyped-def]
+    # Byte-identical regression: a provider that never sets the new fields
+    # (all CSV/scraped/team-sport paths) settles exactly as before —
+    # completion defaults to "full" and the score path is untouched.
+    pick = await seed_pick(session, "evt-completion-default")
+    assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 1
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "won"  # Over 2.5 with 3 goals — same as test_settles_past_pick
+    assert row.pnl == Decimal("22.00")
+    assert (row.home_score, row.away_score) == (2, 1)

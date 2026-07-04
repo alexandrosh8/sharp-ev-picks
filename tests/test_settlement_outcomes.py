@@ -10,10 +10,12 @@ import pytest
 
 from app.schemas.base import Outcome
 from app.settlement.outcomes import (
+    TENNIS_SETTLEMENT_CONVENTION,
     pick_pnl,
     pick_roi,
     provisional_result,
     settle_selection,
+    settle_selection_retired,
 )
 
 HOME = "Alpha FC"
@@ -323,3 +325,35 @@ def test_football_ah_engine_matches_verified_reference() -> None:
                 assert abs(away_pnl - _ref_settle_ah(-margin, -line, 2.0)) < 1e-9
                 checked += 2
     assert checked == len(lines) * 36 * 2
+
+
+# --- tennis retirement convention (TENNIS_SETTLEMENT_CONVENTION) --------------
+
+
+def test_tennis_convention_is_declared() -> None:
+    assert TENNIS_SETTLEMENT_CONVENTION == "pinnacle_one_set"
+
+
+def test_retired_h2h_grades_advancing_player() -> None:
+    # Pinnacle-style: >=1 completed set + a player advanced -> moneyline
+    # graded to the advancing side, regardless of the partial set score.
+    assert settle_selection_retired("h2h", HOME, HOME, AWAY, "home") is Outcome.WON
+    assert settle_selection_retired("h2h", HOME, HOME, AWAY, "away") is Outcome.LOST
+    assert settle_selection_retired("h2h", AWAY, HOME, AWAY, "away") is Outcome.WON
+    assert settle_selection_retired("h2h", AWAY, HOME, AWAY, "home") is Outcome.LOST
+
+
+def test_retired_non_h2h_markets_void() -> None:
+    # The match total is undefined after a retirement — totals (and any other
+    # market) return the stake rather than grade from a fragment.
+    assert settle_selection_retired("totals", "Over 2.5", HOME, AWAY, "home") is Outcome.VOID
+    assert settle_selection_retired("spreads", f"{HOME} -1.5", HOME, AWAY, "away") is Outcome.VOID
+
+
+def test_retired_refuses_unknown_winner_or_selection() -> None:
+    with pytest.raises(ValueError, match="advancing side"):
+        settle_selection_retired("h2h", HOME, HOME, AWAY, None)
+    with pytest.raises(ValueError, match="advancing side"):
+        settle_selection_retired("h2h", HOME, HOME, AWAY, "either")
+    with pytest.raises(ValueError, match="neither player"):
+        settle_selection_retired("h2h", "Somebody Else", HOME, AWAY, "home")

@@ -25,8 +25,14 @@ from sqlalchemy.orm import aliased
 from app.edge.value_policy import ValuePolicy
 from app.probabilities.devig import DevigMethod
 from app.schemas.base import Outcome
-from app.settlement.outcomes import pick_pnl, pick_roi, settle_selection
-from app.settlement.results import FinalScore, ScoreBook, load_scores
+from app.settlement.outcomes import (
+    TENNIS_SETTLEMENT_CONVENTION,
+    pick_pnl,
+    pick_roi,
+    settle_selection,
+    settle_selection_retired,
+)
+from app.settlement.results import Completion, FinalScore, ScoreBook, load_scores
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking, Sport, Team
 
 if TYPE_CHECKING:
@@ -266,13 +272,23 @@ async def settle_open_picks(
         if score is None:
             continue  # close_pending — stays open, retried next cycle
         if await _settle_one(
-            session, pick, home_name, away_name, score.home_score, score.away_score, now
+            session,
+            pick,
+            home_name,
+            away_name,
+            score.home_score,
+            score.away_score,
+            now,
+            completion=score.completion,
+            winner_side=score.winner_side,
         ):
             settled += 1
             # Snapshot close AFTER the status flip, same transaction: the
             # pick is now frozen for revalidation, so what we write here is
             # final. A False return keeps the re-scrape close untouched.
-            if devig_method is not None:
+            # Walkover/abandonment voids skip it: a market that never played
+            # out has no legitimate close (prices drift toward suspension).
+            if devig_method is not None and score.completion != "void":
                 await finalize_closing_from_snapshots(
                     session,
                     pick,
@@ -359,12 +375,29 @@ async def _settle_one(
     home_score: int,
     away_score: int,
     now: datetime,
+    *,
+    completion: Completion = "full",
+    winner_side: str | None = None,
 ) -> bool:
-    """Atomic single-pick settlement: result row + status flip. False = skipped."""
+    """Atomic single-pick settlement: result row + status flip. False = skipped.
+
+    `completion` implements TENNIS_SETTLEMENT_CONVENTION ("pinnacle_one_set",
+    app/settlement/outcomes.py): "void" (walkover / abandoned before one
+    completed set) voids every market; "retired" (>=1 completed set, a player
+    advanced) grades h2h to `winner_side` and voids the rest; "full" — the
+    only value non-tennis providers emit — is the unchanged score path.
+    """
     try:
-        outcome = settle_selection(
-            pick.market, pick.selection, home_name, away_name, home_score, away_score
-        )
+        if completion == "void":
+            outcome = Outcome.VOID
+        elif completion == "retired":
+            outcome = settle_selection_retired(
+                pick.market, pick.selection, home_name, away_name, winner_side
+            )
+        else:
+            outcome = settle_selection(
+                pick.market, pick.selection, home_name, away_name, home_score, away_score
+            )
     except ValueError as exc:
         logger.warning("pick %d not settleable: %s", pick.id, exc)
         return False
@@ -378,8 +411,10 @@ async def _settle_one(
             outcome=str(outcome),
             pnl=pnl,
             roi=pick_roi(pnl, stake),
-            home_score=home_score,
-            away_score=away_score,
+            # A walkover/abandonment has no meaningful score — leave NULL
+            # (same shape as the stale-void paths) rather than persist 0-0.
+            home_score=None if completion == "void" else home_score,
+            away_score=None if completion == "void" else away_score,
             settled_at=now,
         )
         .on_conflict_do_nothing(constraint="uq_result_tracking_pick")
@@ -388,6 +423,18 @@ async def _settle_one(
     if inserted.scalar_one_or_none() is None:
         return False  # already settled by a concurrent/manual path
     pick.status = "settled"
+    if completion == "void":
+        # Walkover/abandonment: the match was never (fully) played — mirror
+        # the other VOID paths, which deliberately leave Event.status alone.
+        logger.info(
+            "settled pick %d: %s %s -> void (%s — tennis convention %s)",
+            pick.id,
+            pick.market,
+            pick.selection,
+            "walkover/abandoned before one completed set",
+            TENNIS_SETTLEMENT_CONVENTION,
+        )
+        return True
     # Issue 2 (2026-06-24): Event.status was only ever the 'scheduled' server
     # default — nothing transitioned it, so a finished, settled game stayed
     # 'scheduled' forever. A pick settling from a REAL final score is the

@@ -16,6 +16,21 @@ from decimal import Decimal
 
 from app.schemas.base import Outcome
 
+# DECLARED tennis settlement convention (ADR-0019 sport-shadow appendix,
+# encoded 2026-07-04). Book conventions differ (Pinnacle grades the moneyline
+# once >=1 full set is completed and a player advanced; bet365 voids on any
+# retirement; walkovers void everywhere). We settle to the Pinnacle rule —
+# matching our sharp-anchor book — spelled out:
+#   * walkover, or any abnormal completion BEFORE one completed set
+#     -> ALL markets VOID (stake returned, pnl 0);
+#   * retirement/default AFTER >=1 completed set -> h2h (match_winner) graded
+#     to the ADVANCING player; every other market (e.g. over_under_sets)
+#     VOID — the match total is undefined, never inferred from a fragment;
+#   * anything not affirmatively classifiable (no winner flag, incomplete
+#     set pattern on a "final") is NOT settled — the pick stays open for
+#     manual /events/{id}/result entry. Never guess.
+TENNIS_SETTLEMENT_CONVENTION = "pinnacle_one_set"
+
 _TOTALS_RE = re.compile(r"(Over|Under) (\d+(?:\.\d+)?)")
 _EH_DRAW_RE = re.compile(r"Draw \(([+-]?\d+(?:\.\d+)?)\)")
 _SIGNED_LINE_RE = re.compile(r"[+-]\d+(?:\.\d+)?")
@@ -50,6 +65,31 @@ def settle_selection(
     if market == "spreads":
         return _settle_spreads(selection, home, away, home_score, away_score)
     raise ValueError(f"market {market!r} is not settleable")
+
+
+def settle_selection_retired(
+    market: str,
+    selection: str,
+    home: str,
+    away: str,
+    winner_side: str | None,
+) -> Outcome:
+    """Outcome of one selection for a RETIRED tennis match under
+    TENNIS_SETTLEMENT_CONVENTION ("pinnacle_one_set"): >=1 completed set and
+    an advancing player — h2h grades to that player, all other markets VOID.
+
+    Raises ValueError when the winner side is unknown or the selection cannot
+    be mapped — callers must skip (and log) rather than guess.
+    """
+    if winner_side not in ("home", "away"):
+        raise ValueError(f"retired match without a known advancing side: {winner_side!r}")
+    if market == "h2h":
+        if selection == home:
+            return _won(winner_side == "home")
+        if selection == away:
+            return _won(winner_side == "away")
+        raise ValueError(f"h2h selection {selection!r} matches neither player")
+    return Outcome.VOID  # totals/other markets: undefined on retirement -> stake returned
 
 
 def pick_pnl(outcome: Outcome, stake: Decimal, decimal_odds: Decimal) -> Decimal:

@@ -19,6 +19,7 @@ import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Literal
 
 import httpx
 
@@ -39,6 +40,13 @@ from app.resolution.matching import distinguishing_markers
 logger = logging.getLogger(__name__)
 
 
+# How the match reached its result. "full" is a normally-completed game and
+# the only value non-tennis providers ever emit; "retired" and "void" exist
+# for the DECLARED tennis settlement convention (see
+# app/settlement/outcomes.py::TENNIS_SETTLEMENT_CONVENTION).
+Completion = Literal["full", "retired", "void"]
+
+
 @dataclass(frozen=True)
 class FinalScore:
     home_team: str
@@ -46,6 +54,13 @@ class FinalScore:
     match_date: date
     home_score: int
     away_score: int
+    # Tennis-convention fields (defaults keep every existing provider —
+    # football-data CSVs, scraped finals, ESPN team sports — byte-identical).
+    # completion="retired" REQUIRES winner_side: the settler grades h2h to the
+    # advancing side and voids everything else. completion="void" voids all
+    # markets (walkover / abandoned before one completed set).
+    completion: Completion = "full"
+    winner_side: Literal["home", "away"] | None = None
 
 
 @dataclass(frozen=True)
