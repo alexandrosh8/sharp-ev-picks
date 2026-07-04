@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="docs/assets/logo.svg" alt="sharp-ev-picks — +EV picks decision-support platform" width="560">
+<img src="docs/assets/logo.svg" alt="sharp-ev-picks — picks-only sports-market analytics" width="560">
 
-**A picks-only +EV decision-support platform for football &amp; basketball.**
+**A picks-only sports-market analytics platform.**
 
-Sharp-vs-soft line shopping · vig-stripped edges · fractional-Kelly sizing · live Closing Line Value tracking.
+Read-only odds ingestion · sharp-anchor devig & line shopping · trusted-CLV and source-quality tracking · evidence-first dashboard.
 You review every pick and place any bet yourself — the system never does.
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
@@ -15,7 +15,7 @@ You review every pick and place any bet yourself — the system never does.
 [![CI](https://github.com/alexandrosh8/sharp-ev-picks/actions/workflows/ci.yml/badge.svg)](https://github.com/alexandrosh8/sharp-ev-picks/actions/workflows/ci.yml)
 [![Safety: picks-only · no auto-bet](https://img.shields.io/badge/safety-picks--only%20%C2%B7%20no%20auto--bet-22c55e)](#-safety--read-this-first)
 
-[Install](#install--run) · [How it works](#how-it-works) · [Sports](#sports-coverage) · [Configuration](#configuration) · [Architecture](#architecture) · [Docs](#documentation)
+[Install](#install--run) · [How it works](#how-it-works) · [Sports](#sports-coverage) · [Validation](#validation-protocol-adr-0019) · [Dashboard](#dashboard--signaldesk) · [Configuration](#configuration) · [Architecture](#architecture) · [Docs](#documentation)
 
 </div>
 
@@ -23,41 +23,35 @@ You review every pick and place any bet yourself — the system never does.
 
 ## 🔒 Safety — read this first
 
-> **This system never places bets.** It surfaces +EV picks for manual review; **you** decide and place any bet personally, on your own accounts.
+> **This system never places bets.** It surfaces candidate picks for manual review; **you** decide and place any bet personally, on your own accounts.
 >
 > There is **no** bet-execution path, **no** bookmaker login automation, **no** stored betting credentials, and **no** auto-betting flag — by design. Every market-data integration is **read-only (GET)**. A CI safety audit (`scripts/safety_audit.sh`) fails the build if a bet-placement path ever appears. Recommended stakes, edges and EV are informational only — betting involves risk and nothing here is a guarantee of profit.
 
 ## How it works
 
-The honest backtest result (`docs/backtesting/`): a goals model (Dixon-Coles) does **not** beat the market on its own — negative CLV. **Sharp-vs-soft line shopping does**: price fair value from the sharpest book (Pinnacle), strip the vig, and surface a pick only when a softer book's price materially beats that fair value.
+The doctrine, in order of importance:
 
-Backtested on 18 European leagues × 7 seasons × two markets (**46k matches**; parameters swept on TRAIN only, then a single pre-registered holdout). Held-out 2024–26:
+1. **Standalone models are not trusted just because they produce picks.** The project's own backtesting found a goals model alone does not beat the market.
+2. **Sharp-vs-soft line shopping is the core pricing idea.** Fair value is priced from the sharpest available book (Pinnacle; optionally Betfair Exchange), the vig is stripped (8 parity-tested devig methods), and a candidate exists only when a softer book's price materially beats that fair value.
+3. **Candidates are gated by evidence and freshness.** A premium candidate without a real sharp anchor can be demoted to the shadow tier (`VALUE_REQUIRE_SHARP_ANCHOR`); exchange anchors must clear a liquidity floor; odds older than the freshness window are **discarded, never used** (fail-closed).
+4. **CLV proves or disproves edge over time — and only *trusted* CLV counts.** A closing line anchored by a pick's own fill book, an unmoved (tautological) line, a circular same-market close, or a fabricated/implausible close is **excluded from evidence**, not averaged in. Small-sample ROI is noise; all-row CLV is not proof. The quality bar for any claim is trusted CLV with a sufficient sample, acceptable freshness, source agreement, and reliable settlement.
 
-| Tier                       | n   | ROI        | Incremental CLV       | Notes                          |
-| -------------------------- | --- | ---------- | --------------------- | ------------------------------ |
-| **Premium** (live default) | 62  | **+22.4%** | **+0.107** ( > 2 SE ) | 1X2 and O/U 2.5 each positive  |
-| Volume (shadow)            | 379 | +2.5%      | +0.019                | tracked, never alerted         |
-
-> **Read the headline as an upper bound, not the live expectation** (backtest-honesty audit, 2026-07-01). The numbers above fill at the **gross Max across all books** (exchanges included), while live fills at the best soft book or an exchange net of commission — a soft-book-only variant exists (`--fill-universe soft`). The original "> 2 SE" also treated correlated same-match picks as independent; the backtest verdict now gates on a **cluster-robust (by-match) SE**. The 2025 holdout is spent ([ADR-0019](docs/adr/)), and the pre-registered single-shot on fresh 2026 data (2026-07-02) **did not meet acceptance** — the held-out sample at frozen thresholds was tiny (n=13 for 1X2, n=3 for O/U 2.5, vs the n≥150 bar) with point-negative CLV, alongside a 2026-window fill-coverage anomaly (see `docs/research/2026-07-02-fresh-2026-single-shot-header.md`). The strategy is neither re-validated nor refuted by that run; live sharp-close CLV accrual remains the primary evidence path.
-
-The number to trust is **CLV** — small-sample ROI is noisy. The edge is only claimed **where a real sharp price exists**: a premium candidate priced only from soft-book consensus can be demoted to the shadow tier (`VALUE_REQUIRE_SHARP_ANCHOR`), exchange anchors must clear a liquidity floor, and a **fake-CLV independence guard** excludes any closing line anchored by a pick's own fill book — so the metric that proves edge cannot be quietly faked.
-
-Live, the scheduler polls odds, strips vig (8 parity-tested devig methods), gates +EV edges, sizes fractional Kelly, alerts, and a 30-minute **CLV true-up** refreshes each open pick's closing-line value — the discipline that proves (or disproves) edge over time.
+**Historical backtests** (labeled historical — not live proof): an 18-league, 7-season sweep with a pre-registered holdout showed positive held-out CLV for the sharp-vs-soft method, with documented limitations (gross-fill optimism, correlated-sample SEs — since corrected to cluster-robust). That holdout is **spent**, and a later pre-registered single-shot on early-2026 data failed its sample-size bar due to a data-coverage anomaly, neither validating nor refuting the strategy. Details and caveats: [`docs/backtesting/`](docs/backtesting/) and [ADR-0019](docs/adr/). **Live trusted-CLV accrual is the primary evidence path today, and it is not yet conclusive.**
 
 ## Sports coverage
 
-A sport is *shown* the moment it's scrapeable, but it only *mints picks* once its own closing-line evidence proves an edge.
+A sport is *shown* once it is scrapeable; it *mints premium picks* only where the pipeline is enabled — and any promotion beyond that requires an evidence review (trusted CLV, sample size, freshness, source agreement, settlement reliability), never an env flip.
 
-| Sport                             | Status                              | Notes                                                                                              |
-| --------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **Football / Soccer**             | ✅ Pick source — **validated**      | Held-out CLV **> 2 SE** (1X2 + O/U 2.5). Sharp-vs-soft line shopping.                              |
-| **Basketball** (NBA / EuroLeague) | ⚠️ Shadow — **not yet proven**      | Same method (moneyline + totals); basketball-specific held-out CLV still accruing. Promotion requires evidence review, not an env flip. |
-| **Tennis** (ATP / WTA)            | 🚧 Display-only                     | Scraped + shown; mints **no** picks (no free sharp close to validate against yet).                 |
-| **American football** (NFL)       | 🚧 Display-only                     | Scraped + shown; mints **no** picks — forward-capturing the Pinnacle close until CLV can be graded. |
+| Sport | Status | Notes |
+| --- | --- | --- |
+| **Football / Soccer** | ✅ Live pick source (benchmark) | The enabled pipeline. Historical held-out evidence supports the method; **live trusted CLV is still accruing and not yet conclusive** — stated on the dashboard, not hidden. |
+| **Basketball** (incl. NBA) | ⚠️ Shadow — evidence accruing | Closest shadow candidate on current exploratory reports; **not promotable** (sample marginal, source-agreement coverage thin). |
+| **Tennis** (ATP / WTA) | 🚧 Shadow / display-only | Settlement now follows the `pinnacle_one_set` convention (see below); sharp-close capture evidence still accruing; no picks minted. |
+| **American football** (NFL) | 🚧 Display-only | Too little event volume to evaluate yet. |
 
-## Install &amp; run
+## Install & run
 
-Both supported paths run the **same code** and serve the picks dashboard at **http://localhost:8000/**.
+Both supported paths run the **same code** and serve the dashboard at **http://localhost:8000/**.
 
 ### Option 1 — Your own PC (Windows or Mac)
 
@@ -106,59 +100,107 @@ uv run uvicorn app.main:app --reload         # http://localhost:8000/
 Prefer not to install the databases? `docker compose up -d postgres redis` and keep the app native. First-time commands live in [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). Dev tasks:
 
 ```bash
-uv run pytest -q                 # 2,000+ tests (no network)
-uvx ruff check .                 # lint
-uv run mypy app tests            # types
-bash scripts/safety_audit.sh     # no-autobet + secret-leak greps (CI-gated)
+uv run pytest -q                          # 2,400+ tests (no network)
+uvx ruff check .                          # lint
+uvx ruff format --check app tests scripts # formatting (CI-gated separately)
+uv run mypy app tests                     # types
+uv run alembic heads                      # single migration head
+bash scripts/safety_audit.sh              # no-autobet + secret-leak greps (CI-gated)
 ```
+
+Evidence/validation tooling (read-only; outputs refuse to overwrite prior runs):
+
+```bash
+uv run python scripts/research/sport_quality_report.py --days 30   # per-sport trusted-CLV / freshness / agreement report
+uv run python scripts/research/devig_comparison.py                 # validation-only devig method comparison
+uv run python scripts/bsp_inventory.py                             # BSP archive/cache inventory + readiness
+uv run python scripts/arcadia_anchor_export.py export --from 2026-07-01 --to 2026-12-31
+uv run python scripts/arcadia_anchor_export.py preflight --dataset <exported.csv>   # prints PASS or DO-NOT-RUN
+```
+
+## Validation protocol (ADR-0019)
+
+The next strategy validation is **pre-registered, signed, and armed — and deliberately has not run**:
+
+- **H2 protocol (signed):** a *pure prospective single-shot* — no train side, no selection on any 2026 data, evaluated once against the pre-registered frozen configuration (hash-pinned) using the project's own Pinnacle ARCADIA capture as the independent sharp anchor and a future Betfair BSP archive as the close.
+- **H6 agreement gate (signed, tolerance 0.02):** a validation/shadow-only variant requiring the sharp anchor to agree with an independent multi-book consensus; it records pass/fail/excluded reasons, never silently drops rows, and **is not a live gate or promotion switch**.
+- **Guards:** the run is impossible until the future BSP data exists and a coverage preflight passes — the preflight prints **`DO-NOT-RUN`** while data is incomplete (it currently does, correctly), spent-slate sha256 guards block every previously-read dataset, and a frozen-config-hash check stops the run if live settings drift.
+- **No validation run has been performed early.** Exploratory readouts are labeled exploratory/spent and are never used to tune frozen thresholds.
+
+Evidence machinery accruing in the background: freshness-stratified trusted-CLV telemetry (anchor-age × mint-to-kickoff × sport × market buckets), monthly per-sport quality reports (coverage, agreement, freshness, settlement, sample sufficiency), and a pre-registered anchor-freshness bound (H8) that stays shadow-only. These reports exist to accrue meaningful samples over time, not to create same-day narratives.
+
+## Dashboard — SignalDesk
+
+A single self-contained page (`app/api/dashboard.html`; no framework, no CDN, installable PWA) styled as a trading-intelligence console. Five workspaces:
+
+- **Today** — command screen: qualified picks, a derived "needs attention" queue (source degraded, low evidence, staleness), next kickoffs, recent results, and a one-line evidence position.
+- **Edges** — master-detail pick console (stream → detail → evidence panes on desktop; full-screen sheets on mobile) with explicit trust states: Premium vs **Shadow — tracked, informational** (never styled actionable), stale, weak match, missing anchor, and per-pick close/CLV trust.
+- **Radar** — market coverage by kickoff proximity, with DISPLAY-ONLY tags for unvalidated sports.
+- **Lab** — the evidence workspace: a claims ledger ("can claim / cannot claim yet"), the **trusted sharp-close CLV** headline kept strictly separate from all-closes context CLV, close-quality exclusions (tautological / circular / fabricated), calibration, **Sport Readiness** (per-sport shadow status and blockers), and sample-size warnings everywhere.
+- **Sources** — source-health matrix (scrape, ARCADIA, Betfair inline, Betfair API *monitor-only*, proxy pool — redacted), staleness monitor, review-queue counts, H2 validation readiness including the DO-NOT-RUN state, and the H6 status line.
+
+No performance claims appear on the dashboard; low-evidence and shadow items are visually incapable of looking actionable.
 
 ## Configuration
 
 All secrets live in `.env` only (copy from `.env.example`; `0600`, gitignored — **never commit it**). Every key ships with a safe default — the app works with none of them set. The keys that matter most:
 
-| Key                                       | Default                | What it does                                                                             |
-| ----------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------- |
-| `ODDS_SOURCE`                             | `oddsportal`           | Free OddsPortal scrape (default) or `odds_api` (The Odds API).                            |
-| `DASHBOARD_AUTH_ENABLED`                  | `true` in `.env.example` | First-run `/setup` creates the admin password (stored hashed). `false` = no login.      |
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty                  | Pick alerts. Blank just disables alerts; the dashboard still works.                       |
-| `VALUE_REQUIRE_SHARP_ANCHOR`              | `false`                | When `true`, a premium pick without a real Pinnacle/Betfair anchor demotes to shadow.     |
-| `SCRAPER_PROXY_POOL`                      | empty                  | Optional rotating proxies for the scrape *and* the Pinnacle close capture (see below).    |
-| `BETFAIR_EXCHANGE_ENABLED`                | `false`                | Optional read-only Betfair Exchange BACK-odds capture as a second sharp anchor.           |
-| `ODDSPORTAL_USE_JSON_FEED`                | `false`                | `true` swaps the per-match Playwright render for a faster `curl_cffi` JSON-feed reader.   |
+| Key | Default | What it does |
+| --- | --- | --- |
+| `ODDS_SOURCE` | `oddsportal` | Free OddsPortal scrape (default) or `odds_api` (The Odds API). |
+| `DASHBOARD_AUTH_ENABLED` | `true` in `.env.example` | First-run `/setup` creates the admin password (stored hashed). `false` = no login. |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Pick alerts. Blank just disables alerts; the dashboard still works. |
+| `VALUE_REQUIRE_SHARP_ANCHOR` | `false` | When `true`, a premium pick without a real Pinnacle/Betfair anchor demotes to shadow. |
+| `SCRAPER_PROXY_POOL` | empty | Optional rotating proxies for the scrape *and* the Pinnacle close capture (see below). |
+| `BETFAIR_EXCHANGE_ENABLED` | `false` | Optional read-only Betfair Exchange BACK-odds capture as a second sharp anchor. |
+| `ODDSPORTAL_USE_JSON_FEED` | `false` | `true` swaps the per-match Playwright render for a faster `curl_cffi` JSON-feed reader. |
 
 The full key reference (scrape tuning, timeouts, results-settlement cadence) is documented inline in [`.env.example`](.env.example).
 
-**Scrape proxies.** The free OddsPortal scrape runs from your host IP, which can be throttled and only lists your region's books. A rotating pool (`host|port|user|pass` quads, comma-separated) widens coverage (~18 UK mainstream books vs ~5 region-restricted) and speeds a full slate to minutes. The same pool automatically serves as egress for the free **Pinnacle ARCADIA close capture**, which rejects datacenter/direct IPs — without a proxy the sharp-close archive stays empty. Read-only either way; credentials never leave `.env`.
+**Scrape proxies.** The free OddsPortal scrape runs from your host IP, which can be throttled and only lists your region's books. A rotating pool (`host|port|user|pass` quads, comma-separated) widens coverage and speeds a full slate. The same pool serves as egress for the free **Pinnacle ARCADIA close capture**, which rejects datacenter/direct IPs. Read-only either way; credentials never leave `.env`. On heavy slates, limited capture/proxy capacity can constrain coverage — the freshness gate then **discards** stale candidates rather than minting stale picks.
 
-**Betfair Exchange.** An off-by-default, read-only capture ([ADR-0015](docs/adr/adr-0015-betfair-exchange-back-odds-capture.md)) binds Betfair BACK odds inline on the same canonical event as the soft books — no cross-source matching, no wrong-game risk. Exchange anchors are liquidity-gated (a known-thin line can't serve as the sharp anchor).
+**Betfair Exchange.** An off-by-default, read-only capture ([ADR-0015](docs/adr/adr-0015-betfair-exchange-back-odds-capture.md)) binds Betfair BACK odds inline on the same canonical event as the soft books. Exchange anchors are liquidity-gated. The separate Betfair API staleness comparison is **monitor-only** — it records verdicts and never demotes live picks.
 
 ## Architecture
 
 Proven open-source engines bound into one pipeline:
 
-- **Ingestion** — OddsHarvester-based OddsPortal scrape (`app/ingestion/oddsportal.py`, Playwright render or `curl_cffi` JSON feed); free Pinnacle ARCADIA close capture (`app/ingestion/pinnacle_arcadia.py`); optional Betfair Exchange BACK odds. All read-only.
-- **Pricing** — penaltyblog Dixon-Coles for football (`app/models/football_dc.py`); an 8-method devig (`app/probabilities/devig.py` — multiplicative, additive, power, Shin closed-form, probit, odds-ratio, logarithmic, differential-margin; parity-tested to 1e-8).
-- **Edge &amp; risk** — edge/EV gating (`app/edge/value.py`) with sharp/consensus anchor grading and an exchange-liquidity floor; fractional-Kelly sizing with per-pick and daily exposure caps (`app/risk/`).
-- **Resolution** — a precision-hardened cross-source matcher (`app/resolution/`) for CLV: marker/reserve-aware (women/youth/reserve sides never collapse onto the senior team), two-tier Jaro-Winkler over a curated alias seed, tennis surname-initial veto, tight kickoff windows, plus a read-only wrong-game self-audit each cycle.
-- **Persistence &amp; serving** — Postgres warehouse (SQLAlchemy 2.0 async + Alembic); APScheduler drives polling, settlement, CLV true-up and sharp-close captures; FastAPI serves the dashboard.
-- **Dashboard** — a single self-contained file (`app/api/dashboard.html`; no framework, no CDN, installable PWA). Mobile-first, four sections — **Picks / Games / Performance / Diagnostics** — with a trust status bar (health, freshness, premium/shadow counts, ROI, CLV), explicit state badges (Premium, Shadow "tracked — not actionable", stale, display-only, weak/missing anchor, settlement, CLV), and honest empty/error states. Diagnostics explains *why* the board is quiet.
+- **Ingestion** — OddsHarvester-based OddsPortal scrape (`app/ingestion/oddsportal.py`, Playwright render or `curl_cffi` JSON feed); free Pinnacle ARCADIA close capture (`app/ingestion/pinnacle_arcadia.py`); optional Betfair Exchange BACK odds; Betfair BSP archive tooling for validation. All read-only.
+- **Pricing** — penaltyblog Dixon-Coles for football (`app/models/football_dc.py`); an 8-method devig (`app/probabilities/devig.py` — multiplicative, additive, power, Shin closed-form, probit, odds-ratio, logarithmic, differential-margin; parity-tested, with cross-library golden vectors).
+- **Edge & risk** — edge/EV gating (`app/edge/value.py`) with sharp/consensus anchor grading and an exchange-liquidity floor; fractional-Kelly sizing (informational) with per-pick and daily exposure caps (`app/risk/`).
+- **Resolution / matching** — a precision-hardened cross-source matcher (`app/resolution/`): marker-aware (women/youth/reserve/B sides never collapse onto the senior team), two-tier Jaro-Winkler over a curated alias seed, tennis surname-initial veto, tight kickoff windows, fail-closed on ambiguity, plus a read-only wrong-game self-audit each cycle. **Aliases are applied only through a sanctioned evidence process**: distinct-fixture co-occurrence evidence, dry-run patch review, regression tests, and a matcher differential proving zero unintended merges — generic-base aliases are never forced.
+- **Settlement** — automatic from free results feeds with wrong-game guards; tennis follows the declared `pinnacle_one_set` convention (below); anything unclassifiable is left for manual entry, never guessed.
+- **Evidence & validation** — trusted-CLV true-up with independence/tautology/circularity exclusions; the pre-registered ARCADIA/BSP validation harness (`app/backtesting/`, `scripts/arcadia_anchor_export.py`) with preflight DO-NOT-RUN and spent-data guards; per-sport quality reporting.
+- **Persistence & serving** — Postgres warehouse (SQLAlchemy 2.0 async + Alembic); APScheduler drives polling, settlement, CLV true-up and sharp-close captures; FastAPI serves SignalDesk.
+- **Agent/skills discipline** — project skills under `.claude/skills/` encode the research, shadow-engineering, matching and CLV-evidence procedures used to maintain the repo.
 
 **Stack:** Python 3.12 · FastAPI · SQLAlchemy 2.0 async + asyncpg · APScheduler · Redis · PostgreSQL · Playwright (Chromium) · Docker Compose. Pure-math modules (`probabilities`, `edge`, `risk`) take no env/DB/HTTP — policies enter as frozen dataclasses at the composition root.
 
-## Status
+**Tennis settlement convention** (`pinnacle_one_set`, matching the sharp-anchor book's rule): a walkover or any abnormal ending before one completed set voids all markets; a retirement after at least one completed set grades the moneyline to the advancing player and voids other markets; unclassifiable cases remain unsettled for manual entry. This improves settlement reliability — it does not promote tennis.
 
-Football is the validated live pick source (held-out incremental CLV > 2 SE, wired as the default pipeline with a 30-minute CLV true-up). Basketball runs the identical method in shadow while its own evidence accrues; tennis and NFL are display-only. Settlement is automatic from free results feeds, with wrong-game, retirement/walkover and extra-time guards. 2,000+ tests, typed end-to-end, CI-gated safety audit. Roadmap: bankroll tracking, then a validated NBA model.
+## Status — monitor-and-accrue
+
+The project is in **monitor-and-accrue** mode: production is monitored, the validation machinery is signed and armed, and evidence is accruing. Clean monitoring rounds with no changes are the expected outcome. No user-side action is needed unless operational capture capacity changes.
+
+**Current limitations (honest):** trusted-CLV samples are still accruing everywhere and are not yet conclusive for any sport, including the live football pipeline; basketball is the closest shadow candidate but not promotable; NFL lacks volume; tennis settlement is fixed but capture evidence is thin; Betfair staleness stays monitor-only; the H2 validation waits for future BSP data and a preflight PASS; heavy slates can exceed capture capacity, in which case freshness gates fail closed.
+
+**Next evidence milestones:** monthly sport-quality reports; trusted-CLV accrual per sport/market/freshness bucket; source-agreement coverage; settlement reliability confirmation (first live tennis retirement case); the H2 prospective validation when its data exists.
+
+## For future agents
+
+Use the local repository as the source of truth. Do not loosen gates, promote sports without an evidence review, run the H2 validation early, make performance claims, or add any bet-execution path. Prefer tests and evidence over speculative code. The quality bar is trusted CLV, freshness, source agreement, sample size, and settlement reliability. A clean monitoring round with no changes is a valid, successful outcome.
 
 ## Documentation
 
-| Path                                       | Contents                                                 |
-| ------------------------------------------ | -------------------------------------------------------- |
-| [`docs/adr/`](docs/adr/)                   | Architecture decision records                            |
-| [`docs/research/`](docs/research/)         | Repository &amp; data-source research logs               |
-| [`docs/backtesting/`](docs/backtesting/)   | Backtesting methodology &amp; results                    |
-| [`docs/deployment/`](docs/deployment/)     | Mac dev + Ubuntu/OpenClaw deployment guides              |
-| [`docs/security/`](docs/security/)         | Security notes &amp; reviews                             |
-| [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md) | End-to-end verify-the-backtest &amp; live-picks commands |
+| Path | Contents |
+| --- | --- |
+| [`docs/adr/`](docs/adr/) | Architecture decision records, including ADR-0019 (pre-registered validation protocol, signed amendments) |
+| [`docs/runbooks/`](docs/runbooks/) | Operational runbooks, including the H2 validation single-shot procedure |
+| [`docs/research/`](docs/research/) | Research logs, sport-quality reports, BSP readiness, devig comparisons |
+| [`docs/backtesting/`](docs/backtesting/) | Historical backtesting methodology & results (spent/exploratory — see caveats inline) |
+| [`docs/deployment/`](docs/deployment/) | Mac dev + Ubuntu/OpenClaw deployment guides |
+| [`docs/security/`](docs/security/) | Security notes & reviews |
+| [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md) | End-to-end verify-the-backtest & live-picks commands |
 
 ## License
 
