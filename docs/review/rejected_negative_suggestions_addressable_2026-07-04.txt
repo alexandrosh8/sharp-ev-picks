@@ -1,0 +1,18 @@
+# Rejected alias candidates — NEGATIVE-alias suggestions (human consideration
+# only; add the vetted ones to the _NOT_ADDED list in
+# tests/test_resolution_nameform_aliases.py so they stay distinct forever):
+# _NOT_ADDED_CANDIDATES = [
+#     ('Gigantes San Francisco', 'Gigantes de Carolina'),  # weak_similarity — Gigantes de Carolina is a Puerto Rico BSN club, not the Dominican LNB side
+#     ('Heroes de Moca', 'Indios de Mayaguez'),  # weak_similarity — Heroes de Moca (DOM) vs Indios de Mayaguez (PUR) — different clubs, different countries
+#     ('Gremio Juventus', 'Juventus SC'),  # weak_similarity|same_country_common_name|city_club_ambiguity|known_false_pattern — known-false (Gremio Juventus vs Juventus SC) + normalization-collision trap: 'Juventus SC' normalizes to bare 'juventus' = Juventus FC Turin's key
+#     ('Everton', 'Everton Vina del Mar'),  # weak_similarity|city_club_ambiguity|known_false_pattern — bare 'Everton' is Everton FC (England, existing seed entry); Everton Vina del Mar is a different club
+#     ('Bayswater', 'Bayswater City'),  # same_country_common_name|city_club_ambiguity|known_false_pattern — explicit known-false from the matcher skill: Bayswater and Bayswater City are DISTINCT clubs
+#     ('Brevard SC', 'Brevard Fire'),  # city_club_ambiguity|known_false_pattern — in KNOWN_FALSE_PAIRS: Brevard SC and Brevard Fire are distinct clubs
+#     ('fonseca j', 'jong j'),  # weak_similarity — Joao Fonseca vs Jong J. — different players (doubles/coincidence pairing)
+#     ('marozsan f', 'roncadelli f'),  # weak_similarity — Marozsan F. vs Roncadelli F. — different players
+#     ('gjorcheska l', 'tran l'),  # weak_similarity — Gjorcheska L. vs Tran L. — different players
+#     ('grantt c', 'grant t'),  #  — tennis initial-veto class: trailing initials differ (c vs t) — different players regardless of similarity
+#     ('lazarogarcia a', 'mektic a'),  # weak_similarity — Lazaro Garcia A. vs Mektic A. — different players
+#     ('leec y', 'ku y'),  # weak_similarity — Lee C.Y. vs Ku Y. — different players
+#     ('rakotomangarajaonah t', 'kostovic t'),  # weak_similarity — Rakotomanga Rajaonah T. vs Kostovic T. — different players
+# ]

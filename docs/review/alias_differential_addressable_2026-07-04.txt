@@ -1,0 +1,72 @@
+feed events=1674  old matched=831  new matched=866  delta=+35
+decision flips=35
+[RECOVERY] tennis/ATP Wimbledon: Budkov Kjaer N. vs Virtanen O. @ 06-25 12:45
+    new=('kjaer n', 'virtanen o', '2026-06-25T12:00:00+00:00')
+[RECOVERY] tennis/ATP Mallorca: Dimitrov G. vs Davidovich Fokina A. @ 06-25 15:35
+    new=('dimitrov g', 'fokina a', '2026-06-25T15:30:00+00:00')
+[RECOVERY] basketball/NBL1 South: Hobart Chargers vs Eltham @ 06-26 10:00
+    new=('Hobart Chargers', 'Eltham Wildcats', '2026-06-26T10:00:00+00:00')
+[RECOVERY] soccer/Premier Division: Bohemians vs St. Patricks @ 06-26 19:00
+    new=('Bohemians', 'St Patrick´s Athletic', '2026-06-26T19:00:00+00:00')
+[RECOVERY] soccer/Serie B: Novorizontino vs Vila Nova FC @ 06-26 22:00
+    new=('Gremio Novorizontino', 'Vila Nova', '2026-06-26T22:00:00+00:00')
+[RECOVERY] basketball/NBL1 South: Ballarat vs Waverley @ 06-27 09:30
+    new=('Ballarat Miners', 'Waverley Falcons', '2026-06-27T09:30:00+00:00')
+[RECOVERY] basketball/NBL1 South: Dandenong vs Mt Gambier @ 06-27 09:30
+    new=('Dandenong Rangers', 'MT Gambier Pioneers', '2026-06-27T09:30:00+00:00')
+[RECOVERY] basketball/NBL1 South: Kilsyth vs Diamond Valley @ 06-27 09:30
+    new=('Kilsyth Cobras', 'Diamond Valley Eagles', '2026-06-27T09:30:00+00:00')
+[RECOVERY] basketball/NBL1 North: Sunshine Coast Phoenix vs Southern District @ 06-27 10:00
+    new=('Sunshine Coast Phoenix', 'Southern Districts Spartans', '2026-06-27T10:00:00+00:00')
+[RECOVERY] basketball/NBL1 South: Melbourne Tigers vs Dandenong @ 06-28 04:30
+    new=('Melbourne Tigers', 'Dandenong Rangers', '2026-06-28T04:30:00+00:00')
+[RECOVERY] basketball/NBL1 South: Nunawading vs Mt Gambier @ 06-28 05:00
+    new=('Nunawading Spectres', 'MT Gambier Pioneers', '2026-06-28T05:00:00+00:00')
+[RECOVERY] soccer/Mineiro 2: Aymores vs Valeriodoce @ 06-28 13:00
+    new=('Aymores', 'Valeriodoce EC', '2026-06-28T13:00:00+00:00')
+[RECOVERY] soccer/Primera B: Laferrere vs Argentino de Quilmes @ 06-28 16:00
+    new=('Deportivo Laferrere', 'Argentino de Quilmes', '2026-06-28T16:00:00+00:00')
+[RECOVERY] soccer/Club Friendly: Univ. Craiova vs Polissya Zhytomyr @ 06-29 15:00
+    new=('Universitatea Craiova', 'Polissya Zhytomyr', '2026-06-29T15:00:00+00:00')
+[RECOVERY] tennis/WTA Wimbledon: Bouzas Maneiro J. vs Potapova A. @ 06-29 18:20
+    new=('maneiro j', 'potapova a', '2026-06-29T18:18:29+00:00')
+[RECOVERY] soccer/Club Friendly: Nyiregyhaza vs Brno @ 06-30 15:00
+    new=('Nyiregyhaza Spartacus', 'Zbrojovka Brno', '2026-06-30T15:00:00+00:00')
+[RECOVERY] tennis/ATP Wimbledon: Davidovich Fokina A. vs Marozsan F. @ 07-01 12:05
+    new=('fokina a', 'marozsan f', '2026-07-01T12:00:00+00:00')
+[RECOVERY] tennis/WTA Wimbledon: Yastremska D. vs Bouzas Maneiro J. @ 07-01 13:00
+    new=('yastremska d', 'maneiro j', '2026-07-01T13:00:00+00:00')
+[RECOVERY] tennis/WTA Wimbledon: Pegula J. vs Sorribes Tormo S. @ 07-01 15:45
+    new=('pegula j', 'tormo s', '2026-07-01T16:00:00+00:00')
+[RECOVERY] soccer/Mineiro 2: Valeriodoce vs Democrata SL @ 07-01 23:00
+    new=('Valeriodoce EC', 'Democrata SL', '2026-07-01T23:00:00+00:00')
+[RECOVERY] tennis/ATP Wimbledon: De Minaur A. vs Mannarino A. @ 07-02 10:10
+    new=('minaur a', 'mannarino a', '2026-07-02T11:00:00+00:00')
+[RECOVERY] soccer/Serie B: Cuiaba vs America MG @ 07-02 23:00
+    new=('Cuiaba', 'America Mineiro', '2026-07-02T23:00:00+00:00')
+[RECOVERY] basketball/NBL1 North: Southern District vs Cairns Marlins @ 07-03 10:30
+    new=('Southern Districts Spartans', 'Cairns Marlins', '2026-07-03T10:30:00+00:00')
+[RECOVERY] basketball/NBL1 South: Mt Gambier vs Knox @ 07-03 10:30
+    new=('MT Gambier Pioneers', 'Knox Raiders', '2026-07-03T10:30:00+00:00')
+[RECOVERY] basketball/NBL1 South: Sandringham Sabres vs Waverley @ 07-03 10:30
+    new=('Sandringham Sabres', 'Waverley Falcons', '2026-07-03T10:30:00+00:00')
+[RECOVERY] soccer/Victoria Premier League 2: Springvale vs Keilor Park @ 07-03 10:30
+    new=('Springvale White Eagles', 'Keilor Park', '2026-07-03T10:30:00+00:00')
+[RECOVERY] tennis/WTA Wimbledon: Pegula J. vs Bouzas Maneiro J. @ 07-03 12:40
+    new=('pegula j', 'maneiro j', '2026-07-03T12:45:52+00:00')
+[RECOVERY] tennis/ATP Wimbledon: Davidovich Fokina A. vs Fucsovics M. @ 07-03 15:00
+    new=('fokina a', 'fucsovics m', '2026-07-03T16:00:00+00:00')
+[RECOVERY] soccer/USL League Two: Sporting Jax 2 vs Brave SC @ 07-03 23:00
+    new=('Sporting Club Jacksonville II', 'Brave SC', '2026-07-03T23:00:00+00:00')
+[RECOVERY] soccer/USL Championship: Loudoun vs Sporting Jax @ 07-03 23:30
+    new=('Loudoun United', 'Sporting Club Jacksonville', '2026-07-03T23:30:00+00:00')
+[RECOVERY] basketball/NBL1 South: Diamond Valley vs Nunawading @ 07-04 10:00
+    new=('Diamond Valley Eagles', 'Nunawading Spectres', '2026-07-04T10:00:00+00:00')
+[RECOVERY] basketball/NBL1 South: Eltham vs Sandringham Sabres @ 07-04 10:00
+    new=('Eltham Wildcats', 'Sandringham Sabres', '2026-07-04T10:00:00+00:00')
+[RECOVERY] tennis/ATP Wimbledon: De Minaur A. vs Svajda Z. @ 07-04 10:05
+    new=('minaur a', 'svajda z', '2026-07-04T11:05:00+00:00')
+[RECOVERY] basketball/NBL1 South: Mt Gambier vs Bendigo Braves @ 07-04 10:30
+    new=('MT Gambier Pioneers', 'Bendigo Braves', '2026-07-04T10:30:00+00:00')
+[RECOVERY] basketball/NBL1 West: Joondalup Wolves vs Kalamunda Eastern Suns @ 07-04 11:00
+    new=('Joondalup Wolves', 'Eastern Suns', '2026-07-04T11:00:00+00:00')

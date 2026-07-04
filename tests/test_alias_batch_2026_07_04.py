@@ -24,6 +24,45 @@ _BATCH: list[tuple[str, str, str]] = [
     ("Maitland M.", "Maitland Mustangs", "Central Coast Crusaders"),
     # Monitor round 2 (AC-0095): 2 exact co-occurrences.
     ("Def. de Cambaceres", "Defensores de Cambaceres", "Argentino de Rosario"),
+    # Addressable-gap batch (alias_candidates_addressable_2026-07-04.csv):
+    # NBL1 city-name -> full-nickname (women's sides carry W, marker-vetoed).
+    ("Southern District", "Southern Districts Spartans", "Ipswich Force"),
+    ("Ballarat", "Ballarat Miners", "Geelong"),
+    ("Dandenong", "Dandenong Rangers", "Frankston"),
+    ("Diamond Valley", "Diamond Valley Eagles", "Casey Cavaliers"),
+    ("Eltham", "Eltham Wildcats", "Keilor Thunder"),
+    ("Mt Gambier", "MT Gambier Pioneers", "Kilsyth"),
+    # pinnacle carries two spellings — both unify at ONE canonical (AC-0019).
+    ("Mount Gambier Pioneers", "MT Gambier Pioneers", "Nunawading"),
+    ("Nunawading", "Nunawading Spectres", "Ringwood"),
+    ("Waverley", "Waverley Falcons", "Knox"),
+    ("Kalamunda Eastern Suns", "Eastern Suns", "Geraldton Buccaneers"),
+    # Soccer per-club abbreviations/short forms (namespace-scanned, unique).
+    ("Akranes", "IA Akranes", "KR Reykjavik"),
+    ("Nyiregyhaza", "Nyiregyhaza Spartacus", "Brno"),
+    ("Univ. Craiova", "Universitatea Craiova", "Sabah Baku"),
+    ("Valeriodoce", "Valeriodoce EC", "Aymores"),
+    ("Dianella White Eagle", "Dianella White Eagles", "Sorrento"),
+    # Merged into the EXISTING canonical entry (split-canonical trap avoided).
+    ("St. Patricks", "St Patrick's Athletic F.C.", "Sligo Rovers"),
+    ("Laferrere", "Deportivo Laferrere", "Defensores Unidos"),
+    ("America MG", "America Mineiro", "Criciuma"),
+    ("Novorizontino", "Gremio Novorizontino", "Ponte Preta"),
+    ("San Martin Mendoza", "San Martin de Mendoza", "Huracan Las Heras"),
+    # First-team mapping also recovers 'Sporting Jax 2' vs '... II' (equal
+    # reserve markers; matcher aliases marker-STRIPPED bases).
+    ("Sporting Jax", "Sporting Club Jacksonville", "Loudoun"),
+    ("Springvale", "Springvale White Eagles", "Eastern Lions"),
+    ("Naftan", "Naftan Novopolotsk", "Baranovici"),
+    # Tennis compound-surname truncations (same trailing initial, unique
+    # surname on tour; Pinnacle keeps the LAST surname only).
+    ("budkovkjaer n", "kjaer n", "virtanen o"),
+    ("davidovichfokina a", "fokina a", "cerundolo j m"),
+    ("deminaur a", "minaur a", "burruchaga r a"),
+    ("martintiffon p", "tiffon p", "bailly g a"),
+    ("vandezandschulp b", "zandschulp b", "kovacevic a"),
+    ("bouzasmaneiro j", "maneiro j", "potapova a"),
+    ("sorribestormo s", "tormo s", "pegula j"),
 ]
 
 _KO = datetime(2026, 7, 2, 18, 0, tzinfo=UTC)
