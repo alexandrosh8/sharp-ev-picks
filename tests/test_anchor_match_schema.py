@@ -129,4 +129,4 @@ def test_alembic_graph_has_single_head() -> None:
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["c9e4f2a7d5b3"]  # picks_close_exclusion_reason (A4)
+    assert heads == ["f8a3c5d7e9b1"]  # picks_steam_shadow_verdict (A5)

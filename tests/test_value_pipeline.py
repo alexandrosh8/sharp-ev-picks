@@ -1428,6 +1428,121 @@ async def test_steam_gate_absent_is_strict_noop() -> None:
     assert "steam" not in picks[0].reason_summary
 
 
+# --- A5: steam SHADOW-VERDICT stamping (observability only) ------------------
+# The four steam_* fields record what the gate saw/decided at mint; they must
+# never gate, demote, reorder, or raise. NULLs = not evaluated (no policy /
+# consensus anchor / eval error) — never fabricated.
+
+
+async def test_steam_shadow_verdict_stamped_when_tripped() -> None:
+    # The converging SHADOW candidate stays premium (behavior unchanged) AND the
+    # verdict is persisted on the pick: tripped, reason slugs, numeric detail.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.steam_policy = SteamPolicy(enabled=False)  # shadow
+    deps.steam_history_loader = _steam_history_loader(3.80)
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    p = picks[0]
+    assert p.tier == "premium"  # tier UNCHANGED — observability only
+    assert p.steam_tripped is True
+    assert p.steam_reasons == "soft_toward_anchor"
+    assert p.steam_closed_fraction is not None
+    assert p.steam_closed_fraction >= 0.5  # >= policy close_frac by construction
+    assert p.steam_anchor_age_seconds is not None
+    assert 0.0 <= p.steam_anchor_age_seconds < 3600.0  # fresh anchor this cycle
+
+
+async def test_steam_shadow_verdict_stamped_when_clean() -> None:
+    # Policy configured but only the current cycle's points exist: the gate
+    # cannot judge movement and the anchor is fresh -> EVALUATED and clean.
+    # tripped=False (not NULL) distinguishes "looked and passed" from "never
+    # looked"; the unavailable numerics stay None (never fabricated).
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.steam_policy = SteamPolicy(enabled=False)  # shadow, no history loader
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    p = picks[0]
+    assert p.tier == "premium"
+    assert p.steam_tripped is False
+    assert p.steam_reasons is None  # no component flag raised
+    assert p.steam_closed_fraction is None  # < min_points: no movement judgement
+    assert p.steam_anchor_age_seconds is not None  # anchor observed this cycle
+
+
+async def test_steam_shadow_nulls_when_gate_unconfigured() -> None:
+    # steam_policy None (gate absent): the verdict is NEVER computed -> all four
+    # fields NULL, exactly like a pre-column row.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    p = picks[0]
+    assert p.steam_tripped is None
+    assert p.steam_reasons is None
+    assert p.steam_closed_fraction is None
+    assert p.steam_anchor_age_seconds is None
+
+
+async def test_steam_shadow_eval_error_stamps_nulls_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A steam-eval crash must NEVER break picking: the pick mints unchanged
+    # (premium, alerted) with NULL steam fields — fail-safe observability.
+    def _boom(**_kwargs: object) -> object:
+        raise RuntimeError("synthetic steam-eval failure")
+
+    monkeypatch.setattr("app.pipeline.evaluate_steam", _boom)
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.steam_policy = SteamPolicy(enabled=False)
+    deps.steam_history_loader = _steam_history_loader(3.80)
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    p = picks[0]
+    assert p.tier == "premium"
+    assert "steam" not in p.reason_summary
+    assert p.steam_tripped is None
+    assert p.steam_reasons is None
+    assert p.steam_closed_fraction is None
+    assert p.steam_anchor_age_seconds is None
+    assert len(sink.sent) == 1
+
+
+async def test_steam_shadow_does_not_change_picks_tiers_or_order() -> None:
+    # Proof of no behavior change: the SAME market with the shadow eval ON
+    # (verdict tripping) yields the same picks, tiers, and order as with the
+    # gate absent — only the stamped fields and the reason note differ.
+    def _key(p: object) -> tuple[object, ...]:
+        return (
+            p.event_id,  # type: ignore[attr-defined]
+            str(p.market),  # type: ignore[attr-defined]
+            p.selection,  # type: ignore[attr-defined]
+            p.tier,  # type: ignore[attr-defined]
+            p.edge,  # type: ignore[attr-defined]
+        )
+
+    baseline_sink = RecordingSink()
+    baseline_deps = make_deps(baseline_sink, FakeLoader(market_snapshots()))
+    baseline = await run_value_pipeline(baseline_deps, "soccer")
+
+    shadow_sink = RecordingSink()
+    shadow_deps = make_deps(shadow_sink, FakeLoader(market_snapshots()))
+    shadow_deps.steam_policy = SteamPolicy(enabled=False)
+    shadow_deps.steam_history_loader = _steam_history_loader(3.80)
+    shadowed = await run_value_pipeline(shadow_deps, "soccer")
+
+    assert [_key(p) for p in shadowed] == [_key(p) for p in baseline]
+    assert len(shadow_sink.sent) == len(baseline_sink.sent)
+    # and the shadow run actually evaluated (guards against a vacuous pass)
+    assert shadowed[0].steam_tripped is True
+
+
 def two_event_snapshots(soft_home_a: float, soft_home_b: float) -> list[OddsSnapshotIn]:
     """Two independent H2H events, each Pinnacle-anchored (identical sharp lines)
     with SoftBook overpricing Home. evt-A is iterated FIRST (snapshot order ->

@@ -1383,17 +1383,41 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # to volume (shadow) — persisted + CLV-tracked, never alerted — exactly
             # like the gates above (never a silent drop).
             steam_note = ""
-            if deps.steam_policy is not None and anchor_book != CONSENSUS_ANCHOR:
-                market_traj = steam_trajectories.get((event_id, market, detail), {})
-                verdict = evaluate_steam(
-                    fill_trajectory=lookup_trajectory(market_traj, v.selection, v.best_book),
-                    anchor_trajectory=lookup_trajectory(market_traj, v.selection, anchor_book),
-                    now=now,
-                    policy=deps.steam_policy,
-                )
+            # A5 SHADOW-VERDICT stamps (observability only — persisted on the
+            # pick so future settled evidence can judge the OFF gate). None =
+            # never evaluated (gate unconfigured / consensus anchor / eval
+            # error); False = evaluated clean; True = would demote.
+            steam_tripped: bool | None = None
+            steam_reasons: str | None = None
+            steam_closed_fraction: float | None = None
+            steam_anchor_age_seconds: float | None = None
+            verdict = None
+            steam_gate_policy = deps.steam_policy
+            if steam_gate_policy is not None and anchor_book != CONSENSUS_ANCHOR:
+                try:
+                    market_traj = steam_trajectories.get((event_id, market, detail), {})
+                    verdict = evaluate_steam(
+                        fill_trajectory=lookup_trajectory(market_traj, v.selection, v.best_book),
+                        anchor_trajectory=lookup_trajectory(market_traj, v.selection, anchor_book),
+                        now=now,
+                        policy=steam_gate_policy,
+                    )
+                except Exception as exc:  # steam eval must NEVER break picking
+                    # (A5 fail-safe: the shadow stamps stay NULL — never fabricated)
+                    logger.error(
+                        "steam eval failed for %s/%s: %s",
+                        sport_key,
+                        event_id,
+                        type(exc).__name__,
+                    )
+            if verdict is not None and steam_gate_policy is not None:
+                steam_tripped = verdict.tripped
+                steam_reasons = ",".join(verdict.reasons) if verdict.reasons else None
+                steam_closed_fraction = verdict.closed_fraction
+                steam_anchor_age_seconds = verdict.anchor_age_seconds
                 if verdict.tripped:
                     reason_str = ",".join(verdict.reasons)
-                    if deps.steam_policy.enabled and tier == "premium":
+                    if steam_gate_policy.enabled and tier == "premium":
                         tier = "volume"
                         n_steam_demoted += 1
                         steam_note = f" | steam ({reason_str}): demoted to volume (shadow)"
@@ -1517,6 +1541,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 anchor_match_method=anchor_match_method,
                 # Betfair staleness-guard verdict at mint (observability only).
                 anchor_staleness_decision=anchor_staleness_decision,
+                # A5: steam SHADOW verdict at mint (observability only — never
+                # gates/demotes/reorders; NULLs = not evaluated, never fabricated).
+                steam_tripped=steam_tripped,
+                steam_reasons=steam_reasons,
+                steam_closed_fraction=steam_closed_fraction,
+                steam_anchor_age_seconds=steam_anchor_age_seconds,
                 # P2-2: whether the anchor devig fell back to multiplicative for this
                 # MINT fair — the trusted CLV subset drops asymmetric mint/close fallbacks.
                 mint_devig_fell_back=v.sharp_devig_fell_back,

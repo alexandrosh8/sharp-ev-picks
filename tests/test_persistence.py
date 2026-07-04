@@ -55,6 +55,11 @@ def make_pick(
         liquidity=None,
         reason_summary="persistence test",
         tier=tier,
+        # A5 steam shadow verdict (observability only) — roundtrip coverage
+        steam_tripped=True,
+        steam_reasons="soft_toward_anchor,stale_anchor",
+        steam_closed_fraction=0.62,
+        steam_anchor_age_seconds=5400.0,
         created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
     )
 
@@ -156,6 +161,11 @@ async def test_persisted_pick_roundtrips_fields(session) -> None:  # type: ignor
     assert row.status == "alerted"
     assert row.decimal_odds == Decimal("2.1000")
     assert row.stake_breakdown["final"] == 0.02
+    # A5 steam shadow verdict roundtrips (observability only, nullable)
+    assert row.steam_tripped is True
+    assert row.steam_reasons == "soft_toward_anchor,stale_anchor"
+    assert row.steam_closed_fraction == Decimal("0.620000")
+    assert row.steam_anchor_age_seconds == Decimal("5400.000000")
 
 
 async def test_version_bump_supersedes_older_open_pick(session) -> None:  # type: ignore[no-untyped-def]

@@ -1400,6 +1400,26 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     clv_quality = _aggregate_settled([_settled_tuple(r) for r in rows])["clv_quality"]
     clv_quality["scope"] = "all_tiers"
     clv_quality["strata"] = await clv_quality_strata(session)
+    # A5 STEAM SHADOW counts (observability only — feature-detected so a
+    # pre-migration DB serves the report unchanged). Splits ALL picks by the
+    # persisted mint-time shadow verdict: would_demote (tripped) / clear
+    # (evaluated, no trip) / unevaluated (NULL: gate unconfigured, consensus
+    # anchor, eval error, or pre-column row). The three counts sum to every
+    # pick row — no silent loss.
+    steam_shadow: dict[str, int] | None = None
+    steam_attr = getattr(Pick, "steam_tripped", None)
+    if steam_attr is not None:
+        steam_counts = {
+            tripped: int(n)
+            for tripped, n in (
+                await session.execute(select(steam_attr, func.count()).group_by(steam_attr))
+            ).all()
+        }
+        steam_shadow = {
+            "would_demote": steam_counts.get(True, 0),
+            "clear": steam_counts.get(False, 0),
+            "unevaluated": steam_counts.get(None, 0),
+        }
     return {
         **premium,
         "n_pending": pending_by_tier.get("premium", 0),
@@ -1407,6 +1427,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         "volume": volume,
         "by_sport": by_sport,
         "clv_quality": clv_quality,
+        "steam_shadow": steam_shadow,
     }
 
 
@@ -3368,6 +3389,20 @@ async def persist_pick(
             # under SHADOW, actual demotion under enforce. NULL when the guard is
             # off / no verdict / non-H2H.
             anchor_staleness_decision=pick.anchor_staleness_decision,
+            # A5: steam SHADOW verdict at mint (observability ONLY — nothing gates
+            # on these; NULLs = not evaluated). Evidence for the OFF steam gate.
+            steam_tripped=pick.steam_tripped,
+            steam_reasons=pick.steam_reasons,
+            steam_closed_fraction=(
+                Decimal(str(round(pick.steam_closed_fraction, 6)))
+                if pick.steam_closed_fraction is not None
+                else None
+            ),
+            steam_anchor_age_seconds=(
+                Decimal(str(round(pick.steam_anchor_age_seconds, 6)))
+                if pick.steam_anchor_age_seconds is not None
+                else None
+            ),
             # P2-2: mint-side devig-fallback provenance (close side stamped by the CLV
             # true-up) — the trusted CLV subset drops asymmetric mint/close fallbacks.
             mint_devig_fell_back=pick.mint_devig_fell_back,
@@ -3437,6 +3472,20 @@ async def persist_pick(
         # the promoting detection's staleness verdict replaces the shadow row's
         # (observability only — describes the alert the operator acts on)
         existing.anchor_staleness_decision = pick.anchor_staleness_decision
+        # A5: likewise the promoting detection's steam shadow verdict — the row
+        # must describe the mint the operator acts on (observability only)
+        existing.steam_tripped = pick.steam_tripped
+        existing.steam_reasons = pick.steam_reasons
+        existing.steam_closed_fraction = (
+            Decimal(str(round(pick.steam_closed_fraction, 6)))
+            if pick.steam_closed_fraction is not None
+            else None
+        )
+        existing.steam_anchor_age_seconds = (
+            Decimal(str(round(pick.steam_anchor_age_seconds, 6)))
+            if pick.steam_anchor_age_seconds is not None
+            else None
+        )
         # the promoting detection's policy regime replaces the shadow row's: the
         # row now describes the premium alert the operator acts on, so its CLV must
         # attribute to the policy that promoted it (H3).

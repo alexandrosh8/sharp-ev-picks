@@ -376,6 +376,21 @@ class Pick(Base):
     # next sharp book / consensus). NULL = guard off, no verdict for the
     # event, non-H2H market, or pre-column row. Mirrors anchor_match_method.
     anchor_staleness_decision: Mapped[str | None] = mapped_column(String(16))
+    # A5 STEAM SHADOW VERDICT mint stamp (observability ONLY — never gating;
+    # the steam gate stays OFF per the 2026-06-28 walk-forward verdict). What
+    # app/edge/steam.py decided at mint over the inputs the real gate would
+    # see: tripped (NULL = never evaluated — gate unconfigured / consensus
+    # anchor / eval error / pre-column row; False = evaluated clean; True =
+    # would demote), the comma-joined reason slugs ('soft_toward_anchor' /
+    # 'stale_anchor' / 'soft_steamed_away'), and the numeric detail (fraction
+    # of the mint fill-vs-anchor gap already closed; anchor age at mint). NULL
+    # numerics = the gate could not compute them (never fabricated). Additive
+    # + nullable, no backfill — evidence accrues forward so future settled
+    # data can validate/refute the gate without ever enabling it.
+    steam_tripped: Mapped[bool | None] = mapped_column(Boolean)
+    steam_reasons: Mapped[str | None] = mapped_column(String(64))
+    steam_closed_fraction: Mapped[Decimal | None] = mapped_column(METRIC)
+    steam_anchor_age_seconds: Mapped[Decimal | None] = mapped_column(METRIC)
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)

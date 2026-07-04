@@ -90,6 +90,21 @@ class PickOut(InternalModel):
     # demotion (fell to the next sharp book / consensus). None = guard off,
     # no verdict for the event, or non-H2H market.
     anchor_staleness_decision: str | None = None
+    # A5 STEAM SHADOW VERDICT (observability ONLY — never gates, demotes,
+    # filters, or reorders; the steam gate itself stays OFF, memory rule
+    # 2026-06-28). What app/edge/steam.py decided AT MINT over the same inputs
+    # the real gate would see, persisted so future in-season settled evidence
+    # can validate or refute the gate without enabling it. steam_tripped None =
+    # never evaluated (gate unconfigured / consensus anchor / eval error /
+    # pre-column row); False = evaluated and clean; True = would demote (did
+    # demote only if the gate is enforcing). steam_reasons = comma-joined
+    # SteamVerdict.reasons slugs (None when no component flag raised); the two
+    # numeric detail fields stay None whenever the gate could not compute them
+    # (never fabricated).
+    steam_tripped: bool | None = None
+    steam_reasons: str | None = None
+    steam_closed_fraction: float | None = None
+    steam_anchor_age_seconds: float | None = Field(default=None, ge=0.0)
     # P2-2: did the anchor's devig FALL BACK to multiplicative when this pick's
     # MINT fair was computed (underround book / solver failure)? Persisted as
     # Pick.mint_devig_fell_back so the trusted CLV subset can drop ASYMMETRIC
