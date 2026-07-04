@@ -53,6 +53,12 @@ One cycle of `app/pipeline.py::run_value_pipeline`, invoked per sport by the
    probabilities on a `SHARP_BOOKS` member (Pinnacle / Betfair Exchange /
    Smarkets) or the consensus median (`app/edge/value.py`). Default devig is
    `power`; multiplicative is rejected at config load (ADR-0006, ADR-0019).
+   Note: of the 8 named devig methods in `app/probabilities/devig.py`, two
+   pairs are proven identical — `odds_ratio` ≡ `logarithmic` (routed through
+   the same constant-logit-shift solver) and `differential_margin_weighting`
+   ≡ `additive` (the odds term cancels; see the module docstrings and
+   `tests/test_devig.py`) — so the 8 methods are 6 distinct estimators, not
+   8 independent ones.
 4. **Edge → gates** — `find_value_bets_with_fair` flags soft prices above
    fair. Gates (defaults in `app/config.py`): edge ≥ 0.03 premium /
    ≥ 0.015 volume, edge ≤ 0.20 (implausibility ceiling), odds ≥ 1.30,
@@ -136,12 +142,33 @@ lower bound > 0.5 — then a deliberate, ADR-logged flip, never automatic.
 
 ## Dashboard & diagnostics
 
-`app/api/dashboard.html` — a single self-contained page with four sections
-(Picks / Games / Performance / Diagnostics) behind optional PBKDF2 session
-auth (`/health` stays public). Status chips: source freshness, live premium
-count, shadow count, open picks, ROI (sample-suppressed), stake-weighted
-sharp CLV. Diagnostics surface per-sport poll state, ingestion counters,
-match-rate/link observability and self-audit anomalies. Runtime watchdogs:
+`app/api/dashboard.html` — **SignalDesk**, a single self-contained page (no
+framework, no CDN) behind optional PBKDF2 session auth (`/health` stays
+public). A single header **system pill** (click for the status popover)
+replaces the old chip strip. Five workspaces, reached by a desktop rail or
+the mobile dock:
+
+- **Today** — command screen: qualified picks, a derived "needs attention"
+  queue, next kickoffs, recent results, one-line evidence position.
+- **Edges** — master-detail pick console (signal stream → detail → evidence
+  panes) with search + tier/status filters; shadow rows are
+  tracked-informational, never styled actionable.
+- **Radar** — market coverage grouped by kickoff proximity, display-only
+  tags for unvalidated sports.
+- **Lab** — evidence workspace: a claims ledger (can claim / cannot claim
+  yet), the trusted sharp-close CLV headline kept strictly separate from
+  all-closes *context* CLV, close-quality exclusions
+  (tautological/circular/fabricated), calibration, premium-vs-shadow tier
+  table, and per-sport **Sport Readiness** (shadow-first policy stated
+  inline).
+- **Sources** — source-quality matrix (OddsPortal scrape, Pinnacle ARCADIA,
+  Betfair inline, **monitor-only** Betfair API, proxy pool, review queues),
+  staleness monitor, per-market poll counters, **H2 validation readiness**
+  (including the DO-NOT-RUN state) and the **H6 agreement-gate status**
+  line (shadow-only).
+
+Diagnostics data (per-sport poll state, ingestion counters, match-rate/link
+observability, self-audit anomalies) feeds Radar/Sources. Runtime watchdogs:
 `app/maintenance/self_audit.py` (read-only DB anomaly checks + dead-man's
 switch, alerting via the same sinks), `calibration_drift`, and
 `upstream_watch` (PyPI release notices; never auto-installs).

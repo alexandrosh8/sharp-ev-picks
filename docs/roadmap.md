@@ -1,89 +1,49 @@
-# Roadmap — 8 Phases
+# Roadmap — monitor-and-accrue
 
-> Status legend: ✅ done · 🔜 next · ⏳ later. Updated 2026-06-10.
+> Updated 2026-07-04 (UTC). Current status and limitations live in
+> `README.md` ("Status — monitor-and-accrue"); this file tracks posture and
+> next milestones only. The original 8-phase build plan (2026-06-10) is
+> retired — its history is in git (`git log -- docs/roadmap.md`).
 
-## Phase 1 — Claude environment + scaffold ✅ (this engagement)
+## Where the build plan landed
 
-**Delivered:** CLAUDE.md (hard safety rules), 15 project agents, 9 project
-skills, tested hooks (fail-closed secret gate), markdown memory + ADRs
-0000-0010, research logs (Claude env, betting repos, GBM, free odds), full
-`app/` scaffold: oracle-validated pure math (devig×4/Kelly/edge/exposure/CLV),
-pydantic schemas + safety-validated config, 14-table warehouse + alembic,
-read-only ingestion (Odds API rotation + football-data loader), idempotent
-Telegram/webhook alerts, APScheduler pipeline, FastAPI, backtest math, CI +
-safety audit, 115+ tests.
-**Acceptance:** CLAUDE.md loads; GitHub MCP works; gitleaks clean; safety
-rules active in agents+hooks+config validator+CI grep. ✅
+Phases 1-2 (scaffold, live ingestion), 4 (settlement + CLV loop),
+6 (edge-engine hardening, devig sweep), 7 (dashboard — now the
+five-workspace SignalDesk) and 8 (Ubuntu production deployment) are
+delivered. The standalone-model phases were superseded by evidence: the
+football Dixon-Coles model was built but demoted to screens-only
+(`PICK_STRATEGY=model`, negative backtested CLV), and no standalone NBA
+model was built — basketball instead accrues shadow evidence through the
+sharp-vs-soft value pipeline. Sharp-vs-soft line shopping is the live
+strategy (`docs/backtesting/value-findings.md`, ADR-0019).
 
-## Phase 2 — Live ingestion 🔜
+## Standing posture
 
-**Deliverables:** event/entity resolution (external_ref ↔ events/teams,
-normalization tables), persistence wiring for the pipeline (snapshots,
-detected_edges, picks rows), kickoff-aware polling cadence + redundant
-closing-snapshot job, data-quality gates (row counts, freshness, null rates).
-**Acceptance:** odds snapshots accumulate for ≥2 football leagues + NBA
-within the free credit budget; stale odds flagged and rejected; re-runs
-idempotent; no automatic betting code (safety audit green).
+- **Monitor-and-accrue:** production is monitored, evidence accrues, and a
+  clean monitoring round with no changes is a valid, successful outcome.
+  Trusted-CLV samples are not yet conclusive for any sport, including the
+  live football pipeline. No validated model and no profitability is
+  claimed or promised.
+- **Validation:** the H2 prospective single-shot and the H6 agreement gate
+  are pre-registered and signed (ADR-0019). H2 stays deliberately un-run
+  until future BSP data exists and the coverage preflight prints PASS (it
+  currently prints DO-NOT-RUN, correctly); H6 is shadow/monitor-only.
+- **Sports policy — shadow-first:** football is the only pick-minting
+  pipeline. Basketball (closest shadow candidate), tennis and NFL accrue
+  shadow or display-only evidence and promote only on trusted CLV, sample
+  size, freshness, source agreement and settlement reliability — never a
+  bare env flip.
+- **Manual betting only:** stakes/edges/EV are informational; the operator
+  reviews every pick and places any bet personally. Nothing here is a
+  guarantee of profit.
 
-## Phase 3 — Football MVP model ⏳
+## Next evidence milestones (mirrors README)
 
-**Deliverables:** penaltyblog used directly (user direction 2026-06-10) for
-Dixon-Coles fitting over football-data.co.uk history; score-matrix market
-derivation (1X2/totals first); per-league calibration reports
-(Brier/log-loss/reliability); walk-forward backtest with signal-time prices
-(harness pattern from georgedouzas/sports-betting); model registered in
-`model_versions`; parity tests of our devig vs penaltyblog's implied module.
-**Acceptance:** calibrated 1X2 + totals probabilities for ≥2 leagues;
-backtest report in docs/backtesting/ with CLV — no live picks until
-calibration gates pass.
-
-## Phase 4 — Result tracking + CLV loop ✅ (2026-06-10)
-
-**Delivered:** settlement engine (`app/settlement/`): pure outcome mapping
-for every live market (1X2/ML, totals, BTTS, DNB, DC, AH half-lines, EH
-3-way), free results sources mapped from league slugs (martj42 international
-CSV for the World Cup; football-data.co.uk new-league + season CSVs for
-clubs) into a normalized-name ±1-day ScoreBook, hourly `settle_results` job
-(silent-empty refusal, idempotent via `uq_result_tracking_pick`), manual
-event-level settlement `POST /events/{id}/result` + dashboard settle button
-(covers NBA/euroleague — no free feed), `GET /performance` ROI +
-stake-weighted log-CLV report + dashboard cards. Live CLV true-up was
-already running (`app/clv_trueup.py`); settling freezes a pick's CLV.
-**Acceptance met:** auto- and user-recorded results produce ROI/CLV reports;
-settled picks carry outcome/pnl/roi/settled_at and frozen clv_log/beat_close.
-
-## Phase 5 — NBA MVP model ⏳
-
-**Deliverables:** nba_api ingestion (direct dependency), schedule/form/
-availability feature builders, LightGBM + isotonic calibration
-(ADR-0005/0009; lightgbm+xgboost installed from the `models` group),
-sportsbookreview 2011-2021 historical odds import + validation, walk-forward
-evaluation with the XGBoost challenger.
-**Acceptance:** calibrated moneyline/spread/totals probabilities with
-rest/B2B/availability features; ECE-shrunk edges; backtest + CLV report.
-
-## Phase 6 — Edge engine hardening ⏳
-
-**Deliverables:** devig method sweep on real CLV data (revisit ADR-0006;
-evaluate penaltyblog's odds-ratio/logarithmic methods + goto_conversion),
-market-prior blending per league, optional Betfair read-only data (clean-room
-client; historical BASIC files), football ensemble experiment (ADR-0004
-phase-6 clause).
-**Acceptance:** measured devig/blending choices documented in ADR revisions;
-only +EV picks alert; duplicate alerts impossible (Redis + DB unique).
-
-## Phase 7 — Dashboard ⏳
-
-**Deliverables:** picks dashboard (model vs market probability, edge/EV/CLV
-filters, reasoning display), performance views (ROI, CLV, drawdown), served
-from the existing FastAPI app.
-**Acceptance:** user can review picks and reasoning clearly; every view
-carries the manual-betting reminder.
-
-## Phase 8 — Ubuntu/OpenClaw deployment ⏳
-
-**Deliverables:** production compose (app profile), systemd/Docker restart
-policies, log collection, port dance vs OpenClaw, backup strategy for
-Postgres volumes, `docs/deployment/ubuntu-openclaw.md` executed.
-**Acceptance:** runs unattended on the VPS; identical behavior to Mac; CI
-green; safety audit green in production image.
+1. Monthly per-sport quality reports (coverage, agreement, freshness,
+   settlement, sample sufficiency).
+2. Trusted-CLV accrual per sport/market/freshness bucket.
+3. Source-agreement coverage growth.
+4. Settlement-reliability confirmation (first live tennis retirement case
+   under the `pinnacle_one_set` convention).
+5. The H2 prospective validation, once its data exists and the preflight
+   passes.
