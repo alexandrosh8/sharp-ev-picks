@@ -38,6 +38,13 @@ DEAD_MANS_DEFAULT_K = 3
 #: warning per window while the pool stays tight.
 PROXY_HEADROOM_ALERT_INTERVAL = timedelta(hours=6)
 
+#: Listing-recovery watch (OddsPortal listing blackout, 2026-07-04): how many
+#: CONSECUTIVE self-audit cycles must see a zero-match listing before the
+#: listing counts as DARK — only then does the first >0-match listing fire the
+#: one-shot "recovered" notice. Aligned with DEAD_MANS_DEFAULT_K so both
+#: switches agree on what a real outage (vs a quiet gap) looks like.
+LISTING_DARK_K = 3
+
 
 class _Dispatcher(Protocol):
     """Minimal alert-dispatch surface (app.notifications.dispatcher.AlertDispatcher
@@ -160,6 +167,63 @@ def evaluate_proxy_headroom(
     )
 
 
+def evaluate_listing_recovery(
+    listed_matches: int | None,
+    *,
+    prior_dark_streak: int,
+    dark_k: int = LISTING_DARK_K,
+) -> tuple[int, Anomaly | None]:
+    """Pure listing-recovery step (OddsPortal blackout 2026-07-04): notice the
+    moment the upstream LISTING serves fixtures again after a dark run.
+
+    `listed_matches` is the latest scrape cycle's listing count (summed across
+    sports) — the scrape cycle itself is the probe, no extra request is ever
+    made. ``None`` means no listing signal this cycle (no poll finished yet, or
+    the active loader doesn't report listing counts): state holds unchanged.
+    Zero extends the dark streak. A >0 count after >= `dark_k` consecutive dark
+    cycles fires the one-shot WARN "listing recovered" (WARN so it reaches the
+    health monitor AND the alert channel — the operator wants the revert the
+    moment it lands); any >0 count resets the streak, so the notice cannot
+    repeat until another full dark run accrues.
+
+    Returns (new_dark_streak, anomaly|None)."""
+    if listed_matches is None:
+        return prior_dark_streak, None
+    if listed_matches <= 0:
+        return prior_dark_streak + 1, None
+    if prior_dark_streak >= dark_k:
+        return 0, Anomaly(
+            "WARN",
+            "listing_recovered",
+            f"oddsportal listing RECOVERED: {listed_matches} matches listed after "
+            f"{prior_dark_streak} consecutive dark self-audit cycles — live odds "
+            "ingestion should resume; verify fresh picks follow",
+        )
+    return 0, None
+
+
+def _listing_matches_from_last_poll() -> int | None:
+    """Latest listing count summed across sports from the pipeline's LAST_POLL
+    liveness registry — the self-audit's listing-probe input. The poll cycle
+    already performs the dated listing scrape and records `matches_found` per
+    sport, so reading it here adds ZERO upstream requests (politeness). ``None``
+    until a poll that reports listing counts has run (startup, or a loader such
+    as odds_api that has no listing concept). Lazy import + broad guard: a
+    monitoring input must never break the audit (type-name-only logging)."""
+    try:
+        from app.pipeline import LAST_POLL
+
+        known = [
+            int(poll["matches_found"])
+            for poll in LAST_POLL.values()
+            if poll.get("matches_found") is not None
+        ]
+        return sum(known) if known else None
+    except Exception as exc:  # fail-safe: no listing signal this cycle
+        logger.warning("self_audit listing probe input unavailable: %s", type(exc).__name__)
+        return None
+
+
 @dataclass
 class SelfAuditMonitorState:
     """Process-local state the scheduled self-audit carries across cycles.
@@ -176,6 +240,11 @@ class SelfAuditMonitorState:
     #: Task B5: last time the proxy-headroom warning was emitted (time throttle,
     #: max one per PROXY_HEADROOM_ALERT_INTERVAL while the pool stays tight).
     last_proxy_headroom_alert: datetime | None = None
+    #: Listing-recovery watch: consecutive self-audit cycles whose latest poll
+    #: listed ZERO matches. Reset by any >0 listing; the recovery notice fires
+    #: only when a >0 listing follows a streak >= LISTING_DARK_K. Restart
+    #: semantics match the dead-man's switch: the streak rebuilds from 0.
+    listing_dark_streak: int = 0
 
 
 def anomaly_alert(anomaly: Anomaly, now: datetime) -> Alert:
@@ -305,6 +374,30 @@ async def self_audit_job(
                     logger.error(
                         "self_audit alert dispatch failed for %s: %s",
                         headroom_warn.code,
+                        type(exc).__name__,
+                    )
+    # Listing-recovery watch (upstream-revert detection for the 2026-07-04
+    # OddsPortal listing blackout): rides the LAST_POLL listing counts the poll
+    # cycle already records — zero extra upstream requests. Runs BEFORE the DB
+    # audit (like proxy_headroom) so a DB outage can't mask the revert; fully
+    # fail-safe (a broken input yields None -> state holds, nothing fires).
+    if monitor_state is not None:
+        dark_streak, recovered = evaluate_listing_recovery(
+            _listing_matches_from_last_poll(),
+            prior_dark_streak=monitor_state.listing_dark_streak,
+        )
+        monitor_state.listing_dark_streak = dark_streak
+        if recovered is not None:
+            # One-shot by construction (the streak resets on the >0 listing),
+            # so no confirm-before-consume machinery is needed here.
+            logger.warning("self_audit %s: %s", recovered.code, recovered.detail)
+            if dispatcher is not None:
+                try:
+                    await dispatcher.dispatch(anomaly_alert(recovered, now))
+                except Exception as exc:  # alerting must never break the cycle
+                    logger.error(
+                        "self_audit alert dispatch failed for %s: %s",
+                        recovered.code,
                         type(exc).__name__,
                     )
     try:

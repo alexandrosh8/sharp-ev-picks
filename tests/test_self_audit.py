@@ -86,6 +86,48 @@ def test_dead_mans_switch_rearms_after_fresh_cycle() -> None:
     )
 
 
+# --- Task 1b: OddsPortal listing-recovery watch (pure eval) ------------------ #
+
+
+def test_listing_recovery_accumulates_dark_streak_and_stays_quiet() -> None:
+    from app.maintenance.self_audit import evaluate_listing_recovery
+
+    # zero-listing cycles extend the dark streak; nothing fires while dark
+    assert evaluate_listing_recovery(0, prior_dark_streak=0, dark_k=3) == (1, None)
+    assert evaluate_listing_recovery(0, prior_dark_streak=1, dark_k=3) == (2, None)
+    assert evaluate_listing_recovery(0, prior_dark_streak=2, dark_k=3) == (3, None)
+
+
+def test_listing_recovery_none_input_holds_state() -> None:
+    from app.maintenance.self_audit import evaluate_listing_recovery
+
+    # no listing signal this cycle (loader has no listing concept / no poll yet)
+    # -> state holds unchanged, nothing fires, even mid-blackout
+    assert evaluate_listing_recovery(None, prior_dark_streak=9, dark_k=3) == (9, None)
+
+
+def test_listing_recovery_fires_once_after_dark_run() -> None:
+    from app.maintenance.self_audit import evaluate_listing_recovery
+
+    # a >0 listing after >= dark_k dark cycles fires the one-shot WARN
+    streak, anomaly = evaluate_listing_recovery(42, prior_dark_streak=3, dark_k=3)
+    assert streak == 0
+    assert anomaly is not None
+    assert anomaly.code == "listing_recovered"
+    assert anomaly.severity == "WARN"
+
+    # the streak reset means it cannot repeat until another full dark run accrues
+    assert evaluate_listing_recovery(50, prior_dark_streak=0, dark_k=3) == (0, None)
+
+
+def test_listing_recovery_no_alert_when_never_went_dark_enough() -> None:
+    from app.maintenance.self_audit import evaluate_listing_recovery
+
+    # a brief 1-2 cycle dip below dark_k that recovers is normal scrape noise,
+    # not a blackout revert -> reset the streak but do not alert
+    assert evaluate_listing_recovery(30, prior_dark_streak=2, dark_k=3) == (0, None)
+
+
 # --- P0-2 log->alert bridge + P0-4 wiring (job, mocked dispatcher) ---------- #
 
 
@@ -117,6 +159,44 @@ async def test_self_audit_job_dispatches_then_dedupes(monkeypatch) -> None:  # t
     # the SAME ongoing anomaly the next cycle is deduped (no re-alert)
     await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
     assert disp.sent == ["self-audit-stale_odds"]
+
+
+async def test_listing_blackout_shape_is_detected_and_recovery_fires(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Task 1d regression — the exact 2026-07-04 failure shape: the OddsPortal
+    # LISTING returns 0 matches every cycle while the self-audit itself stays
+    # healthy (per-match/ARCADIA paths keep serving, so run_self_audit finds no
+    # anomaly and reports fresh odds). Assert the blackout is DETECTED (dark
+    # streak accrues, quiet until the bar) and that the upstream revert fires
+    # exactly once when the listing serves fixtures again — so recovery no
+    # longer depends on someone noticing the quiet cycle by hand.
+    from app.maintenance import self_audit as sa
+
+    async def healthy_audit(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return [], 5  # no anomaly, fresh odds — the audit cannot see the listing hole
+
+    monkeypatch.setattr(sa, "run_self_audit", healthy_audit)
+    # Drive the listing-probe input directly (the poll registry the watch reads).
+    listing = {"n": 0}
+    monkeypatch.setattr(sa, "_listing_matches_from_last_poll", lambda: listing["n"])
+
+    disp = _FakeDispatcher()
+    state = sa.SelfAuditMonitorState()
+
+    # blackout: 4 consecutive dark cycles — streak accrues, NOTHING fires
+    for _ in range(4):
+        await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
+    assert state.listing_dark_streak == 4
+    assert disp.sent == []
+
+    # upstream reverts: the listing serves fixtures again -> one recovery alert
+    listing["n"] = 37
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
+    assert state.listing_dark_streak == 0
+    assert disp.sent == ["self-audit-listing_recovered"]
+
+    # a second healthy cycle does not re-alert (one-shot until another dark run)
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state)
+    assert disp.sent == ["self-audit-listing_recovered"]
 
 
 async def test_self_audit_job_realerts_after_anomaly_clears(monkeypatch) -> None:  # type: ignore[no-untyped-def]
