@@ -1,0 +1,58 @@
+EXPLORATORY — any threshold later frozen from this data must treat this readout as spent.
+DEVIG COMPARISON — validation-only; NO ROI, NO headline, NO winner selection.
+population: settled picks with close_independent_of_fill IS TRUE (n=481)
+skipped (counted, never guessed): {'consensus_or_unnamed_anchor': 400, 'selection_unresolved': 6, 'no_anchor_group': 11}
+
+method                      sport       market        n    brier  logloss   nCl  |f-close|
+additive                    basketball  h2h           8   0.1747   0.5344     8     0.0404
+additive                    basketball  totals        3   0.2517   0.6965     3     0.0192
+additive                    soccer      h2h          19   0.2152   0.6231    19     0.0333
+additive                    soccer      spreads      20   0.2191   0.6271    20     0.0981
+additive                    soccer      totals        9   0.1934   0.5745     9     0.0187
+additive                    tennis      h2h           5   0.0885   0.3316     5     0.0131
+differential_margin_weightingbasketball  h2h           8   0.1747   0.5344     8     0.0404
+differential_margin_weightingbasketball  totals        3   0.2517   0.6965     3     0.0192
+differential_margin_weightingsoccer      h2h          19   0.2152   0.6231    19     0.0333
+differential_margin_weightingsoccer      spreads      20   0.2191   0.6271    20     0.0981
+differential_margin_weightingsoccer      totals        9   0.1934   0.5745     9     0.0187
+differential_margin_weightingtennis      h2h           5   0.0885   0.3316     5     0.0131
+logarithmic                 basketball  h2h           8   0.1746   0.5341     8     0.0404
+logarithmic                 basketball  totals        3   0.2517   0.6965     3     0.0193
+logarithmic                 soccer      h2h          19   0.2152   0.6226    19     0.0314
+logarithmic                 soccer      spreads      20   0.2198   0.6285    20     0.1063
+logarithmic                 soccer      totals        9   0.1933   0.5743     9     0.0186
+logarithmic                 tennis      h2h           5   0.0882   0.3306     5     0.0127
+multiplicative              basketball  h2h           8   0.1770   0.5398     8     0.0406
+multiplicative              basketball  totals        3   0.2515   0.6962     3     0.0184
+multiplicative              soccer      h2h          19   0.2155   0.6230    19     0.0282
+multiplicative              soccer      spreads      20   0.2192   0.6270    20     0.0969
+multiplicative              soccer      totals        9   0.1947   0.5775     9     0.0202
+multiplicative              tennis      h2h           5   0.0918   0.3425     5     0.0189
+odds_ratio                  basketball  h2h           8   0.1746   0.5341     8     0.0404
+odds_ratio                  basketball  totals        3   0.2517   0.6965     3     0.0193
+odds_ratio                  soccer      h2h          19   0.2152   0.6226    19     0.0314
+odds_ratio                  soccer      spreads      20   0.2198   0.6285    20     0.1063
+odds_ratio                  soccer      totals        9   0.1933   0.5743     9     0.0186
+odds_ratio                  tennis      h2h           5   0.0882   0.3306     5     0.0127
+power                       basketball  h2h           8   0.1735   0.5316     8     0.0410
+power                       basketball  totals        3   0.2517   0.6966     3     0.0196
+power                       soccer      h2h          19   0.2151   0.6227    19     0.0338
+power                       soccer      spreads      20   0.2205   0.6300    20     0.1099
+power                       soccer      totals        9   0.1927   0.5729     9     0.0179
+power                       tennis      h2h           5   0.0867   0.3253     5     0.0119
+probit                      basketball  h2h           8   0.1746   0.5342     8     0.0404
+probit                      basketball  totals        3   0.2517   0.6965     3     0.0192
+probit                      soccer      h2h          19   0.2152   0.6227    19     0.0318
+probit                      soccer      spreads      20   0.2194   0.6276    20     0.1030
+probit                      soccer      totals        9   0.1933   0.5744     9     0.0186
+probit                      tennis      h2h           5   0.0882   0.3308     5     0.0128
+shin                        basketball  h2h           8   0.1747   0.5344     8     0.0404
+shin                        basketball  totals        3   0.2517   0.6965     3     0.0192
+shin                        soccer      h2h          19   0.2153   0.6231    19     0.0319
+shin                        soccer      spreads      20   0.2191   0.6271    20     0.0981
+shin                        soccer      totals        9   0.1934   0.5745     9     0.0187
+shin                        tennis      h2h           5   0.0885   0.3316     5     0.0131
+
+EXPLORATORY — any threshold later frozen from this data must treat this readout as spent.
+
+JSON written: /workspace/docs/research/devig_comparison_2026-07-04.json

@@ -223,3 +223,15 @@ def test_odds_ratio_and_logarithmic_are_equivalent_methods() -> None:
         a = devig(odds, method=DevigMethod.ODDS_RATIO)
         b = devig(odds, method=DevigMethod.LOGARITHMIC)
         assert a == pytest.approx(b, abs=1e-9)
+
+
+def test_shin_matches_mberk_shin_golden_vectors() -> None:
+    """Cross-library fixture from mberk/shin (MIT, tests/test_shin.py): odds
+    [2.6, 2.4, 4.3] must devig to these probabilities under Shin. Locks our
+    implementation against the reference implementation's golden output
+    (research scan 2026-07-04 — the only adoptable artifact from the sweep)."""
+    probs = devig([2.6, 2.4, 4.3], DevigMethod.SHIN)
+    expected = [0.3729941, 0.4047794, 0.2222265]
+    assert sum(probs) == pytest.approx(1.0, abs=1e-9)
+    for got, want in zip(probs, expected, strict=True):
+        assert got == pytest.approx(want, abs=2e-4)

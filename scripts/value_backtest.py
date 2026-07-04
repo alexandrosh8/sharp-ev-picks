@@ -32,6 +32,7 @@ import asyncio
 import csv
 import io
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -716,6 +717,126 @@ def _apply_arcadia_anchor(
     return joined_rows
 
 
+# H6 outcome-name keys per market kind (selection keys for agreement_verdict;
+# order MUST parallel the MARKETS column tuples).
+_H6_OUTCOME_NAMES: dict[str, tuple[str, ...]] = {
+    "1x2": ("home", "draw", "away"),
+    "ou25": ("over", "under"),
+}
+# football-data market-average columns (broad soft-dominated consensus).
+_H6_AVG_COLS: dict[str, tuple[str, ...]] = {
+    "1x2": ("AvgH", "AvgD", "AvgA"),
+    "ou25": ("Avg>2.5", "Avg<2.5"),
+}
+
+
+def _h6_reference_odds(r: dict, kind: str) -> list[float] | None:
+    """The H6 REFERENCE price vector for one fd/BSP row: the row's soft-consensus
+    odds — the Avg* market-average columns when fully present, else the
+    per-outcome mean across the named soft books (_SOFT_1X2_BOOKS via
+    SOFT_FILL_BOOKS; ou25 carries B365 only in this era). None = no usable
+    consensus on this row (the H6 row then EXCLUDES it, fail-closed — never a
+    faked reference). CALLER CONTRACT (app/backtesting/agreement.py): the
+    reference is never the PS* sharp anchor itself; Avg* is a ~30-book
+    soft-dominated market average and the fallback averages soft books only."""
+    avg = [_f(r.get(c)) for c in _H6_AVG_COLS[kind]]
+    if None not in avg:
+        return avg  # type: ignore[return-value]
+    n_outcomes = len(_H6_AVG_COLS[kind])
+    sums = [0.0] * n_outcomes
+    counts = [0] * n_outcomes
+    for cols in SOFT_FILL_BOOKS.get(kind, ()):
+        for i, c in enumerate(cols):
+            v = _f(r.get(c))
+            if v is not None:
+                sums[i] += v
+                counts[i] += 1
+    if all(c > 0 for c in counts):
+        return [sums[i] / counts[i] for i in range(n_outcomes)]
+    return None
+
+
+def _h6_agreement_row(
+    rows: list[dict],
+    kind: str,
+    frozen_bets: list[VBet],
+    baseline: "Stats",
+) -> tuple[list[VBet], "Counter[str]", "Counter[str]"]:
+    """The pre-registered H6 EXTRA row for the frozen eval: the SAME frozen
+    (thr, POWER) bets, restricted to those whose fixture ALSO passes the
+    Pinnacle-AND-consensus agreement predicate (app/backtesting/agreement.py).
+    Purely additive reporting — the main frozen row above is untouched.
+
+    Fail-closed: a bet with no usable consensus reference (or an unrecoverable
+    outcome) is EXCLUDED from the H6 variant — neither pass nor fail — and the
+    exclusion counts are printed. TOLERANCE PROVENANCE: no numeric tolerance was
+    ever recorded in the research log ADR-0019 points at, so this uses the
+    PROPOSED (not frozen) 0.02 absolute-probability tolerance and says so."""
+    from app.backtesting.agreement import (
+        PROPOSED_H6_TOLERANCE,
+        REASON_REFERENCE_MISSING,
+        REASON_SELECTION_MISSING,
+        agreement_verdict,
+    )
+
+    outcome_names = _H6_OUTCOME_NAMES[kind]
+    ps_cols, mx_cols = MARKETS[kind][0], MARKETS[kind][1]
+    retained: list[VBet] = []
+    excluded: Counter[str] = Counter()
+    fail_reasons: Counter[str] = Counter()
+    for b in frozen_bets:
+        # VBet.cluster is "m{row_index}" (set by bets_for) — recover the row.
+        ri = int((b.cluster or "m0")[1:])
+        r = rows[ri]
+        ps = [_f(r.get(c)) for c in ps_cols]
+        mx = [_f(r.get(c)) for c in mx_cols]
+        if None in ps:  # cannot happen for a minted bet; fail closed anyway
+            excluded["outcome_unrecovered"] += 1
+            continue
+        sharp = devig(ps, method=DevigMethod.POWER)  # type: ignore[arg-type]
+        # Recover the bet's outcome index by exact identity with bets_for's own
+        # arithmetic (same inputs, same devig call -> bitwise-equal floats).
+        idx: int | None = None
+        for i in range(len(ps)):
+            if mx[i] is not None and mx[i] == b.odds and sharp[i] - 1.0 / mx[i] == b.edge:
+                idx = i
+                break
+        if idx is None:
+            excluded["outcome_unrecovered"] += 1  # wiring-level, not a verdict reason
+            continue
+        ref_odds = _h6_reference_odds(r, kind)
+        reference = (
+            dict(zip(outcome_names, devig(ref_odds, method=DevigMethod.POWER), strict=True))
+            if ref_odds is not None
+            else None
+        )
+        anchor = dict(zip(outcome_names, sharp, strict=True))
+        verdict = agreement_verdict(anchor, reference, outcome_names[idx], PROPOSED_H6_TOLERANCE)
+        if verdict.reason in (REASON_REFERENCE_MISSING, REASON_SELECTION_MISSING):
+            excluded[verdict.reason] += 1  # fail-closed EXCLUSION, reported not failed
+        elif verdict.passes:
+            retained.append(b)
+        else:
+            fail_reasons[verdict.reason] += 1
+    print(
+        f"\nH6 agreement-gate variant (pre-registered) — tolerance "
+        f"{PROPOSED_H6_TOLERANCE:.3f} abs-prob (PROPOSED: ADR-0019 says 'frozen at the "
+        "value recorded in the research log' but NO numeric value was recorded there; "
+        "this is a proposal, not a frozen value)"
+    )
+    n_failed = sum(fail_reasons.values())
+    if not retained and not n_failed:
+        print("H6: reference unavailable on this slate")
+        print(f"  excluded (fail-closed, never counted as fail): {dict(excluded) or {}}")
+        return retained, fail_reasons, excluded
+    print(
+        f"  n retained={len(retained)} failed={n_failed} ({dict(fail_reasons) or {}}) "
+        f"excluded={sum(excluded.values())} ({dict(excluded) or {}})"
+    )
+    print(_fmt(Stats.from_bets(retained, with_roi_ci=True), "H6 agree", baseline))
+    return retained, fail_reasons, excluded
+
+
 def _frozen_eval(
     rows: list[dict],
     kind: str,
@@ -734,16 +855,16 @@ def _frozen_eval(
     print(f"\n[{kind}] FROZEN-EVAL (prospective single-shot): {len(rows)} joined rows")
     print(f"parameters = pre-registered frozen values: devig=power thr={thr:.3f} (no selection)")
     baseline = Stats.from_bets(bets_for(rows, 0.0, DevigMethod.POWER, (kind,), min_odds, max_odds))
-    stats = Stats.from_bets(
-        bets_for(rows, thr, DevigMethod.POWER, (kind,), min_odds, max_odds),
-        with_roi_ci=True,
-    )
+    frozen_bets = bets_for(rows, thr, DevigMethod.POWER, (kind,), min_odds, max_odds)
+    stats = Stats.from_bets(frozen_bets, with_roi_ci=True)
     print(_fmt(baseline, "0.000 (baseline null)"))
     print(_fmt(stats, f"{thr:.3f} (FROZEN)", baseline))
     if kind == "1x2":
         # H1 band check: [5.0, inf) must stay CLV-negative held-out.
         band = Stats.from_bets(bets_for(rows, thr, DevigMethod.POWER, (kind,), 5.0, 1000.0))
         print(_fmt(band, "  H1 band [5.0,inf)", baseline))
+    # Pre-registered H6 EXTRA row (additive; the frozen row above is untouched).
+    _h6_agreement_row(rows, kind, frozen_bets, baseline)
     print("descriptive grid (VISIBILITY ONLY — never selectable, slate is spent after reading):")
     for dm in (DevigMethod.POWER, DevigMethod.SHIN, DevigMethod.ODDS_RATIO):
         for t in (0.005, 0.010, 0.020):

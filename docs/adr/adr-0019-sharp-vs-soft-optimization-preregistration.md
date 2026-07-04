@@ -218,3 +218,52 @@ incumbent config — which is precisely what a prospective validation is.
 
 *Operator sign-off of this amendment (one signature covers anchor source +
 this split design) remains the final gate before the run.*
+
+## 2026-07-04 APPENDIX — H6 implementation, H8 pre-registration, sport shadow policy
+
+### H6 agreement gate — implemented (backtest variant), tolerance gap found
+- Implemented before the H2 slate per the amendment's deadline clause:
+  predicate in `app/backtesting/agreement.py` (pure; closed reason vocabulary
+  agree / reference_missing / direction_conflict / delta_exceeds_tolerance /
+  selection_missing; reference may NEVER be the anchor source), wired as the
+  pre-registered EXTRA ROW in `scripts/value_backtest.py::_frozen_eval` only.
+  Fail-closed: reference_missing rows are EXCLUDED from the H6 variant and
+  counted, never passed.
+- **Protocol gap (honesty):** the base ADR froze the tolerance "at the value
+  recorded in the research log" — no value was ever recorded there
+  (2026-06-30 log STEP 3 instructed it; it did not happen). **Proposed:
+  0.02 absolute probability** (`PROPOSED_H6_TOLERANCE`), consensus reference
+  = median of >=3 distinct soft books within 30 min of mint. This number is
+  NOT yet pre-registered — operator sign-off required before any acceptance
+  run reads the H6 row. The 2026-07-04 retrospective replay (soccer pass/fail
+  CLV at n=11/26) was SEEN and is spent for tolerance selection; the 0.02
+  proposal derives from the pre-existing edge-threshold scale (2x the volume
+  edge floor), not from that readout.
+
+### H8 pre-registration — anchor-freshness eligibility bound (NOT enabled)
+> **H8:** a premium pick is eligible only if its named sharp anchor's
+> snapshot age at mint is <= 7200 seconds; older anchors demote the pick to
+> the volume (shadow) tier — never a hard drop. Consensus-anchored picks are
+> out of scope (no single anchor snapshot). Threshold chosen from first
+> principles (monotone price-accuracy toward kickoff; 2h ≈ several poll
+> cycles), NOT from data: the 2026-07-04 exploratory freshness readout
+> (soccer named anchors ~all 0-15m; basketball hints only, all n<30) was
+> seen before this freeze and is recorded as SPENT for threshold tuning.
+> Evaluation: forward shadow evidence and/or a future pre-registered slate;
+> acceptance under the standard four clauses. No live effect until then.
+
+### Sport shadow policy (operator mandate 2026-07-04)
+All new basketball/NBA/NFL/tennis strategies start shadow-only and must
+prove quality with trusted CLV, source agreement, freshness, coverage, and
+sample size before any promotion. The 2026-07-04 exploratory sport report
+(`docs/research/sport_quality_report_2026-07-04.*`), devig comparison, and
+H6 replay are all recorded as EXPLORATORY/SPENT for selection. Known
+per-sport blockers: basketball — soft-snapshot consensus coverage
+(reference_missing 51/79 in the replay); tennis — Betfair capture parser
+absent + retirement-void settlement convention must be encoded before
+settled tennis evidence is trustworthy (book conventions differ: Pinnacle
+grades after one completed set, bet365 voids); NFL/american_football —
+negligible capture (6 events/30d) and, if spreads ever get CLV, the
+key-number rule: never convert spread<->ML via a normal (Stern) model —
+devig each market's own prices; spread CLV needs an empirical margin
+distribution.
