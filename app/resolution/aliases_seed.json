@@ -1610,7 +1610,8 @@
       "Hellas Verona Football Club"
     ],
     "Helsingin Jalkapalloklubi": [
-      "HJK Helsinki"
+      "HJK Helsinki",
+      "HJK"
     ],
     "Henan F.C.": [
       "Henan Construction",
@@ -3665,6 +3666,12 @@
     ],
     "Belconnen United": [
       "Belconnen Utd."
+    ],
+    "Drogheda United": [
+      "Drogheda"
+    ],
+    "Manly United": [
+      "Manly Utd"
     ]
   }
 }

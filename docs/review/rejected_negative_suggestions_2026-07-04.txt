@@ -1,0 +1,5 @@
+# Rejected alias candidates — NEGATIVE-alias suggestions (human consideration
+# only; add the vetted ones to the _NOT_ADDED list in
+# tests/test_resolution_nameform_aliases.py so they stay distinct forever):
+# _NOT_ADDED_CANDIDATES = [
+# ]
