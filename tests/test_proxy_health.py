@@ -134,16 +134,16 @@ def test_diagnostics_half_open_is_probing_not_healthy() -> None:
     registry, clock = make_registry(threshold=3, cooldown_seconds=900.0)
     for _ in range(3):
         registry.record_failure(4, "TimeoutError")
-    diag = registry.diagnostics(configured=2)
+    diag = registry.diagnostics(configured=2, concurrency_floor=1)
     assert (diag["quarantined"], diag["probing"], diag["dead"]) == (1, 0, 1)
     clock.advance(901)  # half-open — still unproven
-    diag = registry.diagnostics(configured=2)
+    diag = registry.diagnostics(configured=2, concurrency_floor=1)
     assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 1, 1)
     assert diag["healthy"] == 1
     assert diag["verdict"] == "Proxy pool degraded"
     assert diag["action"] == "Replace or expand proxy pool"
     registry.record_success(4)  # probe passed — NOW it is healthy
-    diag = registry.diagnostics(configured=2)
+    diag = registry.diagnostics(configured=2, concurrency_floor=1)
     assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 0, 0)
     assert diag["healthy"] == 2
     assert diag["verdict"] == "Proxy pool healthy"
@@ -156,7 +156,7 @@ def test_all_quarantined_fails_open_to_full_rotation() -> None:
     registry.record_failure(1, "TimeoutError")
     assert registry.filter_rotation([0, 1]) == [0, 1]  # FAIL-OPEN: full order
     assert registry.select([1, 0]) == 1  # FAIL-OPEN: first of the given order
-    diag = registry.diagnostics(configured=2)
+    diag = registry.diagnostics(configured=2, concurrency_floor=1)
     assert diag["fail_open_events"] == 2
 
 
@@ -183,7 +183,7 @@ def test_failover_windows_15m_1h_and_dominant_class() -> None:
     clock.advance(600)
     registry.record_failure(2, "ConnectionError")  # 100s ago at read time
     clock.advance(100)
-    diag = registry.diagnostics(configured=3)
+    diag = registry.diagnostics(configured=3, concurrency_floor=1)
     assert diag["failovers_15m"] == 2
     assert diag["failovers_1h"] == 2  # the t0 failure aged out (3700s ago)
     assert diag["dominant_failure_class"] == "ConnectionError"
@@ -191,7 +191,7 @@ def test_failover_windows_15m_1h_and_dominant_class() -> None:
 
 def test_diagnostics_shape_and_operator_wording() -> None:
     registry, _clock = make_registry(threshold=3, cooldown_seconds=900.0)
-    diag = registry.diagnostics(configured=12)
+    diag = registry.diagnostics(configured=12, concurrency_floor=3)
     assert diag["verdict"] == "Proxy pool healthy"
     assert diag["freshness"] is None
     assert diag["picks"] is None
@@ -201,7 +201,7 @@ def test_diagnostics_shape_and_operator_wording() -> None:
     # degrade one slot (never succeeded -> also "dead")
     for _ in range(3):
         registry.record_failure(4, "TimeoutError")
-    diag = registry.diagnostics(configured=12)
+    diag = registry.diagnostics(configured=12, concurrency_floor=3)
     assert diag["quarantined"] == 1
     assert diag["dead"] == 1
     assert diag["healthy"] == 11
@@ -217,6 +217,23 @@ def test_diagnostics_shape_and_operator_wording() -> None:
     assert slot["last_error_class"] == "TimeoutError"
 
 
+def test_diagnostics_headroom_vs_concurrency_floor() -> None:
+    # Task B5: explicit scrape headroom — healthy minus the concurrency floor
+    # (ODDSPORTAL_CONCURRENCY). Can be ZERO or NEGATIVE when quarantines eat
+    # into the parallelism budget; the payload must say so, not hide it.
+    registry, _clock = make_registry(threshold=3, cooldown_seconds=900.0)
+    diag = registry.diagnostics(configured=12, concurrency_floor=12)
+    assert diag["concurrency_floor"] == 12
+    assert diag["headroom"] == 0  # 12 healthy - floor 12: NO headroom
+    diag = registry.diagnostics(configured=12, concurrency_floor=3)
+    assert diag["headroom"] == 9
+    for _ in range(3):  # quarantine one slot -> healthy 11
+        registry.record_failure(7, "TimeoutError")
+    diag = registry.diagnostics(configured=12, concurrency_floor=12)
+    assert diag["healthy"] == 11
+    assert diag["headroom"] == -1  # negative is allowed and meaningful
+
+
 def test_diagnostics_payload_is_redacted() -> None:
     # The payload must carry pool INDICES only — never an IP-like string or an
     # inline-credential proxy URL, even after real-looking traffic.
@@ -225,7 +242,7 @@ def test_diagnostics_payload_is_redacted() -> None:
         registry.record_success(index)
     for _ in range(3):
         registry.record_failure(3, "ProxyError")
-    payload = json.dumps(registry.diagnostics(configured=12))
+    payload = json.dumps(registry.diagnostics(configured=12, concurrency_floor=3))
     assert not re.search(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", payload)  # no IPs
     assert not re.search(r"\w+://\S*:\S*@", payload)  # no scheme://user:pass@
     assert "http" not in payload.lower()

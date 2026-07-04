@@ -272,3 +272,132 @@ async def test_dead_mans_switch_one_shot_consumed_on_skipped_duplicate(monkeypat
     state = sa.SelfAuditMonitorState()
     await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=state, dead_mans_k=1)
     assert state.dead_man_alerted is True
+
+
+# --- Task B5: proxy-headroom warning (pure eval + job wiring) ---------------- #
+
+
+def test_evaluate_proxy_headroom_fires_at_floor_plus_one_not_above() -> None:
+    from app.maintenance.self_audit import evaluate_proxy_headroom
+
+    now = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    # comfortably above the floor -> quiet
+    assert evaluate_proxy_headroom(14, 12, now=now, last_alerted=None) is None
+    # healthy == floor + 1 -> WARN (one quarantine from zero headroom)
+    warn = evaluate_proxy_headroom(13, 12, now=now, last_alerted=None)
+    assert warn is not None
+    assert (warn.severity, warn.code) == ("WARN", "proxy_headroom")
+    assert "13" in warn.detail and "12" in warn.detail
+    # at and below the floor -> WARN too
+    assert evaluate_proxy_headroom(12, 12, now=now, last_alerted=None) is not None
+    assert evaluate_proxy_headroom(0, 12, now=now, last_alerted=None) is not None
+
+
+def test_evaluate_proxy_headroom_throttles_to_one_per_window() -> None:
+    from app.maintenance.self_audit import (
+        PROXY_HEADROOM_ALERT_INTERVAL,
+        evaluate_proxy_headroom,
+    )
+
+    t0 = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    assert PROXY_HEADROOM_ALERT_INTERVAL.total_seconds() == 6 * 3600  # max 1 per 6h
+    # inside the window since the last alert -> suppressed
+    inside = t0 + PROXY_HEADROOM_ALERT_INTERVAL - timedelta(minutes=1)
+    assert evaluate_proxy_headroom(12, 12, now=inside, last_alerted=t0) is None
+    # window elapsed -> fires again while the condition persists
+    after = t0 + PROXY_HEADROOM_ALERT_INTERVAL
+    assert evaluate_proxy_headroom(12, 12, now=after, last_alerted=t0) is not None
+
+
+async def test_self_audit_job_proxy_headroom_alerts_once_per_window(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return [], 5  # DB audit healthy — only the proxy warning is in play
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    disp = _FakeDispatcher()
+    state = sa.SelfAuditMonitorState()
+    t0 = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+
+    # no headroom -> warn + dispatch, throttle stamped
+    await sa.self_audit_job(
+        _NO_FACTORY, t0, dispatcher=disp, monitor_state=state, proxy_headroom=(12, 12)
+    )
+    assert disp.sent == ["self-audit-proxy_headroom"]
+    assert state.last_proxy_headroom_alert == t0
+
+    # next cycle inside the 6h window -> throttled (no repeat)
+    await sa.self_audit_job(
+        _NO_FACTORY,
+        t0 + timedelta(minutes=10),
+        dispatcher=disp,
+        monitor_state=state,
+        proxy_headroom=(12, 12),
+    )
+    assert disp.sent == ["self-audit-proxy_headroom"]
+
+    # window elapsed and the pool is still tight -> one more warning
+    await sa.self_audit_job(
+        _NO_FACTORY,
+        t0 + timedelta(hours=6),
+        dispatcher=disp,
+        monitor_state=state,
+        proxy_headroom=(12, 12),
+    )
+    assert disp.sent == ["self-audit-proxy_headroom", "self-audit-proxy_headroom"]
+
+    # healthy pool -> quiet, throttle untouched
+    await sa.self_audit_job(
+        _NO_FACTORY,
+        t0 + timedelta(hours=13),
+        dispatcher=disp,
+        monitor_state=state,
+        proxy_headroom=(14, 12),
+    )
+    assert disp.sent == ["self-audit-proxy_headroom", "self-audit-proxy_headroom"]
+    assert state.last_proxy_headroom_alert == t0 + timedelta(hours=6)
+
+
+async def test_self_audit_job_proxy_headroom_dispatch_failure_is_fail_safe(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return [], 5
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+
+    class _ExplodingDispatcher:
+        async def dispatch(self, alert):  # type: ignore[no-untyped-def]
+            raise RuntimeError("sink down")
+
+    state = sa.SelfAuditMonitorState()
+    t0 = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    # a raising sink must not break the cycle; the throttle still stamps so the
+    # warning stays capped at one per window (advisory — no delivery retry).
+    count = await sa.self_audit_job(
+        _NO_FACTORY,
+        t0,
+        dispatcher=_ExplodingDispatcher(),
+        monitor_state=state,
+        proxy_headroom=(12, 12),
+    )
+    assert count == 0  # DB audit clean; the job completed despite the sink error
+    assert state.last_proxy_headroom_alert == t0
+
+
+async def test_self_audit_job_proxy_headroom_none_or_stateless_is_quiet(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return [], 5
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    disp = _FakeDispatcher()
+    # no proxy input (e.g. direct egress, no pool configured) -> nothing fires
+    await sa.self_audit_job(_NO_FACTORY, dispatcher=disp, monitor_state=sa.SelfAuditMonitorState())
+    # no monitor_state -> no throttle store -> the check is skipped entirely
+    await sa.self_audit_job(
+        _NO_FACTORY, dispatcher=disp, monitor_state=None, proxy_headroom=(0, 12)
+    )
+    assert disp.sent == []

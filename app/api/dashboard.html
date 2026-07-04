@@ -506,6 +506,16 @@
           <section class="tile" aria-labelledby="reviewq-h">
             <div class="tile-h"><h3 id="reviewq-h">Review queues</h3></div>
             <p class="muted" id="review-queues">Not loaded yet.</p>
+            <details class="raw-reason" id="reviewq-browse">
+              <summary>Review queue — newest</summary>
+              <p class="muted" id="reviewq-browse-status">Not loaded yet.</p>
+              <div class="tscroll">
+                <table aria-label="Review queue newest rows (read-only)">
+                  <thead><tr><th scope="col">Event</th><th scope="col">Candidate</th><th scope="col">Kickoff (UTC)</th><th scope="col">Source</th><th scope="col">Conf</th><th scope="col">Reason</th><th scope="col">Status</th><th scope="col">Queued</th></tr></thead>
+                  <tbody id="reviewq-browse-rows"></tbody>
+                </table>
+              </div>
+            </details>
           </section>
           <section class="tile" aria-labelledby="permarket-h">
             <div class="tile-h"><h3 id="permarket-h">Per-market top 5</h3></div>
@@ -629,6 +639,9 @@
           matchRate: null,
           matchRateErr: null,
           matchRateLoading: false,
+          reviewQueue: null,
+          reviewQueueErr: null,
+          reviewQueueLoading: false,
           lastOkAt: null,
         };
         let selectedId = null;
@@ -820,6 +833,46 @@
               if (activeView === "sources") renderSources();
             });
         }
+
+        // ===== lazy /resolution/review-queue browse (Sources disclosure) =====
+        // Collapsed by default; fetched ONLY on first expand (timeout-guarded
+        // like match-rate). STRICTLY read-only — no review action exists here.
+        function renderReviewQueueBrowse() {
+          const status = $("reviewq-browse-status");
+          const tb = $("reviewq-browse-rows"); tb.replaceChildren();
+          if (state.reviewQueueLoading) { status.textContent = "Loading review queue…"; return; }
+          if (state.reviewQueueErr) { status.textContent = "Could not load review queue."; return; }
+          if (!state.reviewQueue) { status.textContent = "Not loaded yet."; return; }
+          const rows = state.reviewQueue.rows || [];
+          if (rows.length === 0) { status.textContent = "Review queue is empty."; return; }
+          status.textContent = "Newest " + rows.length + " rows (read-only; triage via the operator CLI).";
+          rows.forEach((r) => {
+            const tr = document.createElement("tr");
+            const conf = r.confidence != null ? fmtNum(r.confidence, 4) : null;
+            const st = r.review_status === "pending" && r.reviewed_at == null ? r.review_status
+              : fmt(r.review_status) + (r.reviewed_at != null ? " @ " + r.reviewed_at : "");
+            [r.event, r.candidate, r.kickoff_utc, r.source, conf, r.reason, st, r.created_at].forEach((v) => {
+              const td = document.createElement("td");
+              td.textContent = String(fmt(v));
+              tr.appendChild(td);
+            });
+            tb.appendChild(tr);
+          });
+        }
+        function loadReviewQueue() {
+          if (state.reviewQueue || state.reviewQueueLoading) return;
+          state.reviewQueueLoading = true;
+          state.reviewQueueErr = null;
+          renderReviewQueueBrowse();
+          fetchGuarded("/resolution/review-queue?limit=50", undefined, MATCH_RATE_TIMEOUT_MS)
+            .then(readJson)
+            .then((body) => { state.reviewQueue = body; state.reviewQueueErr = null; })
+            .catch((e) => { state.reviewQueueErr = e; })
+            .finally(() => { state.reviewQueueLoading = false; renderReviewQueueBrowse(); });
+        }
+        $("reviewq-browse").addEventListener("toggle", function () {
+          if (this.open) loadReviewQueue();
+        });
 
         // ===== header: system pill + popover ==================================
         function setPillText(text, mode) {
@@ -1437,14 +1490,24 @@
         function renderProxyRow(pool) {
           if (!pool) return sourceRow("Proxy pool", "—", "—", "—", "Not loaded yet.", "tag-neutral");
           const degraded = pool.verdict === "Proxy pool degraded";
+          // Task B5: explicit no-headroom state (healthy - concurrency floor <= 0).
+          // Null-safe: an older payload without the field never renders
+          // "undefined" — it keeps the plain healthy/configured text instead.
+          const noHeadroom = typeof pool.headroom === "number" && pool.headroom <= 0;
           const verdict = pool.verdict === "Proxy pool healthy" || pool.verdict === "Proxy pool degraded" ? pool.verdict : fmt(pool.verdict);
           return sourceRow(
             "Proxy pool",
-            "healthy " + fmt(pool.healthy) + " / configured " + fmt(pool.configured),
+            noHeadroom
+              ? fmt(pool.healthy) + "/" + fmt(pool.configured) + " — NO HEADROOM"
+              : "healthy " + fmt(pool.healthy) + " / configured " + fmt(pool.configured),
             "probing " + fmt(pool.probing) + " · dead " + fmt(pool.dead),
             verdict,
-            degraded ? "Source Degraded — freshness protected, no stale picks minted." : "Nominal.",
-            degraded ? "tag-danger" : "tag-success"
+            degraded
+              ? "Source Degraded — freshness protected, no stale picks minted."
+              : noHeadroom
+                ? "No spare proxies vs concurrency floor " + fmt(pool.concurrency_floor) + " — expand the pool."
+                : "Nominal.",
+            degraded || noHeadroom ? "tag-danger" : "tag-success"
           );
         }
         function renderSources() {

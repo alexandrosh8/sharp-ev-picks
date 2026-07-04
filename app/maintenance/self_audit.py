@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 #: (app/scheduler.py) may override per deployment.
 DEAD_MANS_DEFAULT_K = 3
 
+#: Task B5: minimum interval between proxy-headroom warnings. The condition
+#: (healthy <= concurrency floor + 1) typically PERSISTS for hours once a slot
+#: quarantines, so this is a time throttle, not transition dedupe — at most one
+#: warning per window while the pool stays tight.
+PROXY_HEADROOM_ALERT_INTERVAL = timedelta(hours=6)
+
 
 class _Dispatcher(Protocol):
     """Minimal alert-dispatch surface (app.notifications.dispatcher.AlertDispatcher
@@ -125,6 +131,35 @@ def evaluate_dead_mans_switch(
     return streak, already_alerted, None
 
 
+def evaluate_proxy_headroom(
+    healthy: int,
+    concurrency_floor: int,
+    *,
+    now: datetime,
+    last_alerted: datetime | None,
+    throttle: timedelta = PROXY_HEADROOM_ALERT_INTERVAL,
+) -> Anomaly | None:
+    """Pure proxy-headroom check (task B5): WARN when the healthy proxy count is
+    at (or within one of) the scrape's own concurrency floor
+    (ODDSPORTAL_CONCURRENCY) — the pool then has no spare slots and one more
+    quarantine slows every cycle. Time-throttled to one warning per `throttle`
+    window (the condition persists; per-cycle repeats would be noise).
+
+    Counters only — never a proxy URL/IP/credential. Returns None when healthy
+    is comfortably above the floor or the throttle window hasn't elapsed."""
+    if healthy > concurrency_floor + 1:
+        return None
+    if last_alerted is not None and now - last_alerted < throttle:
+        return None
+    return Anomaly(
+        "WARN",
+        "proxy_headroom",
+        f"proxy pool headroom exhausted: {healthy} healthy vs concurrency floor "
+        f"{concurrency_floor} (ODDSPORTAL_CONCURRENCY) — one more quarantine slows "
+        "every scrape cycle; expand or replace the proxy pool",
+    )
+
+
 @dataclass
 class SelfAuditMonitorState:
     """Process-local state the scheduled self-audit carries across cycles.
@@ -138,6 +173,9 @@ class SelfAuditMonitorState:
     active_anomalies: set[str] = field(default_factory=set)
     empty_odds_streak: int = 0
     dead_man_alerted: bool = False
+    #: Task B5: last time the proxy-headroom warning was emitted (time throttle,
+    #: max one per PROXY_HEADROOM_ALERT_INTERVAL while the pool stays tight).
+    last_proxy_headroom_alert: datetime | None = None
 
 
 def anomaly_alert(anomaly: Anomaly, now: datetime) -> Alert:
@@ -228,6 +266,7 @@ async def self_audit_job(
     monitor_state: SelfAuditMonitorState | None = None,
     cycle_window: timedelta = timedelta(seconds=600),
     dead_mans_k: int = DEAD_MANS_DEFAULT_K,
+    proxy_headroom: tuple[int, int] | None = None,
 ) -> int:
     """Run the self-audit, emit one WARNING/ERROR per anomaly (so the health
     monitor catches them) or one INFO when clean, AND (P0-2) dispatch an alert
@@ -238,8 +277,36 @@ async def self_audit_job(
     APPEARS and stays quiet while it persists; it re-alerts only after it clears
     and recurs. The dead-man's-switch (P0-4) rides the same dispatcher with its
     own one-shot. Unconfigured channels degrade gracefully (the dispatcher
-    no-ops on sinks with no token/url); `dispatcher=None` skips alerting entirely."""
+    no-ops on sinks with no token/url); `dispatcher=None` skips alerting entirely.
+
+    `proxy_headroom` (task B5) is an optional `(healthy, concurrency_floor)`
+    pair from the proxy registry diagnostics; when the healthy count is within
+    one of the floor a time-throttled WARN (max one per
+    PROXY_HEADROOM_ALERT_INTERVAL) is logged and dispatched. It runs BEFORE the
+    DB audit so a DB outage can't mask it, requires `monitor_state` (the
+    throttle lives there), and is fully fail-safe."""
     now = now or datetime.now(tz=UTC)
+    if proxy_headroom is not None and monitor_state is not None:
+        healthy, floor = proxy_headroom
+        headroom_warn = evaluate_proxy_headroom(
+            healthy, floor, now=now, last_alerted=monitor_state.last_proxy_headroom_alert
+        )
+        if headroom_warn is not None:
+            # Throttle stamps on FIRE (not on confirmed delivery — deliberate
+            # divergence from the WP7 pattern): this warning is advisory, and a
+            # strict 1-per-window cap beats delivery retries that could spam
+            # the log while a sink is down.
+            monitor_state.last_proxy_headroom_alert = now
+            logger.warning("self_audit %s: %s", headroom_warn.code, headroom_warn.detail)
+            if dispatcher is not None:
+                try:
+                    await dispatcher.dispatch(anomaly_alert(headroom_warn, now))
+                except Exception as exc:  # alerting must never break the cycle
+                    logger.error(
+                        "self_audit alert dispatch failed for %s: %s",
+                        headroom_warn.code,
+                        type(exc).__name__,
+                    )
     try:
         anomalies, fresh_odds = await run_self_audit(
             session_factory, now, cycle_window=cycle_window

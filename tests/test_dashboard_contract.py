@@ -75,6 +75,10 @@ def test_proxy_pool_rendered_from_health_payload() -> None:
     assert re.search(r"renderProxyRow\(\s*health\s*&&\s*health\.proxy_pool", text)
     assert "Proxy pool degraded" in text
     assert "Proxy pool healthy" in text
+    # Task B5: explicit no-headroom state, guarded so an older payload without
+    # the field can never render "undefined".
+    assert "NO HEADROOM" in text
+    assert re.search(r'typeof\s+pool\.headroom\s*===\s*"number"', text)
 
 
 def test_401_redirects_with_authentication_required_message() -> None:
@@ -177,3 +181,28 @@ def test_fmt_helper_and_missing_value_dash() -> None:
     text = _text()
     assert "function fmt(v)" in text
     assert '"—"' in text
+
+
+def test_review_queue_browse_is_lazy_collapsed_disclosure() -> None:
+    """B6: the Sources-view review-queue browse is a collapsed-by-default
+    <details> that lazy-fetches GET /resolution/review-queue on expand with
+    the match-rate timeout guard — never in the boot-time loadOnce() cycle,
+    and never with an <details open> default."""
+    text = _text()
+    assert 'id="reviewq-browse"' in text
+    assert "Review queue — newest" in text
+    disclosure = text[
+        text.index('id="reviewq-browse"') - 200 : text.index('id="reviewq-browse"') + 100
+    ]
+    assert "<details" in disclosure
+    assert "open" not in disclosure.split("<details", 1)[1].split(">", 1)[0]
+    assert re.search(r'fetchGuarded\("/resolution/review-queue[^)]*MATCH_RATE_TIMEOUT_MS', text)
+    assert "function loadReviewQueue" in text
+    load_once = text[
+        text.index("async function loadOnce") : text.index("async function loadOnce") + 2000
+    ]
+    assert "/resolution/review-queue" not in load_once
+    # honest states, read-only wording
+    assert "Loading review queue…" in text
+    assert "Could not load review queue." in text
+    assert "Review queue is empty." in text

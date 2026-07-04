@@ -787,8 +787,20 @@ def build_scheduler(
         # Never raises (self_audit_job guards).
         if session_factory is None:
             return
+        from app.ingestion.proxy_health import get_registry as _get_proxy_registry
         from app.maintenance.self_audit import self_audit_job
 
+        # Task B5: proxy-headroom input for the throttled warning — only when a
+        # pool is actually configured (direct-egress deployments have no
+        # headroom concept and must not warn). Process-local counters, no IO.
+        proxy_headroom: tuple[int, int] | None = None
+        proxies = settings.scraper_proxies()
+        if proxies:
+            pool_diag = _get_proxy_registry().diagnostics(
+                configured=len(proxies),
+                concurrency_floor=settings.oddsportal_concurrency,
+            )
+            proxy_headroom = (int(pool_diag["healthy"]), int(pool_diag["concurrency_floor"]))
         await self_audit_job(
             session_factory,
             dispatcher=self_audit_dispatcher,
@@ -796,6 +808,7 @@ def build_scheduler(
             # Fresh-odds window for the dead-man's switch == one audit cycle, so
             # K consecutive empty audits ≈ K cycles with no live odds ingested.
             cycle_window=timedelta(seconds=settings.self_audit_interval_seconds),
+            proxy_headroom=proxy_headroom,
         )
 
     scheduler.add_job(

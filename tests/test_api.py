@@ -565,6 +565,88 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     assert cov["headline"] == "Betfair 46% · Pinnacle 34%"
 
 
+def test_resolution_review_queue_endpoint_serializes_rows(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """GET /resolution/review-queue serializes the newest match_review_queue rows
+    (names from evidence_json, candidate kickoff, confidence, reason, review
+    status). The DB read is stubbed at the route's own import; the pure
+    serializer runs for real. Read-only browse — no review action exists."""
+    from decimal import Decimal
+
+    from app.api import routes
+    from app.storage.models import MatchReviewQueue
+
+    full = MatchReviewQueue(
+        id=7,
+        source="pinnacle_arcadia",
+        source_event_id="evt-1",
+        candidate_canonical_event_id=42,
+        confidence_score=Decimal("0.8912"),
+        reason="jw_below_accept",
+        evidence_json={
+            "query_base_home": "arsenal",
+            "query_base_away": "chelsea",
+            "candidate_base_home": "arsenal fc",
+            "candidate_base_away": "chelsea fc",
+            "kickoff_delta_seconds": 600.0,
+        },
+        review_status="pending",
+    )
+    full.created_at = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+    full.reviewed_at = None
+    # Degenerate row: no evidence, no candidate link, already reviewed —
+    # serializes as Nones (the dashboard renders '—'), never a 500.
+    bare = MatchReviewQueue(
+        id=6,
+        source="betfair",
+        source_event_id="evt-2",
+        candidate_canonical_event_id=None,
+        confidence_score=Decimal("0.8500"),
+        reason="ambiguity_margin",
+        evidence_json=None,
+        review_status="approved",
+    )
+    bare.created_at = datetime(2026, 7, 2, 9, 30, tzinfo=UTC)
+    bare.reviewed_at = datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
+
+    async def fake_rows(session, *, limit):  # type: ignore[no-untyped-def]
+        assert limit == 50  # default flows through to the repository read
+        return [
+            (full, datetime(2026, 7, 4, 18, 30, tzinfo=UTC)),
+            (bare, None),
+        ]
+
+    monkeypatch.setattr(routes, "review_queue_rows", fake_rows)
+    body = TestClient(make_app()).get("/resolution/review-queue").json()
+    assert body["limit"] == 50
+    assert body["count"] == 2
+    first, second = body["rows"]
+    assert first["id"] == 7
+    assert first["source"] == "pinnacle_arcadia"
+    assert first["event"] == "arsenal v chelsea"
+    assert first["candidate"] == "arsenal fc v chelsea fc"
+    assert first["kickoff_utc"] == "2026-07-04T18:30:00+00:00"
+    assert first["kickoff_delta_seconds"] == pytest.approx(600.0)
+    assert first["confidence"] == pytest.approx(0.8912)
+    assert first["reason"] == "jw_below_accept"
+    assert first["review_status"] == "pending"
+    assert first["created_at"] == "2026-07-03T12:00:00+00:00"
+    assert first["reviewed_at"] is None
+    assert second["event"] is None  # missing evidence -> None, dashboard shows '—'
+    assert second["candidate"] is None
+    assert second["kickoff_utc"] is None
+    assert second["kickoff_delta_seconds"] is None
+    assert second["review_status"] == "approved"
+    assert second["reviewed_at"] == "2026-07-03T08:00:00+00:00"
+
+
+def test_resolution_review_queue_limit_is_validated() -> None:
+    """limit is bounded 1..200 — out-of-range values are a 422, never a
+    table-sized read."""
+    client = TestClient(make_app())
+    assert client.get("/resolution/review-queue?limit=0").status_code == 422
+    assert client.get("/resolution/review-queue?limit=201").status_code == 422
+
+
 def test_dashboard_html_is_not_browser_cached() -> None:
     """The dashboard HTML shell must not be browser-cached: a deploy ships new
     structure (panels, badges, banner) but the page only reloads on a full

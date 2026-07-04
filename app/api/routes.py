@@ -42,7 +42,7 @@ from app.resolution.shadow import summarize_anchor_coverage, summarize_match_rat
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.settlement.outcomes import pick_pnl, pick_roi
-from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
+from app.storage.models import Event, ManualBetLog, MatchReviewQueue, Pick, ResultTracking
 from app.storage.repositories import (
     bet_band_observations,
     betfair_archive_capture_by_sport,
@@ -54,6 +54,7 @@ from app.storage.repositories import (
     live_evidence_rows,
     performance_report,
     pinnacle_archive_capture_by_sport,
+    review_queue_rows,
     shadow_match_rate_outcomes,
     sharp_close_capture_density,
     source_link_metrics,
@@ -826,7 +827,10 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
         # /resolution/match-rate, but that endpoint is slow enough on live
         # (10s+ under scrape load) to hit the dashboard's fetch abort — the
         # tile reads THIS eager, every-cycle payload instead (2026-07-03).
-        "proxy_pool": _get_proxy_registry().diagnostics(configured=len(settings.scraper_proxies())),
+        "proxy_pool": _get_proxy_registry().diagnostics(
+            configured=len(settings.scraper_proxies()),
+            concurrency_floor=settings.oddsportal_concurrency,
+        ),
     }
 
 
@@ -1069,9 +1073,59 @@ async def resolution_match_rate(
     from app.ingestion.proxy_health import get_registry as _get_proxy_registry
 
     report["proxy_pool"] = _get_proxy_registry().diagnostics(
-        configured=len(_get_settings().scraper_proxies())
+        configured=len(_get_settings().scraper_proxies()),
+        concurrency_floor=_get_settings().oddsportal_concurrency,
     )
     return report
+
+
+def serialize_review_queue_row(
+    row: MatchReviewQueue, kickoff_utc: datetime | None
+) -> dict[str, Any]:
+    """One match_review_queue row -> the read-only browse shape (pure; no IO).
+
+    Event names come from the matcher's evidence_json (query vs candidate base
+    forms — the same fields tools/review_queue_cli.py prints); absent evidence
+    serializes as None so the dashboard renders '—', never a guess."""
+    ev: Mapping[str, Any] = row.evidence_json or {}
+
+    def _pair(prefix: str) -> str | None:
+        home = ev.get(f"{prefix}_base_home")
+        away = ev.get(f"{prefix}_base_away")
+        return f"{home} v {away}" if home and away else None
+
+    delta = ev.get("kickoff_delta_seconds")
+    return {
+        "id": row.id,
+        "source": row.source,
+        "source_event_id": row.source_event_id,
+        "event": _pair("query"),
+        "candidate": _pair("candidate"),
+        "kickoff_utc": kickoff_utc.isoformat() if kickoff_utc is not None else None,
+        "kickoff_delta_seconds": float(delta) if delta is not None else None,
+        "confidence": float(row.confidence_score),
+        "reason": row.reason,
+        "review_status": row.review_status,
+        "created_at": row.created_at.isoformat() if row.created_at is not None else None,
+        "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at is not None else None,
+    }
+
+
+@router.get("/resolution/review-queue", dependencies=[Depends(require_dashboard_auth)])
+async def resolution_review_queue(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict[str, Any]:
+    """STRICTLY read-only browse of the newest match_review_queue rows — the
+    borderline matcher rejects captured for human triage (observability tap,
+    never a gate). No review action exists on this API: marking a row reviewed
+    stays in tools/review_queue_cli.py. One SELECT, nothing written."""
+    rows = await review_queue_rows(session, limit=limit)
+    return {
+        "limit": limit,
+        "count": len(rows),
+        "rows": [serialize_review_queue_row(q, kickoff) for q, kickoff in rows],
+    }
 
 
 @router.post("/events/{event_id}/result", dependencies=[Depends(require_dashboard_auth)])

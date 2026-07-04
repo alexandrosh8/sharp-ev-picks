@@ -207,10 +207,16 @@ class ProxyHealthRegistry:
         return order[0]
 
     # --- diagnostics (REDACTED: indices + class names only) ------------------ #
-    def diagnostics(self, *, configured: int) -> dict[str, Any]:
+    def diagnostics(self, *, configured: int, concurrency_floor: int) -> dict[str, Any]:
         """Auth-gated /resolution/match-rate payload. Contains ONLY pool indices,
         counters, ISO timestamps, exception class names, and fixed operator
-        wording — never a proxy URL, host, IP, or credential."""
+        wording — never a proxy URL, host, IP, or credential.
+
+        ``concurrency_floor`` is the scrape's concurrent-task count
+        (Settings.oddsportal_concurrency / ODDSPORTAL_CONCURRENCY), passed in by
+        the caller — env is read ONLY in app/config.py. ``headroom`` =
+        ``healthy - concurrency_floor`` and CAN be negative: at/below zero the
+        scrape has no spare proxies over its own parallelism (task B5)."""
         now = self.clock()
         slots: list[dict[str, Any]] = []
         quarantined = 0
@@ -257,9 +263,15 @@ class ProxyHealthRegistry:
         class_counts = Counter(cls for _ts, cls in recent_1h)
         dominant = class_counts.most_common(1)[0][0] if class_counts else None
         degraded = (quarantined + probing) > 0
+        healthy = max(configured - quarantined - probing, 0)
         return {
             "configured": configured,
-            "healthy": max(configured - quarantined - probing, 0),
+            "healthy": healthy,
+            # Explicit headroom vs the scrape's own parallelism (task B5):
+            # healthy - floor, negative when the pool can't even cover the
+            # concurrent task count.
+            "concurrency_floor": concurrency_floor,
+            "headroom": healthy - concurrency_floor,
             "quarantined": quarantined,
             "probing": probing,
             "dead": dead,
