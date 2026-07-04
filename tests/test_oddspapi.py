@@ -253,3 +253,239 @@ def test_client_never_logs_the_key(caplog) -> None:  # type: ignore[no-untyped-d
 def test_game_carries_pinnacle_anchor_fields() -> None:
     fields = set(OddsPapiGame.__annotations__)
     assert {"home_pinnacle_open", "home_pinnacle_close", "home_best_soft_open"} <= fields
+
+
+# --- STAGED cross-check client (OFF by default; no account, no live calls) ---
+#
+# Fixtures below are SYNTHETIC-PER-DOCS: built from the endpoint map in
+# docs/research/2026-07-05-oddspapi-crosscheck-evaluation.md §F2 (documented
+# names /v4/tournaments and /v4/fixtures, fixtureId + startTime fields) — the
+# note carries no concrete tournaments/fixtures payload example, so shapes are
+# plausible camelCase and scripts/research/verify_oddspapi.py confirms them at
+# signup.
+
+import asyncio  # noqa: E402
+
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+
+import app.ingestion.oddspapi as oddspapi_module  # noqa: E402
+from app.ingestion.oddspapi import (  # noqa: E402
+    MAX_CROSSCHECK_REQUESTS_PER_RUN,
+    OddsPapiBudgetExceededError,
+    OddsPapiCrosscheckClient,
+    OddsPapiDisabledError,
+    OddsPapiPolicy,
+    build_oddspapi_crosscheckclient,
+    parse_fixtures,
+    parse_tournaments,
+    price_history_open_close_before,
+)
+
+
+def _counting_transport(counter: dict[str, int]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        counter["n"] = counter.get("n", 0) + 1
+        counter["method"] = request.method  # type: ignore[assignment]
+        return httpx.Response(200, json=[])
+
+    return httpx.MockTransport(handler)
+
+
+def _enabled_policy(cap: int = MAX_CROSSCHECK_REQUESTS_PER_RUN) -> OddsPapiPolicy:
+    return OddsPapiPolicy(enabled=True, api_key="k", max_requests_per_run=cap)
+
+
+def _mock_client(transport: httpx.MockTransport) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=transport, base_url="https://api.oddspapi.io")
+
+
+# --- inertness ---------------------------------------------------------------
+def test_policy_defaults_are_inert() -> None:
+    policy = OddsPapiPolicy()
+    assert policy.enabled is False
+    assert policy.api_key == ""
+    assert policy.max_requests_per_run == MAX_CROSSCHECK_REQUESTS_PER_RUN
+
+
+def test_factory_returns_none_when_disabled_or_keyless() -> None:
+    assert build_oddspapi_crosscheckclient(OddsPapiPolicy()) is None
+    assert build_oddspapi_crosscheckclient(OddsPapiPolicy(enabled=True)) is None  # no key
+    assert build_oddspapi_crosscheckclient(OddsPapiPolicy(api_key="k")) is None  # flag off
+    built = build_oddspapi_crosscheckclient(OddsPapiPolicy(enabled=True, api_key="k"))
+    assert isinstance(built, OddsPapiCrosscheckClient)
+
+
+def test_disabled_client_never_touches_transport() -> None:
+    counter: dict[str, int] = {}
+
+    async def run() -> None:
+        async with _mock_client(_counting_transport(counter)) as c:
+            client = OddsPapiCrosscheckClient(OddsPapiPolicy(api_key="k"), client=c)
+            with pytest.raises(OddsPapiDisabledError):
+                await client.tournaments()
+            with pytest.raises(OddsPapiDisabledError):
+                await client.historical_odds("f1")
+
+    asyncio.run(run())
+    assert counter.get("n", 0) == 0  # NO request was made
+
+
+def test_keyless_enabled_client_is_also_inert() -> None:
+    counter: dict[str, int] = {}
+
+    async def run() -> None:
+        async with _mock_client(_counting_transport(counter)) as c:
+            client = OddsPapiCrosscheckClient(OddsPapiPolicy(enabled=True), client=c)
+            with pytest.raises(OddsPapiDisabledError):
+                await client.fixtures("t1")
+
+    asyncio.run(run())
+    assert counter.get("n", 0) == 0
+
+
+# --- request budget ----------------------------------------------------------
+def test_policy_cannot_raise_the_hard_cap() -> None:
+    with pytest.raises(ValueError):
+        OddsPapiPolicy(max_requests_per_run=MAX_CROSSCHECK_REQUESTS_PER_RUN + 1)
+    with pytest.raises(ValueError):
+        OddsPapiPolicy(max_requests_per_run=0)
+    assert MAX_CROSSCHECK_REQUESTS_PER_RUN <= 50  # a bug can never burn the month
+
+
+def test_request_cap_enforced_before_transport() -> None:
+    counter: dict[str, int] = {}
+
+    async def run() -> OddsPapiCrosscheckClient:
+        async with _mock_client(_counting_transport(counter)) as c:
+            client = OddsPapiCrosscheckClient(_enabled_policy(cap=2), client=c)
+            await client.tournaments()
+            await client.fixtures("t1")
+            with pytest.raises(OddsPapiBudgetExceededError):
+                await client.historical_odds("f1")
+            return client
+
+    client = asyncio.run(run())
+    assert counter["n"] == 2  # the third call never reached the wire
+    assert client.requests_used == 2
+
+
+# --- GET-only ----------------------------------------------------------------
+def test_crosscheck_client_only_issues_get() -> None:
+    seen_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_methods.append(request.method)
+        return httpx.Response(200, json={"fixtureId": "f1", "bookmakers": {}})
+
+    async def run() -> None:
+        async with _mock_client(httpx.MockTransport(handler)) as c:
+            client = OddsPapiCrosscheckClient(_enabled_policy(), client=c)
+            await client.tournaments(sport_id=1)
+            await client.fixtures("t1")
+            await client.historical_odds("f1", bookmakers=("pinnacle",))
+
+    asyncio.run(run())
+    assert seen_methods == ["GET", "GET", "GET"]
+
+
+def test_module_source_has_no_non_get_http_verb() -> None:
+    """No non-GET HTTP method exists anywhere in the module (read-only audit)."""
+    import inspect
+
+    src = inspect.getsource(oddspapi_module)
+    for verb in (".post(", ".put(", ".patch(", ".delete(", ".request(", ".send("):
+        assert verb not in src, f"non-GET HTTP call {verb!r} found in oddspapi module"
+
+
+def test_crosscheck_client_never_logs_the_key(caplog) -> None:  # type: ignore[no-untyped-def]
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("apiKey") == "TOPSECRETKEY"  # rides the query only
+        return httpx.Response(200, json=[])
+
+    async def run() -> None:
+        async with _mock_client(httpx.MockTransport(handler)) as c:
+            client = OddsPapiCrosscheckClient(
+                OddsPapiPolicy(enabled=True, api_key="TOPSECRETKEY"), client=c
+            )
+            with caplog.at_level("DEBUG"):
+                await client.tournaments()
+
+    asyncio.run(run())
+    assert "TOPSECRETKEY" not in caplog.text
+
+
+# --- pre-kickoff close cutoff -------------------------------------------------
+def test_pre_ko_cutoff_excludes_in_play_points() -> None:
+    kickoff = datetime(2026, 6, 20, 19, 0, tzinfo=UTC)
+    entries = [
+        _entry("2026-06-20T10:00:00Z", 2.10),
+        _entry("2026-06-20T18:40:00Z", 2.04),  # last PRE-KO point => the close
+        _entry("2026-06-20T19:25:00Z", 3.50),  # in-play — must never be the close
+    ]
+    opening, closing = price_history_open_close_before(entries, kickoff)
+    assert opening == Decimal("2.10")
+    assert closing == Decimal("2.04")
+    # sanity: the raw reducer WOULD have taken the in-play point
+    assert price_history_open_close(entries)[1] == Decimal("3.50")
+
+
+def test_pre_ko_cutoff_drops_undatable_entries_fail_closed() -> None:
+    kickoff = datetime(2026, 6, 20, 19, 0, tzinfo=UTC)
+    entries = [
+        {"createdAt": None, "price": 2.5, "active": True},  # undatable -> excluded
+        _entry("not-a-timestamp", 2.4),  # unparseable -> excluded
+        _entry("2026-06-20T18:00:00Z", 2.02),
+    ]
+    assert price_history_open_close_before(entries, kickoff) == (
+        Decimal("2.02"),
+        Decimal("2.02"),
+    )
+
+
+def test_pre_ko_cutoff_rejects_naive_kickoff() -> None:
+    with pytest.raises(ValueError):
+        price_history_open_close_before([], datetime(2026, 6, 20, 19, 0))  # noqa: DTZ001
+
+
+# --- fixture-resolution parsing (synthetic-per-docs payloads) ------------------
+def test_parse_tournaments_tolerates_list_and_wrapper_and_extras() -> None:
+    rows = [
+        {"tournamentId": 101, "name": "Premier League", "sportId": 10, "zzz": "ignored"},
+        {"id": "t-2", "name": "LaLiga"},
+        {"name": "no-id -> skipped"},
+        "not-a-mapping",
+    ]
+    for payload in (rows, {"tournaments": rows}, {"data": rows}):
+        parsed = parse_tournaments(payload)
+        assert [t.tournament_id for t in parsed] == ["101", "t-2"]
+        assert parsed[0].name == "Premier League"
+        assert parsed[0].sport_id == 10
+    assert parse_tournaments({"unexpected": 1}) == []
+    assert parse_tournaments(None) == []
+
+
+def test_parse_fixtures_start_time_is_aware_utc_never_naive() -> None:
+    rows = [
+        {
+            "fixtureId": "fx1",
+            "startTime": "2026-06-20T19:00:00Z",
+            "homeTeam": "Arsenal",
+            "awayTeam": "Chelsea",
+        },
+        {"fixtureId": "fx2", "startTime": "2026-06-21T17:30:00"},  # naive ISO -> assumed UTC
+        {"fixtureId": 12345},  # id coerced to str; no time
+        {"startTime": "2026-06-22T12:00:00Z"},  # no id -> skipped
+    ]
+    parsed = parse_fixtures(rows)
+    assert [f.fixture_id for f in parsed] == ["fx1", "fx2", "12345"]
+    fx1 = parsed[0]
+    assert fx1.start_time == datetime(2026, 6, 20, 19, 0, tzinfo=UTC)
+    assert fx1.start_time.tzinfo is not None
+    assert (fx1.home_team, fx1.away_team) == ("Arsenal", "Chelsea")
+    # naive ISO string -> assumed UTC (the module's _parse_time convention);
+    # the result is ALWAYS tz-aware, never naive.
+    fx2 = parsed[1]
+    assert fx2.start_time == datetime(2026, 6, 21, 17, 30, tzinfo=UTC)
+    assert fx2.start_time.tzinfo is not None
+    assert parsed[2].start_time is None  # absent startTime stays None

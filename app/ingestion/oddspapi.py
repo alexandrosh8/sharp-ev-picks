@@ -55,6 +55,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import httpx
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -66,6 +67,20 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.oddspapi.io"
 HISTORICAL_ODDS_PATH = "/v4/historical-odds"
+# Fixture-resolution endpoints for the STAGED monthly ARCADIA cross-check
+# (docs/research/2026-07-05-oddspapi-crosscheck-evaluation.md §F2: documented
+# endpoint map, fetched 2026-07-04). Path params/response shapes beyond the
+# names are NOT independently verified — scripts/research/verify_oddspapi.py
+# confirms them at signup before anything else is wired.
+TOURNAMENTS_PATH = "/v4/tournaments"
+FIXTURES_PATH = "/v4/fixtures"
+
+# Hard per-run request ceiling for the cross-check client. The free tier is
+# ~250 req/month (repo-cited, operator-verify-at-signup) and the monthly
+# cross-check budget is ~70 requests — a bug (retry loop, unbounded fixture
+# fan-out) must never be able to burn the month's quota in one run. This is a
+# module CONSTANT, not configuration: OddsPapiPolicy may only lower it.
+MAX_CROSSCHECK_REQUESTS_PER_RUN = 50
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -360,13 +375,315 @@ class OddsPapiClient:
         return data if isinstance(data, dict) else {}
 
 
+# ---------------------------------------------------------------------------
+# STAGED monthly ARCADIA cross-check client (OFF by default, no account yet).
+#
+# Purpose (docs/research/2026-07-05-oddspapi-crosscheck-evaluation.md, GO-
+# conditional): a MONTHLY OFFLINE cross-check of our own Pinnacle ARCADIA
+# close capture — football-data.co.uk stopped publishing Pinnacle closing
+# columns 2026-01-15, leaving ARCADIA with no independent verification path.
+# NOT an anchor source, NOT backfill, NEVER in the live pipeline.
+#
+# Everything below is INERT until (a) an operator-created key lands in .env
+# and (b) the enabled flag is flipped at the composition root. The client
+# fail-closes on BOTH: a disabled policy or an absent key refuses every
+# request before any transport is touched. GET-only, like every market-data
+# integration in this repo (ADR-0002).
+# ---------------------------------------------------------------------------
+
+
+class OddsPapiDisabledError(Exception):
+    """The cross-check is disabled (flag off or no key) — no request was made."""
+
+
+class OddsPapiBudgetExceededError(Exception):
+    """The per-run request cap was reached — no further request was made."""
+
+
+@dataclass(frozen=True, slots=True)
+class OddsPapiPolicy:
+    """Frozen cross-check policy, constructed at the composition root ONLY.
+
+    This module never reads env; the composition root maps Settings ->
+    ``OddsPapiPolicy(enabled=settings.oddspapi_enabled, api_key=settings.
+    oddspapi_key.get_secret_value(), ...)``. Defaults are the inert state:
+    disabled, keyless. ``max_requests_per_run`` may only LOWER the module's
+    hard :data:`MAX_CROSSCHECK_REQUESTS_PER_RUN` ceiling, never raise it.
+    """
+
+    enabled: bool = False
+    api_key: str = ""  # never logged; rides ONLY the outbound query string
+    bookmakers: tuple[str, ...] = ("pinnacle",)
+    max_requests_per_run: int = MAX_CROSSCHECK_REQUESTS_PER_RUN
+    base_url: str = BASE_URL
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_requests_per_run <= MAX_CROSSCHECK_REQUESTS_PER_RUN:
+            raise ValueError(
+                "max_requests_per_run must be in [1, "
+                f"{MAX_CROSSCHECK_REQUESTS_PER_RUN}], got {self.max_requests_per_run}"
+            )
+
+
+class OddsPapiTournament(BaseModel):
+    """One tournament/league row from ``GET /v4/tournaments``.
+
+    SYNTHETIC-PER-DOCS: the A7 evaluation confirmed the endpoint exists and
+    takes ``sportId``, but no concrete response payload was retrievable
+    without a key. Field names follow the documented camelCase convention of
+    the historical-odds payload; ``extra="ignore"`` tolerates whatever else
+    the real payload carries, and verify_oddspapi.py prints observed keys so
+    aliases can be corrected at signup.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+    tournament_id: str = Field(default="", validation_alias=AliasChoices("tournamentId", "id"))
+    name: str = ""
+    sport_id: int | None = Field(default=None, validation_alias=AliasChoices("sportId"))
+
+    @field_validator("tournament_id", mode="before")
+    @classmethod
+    def _coerce_id(cls, value: object) -> str:
+        return "" if value is None else str(value)
+
+
+class OddsPapiFixture(BaseModel):
+    """One fixture row from ``GET /v4/fixtures``.
+
+    SYNTHETIC-PER-DOCS: fixture resolution returns ``fixtureId``s and a
+    ``startTime`` (A7 note §F2); team-name field spellings are unverified, so
+    AliasChoices covers the plausible camelCase candidates and the verify
+    script prints a raw sample for correction at signup. ``start_time`` is
+    tz-aware UTC or None, never naive: ISO strings go through ``_parse_time``
+    (naive ISO assumed UTC, the module convention); a naive ``datetime``
+    OBJECT is dropped to None (naive datetime = bug).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+    fixture_id: str = Field(validation_alias=AliasChoices("fixtureId", "id"))
+    start_time: datetime | None = Field(
+        default=None, validation_alias=AliasChoices("startTime", "startDate")
+    )
+    home_team: str = Field(
+        default="", validation_alias=AliasChoices("homeTeam", "homeName", "home")
+    )
+    away_team: str = Field(
+        default="", validation_alias=AliasChoices("awayTeam", "awayName", "away")
+    )
+
+    @field_validator("fixture_id", mode="before")
+    @classmethod
+    def _coerce_id(cls, value: object) -> str:
+        return "" if value is None else str(value)
+
+    @field_validator("start_time", mode="before")
+    @classmethod
+    def _aware_utc_or_none(cls, value: object) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.astimezone(UTC) if value.tzinfo is not None else None
+        return _parse_time(value)
+
+
+def _payload_rows(payload: object, *wrapper_keys: str) -> list[Mapping[str, object]]:
+    """Rows from a top-level JSON list OR a ``{wrapper_key: [...]}`` mapping."""
+    rows: object = payload
+    if isinstance(payload, Mapping):
+        for key in wrapper_keys:
+            if isinstance(payload.get(key), list):
+                rows = payload[key]
+                break
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, Mapping)]
+
+
+def parse_tournaments(payload: object) -> list[OddsPapiTournament]:
+    """Tolerant mapping of a ``/v4/tournaments`` payload; unparseable rows skip."""
+    out: list[OddsPapiTournament] = []
+    for row in _payload_rows(payload, "tournaments", "data"):
+        try:
+            out.append(OddsPapiTournament.model_validate(row))
+        except ValueError:
+            continue
+    return [t for t in out if t.tournament_id]
+
+
+def parse_fixtures(payload: object) -> list[OddsPapiFixture]:
+    """Tolerant mapping of a ``/v4/fixtures`` payload; unparseable rows skip."""
+    out: list[OddsPapiFixture] = []
+    for row in _payload_rows(payload, "fixtures", "data"):
+        try:
+            out.append(OddsPapiFixture.model_validate(row))
+        except ValueError:
+            continue
+    return [f for f in out if f.fixture_id]
+
+
+def price_history_open_close_before(
+    entries: Iterable[Mapping[str, object]], cutoff: datetime
+) -> tuple[Decimal | None, Decimal | None]:
+    """(open, close) restricted to entries strictly BEFORE ``cutoff`` (kickoff).
+
+    The football adaptation the A7 note requires: Pinnacle prices soccer
+    in-play, so the raw last history entry may be post-kickoff — a "close"
+    must be the last pre-KO point. Entries whose ``createdAt`` is missing or
+    unparseable are EXCLUDED (fail-closed: an undatable point can never be
+    called a close). ``cutoff`` must be tz-aware."""
+    if cutoff.tzinfo is None:
+        raise ValueError("cutoff must be timezone-aware (UTC)")
+    pre: list[Mapping[str, object]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        created = _parse_time(entry.get("createdAt"))
+        if created is not None and created < cutoff:
+            pre.append(entry)
+    return price_history_open_close(pre)
+
+
+class OddsPapiCrosscheckClient:
+    """READ-ONLY GET client for the staged monthly ARCADIA cross-check.
+
+    Fail-closed inertness: every request path checks the frozen policy first —
+    disabled or keyless raises :class:`OddsPapiDisabledError` BEFORE any
+    transport is touched. A built-in per-run budget (``policy.max_requests_
+    per_run``, hard-capped at :data:`MAX_CROSSCHECK_REQUESTS_PER_RUN`) counts
+    every wire attempt (retries included) and raises
+    :class:`OddsPapiBudgetExceededError` once spent, so no bug can burn the
+    monthly quota. Never logs the key or full URLs (the key rides the query
+    string) — exception TYPE + status only.
+    """
+
+    def __init__(self, policy: OddsPapiPolicy, *, client: httpx.AsyncClient | None = None) -> None:
+        self._policy = policy
+        self._client = client
+        self._owns_client = client is None
+        self._requests_used = 0
+        # httpx/httpcore log full request URLs (carrying the key) at INFO.
+        for noisy in ("httpx", "httpcore"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+        # Rate/quota response headers from the LAST request (names filtered to
+        # limit/quota vocabulary; values are counters, never secrets) — lets
+        # the verify script report free-tier quota visibility.
+        self.last_rate_headers: dict[str, str] = {}
+
+    @property
+    def requests_used(self) -> int:
+        return self._requests_used
+
+    async def __aenter__(self) -> OddsPapiCrosscheckClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(base_url=self._policy.base_url)
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        if self._owns_client and self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    @retry(
+        retry=retry_if_exception_type(httpx.TransportError),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=8.0),
+        reraise=True,
+    )
+    async def _get(self, path: str, params: dict[str, str]) -> object:
+        """One budgeted GET. The policy gate + budget run INSIDE the retry so
+        every wire attempt is counted and a disabled client never retries into
+        a request."""
+        if not self._policy.enabled:
+            raise OddsPapiDisabledError("oddspapi cross-check is disabled (flag off)")
+        if not self._policy.api_key:
+            raise OddsPapiDisabledError("oddspapi cross-check has no api key configured")
+        if self._requests_used >= self._policy.max_requests_per_run:
+            raise OddsPapiBudgetExceededError(
+                f"per-run request cap reached ({self._policy.max_requests_per_run})"
+            )
+        self._requests_used += 1
+        if self._client is None:
+            self._client = httpx.AsyncClient(base_url=self._policy.base_url)
+            self._owns_client = True
+        try:
+            response = await self._client.get(
+                path, params={**params, "apiKey": self._policy.api_key}, timeout=30.0
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Status only — never the URL (it carries the key in its query).
+            logger.warning("oddspapi %s HTTP %s", path, exc.response.status_code)
+            raise
+        except httpx.HTTPError as exc:
+            logger.warning("oddspapi %s error: %s", path, type(exc).__name__)
+            raise
+        self.last_rate_headers = {
+            name: value
+            for name, value in response.headers.items()
+            if any(tok in name.lower() for tok in ("limit", "quota", "remaining", "reset"))
+        }
+        try:
+            return response.json()
+        except ValueError:
+            return {}
+
+    async def tournaments(self, *, sport_id: int | None = None) -> object:
+        """``GET /v4/tournaments`` — leagues per sport. Raw JSON; feed to
+        :func:`parse_tournaments`."""
+        params: dict[str, str] = {}
+        if sport_id is not None:
+            params["sportId"] = str(sport_id)
+        return await self._get(TOURNAMENTS_PATH, params)
+
+    async def fixtures(self, tournament_id: str) -> object:
+        """``GET /v4/fixtures`` for one tournament — fixture-id resolution for
+        recent finished matches. Raw JSON; feed to :func:`parse_fixtures`."""
+        return await self._get(FIXTURES_PATH, {"tournamentId": tournament_id})
+
+    async def historical_odds(
+        self, fixture_id: str, *, bookmakers: Sequence[str] | None = None
+    ) -> dict:
+        """``GET /v4/historical-odds`` for one finished fixture (budgeted).
+
+        Same documented payload as :class:`OddsPapiClient.historical_odds`;
+        reduce per-outcome histories with :func:`price_history_open_close_before`
+        (kickoff cutoff) — never the raw last entry (soccer prices in-play)."""
+        slugs = tuple(bookmakers) if bookmakers is not None else self._policy.bookmakers
+        data = await self._get(
+            HISTORICAL_ODDS_PATH,
+            {"fixtureId": fixture_id, "bookmakers": ",".join(slugs[:3])},
+        )
+        return data if isinstance(data, dict) else {}
+
+
+def build_oddspapi_crosscheckclient(policy: OddsPapiPolicy) -> OddsPapiCrosscheckClient | None:
+    """Composition-root factory: ``None`` unless the flag is ON and a key is
+    present — the caller skips cleanly, nothing is constructed, nothing runs."""
+    if not policy.enabled or not policy.api_key:
+        return None
+    return OddsPapiCrosscheckClient(policy)
+
+
 __all__ = [
     "BASE_URL",
+    "FIXTURES_PATH",
     "HISTORICAL_ODDS_PATH",
+    "MAX_CROSSCHECK_REQUESTS_PER_RUN",
+    "TOURNAMENTS_PATH",
+    "OddsPapiBudgetExceededError",
     "OddsPapiClient",
+    "OddsPapiCrosscheckClient",
+    "OddsPapiDisabledError",
+    "OddsPapiFixture",
     "OddsPapiGame",
+    "OddsPapiPolicy",
+    "OddsPapiTournament",
+    "build_oddspapi_crosscheckclient",
     "load_oddspapi_dir",
     "outcome_open_close",
     "parse_fixture_bundle",
+    "parse_fixtures",
+    "parse_tournaments",
     "price_history_open_close",
+    "price_history_open_close_before",
 ]
