@@ -206,3 +206,137 @@ def test_review_queue_browse_is_lazy_collapsed_disclosure() -> None:
     assert "Loading review queue…" in text
     assert "Could not load review queue." in text
     assert "Review queue is empty." in text
+
+
+def test_promotion_distance_widget_is_lazy_and_min_n_safe() -> None:
+    """B1: the Lab evidence-distance widget lazy-loads GET /lab/promotion-distance
+    (guarded fetch, never in the boot-time loadOnce() cycle), renders explicit
+    loading/error/empty states, shows progress toward the ok threshold plus a
+    days-to-threshold estimate ("—" without cadence), renders a CLV point
+    estimate ONLY at/above the min-n bar, and never implies promotion —
+    promotion stays gated by SportMarketClvGate + operator sign-off."""
+    text = _text()
+    assert 'id="promo-distance"' in text
+    assert "function loadPromotionDistance" in text
+    assert re.search(r'fetchGuarded\("/lab/promotion-distance"', text)
+    load_once = text[
+        text.index("async function loadOnce") : text.index("async function loadOnce") + 2000
+    ]
+    assert "/lab/promotion-distance" not in load_once
+    # honest states
+    assert "Loading promotion distance…" in text
+    assert "Could not load promotion distance." in text
+    assert "No settled sport/market cells yet." in text
+    # progress + days-to-threshold with an explicit "—" no-cadence state
+    assert "trusted closes" in text
+    assert "days to threshold" in text
+    # the point estimate is double-guarded on the min-n bar (the payload also
+    # nulls sub-floor estimates at the source)
+    assert re.search(
+        r'c\.status === "ok" && Number\(c\.n_trusted\) >= okN && c\.mean_clv_log != null', text
+    )
+    # distance-to-evidence framing only — never "promotion imminent"
+    assert "Promotion stays gated by SportMarketClvGate and operator ADR sign-off." in text
+
+
+def test_close_quality_by_sport_renders_from_performance_payload() -> None:
+    """B2: the per-sport close-quality breakdown renders straight from the
+    existing /performance payload (by_sport[*].clv_quality) — no new fetch —
+    keyed on the persisted close-exclusion reasons, with an honest empty state."""
+    text = _text()
+    assert 'id="closeq-sport"' in text
+    assert "function renderCloseQualityBySport" in text
+    assert "close_exclusion_reasons" in text
+    assert "n_close_reason_known" in text
+    assert "No per-sport close-reason data yet." in text
+    assert "Could not load performance data." in text
+
+
+def test_match_ceiling_is_lazy_collapsed_disclosure() -> None:
+    """B3: the Sources match-ceiling decomposition is a collapsed-by-default
+    <details> that lazy-fetches GET /resolution/match-ceiling on expand with the
+    match-rate timeout guard — never in the boot-time loadOnce() cycle, never
+    <details open>, and explicitly LIVE (never the static research artifact)."""
+    text = _text()
+    assert 'id="ceiling-browse"' in text
+    disclosure = text[
+        text.index('id="ceiling-browse"') - 200 : text.index('id="ceiling-browse"') + 100
+    ]
+    assert "<details" in disclosure
+    assert "open" not in disclosure.split("<details", 1)[1].split(">", 1)[0]
+    assert re.search(r'fetchGuarded\("/resolution/match-ceiling[^)]*MATCH_RATE_TIMEOUT_MS', text)
+    assert "function loadMatchCeiling" in text
+    load_once = text[
+        text.index("async function loadOnce") : text.index("async function loadOnce") + 2000
+    ]
+    assert "/resolution/match-ceiling" not in load_once
+    # honest states + honest framing of the decomposition
+    assert "Loading match ceiling…" in text
+    assert "Could not load match ceiling." in text
+    assert "No events in the window." in text
+    assert "Structural" in text
+    assert "Addressable" in text
+    assert "never from a static research artifact" in text
+
+
+def test_steam_shadow_widget_counts_and_min_n_split() -> None:
+    """B4: the Lab steam shadow-verdict summary renders the would-demote/clear/
+    unevaluated counts, the mint-week trend, and a trusted-CLV split that obeys
+    the same min-n discipline as B1: below the floor it reads "n=X —
+    insufficient", never a point estimate. Monitor-only framing throughout."""
+    text = _text()
+    assert 'id="steam-shadow"' in text
+    assert "function renderSteamShadow" in text
+    assert "Would demote" in text
+    assert "Unevaluated" in text
+    assert "Would-demote by mint week:" in text
+    # a pre-migration payload (steam_shadow null) has an explicit honest state
+    assert "Not yet reported." in text
+    # the split's point estimate is gated on sharp_status === "ok"; the
+    # insufficient state carries the n instead
+    assert re.search(
+        r'agg\.sharp_status === "ok" && agg\.sharp_stake_weighted_clv_log != null', text
+    )
+    assert '" — insufficient"' in text
+    # shadow verdicts are observability only — nothing is demoted
+    assert "no pick is demoted" in text
+
+
+def test_bankroll_tile_is_lazy_with_chart_and_honest_states() -> None:
+    """B7: the Lab bankroll tile lazy-loads GET /bankroll (guarded fetch +
+    TTL, never in the boot-time loadOnce() cycle), renders a running-balance
+    line chart as inline SVG via createElementNS (no innerHTML, no chart lib)
+    with a dashed running-peak line as the drawdown read, text stats
+    (current balance / total settled P&L / max drawdown), and honest states —
+    including the A8 inactive shape ("Bankroll ledger is not configured.")
+    gated strictly on active !== true. Informational-only framing throughout;
+    nothing here feeds staking and the system never places a bet."""
+    text = _text()
+    assert 'id="bankroll-body"' in text
+    assert "function loadBankroll" in text
+    assert re.search(r'fetchGuarded\("/bankroll"\)', text)
+    load_once = text[
+        text.index("async function loadOnce") : text.index("async function loadOnce") + 2000
+    ]
+    assert "/bankroll" not in load_once
+    # honest states, incl. the inactive (unconfigured-ledger) shape
+    assert "Loading bankroll…" in text
+    assert "Could not load bankroll." in text
+    assert "Bankroll ledger is not configured." in text
+    assert "No ledger entries yet." in text
+    assert re.search(r"b\.active !== true.*Bankroll ledger is not configured\.", text)
+    # chart is inline SVG built safely — never innerHTML, never a library
+    assert "function bankrollChartEl" in text
+    assert 'document.createElementNS(SVG_NS, "svg")' in text
+    assert 'document.createElementNS(SVG_NS, "polyline")' in text
+    # drawdown indication: dashed running-peak line, never color-only (legend text)
+    assert "stroke-dasharray" in text
+    assert "running peak" in text
+    # text stats consumed from the A8 payload
+    assert "Current balance" in text
+    assert "Total settled P&L" in text
+    assert "Max drawdown" in text
+    assert "balance_after" in text
+    # informational-only caption — hypothetical, no bets placed by the system
+    assert "Bankroll — hypothetical ledger" in text
+    assert "informational only — this system never places a bet" in text

@@ -466,6 +466,30 @@
             <div class="tile-h"><h3 id="calib-h">Calibration</h3></div>
             <div id="calibration-summary"></div>
           </section>
+          <section class="tile" aria-labelledby="closeqsport-h">
+            <div class="tile-h"><h3 id="closeqsport-h">Close quality by sport</h3></div>
+            <div id="closeq-sport"></div>
+            <p class="muted">Per-sport counts of the persisted close-exclusion reason.
+              An excluded close is unusable evidence, not a loss.</p>
+          </section>
+          <section class="tile" aria-labelledby="promodist-h">
+            <div class="tile-h"><h3 id="promodist-h">Evidence distance — sport / market</h3></div>
+            <div id="promo-distance"></div>
+            <p class="muted">Distance to the trusted-CLV evidence threshold only — informational.
+              Promotion stays gated by SportMarketClvGate and operator ADR sign-off.</p>
+          </section>
+          <section class="tile" aria-labelledby="steamshadow-h">
+            <div class="tile-h"><h3 id="steamshadow-h">Steam shadow — Monitor-only</h3></div>
+            <div id="steam-shadow"></div>
+            <p class="muted">Shadow verdicts are observability only — no pick is demoted by steam.</p>
+          </section>
+          <section class="tile" aria-labelledby="bankroll-h">
+            <div class="tile-h"><h3 id="bankroll-h">Bankroll — hypothetical ledger</h3></div>
+            <div id="bankroll-body"></div>
+            <p class="muted">Hypothetical running balance (manual starting amount + settled P&amp;L)
+              and any stake figures are informational only — this system never places a bet; the
+              operator reviews picks and places any bet personally.</p>
+          </section>
           <section class="tile" aria-labelledby="tiers-h">
             <div class="tile-h"><h3 id="tiers-h">Premium vs Shadow — never mixed</h3></div>
             <div class="tscroll">
@@ -520,6 +544,22 @@
           <section class="tile" aria-labelledby="permarket-h">
             <div class="tile-h"><h3 id="permarket-h">Per-market top 5</h3></div>
             <div id="per-market-summary"></div>
+          </section>
+          <section class="tile" aria-labelledby="ceiling-h">
+            <div class="tile-h"><h3 id="ceiling-h">Match ceiling — structural vs addressable</h3></div>
+            <details class="raw-reason" id="ceiling-browse">
+              <summary>Ceiling decomposition — last 30 days</summary>
+              <p class="muted" id="ceiling-status">Not loaded yet.</p>
+              <div class="tscroll">
+                <table aria-label="Pinnacle match-ceiling decomposition per sport (read-only)">
+                  <thead><tr><th scope="col">Sport</th><th scope="col" class="r">Events</th><th scope="col" class="r">Matched</th><th scope="col" class="r">Structural</th><th scope="col" class="r">Addressable</th><th scope="col" class="r">Unknown league</th><th scope="col">Corrected rate</th></tr></thead>
+                  <tbody id="ceiling-rows"></tbody>
+                </table>
+              </div>
+            </details>
+            <p class="muted">Structural = Pinnacle prices no in-window event for the league, so no
+              match was ever possible; addressable = the league is priced but the matcher missed the
+              event. Computed live — never from a static research artifact.</p>
           </section>
           <section class="tile" aria-labelledby="h2-h">
             <div class="tile-h"><h3 id="h2-h">H2 validation readiness</h3></div>
@@ -642,6 +682,17 @@
           reviewQueue: null,
           reviewQueueErr: null,
           reviewQueueLoading: false,
+          promo: null,
+          promoErr: null,
+          promoLoading: false,
+          promoAt: null,
+          ceiling: null,
+          ceilingErr: null,
+          ceilingLoading: false,
+          bankroll: null,
+          bankrollErr: null,
+          bankrollLoading: false,
+          bankrollAt: null,
           lastOkAt: null,
         };
         let selectedId = null;
@@ -872,6 +923,171 @@
         }
         $("reviewq-browse").addEventListener("toggle", function () {
           if (this.open) loadReviewQueue();
+        });
+
+        // ===== lazy /lab/promotion-distance loader (B1 — Lab view only) ======
+        // Distance to the trusted-CLV EVIDENCE threshold, per (sport, market).
+        // Never fetched in the boot-time loadOnce() cycle: setView("lab")
+        // triggers it, with the same single-fetch guard + TTL as match-rate.
+        // A point estimate renders ONLY at/above the min-n bar — the payload
+        // nulls sub-floor estimates at the source and this render re-guards it.
+        const PROMO_TTL_MS = 5 * 60 * 1000;
+        function renderPromotionDistance() {
+          const box = $("promo-distance"); box.replaceChildren();
+          const p0 = document.createElement("p"); p0.className = "muted";
+          if (state.promoLoading && !state.promo) { p0.textContent = "Loading promotion distance…"; box.appendChild(p0); return; }
+          if (state.promoErr && !state.promo) { p0.textContent = "Could not load promotion distance."; box.appendChild(p0); return; }
+          if (!state.promo) { p0.textContent = "Not loaded yet."; box.appendChild(p0); return; }
+          const okN = Number(state.promo.ok_n) || 30;
+          const cells = state.promo.cells || [];
+          if (cells.length === 0) { p0.textContent = "No settled sport/market cells yet."; box.appendChild(p0); return; }
+          cells.slice(0, 12).forEach((c) => {
+            const r = document.createElement("div"); r.className = "kickoff-row";
+            const nm = document.createElement("span"); nm.className = "kr-t mono";
+            nm.textContent = String(fmt(c.sport)).replace(/_/g, " ") + " · " + fmt(c.market);
+            const prog = document.createElement("span"); prog.className = "kr-s mono";
+            prog.textContent = fmt(c.n_trusted) + " / " + okN + " trusted closes";
+            const s = document.createElement("span"); s.className = "kr-s";
+            if (c.status === "ok" && Number(c.n_trusted) >= okN && c.mean_clv_log != null) {
+              s.textContent = "threshold met · trusted CLV " + fmtSignedPct(clvPctFromLog(c.mean_clv_log) / 100);
+            } else if (c.status === "ok") {
+              s.textContent = "threshold met";
+            } else {
+              s.textContent = "accruing · days to threshold " + (c.est_days_to_threshold != null
+                ? "~" + Math.ceil(Number(c.est_days_to_threshold)) + "d"
+                : "—");
+            }
+            r.append(nm, prog, s); box.appendChild(r);
+          });
+        }
+        function loadPromotionDistance() {
+          const fresh = state.promoAt != null && Date.now() - state.promoAt < PROMO_TTL_MS;
+          if ((state.promo && fresh) || state.promoLoading) return;
+          state.promoLoading = true;
+          if (activeView === "lab") renderPromotionDistance();
+          fetchGuarded("/lab/promotion-distance")
+            .then(readJson)
+            .then((body) => { state.promo = body; state.promoErr = null; state.promoAt = Date.now(); })
+            .catch((e) => { state.promoErr = e; })
+            .finally(() => { state.promoLoading = false; if (activeView === "lab") renderPromotionDistance(); });
+        }
+
+        // ===== lazy /bankroll loader (B7 — Lab view only) =====================
+        // HYPOTHETICAL running-balance ledger: line chart + running-peak line
+        // (the drawdown read) + text stats. Informational only — no money
+        // moves, and nothing here feeds staking. Same single-fetch guard +
+        // TTL as promotion-distance; never fetched in the boot-time
+        // loadOnce() cycle: setView("lab") triggers it.
+        const BANKROLL_TTL_MS = 5 * 60 * 1000;
+        const SVG_NS = "http://www.w3.org/2000/svg";
+        function bankrollChartEl(series) {
+          const vals = series.map((e) => numOf(e.balance_after)).filter((v) => isFinite(v));
+          if (vals.length < 2) return null;
+          const peaks = [];
+          let pk = vals[0];
+          vals.forEach((v) => { pk = Math.max(pk, v); peaks.push(pk); });
+          const lo = Math.min.apply(null, vals), hi = Math.max.apply(null, peaks);
+          const W = 320, H = 96, PAD = 6, span = hi - lo || 1;
+          const x = (i) => PAD + (i * (W - 2 * PAD)) / (vals.length - 1);
+          const y = (v) => H - PAD - ((v - lo) * (H - 2 * PAD)) / span;
+          const pts = (arr) => arr.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
+          const line = (arr, stroke, dashed, width) => {
+            const el = document.createElementNS(SVG_NS, "polyline");
+            el.setAttribute("points", pts(arr));
+            el.setAttribute("fill", "none");
+            el.setAttribute("stroke", stroke);
+            el.setAttribute("stroke-width", width);
+            if (dashed) el.setAttribute("stroke-dasharray", "3 3");
+            return el;
+          };
+          const svg = document.createElementNS(SVG_NS, "svg");
+          svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+          svg.setAttribute("width", "100%");
+          svg.setAttribute("height", "96");
+          svg.setAttribute("role", "img");
+          svg.setAttribute("aria-label", "Hypothetical running balance (solid) with running peak (dashed)");
+          svg.append(line(peaks, "var(--warm)", true, "1"), line(vals, "var(--cyan)", false, "1.5"));
+          return svg;
+        }
+        function renderBankroll() {
+          const box = $("bankroll-body"); box.replaceChildren();
+          const p0 = document.createElement("p"); p0.className = "muted";
+          if (state.bankrollLoading && !state.bankroll) { p0.textContent = "Loading bankroll…"; box.appendChild(p0); return; }
+          if (state.bankrollErr && !state.bankroll) { p0.textContent = "Could not load bankroll."; box.appendChild(p0); return; }
+          if (!state.bankroll) { p0.textContent = "Not loaded yet."; box.appendChild(p0); return; }
+          const b = state.bankroll;
+          if (b.active !== true) { p0.textContent = "Bankroll ledger is not configured."; box.appendChild(p0); return; }
+          const series = b.series || [];
+          if (series.length === 0) { p0.textContent = "No ledger entries yet."; box.appendChild(p0); return; }
+          const chart = bankrollChartEl(series);
+          if (chart) {
+            box.appendChild(chart);
+            const legend = document.createElement("p"); legend.className = "muted";
+            legend.textContent = "Solid — hypothetical balance · dashed — running peak (drawdown reference).";
+            box.appendChild(legend);
+          }
+          const ml = document.createElement("div"); ml.className = "metric-list";
+          ml.appendChild(metricEl("Current balance", fmtNum(b.current_balance)));
+          const start = numOf(b.starting_balance), cur = numOf(b.current_balance);
+          const pnl = isFinite(start) && isFinite(cur) ? cur - start : NaN;
+          ml.appendChild(metricEl("Total settled P&L", isFinite(pnl) ? (pnl >= 0 ? "+" : "") + pnl.toFixed(2) : "—"));
+          ml.appendChild(metricEl("Max drawdown", b.max_drawdown != null ? fmtPct(b.max_drawdown) : "—"));
+          ml.appendChild(metricEl("Ledger entries", String(b.n_entries || series.length)));
+          box.appendChild(ml);
+        }
+        function loadBankroll() {
+          const fresh = state.bankrollAt != null && Date.now() - state.bankrollAt < BANKROLL_TTL_MS;
+          if ((state.bankroll && fresh) || state.bankrollLoading) return;
+          state.bankrollLoading = true;
+          if (activeView === "lab") renderBankroll();
+          fetchGuarded("/bankroll")
+            .then(readJson)
+            .then((body) => { state.bankroll = body; state.bankrollErr = null; state.bankrollAt = Date.now(); })
+            .catch((e) => { state.bankrollErr = e; })
+            .finally(() => { state.bankrollLoading = false; if (activeView === "lab") renderBankroll(); });
+        }
+
+        // ===== lazy /resolution/match-ceiling browse (B3 — Sources disclosure)
+        // Collapsed by default; fetched ONLY on first expand (timeout-guarded
+        // like match-rate). Live decomposition — never a static artifact.
+        function renderMatchCeiling() {
+          const status = $("ceiling-status");
+          const tb = $("ceiling-rows"); tb.replaceChildren();
+          if (state.ceilingLoading) { status.textContent = "Loading match ceiling…"; return; }
+          if (state.ceilingErr) { status.textContent = "Could not load match ceiling."; return; }
+          if (!state.ceiling) { status.textContent = "Not loaded yet."; return; }
+          const sports = state.ceiling.sports || {};
+          const keys = Object.keys(sports).sort();
+          if (keys.length === 0) { status.textContent = "No events in the window."; return; }
+          status.textContent = "Live decomposition — window " + fmt(state.ceiling.window_days) + " days.";
+          keys.forEach((k) => {
+            const b = sports[k];
+            const tr = document.createElement("tr");
+            const corrected = b.corrected_match_rate_lower != null
+              ? fmtPct(b.corrected_match_rate_lower) + " – " + (b.corrected_match_rate_upper != null ? fmtPct(b.corrected_match_rate_upper) : "—")
+              : "—";
+            [k.replace(/_/g, " "), b.events, b.matched, b.structural, b.addressable, b.unknown_league, corrected].forEach((v, i) => {
+              const td = document.createElement("td");
+              if (i >= 1 && i <= 5) td.className = "r";
+              td.textContent = String(fmt(v));
+              tr.appendChild(td);
+            });
+            tb.appendChild(tr);
+          });
+        }
+        function loadMatchCeiling() {
+          if (state.ceiling || state.ceilingLoading) return;
+          state.ceilingLoading = true;
+          state.ceilingErr = null;
+          renderMatchCeiling();
+          fetchGuarded("/resolution/match-ceiling?days=30", undefined, MATCH_RATE_TIMEOUT_MS)
+            .then(readJson)
+            .then((body) => { state.ceiling = body; state.ceilingErr = null; })
+            .catch((e) => { state.ceilingErr = e; })
+            .finally(() => { state.ceilingLoading = false; renderMatchCeiling(); });
+        }
+        $("ceiling-browse").addEventListener("toggle", function () {
+          if (this.open) loadMatchCeiling();
         });
 
         // ===== header: system pill + popover ==================================
@@ -1357,6 +1573,75 @@
         }
 
         // ===== LAB ============================================================
+        // B2: per-sport close-quality breakdown by persisted exclusion reason —
+        // rendered straight from /performance (by_sport[*].clv_quality), no new
+        // fetch. Feature-detected: sports without reason counts are omitted.
+        function renderCloseQualityBySport() {
+          const box = $("closeq-sport"); box.replaceChildren();
+          const perf = state.perf;
+          const p0 = document.createElement("p"); p0.className = "muted";
+          if (!perf) { p0.textContent = "Could not load performance data."; box.appendChild(p0); return; }
+          const bySport = perf.by_sport || {};
+          const rows = Object.keys(bySport).sort().map((k) => {
+            const q = bySport[k] && bySport[k].clv_quality;
+            return {
+              sport: k,
+              known: q ? Number(q.n_close_reason_known) || 0 : 0,
+              nSettled: q ? q.n_settled : null,
+              reasons: (q && q.close_exclusion_reasons) || {},
+            };
+          }).filter((r) => r.known > 0);
+          if (rows.length === 0) { p0.textContent = "No per-sport close-reason data yet."; box.appendChild(p0); return; }
+          rows.forEach((r0) => {
+            const row = document.createElement("div"); row.className = "kickoff-row";
+            const nm = document.createElement("span"); nm.className = "kr-t mono"; nm.textContent = r0.sport.replace(/_/g, " ");
+            const kn = document.createElement("span"); kn.className = "kr-s";
+            kn.textContent = "reason known " + r0.known + " / " + fmt(r0.nSettled);
+            const s = document.createElement("span"); s.className = "kr-s mono";
+            s.textContent = Object.keys(r0.reasons)
+              .sort((a, b) => Number(r0.reasons[b]) - Number(r0.reasons[a]))
+              .map((k) => k.replace(/_/g, " ") + " " + r0.reasons[k]).join(" · ") || "—";
+            row.append(nm, kn, s); box.appendChild(row);
+          });
+        }
+        // B4: steam shadow-verdict summary — counts + mint-week trend + the
+        // trusted-CLV split by verdict, with the SAME min-n discipline as every
+        // other aggregate: below the floor it reads "n=X — insufficient",
+        // never a point estimate. Monitor-only; nothing is demoted.
+        function renderSteamShadow() {
+          const box = $("steam-shadow"); box.replaceChildren();
+          const perf = state.perf;
+          const p0 = document.createElement("p"); p0.className = "muted";
+          if (!perf) { p0.textContent = "Could not load performance data."; box.appendChild(p0); return; }
+          const ss = perf.steam_shadow;
+          if (!ss) { p0.textContent = "Not yet reported."; box.appendChild(p0); return; }
+          const ml = document.createElement("div"); ml.className = "metric-list";
+          ml.appendChild(metricEl("Would demote", String(ss.would_demote || 0)));
+          ml.appendChild(metricEl("Clear", String(ss.clear || 0)));
+          ml.appendChild(metricEl("Unevaluated", String(ss.unevaluated || 0)));
+          box.appendChild(ml);
+          const weekly = ss.weekly || [];
+          if (weekly.length > 0) {
+            const wk = document.createElement("p"); wk.className = "muted"; wk.style.marginTop = "8px";
+            wk.textContent = "Would-demote by mint week: " + weekly.slice(-6).map((w) => {
+              const total = (Number(w.would_demote) || 0) + (Number(w.clear) || 0) + (Number(w.unevaluated) || 0);
+              return w.week_start + " " + (Number(w.would_demote) || 0) + "/" + total;
+            }).join(" · ");
+            box.appendChild(wk);
+          }
+          const split = ss.settled_by_verdict;
+          if (split) {
+            const sm = document.createElement("div"); sm.className = "metric-list"; sm.style.marginTop = "8px";
+            [["Trusted CLV — would demote", split.would_demote], ["Trusted CLV — clear", split.clear]].forEach(([label, agg]) => {
+              if (!agg) return;
+              const v = agg.sharp_status === "ok" && agg.sharp_stake_weighted_clv_log != null
+                ? fmtSignedPct(clvPctFromLog(agg.sharp_stake_weighted_clv_log) / 100)
+                : "n=" + (Number(agg.n_sharp_close) || 0) + " — insufficient";
+              sm.appendChild(metricEl(label, v));
+            });
+            box.appendChild(sm);
+          }
+        }
         function claimRow(can, text) {
           const r = document.createElement("div"); r.className = "claim " + (can ? "can" : "cannot");
           const mk = document.createElement("span"); mk.className = "claim-mk"; mk.textContent = can ? "Can claim" : "Cannot claim yet";
@@ -1473,6 +1758,11 @@
               tb.appendChild(tr);
             });
           }
+
+          renderCloseQualityBySport();
+          renderSteamShadow();
+          renderPromotionDistance();
+          renderBankroll();
         }
 
         // ===== SOURCES ============================================================
@@ -1583,6 +1873,7 @@
           if (location.hash.replace(/^#\/?/, "").split("/")[0] !== view) location.hash = "#/" + view;
           if (view === "radar") renderRadar();
           if (view === "sources") renderSources();
+          if (view === "lab") { loadPromotionDistance(); loadBankroll(); }
           window.scrollTo(0, 0);
         }
         document.querySelectorAll("#rail button[data-view], #dock button[data-view]").forEach((b) =>

@@ -647,6 +647,99 @@ def test_resolution_review_queue_limit_is_validated() -> None:
     assert client.get("/resolution/review-queue?limit=201").status_code == 422
 
 
+def test_lab_promotion_distance_endpoint_serializes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """B1: GET /lab/promotion-distance is a thin auth-gated passthrough of the
+    per-(sport, market) trusted-CLV accrual aggregate — the DB read is stubbed
+    at the route import (the aggregate's min-n nulling is pinned in
+    tests/test_promotion_distance.py). Sub-floor cells carry denominators and
+    a None estimate — never a point estimate."""
+    from app.api import routes
+
+    payload = {
+        "ok_n": 30,
+        "cadence_window_days": 14,
+        "note": (
+            "Distance to the trusted-CLV evidence floor only — informational. "
+            "Promotion stays gated by SportMarketClvGate and operator ADR sign-off."
+        ),
+        "cells": [
+            {
+                "sport": "soccer",
+                "market": "h2h",
+                "n_settled": 40,
+                "n_trusted": 12,
+                "ok_n": 30,
+                "status": "accruing",
+                "n_recent_trusted": 6,
+                "cadence_window_days": 14,
+                "est_days_to_threshold": 42.0,
+                "mean_clv_log": None,
+                "se_clv_log": None,
+            }
+        ],
+    }
+
+    async def fake_report(session):  # type: ignore[no-untyped-def]
+        return payload
+
+    monkeypatch.setattr(routes, "sport_market_promotion_distance", fake_report)
+    body = TestClient(make_app()).get("/lab/promotion-distance").json()
+    assert body["ok_n"] == 30
+    assert "SportMarketClvGate" in body["note"]  # no promotion implication
+    (cell,) = body["cells"]
+    assert cell["status"] == "accruing"
+    assert cell["mean_clv_log"] is None  # sub-floor estimates nulled at the source
+    assert cell["est_days_to_threshold"] == 42.0
+
+
+def test_resolution_match_ceiling_endpoint_serializes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """B3: GET /resolution/match-ceiling serves the LIVE per-sport ceiling
+    decomposition (structural vs addressable vs unknown-league) — the DB read
+    is stubbed at the route import; assembly/classification parity is pinned
+    in tests/test_match_ceiling.py."""
+    from app.api import routes
+
+    captured: dict[str, int] = {}
+
+    async def fake_decomposition(session, *, days):  # type: ignore[no-untyped-def]
+        captured["days"] = days
+        return {
+            "window_days": days,
+            "source": "live",
+            "note": "structural = no in-window pinnacle event for the event's league",
+            "sports": {
+                "soccer": {
+                    "events": 10,
+                    "matched": 4,
+                    "matched_rate": 0.4,
+                    "unmatched": 6,
+                    "structural": 3,
+                    "addressable": 2,
+                    "unknown_league": 1,
+                    "corrected_match_rate_lower": 4 / 7,
+                    "corrected_match_rate_upper": 4 / 6,
+                }
+            },
+        }
+
+    monkeypatch.setattr(routes, "match_ceiling_decomposition", fake_decomposition)
+    body = TestClient(make_app()).get("/resolution/match-ceiling?days=45").json()
+    assert captured["days"] == 45
+    assert body["source"] == "live"  # never the static research artifact
+    assert body["window_days"] == 45
+    soccer = body["sports"]["soccer"]
+    assert soccer["structural"] == 3
+    assert soccer["addressable"] == 2
+
+
+def test_resolution_match_ceiling_days_is_validated() -> None:
+    """days is bounded 1..365 — out-of-range values are a 422 before the
+    handler ever touches the DB (default is 30)."""
+    client = TestClient(make_app())
+    assert client.get("/resolution/match-ceiling?days=0").status_code == 422
+    assert client.get("/resolution/match-ceiling?days=366").status_code == 422
+
+
 def test_dashboard_html_is_not_browser_cached() -> None:
     """The dashboard HTML shell must not be browser-cached: a deploy ships new
     structure (panels, badges, banner) but the page only reloads on a full
