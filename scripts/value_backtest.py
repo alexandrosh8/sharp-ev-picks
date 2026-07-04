@@ -773,7 +773,7 @@ def _h6_agreement_row(
     ever recorded in the research log ADR-0019 points at, so this uses the
     PROPOSED (not frozen) 0.02 absolute-probability tolerance and says so."""
     from app.backtesting.agreement import (
-        PROPOSED_H6_TOLERANCE,
+        H6_TOLERANCE,
         REASON_REFERENCE_MISSING,
         REASON_SELECTION_MISSING,
         agreement_verdict,
@@ -811,7 +811,7 @@ def _h6_agreement_row(
             else None
         )
         anchor = dict(zip(outcome_names, sharp, strict=True))
-        verdict = agreement_verdict(anchor, reference, outcome_names[idx], PROPOSED_H6_TOLERANCE)
+        verdict = agreement_verdict(anchor, reference, outcome_names[idx], H6_TOLERANCE)
         if verdict.reason in (REASON_REFERENCE_MISSING, REASON_SELECTION_MISSING):
             excluded[verdict.reason] += 1  # fail-closed EXCLUSION, reported not failed
         elif verdict.passes:
@@ -820,7 +820,8 @@ def _h6_agreement_row(
             fail_reasons[verdict.reason] += 1
     print(
         f"\nH6 agreement-gate variant (pre-registered) — tolerance "
-        f"{PROPOSED_H6_TOLERANCE:.3f} abs-prob (PROPOSED: ADR-0019 says 'frozen at the "
+        f"{H6_TOLERANCE:.3f} abs-prob (SIGNED 2026-07-04: "
+        "ADR-0019 sign-off record; was 'frozen at the "
         "value recorded in the research log' but NO numeric value was recorded there; "
         "this is a proposal, not a frozen value)"
     )

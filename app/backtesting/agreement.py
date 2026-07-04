@@ -45,7 +45,7 @@ n. ``selection_missing`` is likewise an exclusion in that context.
 TOLERANCE PROVENANCE: ADR-0019 freezes the H6 tolerance "at the value recorded
 in the research log", but no numeric value was ever recorded in
 docs/research/2026-06-30-sharp-vs-soft-calibrate-optimize.md (verified
-2026-07-04). ``PROPOSED_H6_TOLERANCE = 0.02`` (absolute probability) is a
+2026-07-04). ``H6_TOLERANCE = 0.02`` (absolute probability) is a
 PROPOSAL, explicitly labelled as such by every consumer — it is NOT a frozen
 pre-registered value and must be recorded/signed before any acceptance run.
 """
@@ -57,7 +57,8 @@ from dataclasses import dataclass
 
 # Proposed (NOT pre-registered — see module docstring) absolute-probability
 # tolerance for the H6 agreement gate.
-PROPOSED_H6_TOLERANCE = 0.02
+# SIGNED 2026-07-04 (operator session directive; ADR-0019 sign-off record).
+H6_TOLERANCE = 0.02
 
 REASON_AGREE = "agree"
 REASON_REFERENCE_MISSING = "reference_missing"

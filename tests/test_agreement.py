@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from app.backtesting.agreement import (
-    PROPOSED_H6_TOLERANCE,
+    H6_TOLERANCE,
     REASON_AGREE,
     REASON_DELTA_EXCEEDS_TOLERANCE,
     REASON_DIRECTION_CONFLICT,
@@ -187,7 +187,7 @@ def test_h6_row_math_equals_frozen_row_restricted_by_predicate(capsys: Any) -> N
     retained, fail_reasons, excluded = vb._h6_agreement_row(rows, "1x2", frozen_bets, baseline)
     out = capsys.readouterr().out
     assert "H6 agreement-gate variant (pre-registered)" in out
-    assert "PROPOSED" in out  # tolerance provenance is stated, never implied frozen
+    assert "SIGNED 2026-07-04" in out  # tolerance provenance rides the printout
 
     # Independent replication of the predicate over the SAME frozen bets.
     names = ("home", "draw", "away")
@@ -207,7 +207,7 @@ def test_h6_row_math_equals_frozen_row_restricted_by_predicate(capsys: Any) -> N
             else None
         )
         v = agreement_verdict(
-            dict(zip(names, sharp, strict=True)), reference, names[idx], PROPOSED_H6_TOLERANCE
+            dict(zip(names, sharp, strict=True)), reference, names[idx], H6_TOLERANCE
         )
         if v.passes:
             expected_retained.append(b)

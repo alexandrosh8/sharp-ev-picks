@@ -621,17 +621,17 @@ def h6_replay(
     (Pick.model_probability — the VALUE-strategy invariant documented in
     app/storage/repositories.py). Reference = the at-mint soft-consensus median
     (consensus_prob_at_mint). Tolerance = PROPOSED 0.02 abs-prob
-    (app/backtesting/agreement.PROPOSED_H6_TOLERANCE) — NOT a frozen value; no
+    (app/backtesting/agreement.H6_TOLERANCE) — SIGNED 2026-07-04; no
     numeric tolerance was ever recorded in the research log."""
     from app.backtesting.agreement import (
-        PROPOSED_H6_TOLERANCE,
+        H6_TOLERANCE,
         REASON_REFERENCE_MISSING,
         REASON_SELECTION_MISSING,
         agreement_verdict,
     )
 
     out: dict[str, Any] = {
-        "tolerance": PROPOSED_H6_TOLERANCE,
+        "tolerance": H6_TOLERANCE,
         "tolerance_provenance": (
             "PROPOSED 0.02 abs-prob — ADR-0019 H6 says 'frozen at the value recorded "
             "in the research log' but no numeric value was recorded there"
@@ -660,7 +660,7 @@ def h6_replay(
                 {p.selection: p.model_probability},
                 reference,
                 p.selection,
-                PROPOSED_H6_TOLERANCE,
+                H6_TOLERANCE,
             )
             if verdict.reason in (REASON_REFERENCE_MISSING, REASON_SELECTION_MISSING):
                 counts[verdict.reason] += 1

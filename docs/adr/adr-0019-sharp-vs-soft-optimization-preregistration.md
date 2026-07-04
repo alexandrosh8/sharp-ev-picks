@@ -267,3 +267,29 @@ negligible capture (6 events/30d) and, if spreads ever get CLV, the
 key-number rule: never convert spread<->ML via a normal (Stern) model —
 devig each market's own prices; spread CLV needs an empirical margin
 distribution.
+
+## 2026-07-04 — OPERATOR SIGN-OFF RECORDED (H2 amendment + H6 tolerance)
+
+Provenance: operator session directive of 2026-07-04, quoted verbatim from
+the instruction: "Known likely sign-offs: H2 amendment: pure prospective
+single-shot, no train side, frozen config, no H2 tuning. H6 tolerance:
+0.02." — under the directive's rule "If user sign-off is already present in
+this prompt, record it."
+
+Effect:
+1. **H2 amendment SIGNED**: the 2026-07-03 amendment (ARCADIA anchor,
+   eligibility, fail-closed matching, artifacts/hashes) and its frozen
+   split design (pure prospective single-shot, no train side, frozen
+   config hash `6abe1a31…`, no selection on any 2026 data) are now the
+   operative pre-registered protocol. No parameter may change hereafter
+   without voiding the pre-registration.
+2. **H6 tolerance SIGNED at 0.02 absolute probability** (consensus
+   reference = median of >=3 distinct soft books within 30 min of mint;
+   fail-closed reference_missing exclusion). This closes the tolerance gap
+   documented in the 2026-07-04 appendix. The H6 backtest row may now be
+   read at the eventual H2 evaluation.
+3. The validation itself remains NOT RUN — data does not exist; preflight
+   and contamination guards stand unchanged.
+
+If this recording misreads the operator's intent, the operator may void it
+by stating so; until then it is the signed protocol of record.
