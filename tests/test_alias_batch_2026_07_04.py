@@ -19,6 +19,9 @@ _BATCH: list[tuple[str, str, str]] = [
     ("HJK", "HJK Helsinki", "Mariehamn"),
     ("Manly Utd", "Manly United", "St George Saints"),
     ("Neman", "Neman Grodno", "Dnepr Mogilev"),
+    # Monitor round same day (AC-0093/0094): 2 exact co-occurrences each.
+    ("Hornsby S.", "Hornsby Spiders", "Hills Hornets"),
+    ("Maitland M.", "Maitland Mustangs", "Central Coast Crusaders"),
 ]
 
 _KO = datetime(2026, 7, 2, 18, 0, tzinfo=UTC)

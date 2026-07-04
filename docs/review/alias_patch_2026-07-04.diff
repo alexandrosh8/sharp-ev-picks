@@ -1,18 +1,15 @@
 --- a/app/resolution/aliases_seed.json
 +++ b/app/resolution/aliases_seed.json
-@@ -3665,6 +3665,15 @@
+@@ -3672,6 +3672,12 @@
      ],
-     "Belconnen United": [
-       "Belconnen Utd."
+     "Manly United": [
+       "Manly Utd"
 +    ],
-+    "Drogheda United": [
-+      "Drogheda"
++    "Hornsby Spiders": [
++      "Hornsby S."
 +    ],
-+    "HJK Helsinki": [
-+      "HJK"
-+    ],
-+    "Manly United": [
-+      "Manly Utd"
++    "Maitland Mustangs": [
++      "Maitland M."
      ]
    }
  }

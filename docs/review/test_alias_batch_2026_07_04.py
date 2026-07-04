@@ -15,10 +15,8 @@ from app.resolution import EventCandidate, default_aliases, match_event, match_e
 
 # (feed form, pinnacle/canonical form, real opponent from the observed fixture)
 _BATCH: list[tuple[str, str, str]] = [
-    ('Drogheda', 'Drogheda United', 'Shelbourne'),
-    ('HJK', 'HJK Helsinki', 'Mariehamn'),
-    ('Manly Utd', 'Manly United', 'St George Saints'),
-    ('Neman', 'Neman Grodno', 'Dnepr Mogilev'),
+    ('Hornsby S.', 'Hornsby Spiders', 'Hills Hornets'),
+    ('Maitland M.', 'Maitland Mustangs', 'Central Coast Crusaders'),
 ]
 
 _KO = datetime(2026, 7, 2, 18, 0, tzinfo=UTC)
