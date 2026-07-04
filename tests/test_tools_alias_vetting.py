@@ -182,6 +182,89 @@ def test_extract_never_pairs_across_a_marker() -> None:
     assert extract_alias_candidates([pick], archive, aliases=aliases) == []
 
 
+# A women's pick whose OddsPortal URL slug DROPS the "W" marker. Production's
+# live cascade (app/storage/repositories.py) refuses a slug that loses a marker
+# the display name carries (display_markers <= slug_markers); the harness
+# cascade must mirror that guard or the marker-less slug strict-matches the
+# MEN'S archive event — a women->men pseudo-merge production provably blocks.
+_SLUG_LOSES_W_REF = (
+    "https://www.oddsportal.com/football/australia/npl-w/"
+    "alpha-united-a1b2c3d4/west-torrens-e5f6a7b8/"
+)
+
+
+def _womens_pick(ext: str) -> PickFixture:
+    return PickFixture(
+        pick_id=1,
+        sport_key="soccer",
+        league_key="au_npl_w",
+        country="Australia",
+        home="Alpha United W",
+        away="West Torrens W",
+        kickoff=KO,
+        external_ref=ext,
+    )
+
+
+def test_slug_marker_loss_never_pseudo_matches_mens_event() -> None:
+    # Only the men's event exists: the marker-crossing candidate is categorically
+    # NOT alias-addressable (production's marker veto) — no pairs, ever.
+    aliases = _table()
+    mens_only = [ArchiveEvent("pinnacle_soccer", "Alpha United", "West Torrens", KO, "au_npl")]
+    assert (
+        extract_alias_candidates([_womens_pick(_SLUG_LOSES_W_REF)], mens_only, aliases=aliases)
+        == []
+    )
+
+
+def test_slug_marker_loss_does_not_swallow_genuine_nameform_pair() -> None:
+    # BUG (2026-07-04): without production's slug marker-loss guard, the
+    # marker-less slug strict-matched the MEN'S decoy event, recording the
+    # fixture MATCHED and swallowing the genuine women's NAME-FORM candidate.
+    # With the guard, the slug is refused and the women's near-miss pair
+    # ("West Torrens W" -> "West Torrens Birkalla W") is emitted, identical to
+    # the no-slug control below.
+    aliases = _table()
+    archive = [
+        ArchiveEvent("pinnacle_soccer", "Alpha United", "West Torrens", KO, "au_npl"),
+        ArchiveEvent(
+            "pinnacle_soccer", "Alpha United W", "West Torrens Birkalla W", KO, "au_npl_w"
+        ),
+    ]
+    with_slug = extract_alias_candidates(
+        [_womens_pick(_SLUG_LOSES_W_REF)], archive, aliases=aliases
+    )
+    control = extract_alias_candidates([_womens_pick("opaque-ref")], archive, aliases=aliases)
+    pairs = {(c.raw_name_a, c.raw_name_b, c.reason) for c in with_slug}
+    assert ("West Torrens W", "West Torrens Birkalla W", "single_side_nearmiss") in pairs
+    # decision-identity with the no-slug control: the marker-losing slug must
+    # change NOTHING about what the classifier emits
+    assert pairs == {(c.raw_name_a, c.raw_name_b, c.reason) for c in control}
+
+
+def test_slug_retaining_markers_still_matches() -> None:
+    # The guard refuses only marker-LOSING slugs: a marker-free pick with a
+    # marker-free slug (display_markers <= slug_markers trivially) still uses
+    # the slug fallback to strict-match its counterpart.
+    aliases = _table()
+    pick = PickFixture(
+        pick_id=2,
+        sport_key="soccer",
+        league_key="au_npl",
+        country="Australia",
+        home="Alpha Utd.",  # display form that strict-fails vs the archive
+        away="West Torrens",
+        kickoff=KO,
+        external_ref=(
+            "https://www.oddsportal.com/football/australia/npl/"
+            "alpha-united-a1b2c3d4/west-torrens-e5f6a7b8/"
+        ),
+    )
+    archive = [ArchiveEvent("pinnacle_soccer", "Alpha United", "West Torrens", KO, "au_npl")]
+    # slug matches -> fixture is MATCHED -> nothing alias-addressable emitted
+    assert extract_alias_candidates([pick], archive, aliases=aliases) == []
+
+
 def test_candidates_to_rows_review_shape_decision_blank() -> None:
     cand = AliasCandidate("A Utd.", "A United", "soccer", "lg", "AU", 0.97, "single_side_nearmiss")
     attach_risk_flags([cand])

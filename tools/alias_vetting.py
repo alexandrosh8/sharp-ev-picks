@@ -265,9 +265,19 @@ def extract_alias_candidates(
             if slug is not None:
                 sh = canonical_tennis_name(slug[0]) if is_tennis else slug[0]
                 sa = canonical_tennis_name(slug[1]) if is_tennis else slug[1]
-                matched = match_event(
-                    sh, sa, pick.kickoff, cands, aliases=aliases, max_day_drift=MAX_DAY_DRIFT
+                # Production slug marker-loss guard (app/storage/repositories.py):
+                # the OddsPortal slug DROPS women/youth/reserve markers, so use it
+                # only when it RETAINS every marker the display name carries —
+                # else the marker-less slug strict-matches the men's/senior event
+                # (a pseudo-merge the live matcher categorically refuses).
+                display_markers = distinguishing_markers(pick.home) | distinguishing_markers(
+                    pick.away
                 )
+                slug_markers = distinguishing_markers(sh) | distinguishing_markers(sa)
+                if display_markers <= slug_markers:
+                    matched = match_event(
+                        sh, sa, pick.kickoff, cands, aliases=aliases, max_day_drift=MAX_DAY_DRIFT
+                    )
         if matched is None:
             matched = match_event_hardened(
                 qh,

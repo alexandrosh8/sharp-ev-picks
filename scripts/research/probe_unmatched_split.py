@@ -199,9 +199,18 @@ async def _main() -> None:
                         if slug is not None:
                             sh = canonical_tennis_name(slug[0]) if is_tennis else slug[0]
                             sa = canonical_tennis_name(slug[1]) if is_tennis else slug[1]
-                            m = match_event(
-                                sh, sa, ko, cands, aliases=aliases, max_day_drift=MAX_DAY_DRIFT
+                            # Production slug marker-loss guard (repositories.py):
+                            # use the slug only when it RETAINS every marker the
+                            # display name carries — a marker-less slug would
+                            # strict-match the men's/senior event (pseudo-merge).
+                            display_markers = distinguishing_markers(home) | distinguishing_markers(
+                                away
                             )
+                            slug_markers = distinguishing_markers(sh) | distinguishing_markers(sa)
+                            if display_markers <= slug_markers:
+                                m = match_event(
+                                    sh, sa, ko, cands, aliases=aliases, max_day_drift=MAX_DAY_DRIFT
+                                )
                     if m is None:
                         m = match_event_hardened(
                             qh,
