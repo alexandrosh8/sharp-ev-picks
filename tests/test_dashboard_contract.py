@@ -91,7 +91,7 @@ def test_stale_notice_copy() -> None:
 def test_required_empty_states() -> None:
     text = _text()
     assert "Nothing needs attention." in text
-    assert "No actionable picks right now." in text
+    assert "No pick currently qualifies." in text
     assert "Could not load picks." in text
     assert "Could not load games." in text
     assert "Could not load performance data." in text
@@ -102,7 +102,7 @@ def test_state_vocabulary_present() -> None:
     required = [
         "Premium",
         "Shadow",
-        "Tracked — not actionable",
+        "Tracked — informational",
         "Pending",
         "Settled",
         "Won",

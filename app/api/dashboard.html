@@ -369,7 +369,7 @@
         <div class="view-h"><h2>Today</h2></div>
         <div class="tilegrid cols2">
           <section class="tile" aria-labelledby="actionable-h">
-            <div class="tile-h"><h3 id="actionable-h">Actionable now</h3><span class="tag tag-cyan" id="actionable-count">—</span></div>
+            <div class="tile-h"><h3 id="actionable-h">Qualified now</h3><span class="tag tag-cyan" id="actionable-count">—</span></div>
             <div id="actionable-now"></div>
           </section>
           <section class="tile" aria-labelledby="attn-h">
@@ -401,7 +401,7 @@
               </select>
               <select id="eq-status" aria-label="Status filter">
                 <option value="">All statuses</option>
-                <option value="actionable">Actionable</option>
+                <option value="actionable">Qualified</option>
                 <option value="tracked">Tracked</option>
                 <option value="closed">Closed</option>
               </select>
@@ -857,7 +857,7 @@
             const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "Could not load picks.";
             box.appendChild(p0);
           } else if (actionable.length === 0) {
-            const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "No actionable picks right now.";
+            const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "No pick currently qualifies.";
             box.appendChild(p0);
           } else {
             actionable.forEach((p) => {
@@ -877,7 +877,7 @@
           if (health && health.status === "degraded") attn.push("Source Degraded — ingestion health degraded.");
           if (dataIsStale(health)) attn.push("Source Degraded — odds data is stale.");
           if (health && health.proxy_pool && health.proxy_pool.verdict === "Proxy pool degraded") attn.push("Source Degraded — proxy pool degraded.");
-          if (actionable.length === 0 && state.picksErr === null) attn.push("Low Evidence — zero actionable premium picks right now.");
+          if (actionable.length === 0 && state.picksErr === null) attn.push("Low Evidence — no premium pick currently qualifies.");
           if (state.perf && state.perf.sharp_status === "insufficient") attn.push("Low Evidence — sharp evidence insufficient.");
           const attnBox = $("needs-attention"); attnBox.replaceChildren();
           if (attn.length === 0) {
@@ -968,7 +968,7 @@
           const rows = state.picks.filter(matches);
           const groups = [
             ["actionable", "Actionable"],
-            ["tracked", "Tracked — not actionable"],
+            ["tracked", "Tracked — informational"],
             ["closed", "Closed"],
           ];
           groups.forEach(([key, label]) => {
@@ -979,7 +979,7 @@
             h.append(t, n); box.appendChild(h);
             if (list.length === 0) {
               const e = document.createElement("div"); e.className = "edge-group-empty";
-              e.textContent = key === "actionable" ? "No actionable picks right now." : "None right now.";
+              e.textContent = key === "actionable" ? "No pick currently qualifies." : "None right now.";
               box.appendChild(e); return;
             }
             list.forEach((p) => box.appendChild(edgeRowEl(p, health)));
@@ -1089,7 +1089,7 @@
           const body = $("edge-detail-body"); body.replaceChildren();
           const tierTag = document.createElement("span");
           tierTag.className = "tag " + (tierOf(p) === "volume" ? "tag-warm" : "tag-cyan");
-          tierTag.textContent = tierOf(p) === "volume" ? "Shadow — Tracked — not actionable" : "Premium";
+          tierTag.textContent = tierOf(p) === "volume" ? "Shadow — tracked, informational only" : "Premium";
           body.appendChild(tierTag);
           body.appendChild(buildTimeline(p));
 
@@ -1248,6 +1248,12 @@
           });
         }
 
+        function fmtDecisions(d) {
+          if (!d || typeof d !== "object") return "—";
+          const parts = Object.keys(d).sort().map((k) => k.replace(/_/g, " ") + " " + fmt(d[k]));
+          return parts.length ? parts.join(" · ") : "—";
+        }
+
         // ===== LAB ============================================================
         function claimRow(can, text) {
           const r = document.createElement("div"); r.className = "claim " + (can ? "can" : "cannot");
@@ -1265,13 +1271,13 @@
             const nSharp = Number(perf.n_sharp_close) || 0, floor = Number(perf.min_headline_n) || 50;
             ledger.appendChild(claimRow(perf.sharp_status === "ok",
               perf.sharp_status === "ok"
-                ? "edge vs sharp closes is supported by " + nSharp + " trusted closes (≥ " + floor + " floor)."
-                : "edge vs sharp closes yet — " + nSharp + " of " + floor + " trusted closes settled."));
+                ? "Edge vs sharp closes — supported by " + nSharp + " trusted closes (≥ " + floor + " floor)."
+                : "Edge vs sharp closes — " + nSharp + " of " + floor + " trusted closes settled; below the floor."));
             ledger.appendChild(claimRow(perf.roi_status === "ok",
-              perf.roi_status === "ok" ? "a settled ROI figure (" + fmtPct(perf.roi) + ")." : "a settled ROI figure yet — sample below the reporting floor."));
+              perf.roi_status === "ok" ? "Settled ROI — " + fmtPct(perf.roi) + " on a reportable sample." : "Settled ROI — sample below the reporting floor."));
             const cal = perf.calibration;
             ledger.appendChild(claimRow(!!(cal && !cal.insufficient),
-              cal && !cal.insufficient ? "the claimed-fair calibration monitor is reporting." : "a calibration reading yet — sample below the reporting floor."));
+              cal && !cal.insufficient ? "Calibration — the fair-probability monitor is reporting." : "Calibration — sample below the reporting floor."));
           }
 
           const hero = $("sharp-clv-hero"); hero.replaceChildren();
@@ -1380,7 +1386,7 @@
           tb.appendChild(sourceRow("Betfair inline", "—", bfRate, mr ? "Nominal" : "Pending", "Canonical-event inline anchor.", mr ? "tag-success" : "tag-neutral"));
 
           const stale = mr && mr.betfair_staleness;
-          tb.appendChild(sourceRow("Betfair API", "—", "—", "Monitor-only", stale ? "fresh decisions: " + JSON.stringify(stale.fresh_decisions || {}) : "Monitor-only — not a pick-feeding read.", "tag-neutral"));
+          tb.appendChild(sourceRow("Betfair API", "—", "—", "Monitor-only", stale ? "fresh decisions — " + fmtDecisions(stale.fresh_decisions) : "Monitor-only — not a pick-feeding read.", "tag-neutral"));
 
           tb.appendChild(renderProxyRow(health && health.proxy_pool));
 
@@ -1388,7 +1394,7 @@
           tb.appendChild(sourceRow("Review queues", "—", links ? String(links.auto_linked) + " linked" : "—", links ? (links.weak_links > 0 ? "Low Evidence" : "Nominal") : "Pending", links ? links.review_queued + " queued · " + links.weak_links + " weak links" : "Not loaded yet.", links ? "tag-success" : "tag-neutral"));
 
           const staleBox = $("staleness-monitor");
-          staleBox.textContent = stale ? "Monitor-only — fresh decisions: " + JSON.stringify(stale.fresh_decisions || {}) + " · stale rows: " + fmt(stale.stale_rows) : (state.matchRateErr ? "Could not load staleness monitor." : "Loading…");
+          staleBox.textContent = stale ? "Monitor-only — " + fmtDecisions(stale.fresh_decisions) + " · stale rows " + fmt(stale.stale_rows) : (state.matchRateErr ? "Could not load staleness monitor." : "Loading…");
 
           const rq = $("review-queues");
           rq.textContent = links ? "Auto-linked " + links.auto_linked + " · review-queued " + links.review_queued + " · weak links " + links.weak_links : (state.matchRateErr ? "Could not load review queues." : "Loading…");
