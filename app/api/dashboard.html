@@ -52,7 +52,7 @@
         --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
         --radius: 6px;
         --radius-sm: 4px;
-        --rail-w: 176px;
+        --rail-w: 124px;
         --dock-h: 60px;
       }
       * { box-sizing: border-box; }
@@ -154,16 +154,18 @@
         .rail {
           display: flex; flex-direction: column; gap: 2px;
           position: fixed; left: 0; top: 0; bottom: 0; z-index: 55;
-          width: var(--rail-w); padding: 18px 10px;
+          width: var(--rail-w); padding: 14px 8px;
           background: var(--panel); border-right: 1px solid var(--line);
           overflow-y: auto;
         }
         .rail .rail-mark { padding: 2px 10px 18px; font-family: var(--mono); font-weight: 700; letter-spacing: 0.08em; color: var(--text); }
         .rail .rail-mark .brand-mark { color: var(--cyan); }
         .rail button {
-          display: flex; align-items: center; gap: 10px; text-align: left;
+          display: flex; align-items: center; gap: 8px; text-align: left;
           background: transparent; border: 1px solid transparent; color: var(--dim);
-          padding: 10px 12px; min-height: 44px; border-radius: var(--radius-sm);
+          padding: 8px 10px; min-height: 40px; border-radius: var(--radius-sm);
+          font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.06em;
+          text-transform: uppercase;
         }
         .rail button[aria-current="true"] {
           color: var(--text); background: var(--panel-2); border-left: 2px solid var(--cyan);
@@ -197,14 +199,21 @@
 
       /* ---- views / tiles ------------------------------------------------- */
       main { display: block; }
-      .view { max-width: 1240px; margin: 0 auto; padding: 16px 14px 32px; }
+      .view { max-width: 1400px; margin: 0 auto; padding: 16px 14px 32px; }
       .view-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
       .view-h h2 {
         font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.1em;
         font-size: 13px; color: var(--dim); font-weight: 600;
       }
       .tilegrid { display: grid; grid-template-columns: 1fr; gap: 14px; }
-      @media (min-width: 900px) { .tilegrid.cols2 { grid-template-columns: 1fr 1fr; } }
+      @media (min-width: 900px) { .tilegrid.cols2 { grid-template-columns: 1fr 1fr; }
+        .tilegrid.cols2 > .tile.wide2 { grid-column: 1 / -1; } }
+      /* Today fills wide desktops: three tiles across, aligned tops */
+      @media (min-width: 1280px) {
+        #view-today .tilegrid.cols2 { grid-template-columns: 1fr 1fr 1fr; align-items: start; }
+        #view-today .tilegrid.cols2 > .tile.wide { grid-column: 1 / -1; }
+        #view-today .tilegrid.cols2 > .tile.wide2 { grid-column: span 2; }
+      }
       .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }
       .tile.wide { grid-column: 1 / -1; }
       .tile-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
@@ -380,9 +389,13 @@
             <div class="tile-h"><h3 id="next-h">Next kickoffs</h3></div>
             <div id="next-kickoffs"></div>
           </section>
-          <section class="tile wide" aria-labelledby="evpos-h">
+          <section class="tile wide2" aria-labelledby="evpos-h">
             <div class="tile-h"><h3 id="evpos-h">Evidence position</h3></div>
             <p class="muted" id="evidence-position">—</p>
+          </section>
+          <section class="tile" aria-labelledby="recent-h">
+            <div class="tile-h"><h3 id="recent-h">Recent results</h3></div>
+            <div id="recent-results"></div>
           </section>
         </div>
       </section>
@@ -781,12 +794,16 @@
         }
 
         // ===== lazy /resolution/match-rate loader (Radar + Sources only) =====
+        const MATCH_RATE_TTL_MS = 5 * 60 * 1000;
         function loadMatchRate() {
-          if (state.matchRate || state.matchRateLoading) return;
+          // Bug fix (review 2026-07-04 #4): success used to cache forever —
+          // Radar/Sources numbers went permanently stale. Refetch after a TTL.
+          const fresh = state.matchRateAt != null && Date.now() - state.matchRateAt < MATCH_RATE_TTL_MS;
+          if ((state.matchRate && fresh) || state.matchRateLoading) return;
           state.matchRateLoading = true;
           fetchGuarded("/resolution/match-rate?days=180", undefined, MATCH_RATE_TIMEOUT_MS)
             .then(readJson)
-            .then((body) => { state.matchRate = body; state.matchRateErr = null; })
+            .then((body) => { state.matchRate = body; state.matchRateErr = null; state.matchRateAt = Date.now(); })
             .catch((e) => { state.matchRateErr = e; })
             .finally(() => {
               state.matchRateLoading = false;
@@ -905,6 +922,26 @@
               const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
               const s = document.createElement("span"); s.className = "kr-s"; s.textContent = tierOf(p) === "volume" ? "Shadow" : "Premium";
               r.append(t, e, s); nk.appendChild(r);
+            });
+          }
+
+          // recent settled results (auto-graded or manual), newest first
+          const settled = state.picks.filter((p) => p.outcome != null || p.provisional_outcome != null)
+            .sort((a, b) => new Date(b.starts_at || 0) - new Date(a.starts_at || 0)).slice(0, 4);
+          const rr = $("recent-results"); rr.replaceChildren();
+          if (settled.length === 0) {
+            const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "No settled picks yet.";
+            rr.appendChild(p0);
+          } else {
+            settled.forEach((p) => {
+              const r = document.createElement("div"); r.className = "kickoff-row";
+              const t0 = document.createElement("span"); t0.className = "kr-t mono";
+              t0.textContent = fmt(p.score == null ? p.scraped_score : p.score);
+              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
+              const s = document.createElement("span"); s.className = "kr-s mono";
+              const oc = String(p.outcome == null ? p.provisional_outcome : p.outcome).replace("_", " ");
+              s.textContent = oc.toUpperCase() + (p.outcome == null ? " (provisional)" : "");
+              r.append(t0, e, s); rr.appendChild(r);
             });
           }
 
@@ -1048,7 +1085,7 @@
           const mkField = (labelText, id) => {
             const f = document.createElement("label"); f.className = "field"; f.htmlFor = id;
             const l = document.createElement("span"); l.className = "field-lbl"; l.textContent = labelText;
-            const i = document.createElement("input"); i.type = "number"; i.min = "0"; i.id = id; i.className = "field-input";
+            const i = document.createElement("input"); i.type = "number"; i.min = "0"; i.max = "250"; i.step = "1"; i.id = id; i.className = "field-input";
             f.append(l, i); return { f, i };
           };
           const home = mkField("Home score", "result-home");
@@ -1058,7 +1095,7 @@
           const note = document.createElement("span"); note.className = "result-note"; note.id = "result-note";
           submit.addEventListener("click", async () => {
             const h2 = Number(home.i.value), a2 = Number(away.i.value);
-            if (!Number.isFinite(h2) || !Number.isFinite(a2) || h2 < 0 || a2 < 0) {
+            if (!Number.isInteger(h2) || !Number.isInteger(a2) || h2 < 0 || a2 < 0 || h2 > 250 || a2 > 250) {
               note.textContent = "Enter both scores."; note.classList.add("err"); return;
             }
             submit.disabled = true; note.classList.remove("err");
@@ -1110,7 +1147,10 @@
           const sk = document.createElement("span"); sk.className = "mk"; sk.textContent = "Suggested stake (informational)";
           const sv = document.createElement("span"); sv.className = "mv";
           const sf = numOf(p.recommended_stake_fraction);
-          if (isFinite(sf)) sv.appendChild(starRating(p.confidence_rating && p.confidence_rating.level));
+          const crLevel = Number(p.confidence_rating && p.confidence_rating.level);
+          // Bug fix (review 2026-07-04 #5): a missing rating must read "—",
+          // never a fabricated 1-star assessment.
+          if (isFinite(sf) && Number.isFinite(crLevel) && crLevel >= 1) sv.appendChild(starRating(crLevel));
           else sv.textContent = "—";
           stakeRow.append(sk, sv); body.appendChild(stakeRow);
 
@@ -1430,6 +1470,13 @@
         function setView(view) {
           if (VIEW_KEYS.indexOf(view) === -1) view = "today";
           activeView = view;
+          // Bug fix (review 2026-07-04 #1): leaving Edges (or re-entering it
+          // without a selection) must release the mobile sheet AND the body
+          // scroll freeze, or scrolling dies for the whole session.
+          if (view !== "edges" || selectedId == null) {
+            closeSheet();
+            $("edge-detail").classList.remove("visible");
+          }
           VIEW_KEYS.forEach((k) => { $("view-" + k).hidden = k !== view; });
           document.querySelectorAll("#rail button[data-view], #dock button[data-view]").forEach((b) => {
             b.setAttribute("aria-current", String(b.dataset.view === view));
@@ -1444,7 +1491,13 @@
         window.addEventListener("hashchange", () => {
           const { view, id } = parseHash();
           setView(view);
-          if (view === "edges" && id) { selectedId = id; renderEdgesList(); renderEdgeDetail(); openSheetIfMobile(); }
+          if (view === "edges" && id) {
+            selectedId = id; renderEdgesList(); renderEdgeDetail();
+            // Bug fix (review 2026-07-04 #2): only open the sheet when the id
+            // resolves to a real pick — a stale bookmark must not freeze scrolling
+            // over a blank panel.
+            if (currentPick()) openSheetIfMobile(); else { selectedId = null; closeSheet(); }
+          }
         });
 
         // ===== boot ============================================================
@@ -1452,7 +1505,14 @@
         setView(boot.view);
         if (boot.view === "edges" && boot.id) selectedId = boot.id;
         setInterval(() => { if (state.picks.length) { renderToday(); renderEdgesList(); } }, 30000);
-        setInterval(() => load(), 60000);
+        setInterval(() => {
+          // Bug fix (review 2026-07-04 #3): never clobber an in-progress
+          // manual result entry — skip the full reload while the operator is
+          // typing in the detail pane.
+          const active = document.activeElement;
+          if (active && $("edge-detail").contains(active) && active.tagName === "INPUT") return;
+          load();
+        }, 60000);
         load();
 
         if ("serviceWorker" in navigator) {
