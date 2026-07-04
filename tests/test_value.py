@@ -1,5 +1,7 @@
 """Sharp-vs-soft value finder: anchor selection, commission, gates, outliers."""
 
+from typing import Any
+
 import pytest
 
 from app.edge.value import (
@@ -781,3 +783,100 @@ def test_liquidity_gate_exempts_pinnacle() -> None:
     }
     res = anchor_fair_probs(pinn, exchange_min_liquidity=100.0)  # no liquidity map
     assert res is not None and res[0] == "pinnacle"
+
+
+# --- A4: close_exclusion_reason — the closed-vocabulary classifier -----------
+# One test per branch (first guard wins); the persisted reason is FINER than
+# the close_independent_of_fill boolean it annotates.
+
+_REASON_BASE: dict[str, Any] = {
+    "close_anchor_book": "Pinnacle",
+    "fill_book": "SoftBook",
+    "pick_fair": 0.40,
+    "closing_fair": 0.45,  # moved by 0.05 >> CLV_TAUTOLOGY_EPS
+    "fill_eff": 2.40,  # close edge 0.45 - 1/2.4 ~ 0.033; clv ~ ln(1.08)
+}
+
+
+def _reason(**overrides: Any) -> str:
+    from app.edge.value import close_exclusion_reason
+
+    kwargs: dict[str, Any] = {**_REASON_BASE, **overrides}
+    return close_exclusion_reason(**kwargs)
+
+
+def test_close_exclusion_reason_trusted_when_no_guard_trips() -> None:
+    from app.edge.value import CLOSE_REASON_TRUSTED
+
+    assert _reason() == CLOSE_REASON_TRUSTED
+    # None devig flags on either side are symmetric (mirrors
+    # _devig_fallback_asymmetric) — still trusted.
+    assert _reason(mint_devig_fell_back=None, close_devig_fell_back=True) == CLOSE_REASON_TRUSTED
+
+
+def test_close_exclusion_reason_fabricated_close_implied_edge() -> None:
+    # close edge = 0.95 - 1/2.4 ~ 0.53 > 0.20 ceiling -> fabricated, and it
+    # OUTRANKS the circular verdict (first guard wins).
+    assert _reason(closing_fair=0.95, close_anchor_book="SoftBook") == "fabricated"
+
+
+def test_close_exclusion_reason_fabricated_clv_log_fallback() -> None:
+    # edge = 0.25 - 1/8 = 0.125 <= 0.20, but |ln(8.0 * 0.25)| = ln(2) ~ 0.69 > 0.5.
+    assert _reason(closing_fair=0.25, fill_eff=8.0) == "fabricated"
+
+
+def test_close_exclusion_reason_circular_self_priced() -> None:
+    # The fill book priced its own close -> circular, even though the fair moved.
+    assert _reason(close_anchor_book="SoftBook") == "circular_self_priced"
+
+
+def test_close_exclusion_reason_stale_echo_unmoved_and_pre_creation_capture() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    created = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    assert (
+        _reason(
+            pick_fair=0.45,  # unmoved (== closing_fair)
+            close_captured_at=created - timedelta(hours=2),  # echo of the mint row
+            pick_created_at=created,
+        )
+        == "stale_echo"
+    )
+
+
+def test_close_exclusion_reason_tautological_fresh_or_unknown_capture() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    created = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Fresh capture (> created_at): a genuinely unmoved line, not a provable echo.
+    assert (
+        _reason(
+            pick_fair=0.45,
+            close_captured_at=created + timedelta(hours=1),
+            pick_created_at=created,
+        )
+        == "tautological"
+    )
+    # Unknown capture/creation times cannot prove an echo -> tautological.
+    assert _reason(pick_fair=0.45) == "tautological"
+    # Unknowable pick-time fair is conservatively NOT moved -> tautological.
+    assert _reason(pick_fair=None) == "tautological"
+
+
+def test_close_exclusion_reason_asymmetric_devig_fallback() -> None:
+    assert (
+        _reason(mint_devig_fell_back=True, close_devig_fell_back=False)
+        == "asymmetric_devig_fallback"
+    )
+    # Symmetric fallbacks (both True) stay trusted.
+    assert _reason(mint_devig_fell_back=True, close_devig_fell_back=True) == "trusted"
+
+
+def test_close_exclusion_reason_vocabulary_is_closed_and_column_safe() -> None:
+    # Every reason the classifier can return is in the closed vocabulary and
+    # fits the picks.close_exclusion_reason String(32) column.
+    from app.edge.value import CLOSE_EXCLUSION_REASONS, CLOSE_REASON_TRUSTED
+
+    assert CLOSE_REASON_TRUSTED in CLOSE_EXCLUSION_REASONS
+    assert len(CLOSE_EXCLUSION_REASONS) == len(set(CLOSE_EXCLUSION_REASONS)) == 6
+    assert all(len(r) <= 32 for r in CLOSE_EXCLUSION_REASONS)

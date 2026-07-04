@@ -357,6 +357,16 @@ class Pick(Base):
     # row / no close computed yet. Additive + nullable.
     close_anchor_book: Mapped[str | None] = mapped_column(String(64))
     close_snapshot_captured_at: Mapped[datetime | None]
+    # A4 CLOSE-EXCLUSION REASON (closed vocabulary — app/edge/value.py
+    # CLOSE_EXCLUSION_REASONS): WHY this pick's close is excluded from trusted
+    # CLV — 'fabricated' | 'circular_self_priced' | 'stale_echo' |
+    # 'tautological' | 'asymmetric_devig_fallback' — or 'trusted' when no
+    # guard trips. Stamped beside close_independent_of_fill by BOTH close
+    # writers (app/clv_trueup.py); observability only (nothing gates on it —
+    # the boolean stays the gate input). NULL = pre-column row / no close
+    # computed yet. Additive + nullable; no backfill (provenance accrues
+    # forward).
+    close_exclusion_reason: Mapped[str | None] = mapped_column(String(32))
     # BETFAIR STALENESS GUARD mint stamp (observability ONLY — never gating).
     # The effective per-event verdict the guard read at mint for this pick's
     # market: 'pass' | 'demote' | 'no_api_match' | 'no_api_price' | 'stale_api'

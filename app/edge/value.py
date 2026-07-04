@@ -22,6 +22,7 @@ import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.probabilities.devig import DevigMethod, devig, devig_with_provenance
 
@@ -202,6 +203,97 @@ def persisted_close_independent(
     if not close_is_independent_of_fill(close_anchor_book, fill_book):
         return False
     return close_moved_from_pick_fair(pick_fair, closing_fair)
+
+
+# A4 CLOSE-EXCLUSION REASON — the CLOSED vocabulary persisted to
+# ``picks.close_exclusion_reason`` (String(32), nullable). The untrusted-close
+# rate was one opaque boolean (close_independent_of_fill); the reason names the
+# SPECIFIC guard a close trips, or 'trusted' when none does. Observability
+# only: nothing gates on the reason (the boolean above stays the gate input).
+CLOSE_REASON_TRUSTED = "trusted"
+CLOSE_EXCLUSION_REASONS = (
+    "fabricated",
+    "circular_self_priced",
+    "stale_echo",
+    "tautological",
+    "asymmetric_devig_fallback",
+    CLOSE_REASON_TRUSTED,
+)
+
+# Local mirror of the CLV-1 implausible-close ceilings (app/clv_trueup.py and
+# app/storage/repositories.py keep their own documented copies for the same
+# boundary reason): a close-implied edge above the first, or a |clv_log| above
+# the second, is physically implausible — fabricated, not evidence.
+_CLV_IMPLAUSIBLE_CLOSE_EDGE = 0.20
+_CLV_IMPLAUSIBLE_LOG = 0.5
+
+
+def close_exclusion_reason(
+    *,
+    close_anchor_book: str,
+    fill_book: str,
+    pick_fair: float | None,
+    closing_fair: float,
+    fill_eff: float,
+    mint_devig_fell_back: bool | None = None,
+    close_devig_fell_back: bool | None = None,
+    close_captured_at: datetime | None = None,
+    pick_created_at: datetime | None = None,
+) -> str:
+    """Classify WHY a close is excluded from trusted CLV — or 'trusted'.
+
+    Pure function over the same inputs the close writers already hold; returns
+    exactly one member of ``CLOSE_EXCLUSION_REASONS``, first guard wins:
+
+    1. ``fabricated`` — physically implausible close: close-implied edge
+       (closing_fair - 1/fill_eff) above the CLV-1 ceiling, or |clv_log| =
+       |ln(fill_eff * closing_fair)| implausibly large (same double-guard as
+       ``_clv_row_is_fabricated``).
+    2. ``circular_self_priced`` — the fill book priced its own close (or the
+       same sharp source anchored both sides): ``close_is_independent_of_fill``
+       is False, so clv_log is mechanical.
+    3. ``stale_echo`` — the close fair did NOT move from the pick-time fair AND
+       the anchor rows were captured at or before the pick's creation: the
+       "close" is provably an ECHO of the mint anchor row, fake close evidence.
+    4. ``tautological`` — unmoved close fair without a provable echo (fresh
+       observation of a genuinely static line, or capture times unknown):
+       clv_log re-encodes the pick-time edge either way.
+    5. ``asymmetric_devig_fallback`` — mint and close fairs were devigged by
+       DIFFERENT effective methods (exactly one fell back to multiplicative):
+       the CLV is a devig-method artifact. A None flag on either side is
+       symmetric (mirrors ``_devig_fallback_asymmetric``).
+    6. ``trusted`` — no guard trips.
+
+    Note the reason is FINER than the persisted boolean: 'fabricated' and
+    'asymmetric_devig_fallback' rows can carry close_independent_of_fill=True
+    yet still be excluded from the trusted subset by their own guards.
+    """
+    if (
+        fill_eff > 0.0
+        and 0.0 < closing_fair < 1.0
+        and (
+            closing_fair - 1.0 / fill_eff > _CLV_IMPLAUSIBLE_CLOSE_EDGE
+            or abs(math.log(fill_eff * closing_fair)) > _CLV_IMPLAUSIBLE_LOG
+        )
+    ):
+        return "fabricated"
+    if not close_is_independent_of_fill(close_anchor_book, fill_book):
+        return "circular_self_priced"
+    if not close_moved_from_pick_fair(pick_fair, closing_fair):
+        if (
+            close_captured_at is not None
+            and pick_created_at is not None
+            and close_captured_at <= pick_created_at
+        ):
+            return "stale_echo"
+        return "tautological"
+    if (
+        mint_devig_fell_back is not None
+        and close_devig_fell_back is not None
+        and mint_devig_fell_back != close_devig_fell_back
+    ):
+        return "asymmetric_devig_fallback"
+    return CLOSE_REASON_TRUSTED
 
 
 @dataclass(frozen=True)

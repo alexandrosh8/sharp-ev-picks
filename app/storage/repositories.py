@@ -1036,6 +1036,10 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     q_snapshot_close = q_fallback_close = 0
     close_ages_minutes: list[float] = []
     q_stale_close = 0
+    # A4: per-reason counts of the PERSISTED close_exclusion_reason (closed
+    # vocabulary stamped by the close writers; 'trusted' included). Counts what
+    # is stored — NULL (pre-column / no close yet) rows are simply not counted.
+    reason_counts: dict[str, int] = {}
     for row in rows:
         (
             outcome,
@@ -1062,6 +1066,8 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         # close AGE at kickoff is measurable once provenance accrues.
         close_snapshot_captured_at = row[14] if len(row) > 14 else None
         kickoff_at = row[15] if len(row) > 15 else None
+        # A4 close-exclusion reason (trailing, feature-detected like the rest).
+        close_reason = row[16] if len(row) > 16 else None
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
@@ -1102,6 +1108,9 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             close_ages_minutes.append(age_minutes)
             if age_minutes > STALE_CLOSE_MAX_GAP_MINUTES:
                 q_stale_close += 1
+        if close_reason is not None:
+            key = str(close_reason)
+            reason_counts[key] = reason_counts.get(key, 0) + 1
         if clv_log is not None and not clv_excluded:
             clv_weighted += stake * clv_log
             clv_stake += stake
@@ -1223,6 +1232,12 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             "close_age_p90_minutes": _percentile(close_ages_minutes, 0.9),
             "n_stale_close": q_stale_close,
             "stale_close_max_gap_minutes": STALE_CLOSE_MAX_GAP_MINUTES,
+            # A4: counts per PERSISTED close-exclusion reason (closed vocabulary
+            # incl. 'trusted'; app/edge/value.py CLOSE_EXCLUSION_REASONS). Rows
+            # with no stamped reason (pre-column / no close yet) are the gap
+            # between n_close_reason_known and n_settled.
+            "n_close_reason_known": sum(reason_counts.values()),
+            "close_exclusion_reasons": dict(sorted(reason_counts.items())),
         },
     }
 
@@ -1310,6 +1325,13 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         select_cols.append(close_cap_attr)
     starts_at_idx = len(select_cols)
     select_cols.append(Event.starts_at)  # kickoff — the close-age clock
+    # A4 close-exclusion reason (feature-detected, same migration contract):
+    # the persisted per-row reason feeds the clv_quality per-reason counts.
+    reason_attr = getattr(Pick, "close_exclusion_reason", None)
+    reason_idx = None
+    if reason_attr is not None:
+        reason_idx = len(select_cols)
+        select_cols.append(reason_attr)
     rows = (
         await session.execute(
             select(*select_cols)
@@ -1340,6 +1362,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         mint_fell_back = r[mint_fb_idx] if mint_fb_idx is not None else None
         close_fell_back = r[close_fb_idx] if close_fb_idx is not None else None
         close_captured_at = r[close_cap_idx] if close_cap_idx is not None else None
+        close_reason = r[reason_idx] if reason_idx is not None else None
         return (
             r[0],
             r[1],
@@ -1357,6 +1380,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
             close_fell_back,  # P2-2 close devig-fallback provenance (or None)
             close_captured_at,  # D3 close provenance — close-age diagnostics
             r[starts_at_idx],  # kickoff — the close-age clock (D4)
+            close_reason,  # A4 close-exclusion reason (or None pre-column)
         )
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
@@ -2153,6 +2177,23 @@ async def source_link_metrics(session: AsyncSession) -> dict[str, Any]:
             for source, n, avg in by_source_rows
         },
     }
+
+
+async def review_queue_rows(
+    session: AsyncSession, *, limit: int = 50
+) -> list[tuple[MatchReviewQueue, datetime | None]]:
+    """Newest ``match_review_queue`` rows for the dashboard's read-only browse
+    (GET /resolution/review-queue), each paired with the candidate canonical
+    event's kickoff (LEFT JOIN events.starts_at; None when the candidate is
+    unlinked or has no kickoff). STRICTLY read-only — marking a row reviewed
+    stays in tools/review_queue_cli.py, never the API."""
+    result = await session.execute(
+        select(MatchReviewQueue, Event.starts_at)
+        .outerjoin(Event, MatchReviewQueue.candidate_canonical_event_id == Event.id)
+        .order_by(MatchReviewQueue.created_at.desc(), MatchReviewQueue.id.desc())
+        .limit(limit)
+    )
+    return [(row[0], row[1]) for row in result.all()]
 
 
 @dataclass(frozen=True)
@@ -3420,6 +3461,9 @@ async def persist_pick(
         # CLV provenance (clv-1 / P0-1).
         existing.has_snapshot_close = None
         existing.close_independent_of_fill = None
+        # A4: the exclusion reason described the OLD fill's close — clear it
+        # with the boolean it annotates.
+        existing.close_exclusion_reason = None
         existing.current_odds = None
         existing.current_edge = None
         existing.current_bookmaker = None

@@ -163,6 +163,8 @@ async def test_true_up_fills_clv_fields(factory) -> None:  # type: ignore[no-unt
         # fair (model_probability=0.45), and Pinnacle (close anchor) != SoftBook (fill)
         # -> a genuine, independent close.
         assert pick.close_independent_of_fill is True
+        # A4: the revalidation writer stamps the reason beside the boolean.
+        assert pick.close_exclusion_reason == "trusted"
 
 
 async def test_true_up_stamps_close_provenance(factory) -> None:  # type: ignore[no-untyped-def]
@@ -251,6 +253,11 @@ async def test_true_up_marks_identical_archived_line_close_circular(factory) -> 
         assert stored.closing_anchor_type == "pinnacle"  # sharp-anchored close ...
         # ... but the identical archived line makes it a tautology -> NOT independent.
         assert stored.close_independent_of_fill is False
+        # A4: the reason names the unmoved-close guard. Membership (not equality)
+        # because created_at is DB-stamped at insert while the snapshot capture
+        # time is test-clock NOW — the echo-vs-fresh split is cross-clock here
+        # (deterministic echo semantics are covered in tests/test_close_evidence.py).
+        assert stored.close_exclusion_reason in ("tautological", "stale_echo")
 
 
 async def test_true_up_includes_volume_tier_picks(factory) -> None:  # type: ignore[no-untyped-def]

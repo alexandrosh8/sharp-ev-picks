@@ -279,8 +279,9 @@ def _row(
     has_snapshot_close: bool | None = True,
     close_snapshot_captured_at: datetime | None = None,
     kickoff_at: datetime | None = None,
+    close_exclusion_reason: str | None = None,
 ) -> tuple[object, ...]:
-    # The 16-tuple performance_report._settled_tuple builds (trailing D3 fields).
+    # The 17-tuple performance_report._settled_tuple builds (trailing D3/A4 fields).
     return (
         "won",
         Decimal("1.0"),
@@ -298,6 +299,7 @@ def _row(
         None,
         close_snapshot_captured_at,
         kickoff_at,
+        close_exclusion_reason,
     )
 
 
@@ -359,3 +361,58 @@ def test_clv_quality_null_safe_on_empty_and_pre_provenance_rows() -> None:
     assert legacy["n_close_age_known"] == 0
     assert legacy["close_age_p50_minutes"] is None
     assert legacy["n_stale_close"] == 0
+
+
+def test_clv_quality_close_exclusion_reason_counts() -> None:
+    # A4: per-reason counts of the PERSISTED close_exclusion_reason surface
+    # under clv_quality; unstamped rows (None — pre-column / no close yet) are
+    # not counted and show up as the n_close_reason_known gap.
+    rows = [
+        _row(close_exclusion_reason="trusted"),
+        _row(close_exclusion_reason="trusted"),
+        _row(close_exclusion_reason="tautological"),
+        _row(close_exclusion_reason="stale_echo"),
+        _row(close_exclusion_reason="circular_self_priced"),
+        _row(),  # no reason stamped
+    ]
+    q = _aggregate_settled(rows)["clv_quality"]
+    assert q["close_exclusion_reasons"] == {
+        "circular_self_priced": 1,
+        "stale_echo": 1,
+        "tautological": 1,
+        "trusted": 2,
+    }
+    assert q["n_close_reason_known"] == 5
+    assert q["n_settled"] == 6
+    # Pre-A4 16-tuples (no trailing reason) and empty samples stay null-safe.
+    legacy = _aggregate_settled([_row()[:16]])["clv_quality"]
+    assert legacy["close_exclusion_reasons"] == {}
+    assert legacy["n_close_reason_known"] == 0
+    empty = _aggregate_settled([])["clv_quality"]
+    assert empty["close_exclusion_reasons"] == {}
+
+
+# --------------------------------------------------------------------------- #
+# A4: the finalize writer stamps close_exclusion_reason beside the boolean
+# --------------------------------------------------------------------------- #
+async def test_finalize_stamps_trusted_reason_on_fresh_moved_sharp_close(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _stub_reads(monkeypatch, FRESH_AT)
+    pick = _pick()  # model_probability 0.45; SHIN Betfair close fair ~0.4360 -> MOVED
+    assert await _finalize(pick) is True
+    assert pick.close_independent_of_fill is True
+    assert pick.close_exclusion_reason == "trusted"
+
+
+async def test_finalize_stamps_stale_echo_reason_on_unmoved_pre_creation_close(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Consensus-minted pick (cross-source: the stale Betfair rows survive the D2
+    # gate) whose pick-time fair equals the SHIN Betfair close fair (0.435996):
+    # unmoved AND captured before creation -> the reason names the ECHO, while
+    # the boolean it annotates stays the same opaque False as any tautology.
+    _stub_reads(monkeypatch, STALE_ECHO_AT)
+    pick = _pick(anchor_type="consensus", anchor_book=None)
+    pick.model_probability = Decimal("0.436")
+    assert await _finalize(pick) is True
+    assert pick.closing_anchor_type == "sharp"
+    assert pick.close_snapshot_captured_at == STALE_ECHO_AT
+    assert pick.close_independent_of_fill is False
+    assert pick.close_exclusion_reason == "stale_echo"

@@ -32,6 +32,7 @@ from app.backtesting.clv import clv_log
 from app.edge.value import (
     SHARP_BOOKS,
     anchor_type_for,
+    close_exclusion_reason,
     effective_odds,
     persisted_close_independent,
 )
@@ -253,6 +254,24 @@ async def revalidate_open_picks(
                         else None
                     ),
                     closing_fair=closing_fair,
+                )
+                # A4: persist the SPECIFIC reason beside the boolean (closed
+                # vocabulary, observability only — the boolean above stays the
+                # trusted-subset gate input, unchanged).
+                pick.close_exclusion_reason = close_exclusion_reason(
+                    close_anchor_book=close_anchor,
+                    fill_book=pick.bookmaker,
+                    pick_fair=(
+                        float(pick.model_probability)
+                        if pick.model_probability is not None
+                        else None
+                    ),
+                    closing_fair=closing_fair,
+                    fill_eff=fill_eff,
+                    mint_devig_fell_back=pick.mint_devig_fell_back,
+                    close_devig_fell_back=pick.close_devig_fell_back,
+                    close_captured_at=pick.close_snapshot_captured_at,
+                    pick_created_at=pick.created_at,
                 )
             books = prices_by_key.get(key) or {}
             # The pick's own book is the actionable price; if it dropped the
@@ -1136,6 +1155,22 @@ async def finalize_closing_from_snapshots(
                 float(pick.model_probability) if pick.model_probability is not None else None
             ),
             closing_fair=fair,
+        )
+        # A4: persist the SPECIFIC reason beside the boolean (closed vocabulary,
+        # observability only — the boolean above stays the trusted-subset gate
+        # input, unchanged).
+        pick.close_exclusion_reason = close_exclusion_reason(
+            close_anchor_book=close_anchor,
+            fill_book=pick.bookmaker,
+            pick_fair=(
+                float(pick.model_probability) if pick.model_probability is not None else None
+            ),
+            closing_fair=fair,
+            fill_eff=fill_eff,
+            mint_devig_fell_back=pick.mint_devig_fell_back,
+            close_devig_fell_back=pick.close_devig_fell_back,
+            close_captured_at=pick.close_snapshot_captured_at,
+            pick_created_at=pick.created_at,
         )
     if close_odds is not None and close_odds > 1.0:
         pick.closing_odds = Decimal(f"{close_odds:.4f}")
