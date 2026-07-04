@@ -1,15 +1,12 @@
 --- a/app/resolution/aliases_seed.json
 +++ b/app/resolution/aliases_seed.json
-@@ -3672,6 +3672,12 @@
+@@ -3678,6 +3678,9 @@
      ],
-     "Manly United": [
-       "Manly Utd"
+     "Maitland Mustangs": [
+       "Maitland M."
 +    ],
-+    "Hornsby Spiders": [
-+      "Hornsby S."
-+    ],
-+    "Maitland Mustangs": [
-+      "Maitland M."
++    "Defensores de Cambaceres": [
++      "Def. de Cambaceres"
      ]
    }
  }
