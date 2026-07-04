@@ -7,7 +7,23 @@ namespaces excluded from the base list):
 
   (a) COVERAGE (last --days days): events, pinnacle-namespace counterparts,
       event_source_links matched rate, sharp-anchored pick share, per-event
-      soft-book count distribution.
+      soft-book count distribution. Plus a PINNACLE MATCH-CEILING
+      DECOMPOSITION of the unmatched OddsPortal-side events:
+        STRUCTURAL   — Pinnacle has zero in-window events for the event's
+                       league, so no match was ever possible (excluded from
+                       the corrected match-rate denominator);
+        ADDRESSABLE  — Pinnacle prices the league in-window but the matcher
+                       missed the event;
+        UNKNOWN      — no league-identity evidence either way (kept in the
+                       denominator: the corrected rate is a LOWER bound).
+      League identity heuristic (conservative, in classify_unmatched_event):
+      (1) co-occurrence — leagues of already-matched event pairs (all-time
+      event_source_links) map canonical league -> pinnacle league(s); if
+      mapped, structural/addressable is decided by whether any mapped
+      pinnacle league has an in-window event. (2) Otherwise a normalized
+      exact league-name match (countries must agree unless one side is
+      empty) against in-window pinnacle leagues => addressable. (3) No
+      fuzzy matching — anything else is UNKNOWN, never guessed.
   (b) TRUSTED CLV (all settled picks): n / mean / ddof=1 SE by market, using the
       SAME trust guards as the production report (app/storage/repositories.py:
       tautology, fabricated-close, close-independence, sharp close anchor,
@@ -237,6 +253,77 @@ def latest_capture_at_or_before(
     return None, False
 
 
+def normalize_league(name: str, country: str = "") -> tuple[str, str]:
+    """(normalized country, normalized name): lowercase, non-alphanumerics
+    collapsed to single spaces. Used ONLY for exact-equality league-name
+    matching — never fuzzy/substring (wrong-league risk)."""
+
+    def norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+    return norm(country), norm(name)
+
+
+def classify_unmatched_event(
+    league_id: int,
+    league_name: str,
+    league_country: str,
+    *,
+    co_map: dict[int, set[int]],
+    pinnacle_inwindow_ids: set[int],
+    pinnacle_inwindow_names: set[tuple[str, str]],
+) -> str:
+    """Classify one UNMATCHED OddsPortal-side event by league evidence.
+
+    Returns 'structural' | 'addressable' | 'unknown' (see module docstring).
+    ``co_map`` = canonical league_id -> pinnacle league_ids from all-time
+    matched pairs; ``pinnacle_inwindow_ids``/``_names`` describe pinnacle
+    leagues with >=1 event inside the coverage window."""
+    mapped = co_map.get(league_id)
+    if mapped:
+        return "addressable" if mapped & pinnacle_inwindow_ids else "structural"
+    country, name = normalize_league(league_name, league_country)
+    for p_country, p_name in pinnacle_inwindow_names:
+        if name and p_name == name and (not country or not p_country or p_country == country):
+            return "addressable"
+    return "unknown"
+
+
+def corrected_match_rates(
+    events: int, matched: int, structural: int, unknown: int
+) -> tuple[float | None, float | None]:
+    """(lower, upper) corrected match rates: lower excludes only proven
+    STRUCTURAL events from the denominator; upper also excludes UNKNOWN
+    (the optimistic bound if every unknown league is truly unpriced)."""
+    lower_den = events - structural
+    upper_den = events - structural - unknown
+    return (
+        matched / lower_den if lower_den > 0 else None,
+        matched / upper_den if upper_den > 0 else None,
+    )
+
+
+def _ceiling_block(events: int, matched: int, counts: Counter[str]) -> dict[str, Any]:
+    """JSON block for one sport's unmatched-event decomposition."""
+    structural = counts.get("structural", 0)
+    addressable = counts.get("addressable", 0)
+    unknown = counts.get("unknown", 0)
+    lower, upper = corrected_match_rates(events, matched, structural, unknown)
+    return {
+        "unmatched": structural + addressable + unknown,
+        "structural": structural,
+        "addressable": addressable,
+        "unknown_league": unknown,
+        "corrected_match_rate_lower": lower,
+        "corrected_match_rate_upper": upper,
+        "note": (
+            "structural = no in-window pinnacle event for the event's league "
+            "(co-occurrence map, else exact normalized name); unknown = no "
+            "league-identity evidence, kept in the lower-bound denominator"
+        ),
+    }
+
+
 def soft_book_bucket(n: int) -> str:
     if n == 0:
         return "0"
@@ -352,6 +439,51 @@ async def collect_report(days: int) -> dict[str, Any]:
                 GROUP BY 1
                 """,
                 {"base": sports, "cutoff": cutoff, "now": now},
+            )
+            # Pinnacle match-ceiling decomposition inputs (all SELECT-only):
+            # unmatched OddsPortal-side events + their league row, ...
+            unmatched_rows = await _fetch_all(
+                conn,
+                """
+                SELECT s.key AS sport, e.league_id, l.name, l.country
+                FROM events e
+                JOIN sports s ON s.id = e.sport_id
+                JOIN leagues l ON l.id = e.league_id
+                LEFT JOIN LATERAL (
+                    SELECT lk.id FROM event_source_links lk
+                    WHERE lk.canonical_event_id = e.id
+                      AND lk.source = 'pinnacle_arcadia' AND lk.active
+                    LIMIT 1
+                ) esl ON true
+                WHERE s.key = ANY(:base) AND e.starts_at >= :cutoff AND e.starts_at <= :now
+                  AND esl.id IS NULL
+                """,
+                {"base": sports, "cutoff": cutoff, "now": now},
+            )
+            # ... the all-time co-occurrence league map from matched pairs, ...
+            co_rows = await _fetch_all(
+                conn,
+                r"""
+                SELECT DISTINCT ce.league_id, pe.league_id
+                FROM event_source_links esl
+                JOIN events ce ON ce.id = esl.canonical_event_id
+                JOIN events pe ON pe.external_ref = esl.source_event_id
+                JOIN sports ps ON ps.id = pe.sport_id AND ps.key LIKE 'pinnacle\_%'
+                WHERE esl.source = 'pinnacle_arcadia' AND esl.active
+                """,
+                {},
+            )
+            # ... and the pinnacle-namespace leagues with >=1 in-window event.
+            pinn_league_rows = await _fetch_all(
+                conn,
+                r"""
+                SELECT DISTINCT ps.key AS pinn_sport, l.id, l.name, l.country
+                FROM events pe
+                JOIN sports ps ON ps.id = pe.sport_id AND ps.key LIKE 'pinnacle\_%'
+                JOIN leagues l ON l.id = pe.league_id
+                WHERE pe.starts_at >= :cutoff AND pe.starts_at <= :now
+                """,
+                {"cutoff": cutoff, "now": now},
             )
             pinn_counts = await _fetch_all(
                 conn,
@@ -504,6 +636,9 @@ async def collect_report(days: int) -> dict[str, Any]:
         picks=picks,
         counterpart=counterpart,
         anchor_snaps=anchor_snaps,
+        unmatched_rows=unmatched_rows,
+        co_rows=co_rows,
+        pinn_league_rows=pinn_league_rows,
     ) | {"h6_replay": h6_replay(picks, soft_snaps)}
 
 
@@ -521,8 +656,34 @@ def _assemble(
     picks: list[SettledPick],
     counterpart: dict[int, int],
     anchor_snaps: dict[tuple[int, str], list[tuple[str, datetime]]],
+    unmatched_rows: list[Any],
+    co_rows: list[Any],
+    pinn_league_rows: list[Any],
 ) -> dict[str, Any]:
     cov = {r[0]: {"events": int(r[1]), "matched": int(r[2])} for r in coverage}
+
+    # Pinnacle match-ceiling decomposition of unmatched OddsPortal-side events.
+    co_map: dict[int, set[int]] = defaultdict(set)
+    for can_lid, pinn_lid in co_rows:
+        co_map[int(can_lid)].add(int(pinn_lid))
+    pinn_ids_by_sport: dict[str, set[int]] = defaultdict(set)
+    pinn_names_by_sport: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for pinn_sport, lid, lname, lcountry in pinn_league_rows:
+        base_sport = pinn_sport.removeprefix("pinnacle_")
+        pinn_ids_by_sport[base_sport].add(int(lid))
+        pinn_names_by_sport[base_sport].add(normalize_league(lname or "", lcountry or ""))
+    ceiling: dict[str, Counter[str]] = defaultdict(Counter)
+    for sport, league_id, lname, lcountry in unmatched_rows:
+        ceiling[sport][
+            classify_unmatched_event(
+                int(league_id),
+                lname or "",
+                lcountry or "",
+                co_map=co_map,
+                pinnacle_inwindow_ids=pinn_ids_by_sport.get(sport, set()),
+                pinnacle_inwindow_names=pinn_names_by_sport.get(sport, set()),
+            )
+        ] += 1
     pinn = {r[0].removeprefix("pinnacle_"): int(r[1]) for r in pinn_counts}
     share = {r[0]: {"picks": int(r[1]), "sharp": int(r[2])} for r in pick_share}
     soft_dist: dict[str, Counter[str]] = defaultdict(Counter)
@@ -583,6 +744,9 @@ def _assemble(
                 "pinnacle_namespace_events": pinn.get(sport, 0),
                 "matched_events": c["matched"],
                 "matched_rate": (c["matched"] / c["events"]) if c["events"] else None,
+                "unmatched_decomposition": _ceiling_block(
+                    c["events"], c["matched"], ceiling.get(sport, Counter())
+                ),
                 "picks": s["picks"],
                 "sharp_anchored_picks": s["sharp"],
                 "sharp_anchored_share": (s["sharp"] / s["picks"]) if s["picks"] else None,
@@ -689,6 +853,18 @@ def _fmt_stats(s: dict[str, Any]) -> str:
     return f"n={s['n']:4d} mean {mean} {se} [{s['label']}]"
 
 
+def _fmt_ceiling(d: dict[str, Any]) -> str:
+    def pct(v: float | None) -> str:
+        return f"{v:.1%}" if v is not None else "n/a"
+
+    return (
+        f"unmatched decomposition: unmatched={d['unmatched']} "
+        f"structural={d['structural']} addressable={d['addressable']} "
+        f"unknown-league={d['unknown_league']} | corrected match rate "
+        f"[{pct(d['corrected_match_rate_lower'])}, {pct(d['corrected_match_rate_upper'])}]"
+    )
+
+
 def render(report: dict[str, Any]) -> str:
     lines = [report["label"], f"coverage window: last {report['coverage_window_days']} days", ""]
     for sport, data in report["sports"].items():
@@ -702,6 +878,7 @@ def render(report: dict[str, Any]) -> str:
                 if c["matched_rate"] is not None
                 else "coverage: n/a"
             ),
+            _fmt_ceiling(c["unmatched_decomposition"]),
             (
                 f"picks={c['picks']} sharp-anchored={c['sharp_anchored_picks']} "
                 + (

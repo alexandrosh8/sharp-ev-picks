@@ -1,0 +1,496 @@
+{
+  "generated_at": "2026-07-04T15:09:18.357424+00:00",
+  "label": "EXPLORATORY \u2014 any threshold later frozen from this data must treat this readout as spent.",
+  "coverage_window_days": 30,
+  "sports": {
+    "american_football": {
+      "coverage": {
+        "events": 6,
+        "pinnacle_namespace_events": 10,
+        "matched_events": 2,
+        "matched_rate": 0.3333333333333333,
+        "unmatched_decomposition": {
+          "unmatched": 4,
+          "structural": 0,
+          "addressable": 4,
+          "unknown_league": 0,
+          "corrected_match_rate_lower": 0.3333333333333333,
+          "corrected_match_rate_upper": 0.3333333333333333,
+          "note": "structural = no in-window pinnacle event for the event's league (co-occurrence map, else exact normalized name); unknown = no league-identity evidence, kept in the lower-bound denominator"
+        },
+        "picks": 0,
+        "sharp_anchored_picks": 0,
+        "sharp_anchored_share": null,
+        "soft_book_count_distribution": {
+          "10-19": 6
+        }
+      },
+      "trusted_clv": {
+        "settled": 0,
+        "trusted": {
+          "n": 0,
+          "mean": null,
+          "se": null,
+          "ci95": null,
+          "label": "insufficient (n<30)"
+        },
+        "by_market": {},
+        "untrusted_close_rate": null,
+        "no_close_rate": null,
+        "anchor_staleness_decision": {}
+      },
+      "freshness": {
+        "anchor_age_at_mint": {},
+        "mint_to_kickoff": {},
+        "consensus_anchor_excluded": 0,
+        "no_anchor_snapshot": 0,
+        "market_level_fallbacks": 0
+      }
+    },
+    "basketball": {
+      "coverage": {
+        "events": 481,
+        "pinnacle_namespace_events": 687,
+        "matched_events": 67,
+        "matched_rate": 0.1392931392931393,
+        "unmatched_decomposition": {
+          "unmatched": 414,
+          "structural": 0,
+          "addressable": 169,
+          "unknown_league": 245,
+          "corrected_match_rate_lower": 0.1392931392931393,
+          "corrected_match_rate_upper": 0.2838983050847458,
+          "note": "structural = no in-window pinnacle event for the event's league (co-occurrence map, else exact normalized name); unknown = no league-identity evidence, kept in the lower-bound denominator"
+        },
+        "picks": 430,
+        "sharp_anchored_picks": 88,
+        "sharp_anchored_share": 0.20465116279069767,
+        "soft_book_count_distribution": {
+          "10-19": 277,
+          "4-9": 149,
+          "1-3": 55
+        }
+      },
+      "trusted_clv": {
+        "settled": 370,
+        "trusted": {
+          "n": 40,
+          "mean": 0.06442165,
+          "se": 0.023938102085553848,
+          "ci95": [
+            0.0165454458288923,
+            0.11229785417110769
+          ],
+          "label": "ok"
+        },
+        "by_market": {
+          "h2h": {
+            "n": 15,
+            "mean": 0.02332913333333334,
+            "se": 0.06061462302572796,
+            "ci95": [
+              -0.09790011271812259,
+              0.14455837938478927
+            ],
+            "label": "insufficient (n<30)"
+          },
+          "spreads": {
+            "n": 19,
+            "mean": 0.09558636842105263,
+            "se": 0.014059147655199614,
+            "ci95": [
+              0.06746807311065339,
+              0.12370466373145186
+            ],
+            "label": "insufficient (n<30)"
+          },
+          "totals": {
+            "n": 6,
+            "mean": 0.06846466666666666,
+            "se": 0.019046507030015883,
+            "ci95": [
+              0.030371652606634894,
+              0.10655768072669843
+            ],
+            "label": "insufficient (n<30)"
+          }
+        },
+        "untrusted_close_rate": 0.8918918918918919,
+        "no_close_rate": 0.0,
+        "anchor_staleness_decision": {
+          "none": 370
+        }
+      },
+      "freshness": {
+        "anchor_age_at_mint": {
+          "0-15m": {
+            "n": 13,
+            "mean": 0.08203069230769232,
+            "se": 0.04914125562892123,
+            "ci95": [
+              -0.01625181895015014,
+              0.18031320356553476
+            ],
+            "label": "insufficient (n<30)"
+          },
+          "1-4h": {
+            "n": 4,
+            "mean": 0.0125085,
+            "se": 0.026419424058509174,
+            "ci95": [
+              -0.04033034811701835,
+              0.06534734811701835
+            ],
+            "label": "insufficient (n<30)"
+          },
+          "4h+": {
+            "n": 1,
+            "mean": 0.10762,
+            "se": null,
+            "ci95": null,
+            "label": "insufficient (n<30)"
+          }
+        },
+        "mint_to_kickoff": {
+          "12h+": {
+            "n": 3,
+            "mean": 0.011145,
+            "se": 0.03319139385945298,
+            "ci95": [
+              -0.05523778771890596,
+              0.07752778771890596
+            ],
+            "label": "insufficient (n<30)"
+          },
+          "2-12h": {
+            "n": 15,
+            "mean": 0.07937453333333333,
+            "se": 0.042722383468139155,
+            "ci95": [
+              -0.00607023360294498,
+              0.16481930026961164
+            ],
+            "label": "insufficient (n<30)"
+          }
+        },
+        "consensus_anchor_excluded": 20,
+        "no_anchor_snapshot": 2,
+        "market_level_fallbacks": 7
+      }
+    },
+    "soccer": {
+      "coverage": {
+        "events": 1483,
+        "pinnacle_namespace_events": 3086,
+        "matched_events": 105,
+        "matched_rate": 0.07080242751180041,
+        "unmatched_decomposition": {
+          "unmatched": 1378,
+          "structural": 0,
+          "addressable": 672,
+          "unknown_league": 706,
+          "corrected_match_rate_lower": 0.07080242751180041,
+          "corrected_match_rate_upper": 0.13513513513513514,
+          "note": "structural = no in-window pinnacle event for the event's league (co-occurrence map, else exact normalized name); unknown = no league-identity evidence, kept in the lower-bound denominator"
+        },
+        "picks": 572,
+        "sharp_anchored_picks": 134,
+        "sharp_anchored_share": 0.23426573426573427,
+        "soft_book_count_distribution": {
+          "10-19": 1157,
+          "4-9": 204,
+          "1-3": 122
+        }
+      },
+      "trusted_clv": {
+        "settled": 493,
+        "trusted": {
+          "n": 111,
+          "mean": 0.0192626036036036,
+          "se": 0.0157609821012301,
+          "ci95": [
+            -0.0122593605988566,
+            0.0507845678060638
+          ],
+          "label": "ok"
+        },
+        "by_market": {
+          "double_chance": {
+            "n": 8,
+            "mean": -0.025982250000000002,
+            "se": 0.04761692581153335,
+            "ci95": [
+              -0.1212161016230667,
+              0.0692516016230667
+            ],
+            "label": "insufficient (n<30)"
+          },
+          "h2h": {
+            "n": 47,
+            "mean": 0.041869,
+            "se": 0.029341170688550466,
+            "ci95": [
+              -0.01681334137710093,
+              0.10055134137710094
+            ],
+            "label": "ok"
+          },
+          "spreads": {
+            "n": 33,
+            "mean": 0.05297042424242424,
+            "se": 0.02185488784392434,
+            "ci95": [
+              0.009260648554575562,
+              0.09668019993027292
+            ],
+            "label": "ok"
+          },
+          "totals": {
+            "n": 23,
+            "mean": -0.059559130434782614,
+            "se": 0.025134015002688158,
+            "ci95": [
+              -0.10982716044015893,
+              -0.009291100429406299
+            ],
+            "label": "insufficient (n<30)"
+          }
+        },
+        "untrusted_close_rate": 0.7748478701825557,
+        "no_close_rate": 0.0,
+        "anchor_staleness_decision": {
+          "none": 493
+        }
+      },
+      "freshness": {
+        "anchor_age_at_mint": {
+          "0-15m": {
+            "n": 41,
+            "mean": 0.03603426829268293,
+            "se": 0.021909395220917696,
+            "ci95": [
+              -0.007784522149152463,
+              0.07985305873451831
+            ],
+            "label": "ok"
+          },
+          "1-4h": {
+            "n": 1,
+            "mean": 0.011609,
+            "se": null,
+            "ci95": null,
+            "label": "insufficient (n<30)"
+          }
+        },
+        "mint_to_kickoff": {
+          "0-2h": {
+            "n": 10,
+            "mean": 0.07896020000000001,
+            "se": 0.05887776946499699,
+            "ci95": [
+              -0.03879533892999397,
+              0.196715738929994
+            ],
+            "label": "insufficient (n<30)"
+          },
+          "12h+": {
+            "n": 10,
+            "mean": 0.059553999999999996,
+            "se": 0.02944196078577497,
+            "ci95": [
+              0.0006700784284500577,
+              0.11843792157154993
+            ],
+            "label": "insufficient (n<30)"
+          },
+          "2-12h": {
+            "n": 22,
+            "mean": 0.004721454545454546,
+            "se": 0.02761419344899731,
+            "ci95": [
+              -0.05050693235254007,
+              0.05994984144344917
+            ],
+            "label": "insufficient (n<30)"
+          }
+        },
+        "consensus_anchor_excluded": 66,
+        "no_anchor_snapshot": 3,
+        "market_level_fallbacks": 0
+      }
+    },
+    "tennis": {
+      "coverage": {
+        "events": 510,
+        "pinnacle_namespace_events": 3267,
+        "matched_events": 36,
+        "matched_rate": 0.07058823529411765,
+        "unmatched_decomposition": {
+          "unmatched": 474,
+          "structural": 0,
+          "addressable": 341,
+          "unknown_league": 133,
+          "corrected_match_rate_lower": 0.07058823529411765,
+          "corrected_match_rate_upper": 0.09549071618037135,
+          "note": "structural = no in-window pinnacle event for the event's league (co-occurrence map, else exact normalized name); unknown = no league-identity evidence, kept in the lower-bound denominator"
+        },
+        "picks": 22,
+        "sharp_anchored_picks": 5,
+        "sharp_anchored_share": 0.22727272727272727,
+        "soft_book_count_distribution": {
+          "10-19": 465,
+          "1-3": 22,
+          "4-9": 23
+        }
+      },
+      "trusted_clv": {
+        "settled": 21,
+        "trusted": {
+          "n": 18,
+          "mean": -0.023780888888888893,
+          "se": 0.05259896413222971,
+          "ci95": [
+            -0.1289788171533483,
+            0.08141703937557053
+          ],
+          "label": "insufficient (n<30)"
+        },
+        "by_market": {
+          "h2h": {
+            "n": 18,
+            "mean": -0.023780888888888893,
+            "se": 0.05259896413222971,
+            "ci95": [
+              -0.1289788171533483,
+              0.08141703937557053
+            ],
+            "label": "insufficient (n<30)"
+          }
+        },
+        "untrusted_close_rate": 0.14285714285714285,
+        "no_close_rate": 0.0,
+        "anchor_staleness_decision": {
+          "none": 21
+        }
+      },
+      "freshness": {
+        "anchor_age_at_mint": {
+          "0-15m": {
+            "n": 5,
+            "mean": 0.183586,
+            "se": 0.08331267956679825,
+            "ci95": [
+              0.016960640866403504,
+              0.35021135913359647
+            ],
+            "label": "insufficient (n<30)"
+          }
+        },
+        "mint_to_kickoff": {
+          "12h+": {
+            "n": 5,
+            "mean": 0.183586,
+            "se": 0.08331267956679825,
+            "ci95": [
+              0.016960640866403504,
+              0.35021135913359647
+            ],
+            "label": "insufficient (n<30)"
+          }
+        },
+        "consensus_anchor_excluded": 13,
+        "no_anchor_snapshot": 0,
+        "market_level_fallbacks": 0
+      }
+    }
+  },
+  "h6_replay": {
+    "tolerance": 0.02,
+    "tolerance_provenance": "PROPOSED 0.02 abs-prob \u2014 ADR-0019 H6 says 'frozen at the value recorded in the research log' but no numeric value was recorded there",
+    "per_sport": {
+      "basketball": {
+        "n_sharp_anchored_settled": 83,
+        "counts": {
+          "fail": 11,
+          "pass": 17,
+          "reference_missing": 55
+        },
+        "trusted_clv_pass": {
+          "n": 9,
+          "mean": 0.09760066666666667,
+          "se": 0.06989000653666048,
+          "ci95": [
+            -0.0421793464066543,
+            0.23738067973998764
+          ],
+          "label": "insufficient (n<30)"
+        },
+        "trusted_clv_fail": {
+          "n": 3,
+          "mean": 0.02752866666666667,
+          "se": 0.03412740662738836,
+          "ci95": [
+            -0.04072614658811005,
+            0.0957834799214434
+          ],
+          "label": "insufficient (n<30)"
+        },
+        "min_consensus_books": 3
+      },
+      "soccer": {
+        "n_sharp_anchored_settled": 119,
+        "counts": {
+          "pass": 33,
+          "fail": 69,
+          "reference_missing": 17
+        },
+        "trusted_clv_pass": {
+          "n": 11,
+          "mean": 0.011061181818181819,
+          "se": 0.01811818421155848,
+          "ci95": [
+            -0.025175186604935146,
+            0.04729755024129878
+          ],
+          "label": "insufficient (n<30)"
+        },
+        "trusted_clv_fail": {
+          "n": 27,
+          "mean": 0.03945492592592593,
+          "se": 0.026382959995626783,
+          "ci95": [
+            -0.013310994065327639,
+            0.0922208459171795
+          ],
+          "label": "insufficient (n<30)"
+        },
+        "min_consensus_books": 3
+      },
+      "tennis": {
+        "n_sharp_anchored_settled": 5,
+        "counts": {
+          "fail": 4,
+          "pass": 1
+        },
+        "trusted_clv_pass": {
+          "n": 1,
+          "mean": 0.013641,
+          "se": null,
+          "ci95": null,
+          "label": "insufficient (n<30)"
+        },
+        "trusted_clv_fail": {
+          "n": 4,
+          "mean": 0.22607225,
+          "se": 0.0925195577300416,
+          "ci95": [
+            0.041033134539916805,
+            0.4111113654600832
+          ],
+          "label": "insufficient (n<30)"
+        },
+        "min_consensus_books": 3
+      }
+    }
+  }
+}

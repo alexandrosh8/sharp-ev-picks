@@ -177,6 +177,74 @@ def test_consensus_prob_at_mint_fail_closed() -> None:
     assert median is None and n_books == 0
 
 
+# --------------------------------------------------------------------------- #
+# Pinnacle match-ceiling decomposition (pure classification, no DB)
+# --------------------------------------------------------------------------- #
+def test_normalize_league_exact_only() -> None:
+    assert sqr.normalize_league("Premier  League!", "England") == ("england", "premier league")
+    assert sqr.normalize_league("Serie-A") == ("", "serie a")
+
+
+def test_classify_unmatched_co_occurrence_wins() -> None:
+    co_map = {10: {100}, 11: {101}}
+    kw = {
+        "co_map": co_map,
+        "pinnacle_inwindow_ids": {100},
+        "pinnacle_inwindow_names": set(),
+    }
+    # mapped league with an in-window pinnacle event -> matcher missed it
+    assert sqr.classify_unmatched_event(10, "EPL", "England", **kw) == "addressable"
+    # mapped league, zero in-window pinnacle events -> structural
+    assert sqr.classify_unmatched_event(11, "EPL", "England", **kw) == "structural"
+    # co-occurrence beats a name match (name says addressable, map says structural)
+    kw2 = dict(kw, pinnacle_inwindow_names={("england", "epl")})
+    assert sqr.classify_unmatched_event(11, "EPL", "England", **kw2) == "structural"
+
+
+def test_classify_unmatched_name_match_is_exact_and_country_aware() -> None:
+    kw = {
+        "co_map": {},
+        "pinnacle_inwindow_ids": {100},
+        "pinnacle_inwindow_names": {("england", "premier league"), ("", "serie a")},
+    }
+    # exact normalized name + country -> addressable
+    assert sqr.classify_unmatched_event(1, "Premier - League", "ENGLAND", **kw) == "addressable"
+    # same name, DIFFERENT non-empty country -> never matched (Ethiopia bug guard)
+    assert sqr.classify_unmatched_event(2, "Premier League", "Ethiopia", **kw) == "unknown"
+    # empty country on either side -> name-only match allowed
+    assert sqr.classify_unmatched_event(3, "Serie A", "Italy", **kw) == "addressable"
+    assert sqr.classify_unmatched_event(4, "Premier League", "", **kw) == "addressable"
+    # substrings are NOT matches — exact equality only
+    assert sqr.classify_unmatched_event(5, "Premier", "England", **kw) == "unknown"
+    # no evidence at all -> unknown, never guessed structural
+    assert sqr.classify_unmatched_event(6, "Obscure Cup", "Nowhere", **kw) == "unknown"
+
+
+def test_corrected_match_rates_bounds() -> None:
+    # 100 events, 30 matched, 40 structural, 20 unknown
+    lower, upper = sqr.corrected_match_rates(100, 30, 40, 20)
+    assert lower == pytest.approx(30 / 60)  # excludes only structural
+    assert upper == pytest.approx(30 / 40)  # also excludes unknown
+    # degenerate denominators -> None, never a division blow-up
+    assert sqr.corrected_match_rates(5, 5, 5, 0) == (None, None)
+    lower, upper = sqr.corrected_match_rates(5, 3, 1, 4)
+    assert lower == pytest.approx(3 / 4) and upper is None
+
+
+def test_ceiling_block_counts_and_rates() -> None:
+    from collections import Counter
+
+    block = sqr._ceiling_block(100, 30, Counter(structural=40, addressable=10, unknown=20))
+    assert block["unmatched"] == 70
+    assert block["structural"] == 40
+    assert block["addressable"] == 10
+    assert block["unknown_league"] == 20
+    assert block["corrected_match_rate_lower"] == pytest.approx(0.5)
+    assert block["corrected_match_rate_upper"] == pytest.approx(0.75)
+    empty = sqr._ceiling_block(0, 0, Counter())
+    assert empty["unmatched"] == 0 and empty["corrected_match_rate_lower"] is None
+
+
 def test_expected_outcomes_and_soft_book_classifier() -> None:
     assert sqr.expected_outcomes("1x2") == 3
     assert sqr.expected_outcomes("double_chance") == 3
