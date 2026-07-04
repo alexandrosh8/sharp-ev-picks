@@ -44,6 +44,7 @@ from app.settlement.engine import settle_event_picks
 from app.settlement.outcomes import pick_pnl, pick_roi
 from app.storage.models import Event, ManualBetLog, MatchReviewQueue, Pick, ResultTracking
 from app.storage.repositories import (
+    bankroll_ledger_report,
     bet_band_observations,
     betfair_archive_capture_by_sport,
     betfair_inline_capture_by_sport,
@@ -52,12 +53,14 @@ from app.storage.repositories import (
     latest_available_games_with_events,
     latest_picks_with_events,
     live_evidence_rows,
+    match_ceiling_decomposition,
     performance_report,
     pinnacle_archive_capture_by_sport,
     review_queue_rows,
     shadow_match_rate_outcomes,
     sharp_close_capture_density,
     source_link_metrics,
+    sport_market_promotion_distance,
 )
 
 logger = logging.getLogger(__name__)
@@ -1000,6 +1003,18 @@ async def performance(
     return report
 
 
+@router.get("/bankroll", dependencies=[Depends(require_dashboard_auth)])
+async def bankroll_ledger(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, Any]:
+    """HYPOTHETICAL bankroll ledger (A8): manual starting balance + running
+    settled P&L, with current balance and max drawdown — feeds the B7 chart.
+    Informational ONLY: no money movement, never an input to live staking.
+    Read-only; serves the empty inactive shape on a pre-migration DB or while
+    BANKROLL_STARTING_BALANCE is unset (the shipped default)."""
+    return await bankroll_ledger_report(session)
+
+
 @router.get("/resolution/match-rate", dependencies=[Depends(require_dashboard_auth)])
 async def resolution_match_rate(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1126,6 +1141,33 @@ async def resolution_review_queue(
         "count": len(rows),
         "rows": [serialize_review_queue_row(q, kickoff) for q, kickoff in rows],
     }
+
+
+@router.get("/lab/promotion-distance", dependencies=[Depends(require_dashboard_auth)])
+async def lab_promotion_distance(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, Any]:
+    """B1: per-(sport, market) trusted-CLV evidence accrual vs the reporting
+    'ok' floor (read-only, informational). This is the distance to the
+    EVIDENCE threshold only — promotion stays gated by SportMarketClvGate and
+    operator ADR sign-off; nothing here promotes or implies imminence. Point
+    estimates are nulled at the source below the floor, so no consumer can
+    read a sub-floor CLV number."""
+    return await sport_market_promotion_distance(session)
+
+
+@router.get("/resolution/match-ceiling", dependencies=[Depends(require_dashboard_auth)])
+async def resolution_match_ceiling(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> dict[str, Any]:
+    """B3: per-sport Pinnacle match-ceiling decomposition — structural (the
+    league is not priced by Pinnacle in-window, so no match was ever possible)
+    vs addressable (the matcher missed it) vs unknown-league — computed LIVE
+    against the DB with the same conservative classification as
+    scripts/research/sport_quality_report.py (A1), never the static research
+    artifact. Read-only: a handful of SELECTs, nothing written."""
+    return await match_ceiling_decomposition(session, days=days)
 
 
 @router.post("/events/{event_id}/result", dependencies=[Depends(require_dashboard_auth)])

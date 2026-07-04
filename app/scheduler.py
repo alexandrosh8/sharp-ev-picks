@@ -752,10 +752,34 @@ def build_scheduler(
             )
         except Exception as exc:
             logger.error("settle_results failed: %s", type(exc).__name__)
+        # A8: append newly settled P&L to the hypothetical bankroll ledger —
+        # idempotent catch-up (also absorbs manual dashboard settles). Inactive
+        # (BANKROLL_STARTING_BALANCE unset, the default) = pure no-op.
+        if settings.bankroll_starting_balance is not None:
+            from app.maintenance.bankroll_ledger import sync_bankroll_ledger
+
+            try:
+                await sync_bankroll_ledger(
+                    session_factory, starting_balance=settings.bankroll_starting_balance
+                )
+            except Exception as exc:
+                logger.error("bankroll ledger sync failed: %s", type(exc).__name__)
 
     async def snapshot_bankroll() -> None:
-        # Roadmap phase 6: persist bankroll_snapshots from manual entries.
-        logger.info("snapshot_bankroll: bankroll tracking arrives in roadmap phase 6")
+        # A8 bankroll ledger (was the phase-6 placeholder): daily idempotent
+        # catch-up sync of the HYPOTHETICAL ledger — manual starting balance +
+        # running settled P&L, informational only, no money movement. Ships
+        # OFF: without BANKROLL_STARTING_BALANCE this is a pure no-op.
+        if session_factory is None or settings.bankroll_starting_balance is None:
+            return
+        from app.maintenance.bankroll_ledger import sync_bankroll_ledger
+
+        try:
+            await sync_bankroll_ledger(
+                session_factory, starting_balance=settings.bankroll_starting_balance
+            )
+        except Exception as exc:
+            logger.error("snapshot_bankroll failed: %s", type(exc).__name__)
 
     upstream_dispatcher = _dispatcher(settings, http_client, redis)
 

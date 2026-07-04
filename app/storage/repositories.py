@@ -9,13 +9,14 @@ re-poll of the same market state never duplicates rows.
 import contextlib
 import logging
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -30,6 +31,7 @@ from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
 from app.settlement.outcomes import provisional_result
 from app.storage.models import (
+    BankrollLedgerEntry,
     BetfairAnchorVerdict,
     DashboardCredential,
     Event,
@@ -1261,6 +1263,47 @@ def _aggregate_settled_by_sport(
     return {k: _aggregate_settled(v) for k, v in sorted(by_sport.items())}
 
 
+#: Mint-week trend window for the B4 steam shadow-verdict summary — long enough
+#: to see a drift, short enough that one SELECT stays cheap.
+STEAM_WEEKLY_WINDOW_WEEKS = 8
+
+#: The steam_shadow settled split carries ONLY the trusted-sharp evidence
+#: fields of _aggregate_settled — the same trust guards + MIN_HEADLINE_N
+#: suppression as every other aggregate (below the floor the payload carries
+#: n + "insufficient", never a point estimate).
+_STEAM_SHARP_EVIDENCE_FIELDS = (
+    "n_settled",
+    "n_sharp_close",
+    "sharp_status",
+    "sharp_stake_weighted_clv_log",
+    "min_headline_n",
+)
+
+
+def _weekly_steam_counts(
+    rows: Sequence[tuple[bool | None, datetime | None]],
+) -> list[dict[str, Any]]:
+    """B4: per-mint-week steam shadow-verdict counts (pure — no DB).
+
+    ``rows`` = (steam_tripped, created_at) per pick. Weeks are Monday-anchored
+    (ISO) and reported ascending; the three counts per week sum to that week's
+    pick rows — no silent loss (NULL verdicts count as unevaluated)."""
+    weeks: dict[str, dict[str, int]] = {}
+    for tripped, created_at in rows:
+        if created_at is None:
+            continue
+        day = created_at.date()
+        week_start = (day - timedelta(days=day.weekday())).isoformat()
+        cell = weeks.setdefault(week_start, {"would_demote": 0, "clear": 0, "unevaluated": 0})
+        if tripped is True:
+            cell["would_demote"] += 1
+        elif tripped is False:
+            cell["clear"] += 1
+        else:
+            cell["unevaluated"] += 1
+    return [{"week_start": ws, **counts} for ws, counts in sorted(weeks.items())]
+
+
 async def performance_report(session: AsyncSession) -> dict[str, Any]:
     """ROI + stake-weighted log-CLV over settled picks (phase 4 report).
 
@@ -1332,6 +1375,14 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     if reason_attr is not None:
         reason_idx = len(select_cols)
         select_cols.append(reason_attr)
+    # A5/B4 steam shadow verdict (feature-detected, same migration contract):
+    # the persisted mint-time verdict splits the SETTLED sample for the
+    # steam_shadow trusted-CLV split below.
+    steam_attr = getattr(Pick, "steam_tripped", None)
+    steam_idx = None
+    if steam_attr is not None:
+        steam_idx = len(select_cols)
+        select_cols.append(steam_attr)
     rows = (
         await session.execute(
             select(*select_cols)
@@ -1406,19 +1457,45 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     # (evaluated, no trip) / unevaluated (NULL: gate unconfigured, consensus
     # anchor, eval error, or pre-column row). The three counts sum to every
     # pick row — no silent loss.
-    steam_shadow: dict[str, int] | None = None
-    steam_attr = getattr(Pick, "steam_tripped", None)
-    if steam_attr is not None:
+    steam_shadow: dict[str, Any] | None = None
+    if steam_attr is not None and steam_idx is not None:
+        s_idx: int = steam_idx  # narrowed binding for the closure below
         steam_counts = {
             tripped: int(n)
             for tripped, n in (
                 await session.execute(select(steam_attr, func.count()).group_by(steam_attr))
             ).all()
         }
+        # B4: mint-week verdict trend (would-demote count over time) + the
+        # trusted-CLV split of SETTLED picks by verdict. The split runs through
+        # _aggregate_settled so the sharp fields inherit the exact same trust
+        # guards and MIN_HEADLINE_N suppression as every other aggregate —
+        # below the floor the payload carries n + "insufficient", never a
+        # point estimate. Observability only: no verdict demotes anything.
+        weekly_rows = (
+            await session.execute(
+                select(steam_attr, Pick.created_at).where(
+                    Pick.created_at
+                    >= datetime.now(tz=UTC) - timedelta(weeks=STEAM_WEEKLY_WINDOW_WEEKS)
+                )
+            )
+        ).all()
+
+        def _steam_sharp_evidence(verdict: bool) -> dict[str, Any]:
+            agg = _aggregate_settled([_settled_tuple(r) for r in rows if r[s_idx] is verdict])
+            return {k: agg[k] for k in _STEAM_SHARP_EVIDENCE_FIELDS}
+
         steam_shadow = {
             "would_demote": steam_counts.get(True, 0),
             "clear": steam_counts.get(False, 0),
             "unevaluated": steam_counts.get(None, 0),
+            "weekly": _weekly_steam_counts(
+                [(tripped, created_at) for tripped, created_at in weekly_rows]
+            ),
+            "settled_by_verdict": {
+                "would_demote": _steam_sharp_evidence(True),
+                "clear": _steam_sharp_evidence(False),
+            },
         }
     return {
         **premium,
@@ -2809,9 +2886,9 @@ async def shadow_match_rate_outcomes(
     from app.resolution import (
         EventCandidate,
         default_aliases,
+        marker_safe_slug_names,
         match_event,
         match_event_hardened,
-        oddsportal_slug_names,
     )
     from app.resolution.shadow import ShadowOutcome, arcadia_base_sport
 
@@ -2890,9 +2967,14 @@ async def shadow_match_rate_outcomes(
                 home, away, kickoff, in_window, aliases=aliases, max_day_drift=max_day_drift
             )
             if matched_ev is None:
-                # OddsPortal slug fallback (drops the women "W" suffix + sponsor
-                # tails) — same strict unique match, just a cleaner key.
-                slug = oddsportal_slug_names(ext_ref)
+                # OddsPortal slug fallback (drops sponsor tails) — same strict
+                # unique match, just a cleaner key. Refused when the slug LOSES a
+                # women/youth/reserve marker the display names carry: matching on
+                # the marker-less slug would pseudo-merge a women's/youth pick
+                # onto the men's/senior archive event and OVERSTATE the measured
+                # match rate (the wrong-game class the live close-attach path
+                # already guards against ~40 lines up).
+                slug = marker_safe_slug_names(ext_ref, home, away)
                 if slug is not None:
                     matched_ev = match_event(
                         slug[0],
@@ -3618,3 +3700,508 @@ async def create_dashboard_credentials(
         await session.rollback()
         return False
     return True
+
+
+_EMPTY_BANKROLL_REPORT: dict[str, Any] = {
+    "active": False,
+    "starting_balance": None,
+    "current_balance": None,
+    "max_drawdown": None,
+    "n_entries": 0,
+    "series": [],
+}
+
+
+async def bankroll_ledger_report(session: AsyncSession) -> dict[str, Any]:
+    """Running HYPOTHETICAL-bankroll series + current balance + max drawdown
+    (A8 read aggregate; feeds the B7 bankroll/ROI chart). Informational only.
+
+    FEATURE-DETECTED at the TABLE level (unlike the per-column getattr pattern,
+    the ORM class always exists in code): on a pre-migration DB
+    ``to_regclass('bankroll_ledger')`` is NULL and the empty inactive shape is
+    served instead of raising UndefinedTable. ``active`` is True once the
+    ledger has rows (i.e. BANKROLL_STARTING_BALANCE was set and a sync ran).
+    ``max_drawdown`` is the largest peak-to-trough fraction of the
+    balance_after series (None until a drawdown exists, never fabricated).
+    """
+    if await session.scalar(text("SELECT to_regclass('bankroll_ledger')")) is None:
+        return dict(_EMPTY_BANKROLL_REPORT, series=[])
+    entries = (
+        (
+            await session.execute(
+                select(BankrollLedgerEntry).order_by(
+                    BankrollLedgerEntry.occurred_at, BankrollLedgerEntry.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not entries:
+        return dict(_EMPTY_BANKROLL_REPORT, series=[])
+    peak = entries[0].balance_after
+    max_dd = Decimal("0")
+    for entry in entries:
+        peak = max(peak, entry.balance_after)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - entry.balance_after) / peak)
+    starting = next(
+        (e.amount for e in entries if e.entry_type == "starting_balance"),
+        None,
+    )
+    return {
+        "active": True,
+        "starting_balance": float(starting) if starting is not None else None,
+        "current_balance": float(entries[-1].balance_after),
+        "max_drawdown": float(max_dd) if max_dd > 0 else None,
+        "n_entries": len(entries),
+        "series": [
+            {
+                "occurred_at": e.occurred_at.isoformat(),
+                "entry_type": e.entry_type,
+                "amount": float(e.amount),
+                "balance_after": float(e.balance_after),
+                "pick_id": e.pick_id,
+                "note": e.note,
+            }
+            for e in entries
+        ],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# B1 — per-(sport, market) promotion-distance (trusted-CLV evidence accrual)
+# --------------------------------------------------------------------------- #
+
+#: Per-(sport, market) evidence "ok" floor for the promotion-distance widget —
+#: mirrors MIN_BUCKET_N in scripts/research/sport_quality_report.py (the
+#: report-scale honesty floor for any per-bucket claim), kept app-local so the
+#: app never imports research scripts. This is a REPORTING threshold only:
+#: promotion itself stays gated by SportMarketClvGate
+#: (app/backtesting/live_evidence.py, min_n_sharp_close=500, default-OFF) plus
+#: operator ADR sign-off — nothing here promotes or implies imminence.
+SPORT_MARKET_OK_N = 30
+
+#: Trailing window for the sample-accrual cadence behind the days-to-threshold
+#: estimate. Too short and one busy weekend fakes a cadence; two weeks spans
+#: at least two full fixture cycles for every covered sport.
+PROMOTION_CADENCE_WINDOW_DAYS = 14
+
+
+def _settled_close_is_trusted(
+    *,
+    clv_log: Any,
+    closing_anchor: Any,
+    close_independent: Any,
+    has_snapshot_close: Any,
+    decimal_odds: Any,
+    closing_fair_probability: Any,
+    model_probability: Any,
+    mint_devig_fell_back: Any,
+    close_devig_fell_back: Any,
+) -> bool:
+    """The trusted sharp-close gate as a standalone predicate.
+
+    Exactly the guards ``_aggregate_settled`` applies to its trusted subset
+    (kept adjacent in this module — see that function for the full rationale):
+    a measured clv_log, a GENUINE snapshot close, a named sharp close anchor,
+    independence exactly True, non-tautological, non-fabricated, and a
+    symmetric devig fallback. Used by per-(sport, market) accrual counts so
+    they can never diverge from the headline's trust definition.
+    """
+    if clv_log is None or not bool(has_snapshot_close):
+        return False
+    if closing_anchor not in _SHARP_CLOSE_ANCHORS or close_independent is not True:
+        return False
+    if _clv_row_is_tautological(clv_log, closing_fair_probability, model_probability):
+        return False
+    if _clv_row_is_fabricated(clv_log, decimal_odds, closing_fair_probability):
+        return False
+    return not _devig_fallback_asymmetric(mint_devig_fell_back, close_devig_fell_back)
+
+
+def promotion_distance_cells(
+    rows: Sequence[tuple[Any, ...]],
+    *,
+    now: datetime,
+    ok_n: int = SPORT_MARKET_OK_N,
+    window_days: int = PROMOTION_CADENCE_WINDOW_DAYS,
+) -> list[dict[str, Any]]:
+    """Per-(sport, market) trusted-CLV accrual cells (pure — no DB).
+
+    ``rows`` are settled-pick tuples: (sport, market, settled_at, clv_log,
+    closing_anchor, close_independent, has_snapshot_close, decimal_odds,
+    closing_fair_probability, model_probability, mint_devig_fell_back,
+    close_devig_fell_back). Feature-detected-absent columns arrive as None.
+
+    Honesty rules (binding, mirrored by the dashboard widget):
+      - every cell carries its denominators (n_settled, n_trusted);
+      - mean/SE point estimates are NULLED at the source below ``ok_n`` — no
+        consumer can read a sub-floor CLV estimate, whether or not it honors
+        the status flag;
+      - ``est_days_to_threshold`` is a LINEAR extrapolation of the trailing
+        ``window_days`` trusted-close cadence; None when the threshold is
+        already met or no trusted close accrued in the window (the dashboard
+        renders "—", never a guess).
+    """
+    cutoff = now - timedelta(days=window_days)
+    settled_counts: dict[tuple[str, str], int] = {}
+    trusted: dict[tuple[str, str], list[tuple[float, datetime | None]]] = {}
+    for (
+        sport,
+        market,
+        settled_at,
+        clv_log,
+        closing_anchor,
+        close_independent,
+        has_snapshot_close,
+        decimal_odds,
+        closing_fair_probability,
+        model_probability,
+        mint_devig_fell_back,
+        close_devig_fell_back,
+    ) in rows:
+        key = (str(sport), str(market))
+        settled_counts[key] = settled_counts.get(key, 0) + 1
+        if _settled_close_is_trusted(
+            clv_log=clv_log,
+            closing_anchor=closing_anchor,
+            close_independent=close_independent,
+            has_snapshot_close=has_snapshot_close,
+            decimal_odds=decimal_odds,
+            closing_fair_probability=closing_fair_probability,
+            model_probability=model_probability,
+            mint_devig_fell_back=mint_devig_fell_back,
+            close_devig_fell_back=close_devig_fell_back,
+        ):
+            trusted.setdefault(key, []).append((float(clv_log), settled_at))
+    cells: list[dict[str, Any]] = []
+    for key in sorted(settled_counts):
+        cell_trusted = trusted.get(key, [])
+        n = len(cell_trusted)
+        n_recent = sum(1 for _v, s in cell_trusted if s is not None and s >= cutoff)
+        ok = n >= ok_n
+        mean: float | None = None
+        se: float | None = None
+        if ok:
+            vals = [v for v, _s in cell_trusted]
+            mean = sum(vals) / n
+            if n >= 2:
+                se = math.sqrt(sum((v - mean) ** 2 for v in vals) / (n - 1)) / math.sqrt(n)
+        est: float | None = None
+        if not ok and n_recent > 0:
+            est = (ok_n - n) * window_days / n_recent
+        cells.append(
+            {
+                "sport": key[0],
+                "market": key[1],
+                "n_settled": settled_counts[key],
+                "n_trusted": n,
+                "ok_n": ok_n,
+                "status": "ok" if ok else "accruing",
+                "n_recent_trusted": n_recent,
+                "cadence_window_days": window_days,
+                "est_days_to_threshold": est,
+                # nulled at the source below ok_n — never a sub-floor estimate
+                "mean_clv_log": mean,
+                "se_clv_log": se,
+            }
+        )
+    cells.sort(key=lambda c: (-int(c["n_trusted"]), str(c["sport"]), str(c["market"])))
+    return cells
+
+
+async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, Any]:
+    """B1 aggregate behind GET /lab/promotion-distance (read-only).
+
+    One SELECT over settled picks; the close-provenance columns are
+    FEATURE-DETECTED exactly like performance_report (a pre-migration DB
+    serves the report with those inputs None, so nothing counts as trusted
+    — honest, never a 500)."""
+    close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
+    indep_attr = getattr(Pick, "close_independent_of_fill", None)
+    snapshot_attr = getattr(Pick, "has_snapshot_close", None)
+    mint_fb_attr = getattr(Pick, "mint_devig_fell_back", None)
+    close_fb_attr = getattr(Pick, "close_devig_fell_back", None)
+    select_cols: list[Any] = [
+        Sport.key,
+        Pick.market,
+        ResultTracking.settled_at,
+        Pick.clv_log,
+        Pick.decimal_odds,
+        Pick.closing_fair_probability,
+        Pick.model_probability,
+    ]
+    optional_idx: dict[str, int | None] = {}
+    for name, attr in (
+        ("closing_anchor", close_anchor_attr),
+        ("close_independent", indep_attr),
+        ("has_snapshot_close", snapshot_attr),
+        ("mint_devig_fell_back", mint_fb_attr),
+        ("close_devig_fell_back", close_fb_attr),
+    ):
+        if attr is not None:
+            optional_idx[name] = len(select_cols)
+            select_cols.append(attr)
+        else:
+            optional_idx[name] = None
+    db_rows = (
+        await session.execute(
+            select(*select_cols)
+            .select_from(ResultTracking)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .join(Sport, Event.sport_id == Sport.id)
+        )
+    ).all()
+
+    def _opt(r: Any, name: str) -> Any:
+        idx = optional_idx[name]
+        return r[idx] if idx is not None else None
+
+    rows = [
+        (
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            _opt(r, "closing_anchor"),
+            _opt(r, "close_independent"),
+            _opt(r, "has_snapshot_close"),
+            r[4],
+            r[5],
+            r[6],
+            _opt(r, "mint_devig_fell_back"),
+            _opt(r, "close_devig_fell_back"),
+        )
+        for r in db_rows
+    ]
+    return {
+        "ok_n": SPORT_MARKET_OK_N,
+        "cadence_window_days": PROMOTION_CADENCE_WINDOW_DAYS,
+        "note": (
+            "Distance to the trusted-CLV evidence floor only — informational. "
+            "Promotion stays gated by SportMarketClvGate and operator ADR sign-off."
+        ),
+        "cells": promotion_distance_cells(rows, now=datetime.now(tz=UTC)),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# B3 — Pinnacle match-ceiling decomposition (structural vs addressable), LIVE
+# --------------------------------------------------------------------------- #
+
+
+def _normalize_league_identity(name: str, country: str) -> tuple[str, str]:
+    """(normalized country, normalized name) for exact-equality league matching.
+
+    Mirrors normalize_league in scripts/research/sport_quality_report.py (A1) —
+    kept app-local so the app never imports research scripts; parity is pinned
+    in tests/test_match_ceiling.py. Never fuzzy/substring (wrong-league risk).
+    """
+
+    def norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+    return norm(country), norm(name)
+
+
+def _classify_unmatched_event(
+    league_id: int,
+    league_name: str,
+    league_country: str,
+    *,
+    co_map: Mapping[int, set[int]],
+    pinnacle_inwindow_ids: set[int],
+    pinnacle_inwindow_names: set[tuple[str, str]],
+) -> str:
+    """Classify one UNMATCHED OddsPortal-side event by league evidence.
+
+    'structural' = Pinnacle has zero in-window events for the event's league
+    (no match was ever possible); 'addressable' = Pinnacle prices the league
+    in-window but the matcher missed the event; 'unknown' = no league-identity
+    evidence either way — never guessed. Conservative heuristic: (1) the
+    all-time co-occurrence map of matched pairs; (2) else exact normalized
+    league-name equality (countries must agree unless one side is empty);
+    (3) no fuzzy matching. Mirrors classify_unmatched_event in
+    scripts/research/sport_quality_report.py (A1); parity is pinned in
+    tests/test_match_ceiling.py.
+    """
+    mapped = co_map.get(league_id)
+    if mapped:
+        return "addressable" if mapped & pinnacle_inwindow_ids else "structural"
+    country, name = _normalize_league_identity(league_name, league_country)
+    for p_country, p_name in pinnacle_inwindow_names:
+        if name and p_name == name and (not country or not p_country or p_country == country):
+            return "addressable"
+    return "unknown"
+
+
+def _corrected_match_rates(
+    events: int, matched: int, structural: int, unknown: int
+) -> tuple[float | None, float | None]:
+    """(lower, upper) corrected match rates — mirrors corrected_match_rates in
+    scripts/research/sport_quality_report.py: lower excludes only PROVEN
+    structural events from the denominator; upper also excludes unknown-league
+    events (the optimistic bound if every unknown league is truly unpriced)."""
+    lower_den = events - structural
+    upper_den = events - structural - unknown
+    return (
+        matched / lower_den if lower_den > 0 else None,
+        matched / upper_den if upper_den > 0 else None,
+    )
+
+
+def match_ceiling_blocks(
+    totals: Sequence[tuple[str, int]],
+    matched: Sequence[tuple[str, int]],
+    unmatched: Sequence[tuple[str, int, str | None, str | None]],
+    co_rows: Sequence[tuple[int, int]],
+    pinn_leagues: Sequence[tuple[str, int, str | None, str | None]],
+) -> dict[str, dict[str, Any]]:
+    """Assemble the per-sport ceiling blocks from fetched rows (pure — no DB).
+
+    ``totals``/``matched`` = per-sport in-window event counts (all / with an
+    active pinnacle_arcadia link); ``unmatched`` = (sport, league_id, league
+    name, country) per unmatched event; ``co_rows`` = all-time (canonical
+    league_id, pinnacle league_id) matched pairs; ``pinn_leagues`` =
+    (pinnacle_* sport key, league_id, name, country) leagues with >=1
+    in-window event.
+    """
+    co_map: dict[int, set[int]] = {}
+    for can_lid, pinn_lid in co_rows:
+        co_map.setdefault(int(can_lid), set()).add(int(pinn_lid))
+    ids_by_sport: dict[str, set[int]] = {}
+    names_by_sport: dict[str, set[tuple[str, str]]] = {}
+    for pinn_sport, lid, lname, lcountry in pinn_leagues:
+        base = pinn_sport.removeprefix("pinnacle_")
+        ids_by_sport.setdefault(base, set()).add(int(lid))
+        names_by_sport.setdefault(base, set()).add(
+            _normalize_league_identity(lname or "", lcountry or "")
+        )
+    counts: dict[str, dict[str, int]] = {}
+    for sport, league_id, lname, lcountry in unmatched:
+        verdict = _classify_unmatched_event(
+            int(league_id),
+            lname or "",
+            lcountry or "",
+            co_map=co_map,
+            pinnacle_inwindow_ids=ids_by_sport.get(sport, set()),
+            pinnacle_inwindow_names=names_by_sport.get(sport, set()),
+        )
+        cell = counts.setdefault(sport, {"structural": 0, "addressable": 0, "unknown": 0})
+        cell[verdict] += 1
+    matched_by_sport = {s: int(n) for s, n in matched}
+    blocks: dict[str, dict[str, Any]] = {}
+    for sport, events in sorted(totals):
+        n_events = int(events)
+        n_matched = matched_by_sport.get(sport, 0)
+        cell = counts.get(sport, {"structural": 0, "addressable": 0, "unknown": 0})
+        lower, upper = _corrected_match_rates(
+            n_events, n_matched, cell["structural"], cell["unknown"]
+        )
+        blocks[sport] = {
+            "events": n_events,
+            "matched": n_matched,
+            "matched_rate": (n_matched / n_events) if n_events else None,
+            "unmatched": n_events - n_matched,
+            "structural": cell["structural"],
+            "addressable": cell["addressable"],
+            "unknown_league": cell["unknown"],
+            "corrected_match_rate_lower": lower,
+            "corrected_match_rate_upper": upper,
+        }
+    return blocks
+
+
+async def match_ceiling_decomposition(session: AsyncSession, *, days: int = 30) -> dict[str, Any]:
+    """B3 aggregate behind GET /resolution/match-ceiling — the A1 ceiling
+    decomposition computed LIVE against the DB (READ-ONLY SELECTs; never the
+    static research artifact). Same conservative classification as
+    scripts/research/sport_quality_report.py."""
+    now = datetime.now(tz=UTC)
+    cutoff = now - timedelta(days=days)
+    base_sport = and_(
+        ~Sport.key.startswith("pinnacle_", autoescape=True),
+        ~Sport.key.startswith("betfair_", autoescape=True),
+    )
+    in_window = and_(Event.starts_at >= cutoff, Event.starts_at <= now)
+    link_exists = (
+        select(EventSourceLink.id)
+        .where(
+            EventSourceLink.canonical_event_id == Event.id,
+            EventSourceLink.source == "pinnacle_arcadia",
+            EventSourceLink.active,
+        )
+        .exists()
+    )
+    totals = (
+        await session.execute(
+            select(Sport.key, func.count())
+            .select_from(Event)
+            .join(Sport, Event.sport_id == Sport.id)
+            .where(base_sport, in_window)
+            .group_by(Sport.key)
+        )
+    ).all()
+    matched = (
+        await session.execute(
+            select(Sport.key, func.count())
+            .select_from(Event)
+            .join(Sport, Event.sport_id == Sport.id)
+            .where(base_sport, in_window, link_exists)
+            .group_by(Sport.key)
+        )
+    ).all()
+    unmatched = (
+        await session.execute(
+            select(Sport.key, Event.league_id, League.name, League.country)
+            .select_from(Event)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(League, Event.league_id == League.id)
+            .where(base_sport, in_window, ~link_exists)
+        )
+    ).all()
+    pinn_event = aliased(Event)
+    pinn_sport = aliased(Sport)
+    co_rows = (
+        await session.execute(
+            select(Event.league_id, pinn_event.league_id)
+            .select_from(EventSourceLink)
+            .join(Event, Event.id == EventSourceLink.canonical_event_id)
+            .join(pinn_event, pinn_event.external_ref == EventSourceLink.source_event_id)
+            .join(pinn_sport, pinn_event.sport_id == pinn_sport.id)
+            .where(
+                EventSourceLink.source == "pinnacle_arcadia",
+                EventSourceLink.active,
+                pinn_sport.key.startswith("pinnacle_", autoescape=True),
+            )
+            .distinct()
+        )
+    ).all()
+    pinn_leagues = (
+        await session.execute(
+            select(Sport.key, League.id, League.name, League.country)
+            .select_from(Event)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(League, Event.league_id == League.id)
+            .where(Sport.key.startswith("pinnacle_", autoescape=True), in_window)
+            .distinct()
+        )
+    ).all()
+    return {
+        "window_days": days,
+        "source": "live",
+        "note": (
+            "structural = no in-window pinnacle event for the event's league "
+            "(co-occurrence map, else exact normalized name); unknown = no "
+            "league-identity evidence, kept in the lower-bound denominator"
+        ),
+        "sports": match_ceiling_blocks(
+            [(str(s), int(n)) for s, n in totals],
+            [(str(s), int(n)) for s, n in matched],
+            [(str(s), int(lid), ln, lc) for s, lid, ln, lc in unmatched],
+            [(int(a), int(b)) for a, b in co_rows],
+            [(str(s), int(lid), ln, lc) for s, lid, ln, lc in pinn_leagues],
+        ),
+    }

@@ -457,6 +457,35 @@ class BankrollSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class BankrollLedgerEntry(Base):
+    """Append-only HYPOTHETICAL bankroll ledger (A8): a manual starting balance
+    plus running settled P&L — informational ONLY, no money movement, never an
+    input to live staking (ADR-0002; Kelly extensions stay off until evaluated).
+
+    entry_type: 'starting_balance' | 'settled_pnl' | 'manual_adjustment'.
+    ``amount`` for settled_pnl is result_tracking.pnl exactly as settlement
+    computed it (actual logged stake when present, else the recommended
+    fractional-Kelly stake) — never re-derived here. The UNIQUE on pick_id
+    (NULLs exempt, so non-pick entries are unconstrained) makes the settled-P&L
+    append idempotent: one ledger row per settled pick, ever.
+    """
+
+    __tablename__ = "bankroll_ledger"
+    __table_args__ = (
+        UniqueConstraint("pick_id", name="uq_bankroll_ledger_pick"),
+        Index("idx_bankroll_ledger_occurred", "occurred_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    occurred_at: Mapped[datetime]  # settled_at for settled_pnl; entry time otherwise
+    entry_type: Mapped[str] = mapped_column(String(32))
+    amount: Mapped[Decimal] = mapped_column(MONEY)
+    balance_after: Mapped[Decimal] = mapped_column(MONEY)
+    pick_id: Mapped[int | None] = mapped_column(ForeignKey("picks.id"))
+    note: Mapped[str] = mapped_column(Text, server_default="")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class Alert(Base):
     __tablename__ = "alerts"
     __table_args__ = (

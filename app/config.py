@@ -561,6 +561,16 @@ class Settings(BaseSettings):
     stake_max_drawdown: float | None = Field(default=None, gt=0.0, lt=1.0)
     stake_max_drawdown_probability: float | None = Field(default=None, gt=0.0, lt=1.0)
 
+    # --- Bankroll ledger (A8, informational only — ships OFF) -----------------
+    # Manual HYPOTHETICAL bankroll tracking: a starting balance plus running
+    # settled P&L appended per settled pick (app/maintenance/bankroll_ledger.py).
+    # Unset (default) = ledger INACTIVE: no rows are ever written and
+    # GET /bankroll serves the empty shape. Deliberately NOT wired into staking —
+    # bankroll_base above stays the recommended-stake basis, and the
+    # drawdown-constrained Kelly extensions stay OFF until evaluated. No money
+    # movement, ever (picks-only platform, ADR-0002).
+    bankroll_starting_balance: float | None = Field(default=None, gt=0.0)
+
     # --- Odds sources (read-only access) -----------------------------------------
     # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);
     # "odds_api"   = The Odds API (needs keys below).
