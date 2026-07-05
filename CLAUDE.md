@@ -8,9 +8,7 @@ places any bet personally.
 
 ## HARD SAFETY RULES — read first, never override
 
-1. **This system never places bets.** Never write, scaffold, or suggest code
-   that: places/modifies/cancels a bet; submits Betfair or any exchange
-   orders; drives a browser to a betting slip; bypasses anti-bot protections.
+1. **This system never places bets.**
    **READ-ONLY EXCEPTION (operator-authorized 2026-06-29):** a STRICTLY
    read-only Betfair Exchange API integration for market data (odds) is
    permitted. It MAY authenticate a read-only session and read credentials
@@ -163,10 +161,8 @@ walkforward-backtest, betting-feature-engineering, calibration-eval.
   impersonation; Playwright Chromium is the fallback). It is ToS-sensitive and
   DOM/feed-fragile — treat scrape gaps as expected. To fit the full slate inside
   the odds-freshness window, SCALE by spreading load across a rotating proxy/IP
-  pool + higher concurrency (the proven, lower-ban-risk lever), not by hammering
-  one IP. The feed is not Cloudflare-challenged today, so a challenge-solver
-  (cloudscraper) adds nothing and a stealth browser (camoufox) is slower than the
-  HTTP feed. Scraping carries a real ToS/ban risk — rotate IPs and stay polite.
+  pool + higher concurrency (the proven), not by hammering
+  one IP.
 
 ## Deployment
 
