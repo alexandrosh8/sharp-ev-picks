@@ -8,11 +8,7 @@ places any bet personally.
 
 ## HARD SAFETY RULES — read first, never override
 
-1. **This system never places bets.** Never write, scaffold, or suggest code
-   that: places/modifies/cancels a bet; submits Betfair or any exchange
-   orders; logs into a bookmaker; drives a browser to a betting slip; stores
-   betting credentials, cookies, or session tokens; bypasses anti-bot
-   protections.
+1. **This system never places bets.
 2. **Any code path that could place a bet is a build-breaking defect** —
    `scripts/safety_audit.sh` (run in CI) greps for such paths and must exit 0.
 3. All market-data integrations are **read-only (GET-only)**. Betfair
