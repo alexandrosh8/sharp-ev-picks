@@ -34,6 +34,12 @@ class Market(StrEnum):
     TEAM_TOTALS = "team_totals"
     BTTS = "btts"
     CORRECT_SCORE = "correct_score"
+    # Catch-all for CAPTURE-ONLY markets (sharp-anchored OddsChecker props /
+    # period / combo markets). These are persisted as odds history but are NOT
+    # in the pick/devig whitelist (_DIRECT_MARKETS) and have no settlement
+    # resolver, so they never mint picks or CLV — the real submarket is carried
+    # in market_detail ("oc_<slug>"). Never add OTHER to a devig/pick path.
+    OTHER = "other"
 
 
 class Outcome(StrEnum):

@@ -56,6 +56,9 @@ NOW = datetime.now(tz=UTC)
 
 
 def make_settings(**overrides: object) -> Settings:
+    # These exercise the oddsportal polling branch; pin it (the global default
+    # is now "oddschecker", which fail-closes without proxies).
+    overrides.setdefault("odds_source", "oddsportal")
     return Settings(_env_file=None, **overrides)  # type: ignore[arg-type]
 
 

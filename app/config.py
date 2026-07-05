@@ -572,9 +572,32 @@ class Settings(BaseSettings):
     bankroll_starting_balance: float | None = Field(default=None, gt=0.0)
 
     # --- Odds sources (read-only access) -----------------------------------------
-    # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);
-    # "odds_api"   = The Odds API (needs keys below).
-    odds_source: str = "oddsportal"
+    # "oddsportal"  = free OddsPortal odds via OddsHarvester (default, no key);
+    # "odds_api"    = The Odds API (needs keys below);
+    # "oddschecker" = free OddsChecker odds via the read-only curl_cffi/Hypernova
+    #                 ingester (app/ingestion/oddschecker.py). GET-only, no key.
+    #                 Datacenter-direct egress is Cloudflare-blocked, so it REQUIRES
+    #                 the scraper proxy pool (SCRAPER_PROXIES). OddsChecker carries
+    #                 Betfair Exchange + Sportsbook inline, so selecting it also
+    #                 moves the Betfair anchor to this provider (the dedicated
+    #                 Betfair Exchange capture stays gated to oddsportal).
+    odds_source: str = "oddschecker"
+
+    # --- OddsChecker (only when odds_source="oddschecker") ------------------------
+    # PIPELINE sport keys to poll (csv). soccer is the only CLV-validated sport;
+    # basketball/tennis/american_football come up VISIBILITY-ONLY / experimental
+    # under the same promotion gates as the oddsportal branch (shadow-first).
+    oddschecker_sports: str = "soccer,basketball,tennis,american_football"
+    # Daily discovery window in London-local days (today .. today+N-1). 2 =
+    # today+tomorrow, matching the OddsChecker date picker default.
+    oddschecker_days: int = Field(default=2, ge=1, le=4)
+    # Max concurrent match-page fetches per sport poll (curl_cffi clients).
+    oddschecker_max_clients: int = Field(default=8, ge=1, le=32)
+    # Capture-only: also persist every sharp-anchored (Betfair Exchange) unmapped
+    # market (props / period / combo) as Market.OTHER odds history. These NEVER
+    # mint picks/CLV (not in the devig whitelist, no settlement resolver) — pure
+    # odds capture. Heavier per match (fetches the all-odds API for all markets).
+    oddschecker_capture_sharp_markets: bool = True
     # Default "all" = OddsPortal's worldwide dated daily page (every league
     # that day, no slug filter); off-season leagues simply yield no events.
     # Matches the reference deployment so a fresh committed deploy is wide.

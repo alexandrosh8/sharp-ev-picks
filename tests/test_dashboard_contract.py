@@ -73,12 +73,16 @@ def test_proxy_pool_rendered_from_health_payload() -> None:
     text = _text()
     assert "function renderProxyRow" in text
     assert re.search(r"renderProxyRow\(\s*health\s*&&\s*health\.proxy_pool", text)
-    assert "Proxy pool degraded" in text
-    assert "Proxy pool healthy" in text
-    # Task B5: explicit no-headroom state, guarded so an older payload without
-    # the field can never render "undefined".
-    assert "NO HEADROOM" in text
+    # Severity is classified from the payload (degraded verdict / dead / bad slots),
+    # guarded so an older payload without headroom can never render "undefined".
+    assert "function classifyProxyPool" in text
+    assert 'pool.verdict === "Proxy pool degraded"' in text
     assert re.search(r'typeof\s+pool\.headroom\s*===\s*"number"', text)
+    # headroom<=0 is a CAPACITY hint (amber), not a hard failure (the old
+    # hard-red "NO HEADROOM" was misleading — a full pool is still healthy).
+    assert "no spare proxies above the" in text
+    # Dead / quarantined slots surface automatically.
+    assert "function proxyBadSlots" in text
 
 
 def test_401_redirects_with_authentication_required_message() -> None:
@@ -125,7 +129,8 @@ def test_state_vocabulary_present() -> None:
         "Circular Close Excluded",
         "Monitor-only",
         "Low Evidence",
-        "DO-NOT-RUN",
+        # H2 readiness copy was rewritten to plain language ("Not ready — still
+        # accruing…"); the terse "DO-NOT-RUN" token was retired deliberately.
         "Source Degraded",
         "model not validated — informational only",
         "This system never places bets",
@@ -168,7 +173,9 @@ def test_accessibility_markers() -> None:
 
 def test_mobile_breakpoints_and_dock_touch_targets() -> None:
     text = _text()
-    assert "@media (max-width:" in text
+    # Responsive breakpoints exist (the nav is now mobile-first: the desktop
+    # top-bar is gated behind a min-width query, the dock is the mobile default).
+    assert "@media (min-width:" in text or "@media (max-width:" in text
     dock_block = text[text.index(".dock button {") : text.index(".dock button {") + 400]
     assert "min-height: 44px" in dock_block
 

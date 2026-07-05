@@ -104,8 +104,8 @@
       .tscroll { overflow-x: auto; }
 
       /* ---- desk header ----------------------------------------------------- */
+      .topchrome { position: sticky; top: 0; z-index: 60; }
       .desk-head {
-        position: sticky; top: 0; z-index: 60;
         display: flex; align-items: center; gap: 12px;
         min-height: 52px; padding: calc(env(safe-area-inset-top) + 8px) 14px 8px;
         background: rgba(19, 23, 30, 0.96);
@@ -150,28 +150,26 @@
 
       /* ---- nav rail (desktop) + bottom dock (mobile) ----------------------- */
       .rail { display: none; }
-      @media (min-width: 1024px) {
+      .rail .rail-mark { display: none; }
+      @media (min-width: 720px) {
         .rail {
-          display: flex; flex-direction: column; gap: 2px;
-          position: fixed; left: 0; top: 0; bottom: 0; z-index: 55;
-          width: var(--rail-w); padding: 14px 8px;
-          background: var(--panel); border-right: 1px solid var(--line);
-          overflow-y: auto;
+          display: flex; flex-direction: row; align-items: stretch; gap: 2px;
+          padding: 0 10px; overflow-x: auto;
+          background: rgba(19, 23, 30, 0.96);
+          backdrop-filter: blur(6px);
+          border-bottom: 1px solid var(--line);
         }
-        .rail .rail-mark { padding: 2px 10px 18px; font-family: var(--mono); font-weight: 700; letter-spacing: 0.08em; color: var(--text); }
-        .rail .rail-mark .brand-mark { color: var(--cyan); }
         .rail button {
-          display: flex; align-items: center; gap: 8px; text-align: left;
-          background: transparent; border: 1px solid transparent; color: var(--dim);
-          padding: 8px 10px; min-height: 40px; border-radius: var(--radius-sm);
-          font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.06em;
+          display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+          background: transparent; border: 0; border-bottom: 2px solid transparent;
+          color: var(--dim); padding: 11px 16px; min-height: 42px; border-radius: 0;
+          font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em;
           text-transform: uppercase;
         }
+        .rail button:hover { color: var(--text); border-color: transparent; }
         .rail button[aria-current="true"] {
-          color: var(--text); background: var(--panel-2); border-left: 2px solid var(--cyan);
+          color: var(--text); border-bottom-color: var(--cyan);
         }
-        .desk-head { padding-left: calc(var(--rail-w) + 14px); }
-        main { margin-left: var(--rail-w); }
         body { padding-bottom: 0; }
         .dock { display: none !important; }
       }
@@ -249,8 +247,8 @@
       .attn-row .attn-text { flex: 1; font-size: 12.5px; color: var(--dim); }
 
       /* ---- Edges (master-detail) -------------------------------------------- */
-      .edges-layout { display: grid; grid-template-columns: 1fr; gap: 14px; }
-      @media (min-width: 1024px) { .edges-layout { grid-template-columns: 360px 1fr; align-items: start; } }
+      .edges-layout { display: block; }
+      .edge-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
       .edge-stream-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line); }
       .edge-stream-head input[type="search"] { flex: 1 1 140px; min-width: 120px; }
       .edge-group-h { display: flex; align-items: baseline; gap: 8px; padding: 12px 2px 4px; }
@@ -261,7 +259,7 @@
         display: grid; grid-template-columns: auto 1fr auto; grid-template-areas: "ko ev tier" "sel sel trust" ;
         gap: 3px 10px; width: 100%; text-align: left; padding: 10px 10px;
         background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
-        margin-bottom: 6px; min-height: 56px;
+        min-height: 56px;
       }
       .edge-row:hover, .edge-row.active { border-color: var(--faint); }
       .edge-row.active { background: var(--panel-2); }
@@ -274,23 +272,20 @@
       .edge-row.is-stale .er-event { color: var(--dim); }
 
       .edge-detail { display: none; }
-      .edge-detail.visible { display: block; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
-      .edge-detail-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+      .edge-detail.visible {
+        display: block; position: fixed; top: 0; right: 0; bottom: 0; z-index: 80;
+        width: min(560px, 100vw); overflow-y: auto; background: var(--bg);
+        border-left: 1px solid var(--line);
+        transform: translateX(100%); transition: transform 0.2s ease;
+        box-shadow: -18px 0 44px rgba(0, 0, 0, 0.5);
+      }
+      .edge-detail.visible.open { transform: translateX(0); }
+      .edge-detail-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; position: sticky; top: 0; background: var(--bg); z-index: 1; }
       .edge-detail-head h2 { flex: 1; font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .back-btn { display: none; }
+      .back-btn { display: inline-flex; }
       .edge-detail-grid { display: grid; grid-template-columns: 1fr; gap: 0; }
-      @media (min-width: 1200px) { .edge-detail-grid { grid-template-columns: 1fr 1fr; } }
       #edge-detail-body, #edge-evidence-body { padding: 14px; min-width: 0; }
       #edge-evidence-body { border-top: 1px solid var(--line); }
-      @media (min-width: 1200px) { #edge-evidence-body { border-top: 0; border-left: 1px solid var(--line); } }
-      @media (max-width: 1023px) {
-        .edge-detail.visible {
-          position: fixed; inset: 0; z-index: 80; overflow-y: auto; background: var(--bg);
-          transform: translateX(100%); transition: transform 0.2s ease; border-radius: 0;
-        }
-        .edge-detail.visible.open { transform: translateX(0); }
-        .back-btn { display: inline-flex; }
-      }
       .metric-list { display: grid; gap: 2px; }
       .metric { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
       .metric:first-child { border-top: 0; }
@@ -318,6 +313,7 @@
       .radar-band { margin-bottom: 16px; }
       .radar-band-h { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); padding: 6px 0; border-bottom: 1px solid var(--line); }
       .radar-row { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; font-size: 12px; }
+      .radar-row .rr-t { font-family: var(--mono); font-size: 10.5px; color: var(--cyan); white-space: nowrap; }
       .radar-row .rr-ev { font-weight: 600; flex: 1; min-width: 160px; }
       .radar-row .rr-lg { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
       .radar-row .rr-n { font-family: var(--mono); font-size: 11px; color: var(--dim); }
@@ -336,12 +332,43 @@
       /* ---- Sources ----------------------------------------------------------- */
       td.pending { color: var(--faint); font-style: italic; }
 
+      /* ---- Today: KPI strip + system-health strip -------------------------- */
+      .stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin-bottom: 14px; }
+      .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; min-width: 0; }
+      .stat .sv { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.1; }
+      .stat .sv.pos { color: var(--cyan); }
+      .stat .sv.warn { color: var(--warm); }
+      .stat .sv.neg { color: var(--danger); }
+      .stat .sk { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-top: 4px; }
+      .health-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+      .health-cell { display: grid; gap: 3px; align-content: start; }
+      .health-cell .hk { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+      .health-cell .hv { font-family: var(--mono); font-size: 13px; color: var(--text); }
+      .health-cell .hs { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
+      .health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+      .health-dot.ok { background: var(--success); }
+      .health-dot.warn { background: var(--warm); }
+      .health-dot.bad { background: var(--danger); }
+      #today-asof { color: var(--faint); }
+
+      /* ---- Proxy-pool health tile ------------------------------------------ */
+      .proxy-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+      .proxy-stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 6px; text-align: center; }
+      .proxy-stat .psv { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 700; color: var(--text); }
+      .proxy-stat .psv.neg { color: var(--danger); }
+      .proxy-stat .psk { font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); margin-top: 2px; }
+
+      /* ---- Sources: labeled ops lists -------------------------------------- */
+      .ops-list { display: grid; gap: 2px; margin-top: 4px; }
+      .ops-cap { color: var(--faint); font-size: 11.5px; line-height: 1.45; margin: 0 0 8px; }
+
       @media (prefers-reduced-motion: reduce) {
         * { animation: none !important; transition: none !important; }
       }
     </style>
   </head>
   <body>
+    <div class="topchrome">
     <header class="desk-head" id="desk-head">
       <div class="brand"><span class="brand-mark" aria-hidden="true">&#9670;</span><h1>SignalDesk</h1></div>
       <span class="head-grow"></span>
@@ -366,6 +393,7 @@
       <button type="button" data-view="lab" aria-current="false">Lab</button>
       <button type="button" data-view="sources" aria-current="false">Sources</button>
     </nav>
+    </div>
 
     <main id="main">
       <div id="offline-banner" class="banner banner-danger" role="alert"></div>
@@ -375,7 +403,8 @@
 
       <!-- ================= TODAY — the command screen ==================== -->
       <section class="view" id="view-today" data-view-key="today">
-        <div class="view-h"><h2>Today</h2></div>
+        <div class="view-h"><h2>Today</h2><span class="eyebrow" id="today-asof"></span></div>
+        <div class="stat-strip" id="today-stats"></div>
         <div class="tilegrid cols2">
           <section class="tile" aria-labelledby="actionable-h">
             <div class="tile-h"><h3 id="actionable-h">Qualified now</h3><span class="tag tag-cyan" id="actionable-count">—</span></div>
@@ -396,6 +425,10 @@
           <section class="tile" aria-labelledby="recent-h">
             <div class="tile-h"><h3 id="recent-h">Recent results</h3></div>
             <div id="recent-results"></div>
+          </section>
+          <section class="tile wide" aria-labelledby="syshealth-h">
+            <div class="tile-h"><h3 id="syshealth-h">System health</h3></div>
+            <div class="health-strip" id="today-health"></div>
           </section>
         </div>
       </section>
@@ -523,13 +556,18 @@
           </div>
         </section>
         <div class="tilegrid cols2" style="margin-top:14px">
+          <section class="tile" aria-labelledby="proxyh-h">
+            <div class="tile-h"><h3 id="proxyh-h">Proxy pool health</h3><span class="tag tag-neutral" id="proxyh-verdict">—</span></div>
+            <div id="proxy-health"></div>
+            <p class="muted">Proxies power the odds scrape. A degraded pool only slows scraping — the freshness gate discards any stale price, so no stale pick is ever minted. Dead or quarantined slots are listed automatically.</p>
+          </section>
           <section class="tile" aria-labelledby="stale-mon-h">
             <div class="tile-h"><h3 id="stale-mon-h">Staleness monitor</h3></div>
-            <p class="muted" id="staleness-monitor">Not loaded yet.</p>
+            <div class="muted" id="staleness-monitor">Not loaded yet.</div>
           </section>
           <section class="tile" aria-labelledby="reviewq-h">
             <div class="tile-h"><h3 id="reviewq-h">Review queues</h3></div>
-            <p class="muted" id="review-queues">Not loaded yet.</p>
+            <div class="muted" id="review-queues">Not loaded yet.</div>
             <details class="raw-reason" id="reviewq-browse">
               <summary>Review queue — newest</summary>
               <p class="muted" id="reviewq-browse-status">Not loaded yet.</p>
@@ -564,8 +602,9 @@
           <section class="tile" aria-labelledby="h2-h">
             <div class="tile-h"><h3 id="h2-h">H2 validation readiness</h3></div>
             <p class="muted" id="h2-readiness">—</p>
-            <p class="muted" id="h6-status">Agreement gate (H6): shadow-only — implemented in the
-              validation harness; tolerance (0.02 proposed) awaits operator sign-off. Monitor-only.</p>
+            <p class="muted" id="h6-status">Agreement gate (H6): monitor-only. The system checks
+              whether independent sources agree on a price, but this check never changes or blocks a
+              pick yet — a tolerance (proposed 0.02) is awaiting operator sign-off.</p>
           </section>
         </div>
       </section>
@@ -1234,6 +1273,69 @@
               ? n + " of " + floor + " trusted sharp closes settled — evidence threshold met."
               : n + " of " + floor + " trusted sharp closes settled — Low Evidence, still accruing.";
           }
+
+          // ---- at-a-glance KPI strip (all live, no fabricated metrics) ----
+          $("today-asof").textContent = state.lastOkAt
+            ? "updated " + state.lastOkAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+            : "";
+          const trackedOpen = state.picks.filter((p) => tierOf(p) === "volume" && !hasStarted(p) && p.status === "alerted").length;
+          const next24 = state.picks.filter((p) => {
+            if (hasStarted(p) || p.starts_at == null) return false;
+            const ms = new Date(p.starts_at).getTime() - Date.now();
+            return ms >= 0 && ms <= 24 * 3.6e6;
+          }).length;
+          const settledCount = state.picks.filter((p) => p.outcome != null || p.provisional_outcome != null).length;
+          const nSharp = perf ? Number(perf.n_sharp_close) || 0 : null;
+          const floorN = perf ? Number(perf.min_headline_n) || 50 : null;
+          const ageTxt = health && health.newest_poll_age_seconds != null
+            ? fmtRelAge(new Date(Date.now() - Number(health.newest_poll_age_seconds) * 1000).toISOString())
+            : "—";
+          const stripBox = $("today-stats"); stripBox.replaceChildren();
+          const mkStat = (val, label, cls) => {
+            const c = document.createElement("div"); c.className = "stat";
+            const v = document.createElement("div"); v.className = "sv" + (cls ? " " + cls : ""); v.textContent = val;
+            const k = document.createElement("div"); k.className = "sk"; k.textContent = label;
+            c.append(v, k); return c;
+          };
+          if (state.picksErr === null) {
+            stripBox.appendChild(mkStat(String(actionable.length), "Qualified now", actionable.length > 0 ? "pos" : null));
+            stripBox.appendChild(mkStat(String(trackedOpen), "Tracked open", null));
+            stripBox.appendChild(mkStat(String(next24), "Next 24h", null));
+            stripBox.appendChild(mkStat(String(settledCount), "Settled shown", null));
+          } else {
+            stripBox.appendChild(mkStat("—", "Picks", "neg"));
+          }
+          stripBox.appendChild(mkStat(perf ? nSharp + "/" + floorN : "—", "Trusted sharp closes",
+            perf && perf.sharp_status === "ok" ? "pos" : "warn"));
+          stripBox.appendChild(mkStat(state.gamesErr ? "—" : String(state.games.length), "Fixtures tracked", null));
+
+          // ---- system-health strip ----
+          const healthBox = $("today-health"); healthBox.replaceChildren();
+          const mkCell = (label, dotLvl, main, sub) => {
+            const c = document.createElement("div"); c.className = "health-cell";
+            const k = document.createElement("div"); k.className = "hk"; k.textContent = label;
+            const v = document.createElement("div"); v.className = "hv";
+            if (dotLvl) { const d = document.createElement("span"); d.className = "health-dot " + dotLvl; v.appendChild(d); }
+            v.appendChild(document.createTextNode(main));
+            const s = document.createElement("div"); s.className = "hs"; s.textContent = sub;
+            c.append(k, v, s); healthBox.appendChild(c);
+          };
+          const degradedH = state.picksErr !== null || (health && health.status === "degraded");
+          const staleH = dataIsStale(health);
+          mkCell("Data freshness", degradedH ? "bad" : staleH ? "warn" : "ok",
+            degradedH ? "Source degraded" : staleH ? "Stale" : "Verified",
+            "Newest odds " + ageTxt + " · window " + fmtNum(verifiedWindowMs(health) / 60000, 0) + "m");
+          const pool = health && health.proxy_pool;
+          const pc = classifyProxyPool(pool);
+          mkCell("Proxy pool", pc.level, pc.label,
+            pool ? "healthy " + fmt(pool.healthy) + "/" + fmt(pool.configured) + " · dead " + fmt(pool.dead) : pc.detail);
+          const sportCount = health && health.polls ? Object.keys(health.polls).length : 0;
+          mkCell("Sources", state.gamesErr ? "warn" : "ok",
+            (state.gamesErr ? "—" : state.games.length) + " fixtures",
+            sportCount > 0 ? sportCount + " sport poll" + (sportCount === 1 ? "" : "s") + " active" : "OddsPortal scrape feed");
+          mkCell("Odds staleness", staleH ? "warn" : "ok",
+            staleH ? "Stale — picks not current" : "Within freshness window",
+            "Auto-refresh every 60s");
         }
 
         // ===== EDGES — list ====================================================
@@ -1297,7 +1399,9 @@
               e.textContent = key === "actionable" ? "No pick currently qualifies." : "None right now.";
               box.appendChild(e); return;
             }
-            list.forEach((p) => box.appendChild(edgeRowEl(p, health)));
+            const grid = document.createElement("div"); grid.className = "edge-grid";
+            list.forEach((p) => grid.appendChild(edgeRowEl(p, health)));
+            box.appendChild(grid);
           });
         }
         function selectEdge(id) {
@@ -1308,11 +1412,11 @@
           openSheetIfMobile();
         }
         function openSheetIfMobile() {
+          // The detail is a right-docked drawer at ALL widths now (task C: the
+          // list uses the full width as a card grid), so always slide it open.
           $("edge-detail").classList.add("visible");
-          if (window.matchMedia("(max-width: 1023px)").matches) {
-            $("edge-detail").classList.add("open");
-            document.body.style.overflow = "hidden";
-          }
+          $("edge-detail").classList.add("open");
+          document.body.style.overflow = "hidden";
         }
         function closeSheet() {
           $("edge-detail").classList.remove("open");
@@ -1543,12 +1647,13 @@
             const band = document.createElement("div"); band.className = "radar-band"; band.appendChild(h);
             rows.slice(0, 40).forEach((g) => {
               const r = document.createElement("div"); r.className = "radar-row";
+              const tm = document.createElement("span"); tm.className = "rr-t mono"; tm.textContent = fmtLocal(g.starts_at);
               const ev = document.createElement("span"); ev.className = "rr-ev"; ev.textContent = fmt(g.event);
               const lg = document.createElement("span"); lg.className = "rr-lg mono"; lg.textContent = fmt(g.league);
               const bc = document.createElement("span"); bc.className = "rr-n mono"; bc.textContent = "books " + fmt(g.bookmaker_count);
               const mc = document.createElement("span"); mc.className = "rr-n mono"; mc.textContent = "markets " + fmt(g.market_count);
               const fr = document.createElement("span"); fr.className = "rr-n mono"; fr.textContent = fmtRelAge(g.updated_at || g.last_captured_at);
-              r.append(ev, lg, bc, mc, fr);
+              r.append(tm, ev, lg, bc, mc, fr);
               if (g.unvalidated === true || g.validated === false) {
                 const tag = document.createElement("span"); tag.className = "tag tag-warm tag-dashed"; tag.textContent = "Display-only";
                 tag.title = "model not validated — informational only";
@@ -1777,28 +1882,101 @@
           const c4 = document.createElement("td"); c4.textContent = notes; tr.appendChild(c4);
           return tr;
         }
+        // Task F: honest proxy-pool semantics used by BOTH the Sources source
+        // matrix and the dedicated proxy tile + the Today health strip.
+        //   GREEN  = healthy AND spare capacity (headroom > 0).
+        //   AMBER  = healthy but headroom <= 0 (a capacity hint, not a failure).
+        //   RED    = verdict degraded, OR dead > 0, OR any slot quarantined/half-open.
+        function proxyBadSlots(pool) {
+          return ((pool && pool.slots) || []).filter(
+            (s) => s.state === "quarantined" || s.state === "half_open"
+          );
+        }
+        function classifyProxyPool(pool) {
+          if (!pool) return { level: "warn", label: "Unknown", detail: "Not loaded yet." };
+          const dead = Number(pool.dead) || 0;
+          const degraded = pool.verdict === "Proxy pool degraded";
+          const bad = proxyBadSlots(pool);
+          const headroom = typeof pool.headroom === "number" ? pool.headroom : null;
+          if (degraded || dead > 0 || bad.length > 0) {
+            return {
+              level: "bad",
+              label: "Degraded",
+              detail: "Pool degraded — scraping is slower, but the freshness gate discards stale prices so no stale pick is minted.",
+            };
+          }
+          if (headroom !== null && headroom <= 0) {
+            return {
+              level: "warn",
+              label: "No spare capacity",
+              detail: "Pool healthy, but no spare proxies above the " + fmt(pool.concurrency_floor) + " concurrent fetchers — add more to speed up scraping.",
+            };
+          }
+          return { level: "ok", label: "Healthy", detail: "Healthy, with spare proxy capacity." };
+        }
+        function proxyTagClass(level) {
+          return level === "ok" ? "tag-success" : level === "warn" ? "tag-warm" : "tag-danger";
+        }
         function renderProxyRow(pool) {
           if (!pool) return sourceRow("Proxy pool", "—", "—", "—", "Not loaded yet.", "tag-neutral");
-          const degraded = pool.verdict === "Proxy pool degraded";
-          // Task B5: explicit no-headroom state (healthy - concurrency floor <= 0).
-          // Null-safe: an older payload without the field never renders
-          // "undefined" — it keeps the plain healthy/configured text instead.
-          const noHeadroom = typeof pool.headroom === "number" && pool.headroom <= 0;
-          const verdict = pool.verdict === "Proxy pool healthy" || pool.verdict === "Proxy pool degraded" ? pool.verdict : fmt(pool.verdict);
+          const c = classifyProxyPool(pool);
           return sourceRow(
             "Proxy pool",
-            noHeadroom
-              ? fmt(pool.healthy) + "/" + fmt(pool.configured) + " — NO HEADROOM"
-              : "healthy " + fmt(pool.healthy) + " / configured " + fmt(pool.configured),
-            "probing " + fmt(pool.probing) + " · dead " + fmt(pool.dead),
-            verdict,
-            degraded
-              ? "Source Degraded — freshness protected, no stale picks minted."
-              : noHeadroom
-                ? "No spare proxies vs concurrency floor " + fmt(pool.concurrency_floor) + " — expand the pool."
-                : "Nominal.",
-            degraded || noHeadroom ? "tag-danger" : "tag-success"
+            "healthy " + fmt(pool.healthy) + " / " + fmt(pool.configured),
+            "dead " + fmt(pool.dead) + " · quarantined " + fmt(pool.quarantined),
+            c.label,
+            c.detail,
+            proxyTagClass(c.level)
           );
+        }
+        function renderProxyHealth(pool) {
+          const box = $("proxy-health"); box.replaceChildren();
+          const badge = $("proxyh-verdict");
+          if (!pool) {
+            badge.textContent = "—"; badge.className = "tag tag-neutral";
+            const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "Not loaded yet.";
+            box.appendChild(p0); return;
+          }
+          const c = classifyProxyPool(pool);
+          badge.textContent = c.label; badge.className = "tag " + proxyTagClass(c.level);
+          const stats = document.createElement("div"); stats.className = "proxy-stats";
+          [["Configured", pool.configured, false], ["Healthy", pool.healthy, false],
+           ["Dead", pool.dead, true], ["Quarantined", pool.quarantined, false]].forEach(([k, v, negIfPos]) => {
+            const cell = document.createElement("div"); cell.className = "proxy-stat";
+            const sv = document.createElement("div"); sv.className = "psv" + (negIfPos && Number(v) > 0 ? " neg" : "");
+            sv.textContent = fmt(v);
+            const sk = document.createElement("div"); sk.className = "psk"; sk.textContent = k;
+            cell.append(sv, sk); stats.appendChild(cell);
+          });
+          box.appendChild(stats);
+          const note = document.createElement("p"); note.className = "muted"; note.style.marginTop = "8px";
+          note.textContent = c.detail; box.appendChild(note);
+          if (typeof pool.headroom === "number") {
+            const hr = document.createElement("p"); hr.className = "muted";
+            hr.textContent = "Spare capacity over " + fmt(pool.concurrency_floor) + " concurrent fetchers: " +
+              (pool.headroom > 0 ? "+" + pool.headroom : String(pool.headroom)) + ".";
+            box.appendChild(hr);
+          }
+          if (pool.failovers_1h != null) {
+            const fo = document.createElement("p"); fo.className = "muted";
+            fo.textContent = "Failovers: " + fmt(pool.failovers_15m) + " in 15m · " + fmt(pool.failovers_1h) + " in 1h" +
+              (pool.dominant_failure_class ? " · most common: " + pool.dominant_failure_class : "");
+            box.appendChild(fo);
+          }
+          const bad = proxyBadSlots(pool);
+          if (bad.length > 0) {
+            const h = document.createElement("div"); h.className = "eyebrow"; h.style.marginTop = "10px";
+            h.textContent = "Dead / quarantined slots"; box.appendChild(h);
+            bad.forEach((s) => {
+              const r = document.createElement("div"); r.className = "kickoff-row";
+              const nm = document.createElement("span"); nm.className = "kr-t mono"; nm.textContent = "slot " + fmt(s.index);
+              const st = document.createElement("span"); st.className = "tag tag-danger"; st.textContent = String(s.state).replace(/_/g, " ");
+              const de = document.createElement("span"); de.className = "kr-s mono";
+              de.textContent = (s.last_error_class || "—") + " · fails " + fmt(s.consecutive_failures) + " · " +
+                (s.last_success_at ? "last ok " + fmtRelAge(s.last_success_at) : "never ok");
+              r.append(nm, st, de); box.appendChild(r);
+            });
+          }
         }
         function renderSources() {
           loadMatchRate();
@@ -1822,11 +2000,36 @@
           const links = mr && mr.links;
           tb.appendChild(sourceRow("Review queues", "—", links ? String(links.auto_linked) + " linked" : "—", links ? (links.weak_links > 0 ? "Low Evidence" : "Nominal") : "Pending", links ? links.review_queued + " queued · " + links.weak_links + " weak links" : "Not loaded yet.", links ? "tag-success" : "tag-neutral"));
 
-          const staleBox = $("staleness-monitor");
-          staleBox.textContent = stale ? "Monitor-only — " + fmtDecisions(stale.fresh_decisions) + " · stale rows " + fmt(stale.stale_rows) : (state.matchRateErr ? "Could not load staleness monitor." : "Loading…");
+          renderProxyHealth(health && health.proxy_pool);
 
-          const rq = $("review-queues");
-          rq.textContent = links ? "Auto-linked " + links.auto_linked + " · review-queued " + links.review_queued + " · weak links " + links.weak_links : (state.matchRateErr ? "Could not load review queues." : "Loading…");
+          const staleBox = $("staleness-monitor"); staleBox.replaceChildren();
+          if (!stale) {
+            staleBox.textContent = state.matchRateErr ? "Could not load the staleness monitor." : "Loading…";
+          } else {
+            const cap = document.createElement("p"); cap.className = "ops-cap";
+            cap.textContent = "Monitor-only check on the Betfair price freshness guard — how many inline prices were fresh, demoted as stale, or had no matching live API price. Not a pick-feeding read.";
+            staleBox.appendChild(cap);
+            const ml = document.createElement("div"); ml.className = "metric-list ops-list";
+            const fd = stale.fresh_decisions || {};
+            const DEC = { pass: "Passed (fresh)", demote: "Demoted (stale)", no_api_match: "No live API match", no_api_price: "No live API price" };
+            Object.keys(fd).sort().forEach((k) => ml.appendChild(metricEl(DEC[k] || k.replace(/_/g, " "), String(fd[k]))));
+            ml.appendChild(metricEl("Stale rows in window", fmt(stale.stale_rows)));
+            staleBox.appendChild(ml);
+          }
+
+          const rq = $("review-queues"); rq.replaceChildren();
+          if (!links) {
+            rq.textContent = state.matchRateErr ? "Could not load review queues." : "Loading…";
+          } else {
+            const cap = document.createElement("p"); cap.className = "ops-cap";
+            cap.textContent = "Cross-source event links. Auto-linked matched automatically; in-review is held for human triage; weak links matched below 0.95 confidence.";
+            rq.appendChild(cap);
+            const ml = document.createElement("div"); ml.className = "metric-list ops-list";
+            ml.appendChild(metricEl("Auto-linked", fmt(links.auto_linked)));
+            ml.appendChild(metricEl("In review queue", fmt(links.review_queued)));
+            ml.appendChild(metricEl("Weak links (< 0.95)", fmt(links.weak_links)));
+            rq.appendChild(ml);
+          }
 
           const pmBox = $("per-market-summary"); pmBox.replaceChildren();
           const polls = (health && health.polls) || {};
@@ -1846,8 +2049,8 @@
           const perf = state.perf;
           const h2 = $("h2-readiness");
           h2.textContent = perf && perf.sharp_status === "ok"
-            ? "Preflight: coverage sufficient — informational readiness note only, not an automated gate."
-            : "Preflight: DO-NOT-RUN — coverage accruing.";
+            ? "Ready to review — enough trusted sharp closes have settled to look at H2 validation. This is an informational readiness note, not an automated trigger."
+            : "Not ready — still accruing trusted sharp closes before H2 validation can be reviewed.";
         }
 
         // ===== hash routing + nav wiring ======================================

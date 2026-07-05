@@ -147,7 +147,9 @@ All secrets live in `.env` only (copy from `.env.example`; `0600`, gitignored �
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `ODDS_SOURCE` | `oddsportal` | Free OddsPortal scrape (default) or `odds_api` (The Odds API). |
+| `ODDS_SOURCE` | `oddschecker` | Odds provider (switchable): `oddschecker` (free OddsChecker scrape, **default** — Betfair Exchange inline, all four sports, all markets), `oddsportal` (free OddsPortal scrape), or `odds_api` (The Odds API). |
+| `ODDSCHECKER_SPORTS` | `soccer,basketball,tennis,american_football` | Which sports the OddsChecker feed polls (csv). |
+| `ODDSCHECKER_CAPTURE_SHARP_MARKETS` | `true` | Also capture every sharp-anchored (Betfair Exchange) prop/period/combo market as odds history (never priced or settled — pure capture). |
 | `DASHBOARD_AUTH_ENABLED` | `true` in `.env.example` | First-run `/setup` creates the admin password (stored hashed). `false` = no login. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Pick alerts. Blank just disables alerts; the dashboard still works. |
 | `VALUE_REQUIRE_SHARP_ANCHOR` | `false` | When `true`, a premium pick without a real Pinnacle/Betfair anchor demotes to shadow. |
@@ -157,7 +159,7 @@ All secrets live in `.env` only (copy from `.env.example`; `0600`, gitignored �
 
 The full key reference (scrape tuning, timeouts, results-settlement cadence) is documented inline in [`.env.example`](.env.example).
 
-**Scrape proxies.** The free OddsPortal scrape runs from your host IP, which can be throttled and only lists your region's books. A rotating pool (`host|port|user|pass` quads, comma-separated) widens coverage and speeds a full slate. The same pool serves as egress for the free **Pinnacle ARCADIA close capture**, which rejects datacenter/direct IPs. Read-only either way; credentials never leave `.env`. On heavy slates, limited capture/proxy capacity can constrain coverage — the freshness gate then **discards** stale candidates rather than minting stale picks.
+**Scrape proxies.** The default **OddsChecker** source is Cloudflare-walled on datacenter-direct egress, so it **requires** a rotating pool to fetch at all; the OddsPortal scrape otherwise runs from your host IP, which can be throttled and only lists your region's books. A rotating pool (`host|port|user|pass` quads, comma-separated) widens coverage and speeds a full slate. The dashboard's proxy-pool panel now flags dead/quarantined slots automatically and shows spare-capacity headroom against the active source's fetch concurrency. The same pool serves as egress for the free **Pinnacle ARCADIA close capture**, which rejects datacenter/direct IPs. Read-only either way; credentials never leave `.env`. On heavy slates, limited capture/proxy capacity can constrain coverage — the freshness gate then **discards** stale candidates rather than minting stale picks.
 
 **Betfair Exchange.** An off-by-default, read-only capture ([ADR-0015](docs/adr/adr-0015-betfair-exchange-back-odds-capture.md)) binds Betfair BACK odds inline on the same canonical event as the soft books. Exchange anchors are liquidity-gated. The separate Betfair API staleness comparison is **monitor-only** — it records verdicts and never demotes live picks.
 
@@ -165,7 +167,7 @@ The full key reference (scrape tuning, timeouts, results-settlement cadence) is 
 
 Proven open-source engines bound into one pipeline:
 
-- **Ingestion** — OddsHarvester-based OddsPortal scrape (`app/ingestion/oddsportal.py`, Playwright render or `curl_cffi` JSON feed); free Pinnacle ARCADIA close capture (`app/ingestion/pinnacle_arcadia.py`); optional Betfair Exchange BACK odds; Betfair BSP archive tooling for validation. All read-only.
+- **Ingestion** — pluggable odds provider (`ODDS_SOURCE`): the default **OddsChecker** reader (`app/ingestion/oddschecker.py`, read-only `curl_cffi`/Hypernova-JSON, GET-only — football/basketball/tennis/American football, all devig-sound markets, with Betfair Exchange + Sportsbook inline so the sharp anchor travels with the provider; sharp-anchored props/period captured as odds history), or the OddsHarvester-based **OddsPortal** scrape (`app/ingestion/oddsportal.py`, Playwright render or `curl_cffi` JSON feed), or **The Odds API**; free Pinnacle ARCADIA close capture (`app/ingestion/pinnacle_arcadia.py`); optional dedicated Betfair Exchange BACK odds (OddsPortal source only); Betfair BSP archive tooling for validation. All read-only. **OddsChecker is Cloudflare-walled on datacenter-direct egress, so it requires `SCRAPER_PROXY_POOL`.**
 - **Pricing** — penaltyblog Dixon-Coles for football (`app/models/football_dc.py`); an 8-method devig (`app/probabilities/devig.py` — multiplicative, additive, power, Shin closed-form, probit, odds-ratio, logarithmic, differential-margin; 6 distinct estimators once proven equivalences are collapsed; parity-tested, with cross-library golden vectors).
 - **Edge & risk** — edge/EV gating (`app/edge/value.py`) with sharp/consensus anchor grading and an exchange-liquidity floor; fractional-Kelly sizing (informational) with per-pick and daily exposure caps (`app/risk/`).
 - **Resolution / matching** — a precision-hardened cross-source matcher (`app/resolution/`): marker-aware (women/youth/reserve/B sides never collapse onto the senior team), two-tier Jaro-Winkler over a curated alias seed, tennis surname-initial veto, tight kickoff windows, fail-closed on ambiguity, plus a read-only wrong-game self-audit each cycle. **Aliases are applied only through a sanctioned evidence process**: distinct-fixture co-occurrence evidence, dry-run patch review, regression tests, and a matcher differential proving zero unintended merges — generic-base aliases are never forced.

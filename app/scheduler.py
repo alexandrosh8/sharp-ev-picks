@@ -495,6 +495,50 @@ def build_scheduler(
             )
         else:
             logger.warning("odds_source=odds_api but no keys configured; polling disabled")
+    elif settings.odds_source == "oddschecker":
+        # Read-only OddsChecker (curl_cffi/Hypernova). GET-only; Betfair Exchange
+        # + Sportsbook arrive INLINE as ordinary bookmakers, so selecting this
+        # source moves the Betfair anchor here (the dedicated Betfair Exchange
+        # capture below stays gated to oddsportal). Datacenter-direct egress is
+        # Cloudflare-blocked, so a scraper proxy pool is required.
+        from app.ingestion.oddschecker import OddsCheckerLoader
+
+        proxies = settings.scraper_proxies()
+        oc_sports = tuple(_csv(settings.oddschecker_sports)) or ("soccer",)
+        if not proxies:
+            logger.error(
+                "odds_source=oddschecker requires SCRAPER_PROXIES "
+                "(datacenter-direct is Cloudflare-blocked); polling disabled"
+            )
+        else:
+            directory = EventDirectory()
+            sport_keys = oc_sports
+            # soccer is CLV-validated; the rest are unvalidated -> visibility-only
+            # / experimental under the SAME evidence gates as the oddsportal branch.
+            experimental_sports, visibility_only_sports = _unvalidated_sport_scopes(
+                settings,
+                basketball_keys=(
+                    frozenset({"basketball"}) if "basketball" in oc_sports else frozenset()
+                ),
+                tennis_keys=frozenset({"tennis"}) if "tennis" in oc_sports else frozenset(),
+                nfl_keys=(
+                    frozenset({"american_football"})
+                    if "american_football" in oc_sports
+                    else frozenset()
+                ),
+            )
+            loader = OddsCheckerLoader.for_scheduler(
+                directory,
+                sport_keys=oc_sports,
+                days=settings.oddschecker_days,
+                proxy_pool=proxies,
+                max_clients=settings.oddschecker_max_clients,
+                markets=None,  # capture every supported market across all sports
+                # Also persist sharp-anchored props/period as Market.OTHER odds
+                # history (capture-only; never priced/settled).
+                capture_other=settings.oddschecker_capture_sharp_markets,
+            )
+            league_label = "oddschecker"
     else:
         logger.error("unknown odds_source %r; polling disabled", settings.odds_source)
 

@@ -26,6 +26,9 @@ _NFL = frozenset({"american_football"})
 
 
 def make_settings(**overrides: object) -> Settings:
+    # Default to the oddsportal branch (global default is now "oddschecker",
+    # which fail-closes without proxies); odds_api tests override explicitly.
+    overrides.setdefault("odds_source", "oddsportal")
     return Settings(_env_file=None, **overrides)  # type: ignore[arg-type]
 
 

@@ -1087,9 +1087,16 @@ async def resolution_match_rate(
     # stale candidates — the payload's fixed wording says exactly that.
     from app.ingestion.proxy_health import get_registry as _get_proxy_registry
 
+    _s = _get_settings()
+    # Headroom is measured against the ACTIVE source's parallelism: OddsChecker
+    # fetches with oddschecker_max_clients, OddsPortal with oddsportal_concurrency.
+    # Using the wrong knob mislabels the "no spare proxies" headroom warning.
+    _floor = (
+        _s.oddschecker_max_clients if _s.odds_source == "oddschecker" else _s.oddsportal_concurrency
+    )
     report["proxy_pool"] = _get_proxy_registry().diagnostics(
-        configured=len(_get_settings().scraper_proxies()),
-        concurrency_floor=_get_settings().oddsportal_concurrency,
+        configured=len(_s.scraper_proxies()),
+        concurrency_floor=_floor,
     )
     return report
 
