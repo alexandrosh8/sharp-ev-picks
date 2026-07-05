@@ -6,7 +6,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <title>SignalDesk — trading console</title>
+    <title>sharp-ev-picks — +EV picks console</title>
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230e1116'/%3E%3Ccircle cx='8' cy='8' r='3.4' fill='none' stroke='%2357c7e3' stroke-width='1.6'/%3E%3C/svg%3E"
@@ -23,10 +23,10 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="SignalDesk" />
+    <meta name="apple-mobile-web-app-title" content="sharp-ev-picks" />
     <style>
       /* =====================================================================
-         SignalDesk — a sharp-market trading-intelligence console.
+         sharp-ev-picks — a sharp-market trading-intelligence console.
          Picks-only decision support: the operator reviews evidence here and
          places any bet themselves. Concept: TRADING CONSOLE — deep slate-
          graphite chrome, a restrained duotone accent (signal cyan for
@@ -114,7 +114,9 @@
       }
       .brand { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; }
       .brand-mark { color: var(--cyan); font-size: 16px; }
-      .brand h1 { font-family: var(--mono); letter-spacing: 0.06em; font-size: 15px; font-weight: 700; }
+      .brand-svg { display: block; width: 20px; height: 20px; }
+      .brand h1 { font-family: var(--mono); letter-spacing: 0.04em; font-size: 15px; font-weight: 700; color: var(--text); }
+      .brand h1 .w-ev { color: #22c55e; }
       .head-grow { flex: 1; }
       .system-pill {
         display: inline-flex; align-items: center; gap: 8px;
@@ -370,7 +372,7 @@
   <body>
     <div class="topchrome">
     <header class="desk-head" id="desk-head">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">&#9670;</span><h1>SignalDesk</h1></div>
+      <div class="brand"><svg class="brand-svg" viewBox="0 0 20 20" aria-hidden="true"><polyline points="3,15 8,11 12,7 16,4" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="4" r="2.4" fill="#22c55e"/></svg><h1>sharp<span class="w-ev">-ev-</span>picks</h1></div>
       <span class="head-grow"></span>
       <button
         id="system-pill" class="system-pill" type="button"
@@ -386,7 +388,7 @@
     </header>
 
     <nav class="rail" id="rail" aria-label="Sections">
-      <span class="rail-mark" aria-hidden="true"><span class="brand-mark">&#9670;</span> SignalDesk</span>
+      <span class="rail-mark" aria-hidden="true"><svg class="brand-svg" viewBox="0 0 20 20"><polyline points="3,15 8,11 12,7 16,4" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="4" r="2.4" fill="#22c55e"/></svg> sharp<span class="w-ev">-ev-</span>picks</span>
       <button type="button" data-view="today" aria-current="true">Today</button>
       <button type="button" data-view="edges" aria-current="false">Edges</button>
       <button type="button" data-view="radar" aria-current="false">Radar</button>
@@ -1332,7 +1334,7 @@
           const sportCount = health && health.polls ? Object.keys(health.polls).length : 0;
           mkCell("Sources", state.gamesErr ? "warn" : "ok",
             (state.gamesErr ? "—" : state.games.length) + " fixtures",
-            sportCount > 0 ? sportCount + " sport poll" + (sportCount === 1 ? "" : "s") + " active" : "OddsPortal scrape feed");
+            sportCount > 0 ? sportCount + " sport poll" + (sportCount === 1 ? "" : "s") + " active" : ((health && health.odds_source) || "odds") + " feed");
           mkCell("Odds staleness", staleH ? "warn" : "ok",
             staleH ? "Stale — picks not current" : "Within freshness window",
             "Auto-refresh every 60s");
@@ -1983,14 +1985,19 @@
           const health = state.health;
           const tb = $("source-rows"); tb.replaceChildren();
           const pollAge = health && health.newest_poll_age_seconds != null ? fmtNum(health.newest_poll_age_seconds / 60, 1) + "m" : "—";
-          tb.appendChild(sourceRow("OddsPortal scrape", pollAge, String(state.games.length) + " fixtures", health && health.status === "ok" ? "Nominal" : "Source Degraded", "Live scrape feed.", health && health.status === "ok" ? "tag-success" : "tag-danger"));
+          const oddsSrc = (health && health.odds_source) || null;
+          const oddsSrcLabel = oddsSrc === "oddschecker" ? "OddsChecker scrape"
+            : oddsSrc === "oddsportal" ? "OddsPortal scrape"
+            : oddsSrc === "odds_api" ? "The Odds API" : "Odds feed";
+          tb.appendChild(sourceRow(oddsSrcLabel, pollAge, String(state.games.length) + " fixtures", health && health.status === "ok" ? "Nominal" : "Source Degraded", "Live odds feed — active provider: " + (oddsSrc || "—") + ".", health && health.status === "ok" ? "tag-success" : "tag-danger"));
 
           const mr = state.matchRate;
           const pinRate = mr && mr.coverage_summary ? fmtPct(mr.coverage_summary.pinnacle_rate) : (state.matchRateErr ? "Could not load coverage summary." : "Loading…");
           tb.appendChild(sourceRow("Pinnacle ARCADIA", "—", pinRate, mr ? "Nominal" : "Pending", "Sharp-close archive.", mr ? "tag-success" : "tag-neutral"));
 
           const bfRate = mr && mr.coverage_summary ? fmtPct(mr.coverage_summary.betfair_rate) : (state.matchRateErr ? "Could not load coverage summary." : "Loading…");
-          tb.appendChild(sourceRow("Betfair inline", "—", bfRate, mr ? "Nominal" : "Pending", "Canonical-event inline anchor.", mr ? "tag-success" : "tag-neutral"));
+          const bfSrc = (health && health.betfair_source) || "Canonical-event inline anchor.";
+          tb.appendChild(sourceRow("Betfair inline", "—", bfRate, mr ? "Nominal" : "Pending", bfSrc, mr ? "tag-success" : "tag-neutral"));
 
           const stale = mr && mr.betfair_staleness;
           tb.appendChild(sourceRow("Betfair API", "—", "—", "Monitor-only", stale ? "fresh decisions — " + fmtDecisions(stale.fresh_decisions) : "Monitor-only — not a pick-feeding read.", "tag-neutral"));

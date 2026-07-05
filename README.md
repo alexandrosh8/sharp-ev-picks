@@ -38,6 +38,8 @@ The doctrine, in order of importance:
 
 **Historical backtests** (labeled historical — not live proof): an 18-league, 7-season sweep with a pre-registered holdout showed positive held-out CLV for the sharp-vs-soft method, with documented limitations (gross-fill optimism, correlated-sample SEs — since corrected to cluster-robust). That holdout is **spent**, and a later pre-registered single-shot on early-2026 data failed its sample-size bar due to a data-coverage anomaly, neither validating nor refuting the strategy. Details and caveats: [`docs/backtesting/`](docs/backtesting/) and [ADR-0019](docs/adr/). **Live trusted-CLV accrual is the primary evidence path today, and it is not yet conclusive.**
 
+> **On the OddsChecker default (added 2026-07-05):** those historical backtests are *method-level* and were measured on OddsPortal-era book coverage and team-name forms. Switching the default odds provider to OddsChecker does **not** inherit that evidence — its book set, matching, and closing-line capture differ, so its live trusted-CLV starts accruing from zero. A provider-specific backtest is not possible until settled results and closing lines accrue on the new source; until then OddsChecker picks are treated as unvalidated (shadow-first), exactly like any new source. No historical claim on this README implies the OddsChecker-sourced live system is validated.
+
 ## Sports coverage
 
 A sport is *shown* once it is scrapeable; it *mints premium picks* only where the pipeline is enabled — and any promotion beyond that requires an evidence review (trusted CLV, sample size, freshness, source agreement, settlement reliability), never an env flip.
@@ -129,7 +131,7 @@ The next strategy validation is **pre-registered, signed, and armed — and deli
 
 Evidence machinery accruing in the background: freshness-stratified trusted-CLV telemetry (anchor-age × mint-to-kickoff × sport × market buckets), monthly per-sport quality reports (coverage, agreement, freshness, settlement, sample sufficiency), and a pre-registered anchor-freshness bound (H8) that stays shadow-only. These reports exist to accrue meaningful samples over time, not to create same-day narratives.
 
-## Dashboard — SignalDesk
+## Dashboard — sharp-ev-picks
 
 A single self-contained page (`app/api/dashboard.html`; no framework, no CDN, installable PWA) styled as a trading-intelligence console. Five workspaces:
 
@@ -137,7 +139,7 @@ A single self-contained page (`app/api/dashboard.html`; no framework, no CDN, in
 - **Edges** — master-detail pick console (stream → detail → evidence panes on desktop; full-screen sheets on mobile) with explicit trust states: Premium vs **Shadow — tracked, informational** (never styled actionable), stale, weak match, missing anchor, and per-pick close/CLV trust.
 - **Radar** — market coverage by kickoff proximity, with DISPLAY-ONLY tags for unvalidated sports.
 - **Lab** — the evidence workspace: a claims ledger ("can claim / cannot claim yet"), the **trusted sharp-close CLV** headline kept strictly separate from all-closes context CLV, close-quality exclusions (tautological / circular / fabricated), calibration, **Sport Readiness** (per-sport shadow status and blockers), and sample-size warnings everywhere.
-- **Sources** — source-health matrix (scrape, ARCADIA, Betfair inline, Betfair API *monitor-only*, proxy pool — redacted), staleness monitor, review-queue counts, H2 validation readiness including the DO-NOT-RUN state, and the H6 status line.
+- **Sources** — source-health matrix showing the **active odds provider** (OddsChecker / OddsPortal / The Odds API) and **where the Betfair anchor comes from** under it, plus ARCADIA, Betfair API *monitor-only*, and a proxy-pool panel (redacted) that auto-flags dead/quarantined slots and spare-capacity headroom; staleness monitor, review-queue counts, plain-language H2 validation readiness, and the H6 status line.
 
 No performance claims appear on the dashboard; low-evidence and shadow items are visually incapable of looking actionable.
 

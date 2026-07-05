@@ -21,7 +21,9 @@ def _text() -> str:
 def test_no_tape_branding() -> None:
     text = _text()
     assert "TAPE" not in text
-    assert "SignalDesk" in text
+    # Rebranded to the README wordmark (sharp-ev-picks); SignalDesk retired.
+    assert "sharp-ev-picks" in text
+    assert "SignalDesk" not in text
 
 
 def test_no_innerhtml_sink() -> None:

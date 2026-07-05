@@ -830,9 +830,28 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
         # /resolution/match-rate, but that endpoint is slow enough on live
         # (10s+ under scrape load) to hit the dashboard's fetch abort — the
         # tile reads THIS eager, every-cycle payload instead (2026-07-03).
+        # Active data provenance for the Sources view: where ODDS come from and
+        # where the BETFAIR anchor comes from under the current ODDS_SOURCE.
+        "odds_source": settings.odds_source,
+        "betfair_source": (
+            "oddschecker — inline Betfair Exchange + Sportsbook"
+            if settings.odds_source == "oddschecker"
+            else (
+                "oddsportal — inline Betfair"
+                + (" + dedicated Exchange capture" if settings.betfair_exchange_enabled else "")
+                if settings.odds_source == "oddsportal"
+                else "none (The Odds API has no Betfair)"
+            )
+        ),
         "proxy_pool": _get_proxy_registry().diagnostics(
             configured=len(settings.scraper_proxies()),
-            concurrency_floor=settings.oddsportal_concurrency,
+            # Headroom vs the ACTIVE source's fetch concurrency (see the other
+            # diagnostics call site) — OddsChecker uses oddschecker_max_clients.
+            concurrency_floor=(
+                settings.oddschecker_max_clients
+                if settings.odds_source == "oddschecker"
+                else settings.oddsportal_concurrency
+            ),
         ),
     }
 
