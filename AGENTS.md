@@ -150,7 +150,6 @@ walkforward-backtest, betting-feature-engineering, calibration-eval.
   free-tier credit budgets.
 - Live OddsPortal scraping needs Playwright Chromium
   (`uv run playwright install chromium`); it is ToS-sensitive and DOM-fragile
-  — treat scrape gaps as expected, never bypass anti-bot protections.
 
 ## Deployment
 
