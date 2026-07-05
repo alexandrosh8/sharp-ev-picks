@@ -91,6 +91,17 @@ async def main() -> None:
 
     report = run_walkforward(matches, make_fit_fn(args.xi))
     print(f"evaluated {report.n_eval_matches} matches, priced {report.n_priced}\n")
+    if report.n_fit_failures:
+        print(f"WARNING: {report.n_fit_failures} model refit(s) FAILED and were skipped.")
+    if report.n_eval_matches and report.n_priced == 0:
+        # A priced-0 run is a BROKEN backtest, not a "no edge" finding — say so
+        # loudly so an empty table is never mistaken for a negative result.
+        print(
+            "ERROR: priced 0 of "
+            f"{report.n_eval_matches} matches — the model never produced a price "
+            "(missing dependency or every refit failed). This is NOT a 'no edge' "
+            "result; the backtest did not run."
+        )
 
     print(
         f"{'min_edge':>9} | {'bets':>5} | {'hit%':>6} | {'ROI%':>7} | "

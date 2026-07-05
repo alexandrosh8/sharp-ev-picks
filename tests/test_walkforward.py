@@ -68,6 +68,49 @@ def test_bankroll_path_compounds_and_tracks_drawdown() -> None:
     assert 0.0 <= dd <= 1.0
 
 
+def _synthetic_matches(n: int = 220) -> list[MatchRow]:
+    base = date(2024, 1, 1)
+    teams = [f"T{i}" for i in range(6)]
+    return [
+        row(base + timedelta(days=w * 2), teams[w % 6], teams[(w + 1) % 6], 2, 0, 1.5, 4.0, 6.0)
+        for w in range(n)
+    ]
+
+
+def test_missing_model_dependency_aborts_loudly() -> None:
+    """A missing modelling dependency at fit time must RAISE, never degrade to
+    an empty-but-green '0 bets / priced 0' report (regression: the bare
+    `except Exception` swallowed ModuleNotFoundError)."""
+    matches = _synthetic_matches()
+
+    def fit_fn(history: Sequence[MatchRow], as_of: date) -> PricedFn:
+        raise ModuleNotFoundError("No module named 'penaltyblog'")
+
+    with pytest.raises(ImportError):
+        run_walkforward(
+            matches, fit_fn, warmup_matches=120, training_window_days=600, refit_every_days=1
+        )
+
+
+def test_per_fold_fit_failure_is_counted_not_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A genuine (non-import) fit failure is tolerated but LOGGED and COUNTED,
+    so an all-failed run can't masquerade as an empty backtest."""
+    matches = _synthetic_matches()
+
+    def fit_fn(history: Sequence[MatchRow], as_of: date) -> PricedFn:
+        raise ValueError("singular design matrix")
+
+    with caplog.at_level("WARNING", logger="app.backtesting.walkforward"):
+        report = run_walkforward(
+            matches, fit_fn, warmup_matches=120, training_window_days=600, refit_every_days=1
+        )
+    assert report.n_priced == 0
+    assert report.n_fit_failures > 0
+    assert any("fit failed" in r.message for r in caplog.records)
+
+
 def test_walkforward_no_leakage_and_settles() -> None:
     # Synthetic league where home always wins 2-0; a model that knows this
     # should still only be fit on PRIOR matches. We pass a fit_fn that prices

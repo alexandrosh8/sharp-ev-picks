@@ -6,6 +6,7 @@ on the actual result, and measure CLV against the Pinnacle CLOSING line.
 Pure-ish: takes already-loaded MatchRows + a fit callback; no IO here.
 """
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -13,6 +14,8 @@ from datetime import date, timedelta
 from app.backtesting.clv import clv_log
 from app.ingestion.football_data import MatchRow
 from app.probabilities.devig import DevigMethod, devig
+
+logger = logging.getLogger(__name__)
 
 # A fit callback: given history rows + as_of date, return a priced-matchup
 # function (home, away) -> (p_home, p_draw, p_away) or None if unpriceable.
@@ -40,6 +43,11 @@ class BacktestReport:
     n_eval_matches: int
     n_priced: int
     bets: list[Bet] = field(default_factory=list)
+    # Per-fold model-fit failures that were tolerated (logged, not raised).
+    # A run where this equals the number of refit attempts and n_priced == 0
+    # is a FAILED backtest masquerading as an empty one — surface it, never
+    # let a broken model read as "no edge".
+    n_fit_failures: int = 0
 
     def at_threshold(self, min_edge: float, min_ev: float = 0.0) -> "ThresholdStats":
         chosen = [b for b in self.bets if b.edge >= min_edge and b.ev > min_ev]
@@ -110,8 +118,27 @@ def run_walkforward(
             if len(history) >= 100:
                 try:
                     priced_fn = fit_fn(history, m.match_date)
-                except Exception:
+                except ImportError:
+                    # A missing modelling dependency (e.g. penaltyblog) is
+                    # INFRASTRUCTURAL, not a per-fold pricing miss. Swallowing it
+                    # printed a clean "0 bets / priced 0" report — a broken run
+                    # that reads identically to "no edge found". Fail loudly.
+                    logger.error(
+                        "walkforward abort: model dependency missing at fit (%s)",
+                        m.match_date,
+                    )
+                    raise
+                except Exception as exc:
+                    # A genuine per-fold fit failure is tolerated, but never
+                    # silently: log it and count it so an all-failed run cannot
+                    # masquerade as an empty-but-green backtest.
+                    logger.warning(
+                        "walkforward fit failed at %s: %s",
+                        m.match_date,
+                        type(exc).__name__,
+                    )
                     priced_fn = None
+                    report.n_fit_failures += 1
             else:
                 # window too thin: do NOT silently reuse a stale model
                 priced_fn = None
