@@ -321,16 +321,69 @@ def oddsportal_slug_names(external_ref: str) -> tuple[str, str] | None:
     return home, away
 
 
+# OddsChecker match-URL slug: the two teams live in a path segment as
+# ``home-v-away`` (soccer/tennis) or ``away-at-home`` (US sports); NO trailing
+# per-team id to strip. The event_id can instead be numeric
+# (``oddschecker:101657668``) — those carry no team names, so we return None
+# (the slug tier simply doesn't fire, exactly as for a non-URL OddsPortal ref).
+_ODDSCHECKER_VS = re.compile(r"^(.+?)-v-(.+)$")
+_ODDSCHECKER_AT = re.compile(r"^(.+?)-at-(.+)$")
+
+
+def oddschecker_slug_names(external_ref: str) -> tuple[str, str] | None:
+    """Parse (home, away) from an OddsChecker match-URL external_ref, or None.
+
+    Mirrors ``oddsportal_slug_names`` for the OddsChecker ref shape
+    (``oddschecker:football/english/premier-league/arsenal-v-coventry/winner``
+    or ``oddschecker:tennis/ashlyn-krueger-v-marta-kostyuk``). The matchup lives
+    in whichever path segment carries the ``-v-``/``-at-`` separator (scanned
+    from the end); ``-at-`` is US-sports "away at home", so its orientation is
+    flipped to (home, away). Numeric ids (``oddschecker:<subeventId>``) carry no
+    names and return None. Like the OddsPortal slug this is only ever a FALLBACK
+    candidate key — a wrong close still cannot result, since match_event needs a
+    UNIQUE home+away+day candidate and the marker veto still applies.
+    """
+    if not external_ref.startswith("oddschecker:"):
+        return None
+    path = external_ref.split(":", 1)[1].split("#", 1)[0]
+    parts = [p for p in path.split("/") if p]
+    for seg in reversed(parts):
+        vs = _ODDSCHECKER_VS.match(seg)
+        if vs is not None:
+            home, away = vs.group(1), vs.group(2)
+        else:
+            at = _ODDSCHECKER_AT.match(seg)
+            if at is None:
+                continue
+            away, home = at.group(1), at.group(2)  # "<away> at <home>"
+        home = home.replace("-", " ").strip()
+        away = away.replace("-", " ").strip()
+        if home and away:
+            return home, away
+    return None
+
+
+def slug_names(external_ref: str) -> tuple[str, str] | None:
+    """Source-agnostic (home, away) from a match-URL/id external_ref.
+
+    Dispatches by ref shape so the slug FALLBACK tier works for every provider
+    (OddsPortal URL, OddsChecker path/id). This is a BLOCKING/candidate-key
+    addition into the identical strict matcher — it changes WHICH candidates are
+    tried, never a similarity threshold or a veto.
+    """
+    return oddsportal_slug_names(external_ref) or oddschecker_slug_names(external_ref)
+
+
 def marker_safe_slug_names(external_ref: str, home: str, away: str) -> tuple[str, str] | None:
-    """`oddsportal_slug_names`, refused when the slug LOSES a distinguishing
-    marker (women/youth/reserve) the display names carry.
+    """`slug_names`, refused when the slug LOSES a distinguishing marker
+    (women/youth/reserve) the display names carry.
 
     The slug drops the women-league "W" suffix etc., so matching on it would
     pseudo-merge a women's/youth pick onto the marker-less men's/senior
     fixture — the wrong-game class the close-attach path categorically
     refuses. Use this anywhere the slug is tried as a fallback match key.
     """
-    slug = oddsportal_slug_names(external_ref)
+    slug = slug_names(external_ref)
     if slug is None:
         return None
     display_markers = distinguishing_markers(home) | distinguishing_markers(away)

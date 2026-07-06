@@ -18,7 +18,9 @@ from app.resolution.matching import (
     match_event_hardened,
     match_event_hardened_scored,
     normalize_name,
+    oddschecker_slug_names,
     oddsportal_slug_names,
+    slug_names,
     strip_markers,
     token_sort_ratio,
 )
@@ -36,7 +38,9 @@ __all__ = [
     "match_event_hardened",
     "match_event_hardened_scored",
     "normalize_name",
+    "oddschecker_slug_names",
     "oddsportal_slug_names",
+    "slug_names",
     "strip_markers",
     "token_sort_ratio",
 ]

@@ -15,7 +15,9 @@ from app.resolution.matching import (
     marker_safe_slug_names,
     match_event,
     normalize_name,
+    oddschecker_slug_names,
     oddsportal_slug_names,
+    slug_names,
 )
 
 
@@ -45,6 +47,59 @@ def test_marker_safe_slug_names_refuses_marker_losing_slugs() -> None:
     assert marker_safe_slug_names(ref, "Los Angeles Sparks W", "New York Liberty W") is None
     # One-sided marker loss is enough to refuse.
     assert marker_safe_slug_names(ref, "Los Angeles Sparks W", "New York Liberty") is None
+
+
+def test_oddschecker_slug_names_parse_v_and_at_orientations() -> None:
+    # ISSUE 1 fix: OddsChecker refs carry the matchup in a path segment
+    # ("home-v-away" for soccer/tennis; "away-at-home" for US sports), unlike
+    # OddsPortal's per-team-id URL. This was previously INERT (the slug tier
+    # only fired on "oddsportal.com/" refs), starving Pinnacle-close recall.
+    assert oddschecker_slug_names(
+        "oddschecker:football/english/premier-league/arsenal-v-coventry/winner"
+    ) == ("arsenal", "coventry")
+    # matchup can be the last segment (no trailing /winner)
+    assert oddschecker_slug_names(
+        "oddschecker:tennis/wimbledon/ashlyn-krueger-v-marta-kostyuk"
+    ) == ("ashlyn krueger", "marta kostyuk")
+    # "-at-" is US "away at home" -> orientation flips to (home, away)
+    assert oddschecker_slug_names(
+        "oddschecker:american-football/nfl/carolina-panthers-at-arizona-cardinals/winner"
+    ) == ("arizona cardinals", "carolina panthers")
+
+
+def test_oddschecker_slug_names_none_for_numeric_and_foreign_refs() -> None:
+    # Numeric subevent ids carry NO team names -> None (no regression; the slug
+    # tier simply doesn't fire, same as a non-URL OddsPortal ref).
+    assert oddschecker_slug_names("oddschecker:101657668") is None
+    assert oddschecker_slug_names("oddschecker:football/some-league/standings") is None
+    assert oddschecker_slug_names("1631993947") is None
+    assert oddschecker_slug_names("https://www.oddsportal.com/x/h2h/a-b/c-d/") is None
+
+
+def test_slug_names_dispatches_both_providers_oddsportal_byte_identical() -> None:
+    # Dispatcher must be byte-identical to oddsportal_slug_names on OddsPortal
+    # refs (differential-fuzz decision-identity) AND newly parse OddsChecker.
+    op = "https://www.oddsportal.com/basketball/h2h/los-angeles-sparks-Ia6UdBZF/new-york-liberty-h4iAv3Jl/#x"
+    assert slug_names(op) == oddsportal_slug_names(op)
+    assert slug_names(op) == ("los angeles sparks", "new york liberty")
+    assert slug_names("oddschecker:football/english/premier-league/arsenal-v-coventry/winner") == (
+        "arsenal",
+        "coventry",
+    )
+    assert slug_names("oddschecker:101657668") is None
+    assert slug_names("1631993947") is None
+
+
+def test_marker_safe_slug_names_refuses_oddschecker_marker_loss() -> None:
+    # The marker veto must protect OddsChecker refs too: a women's fixture whose
+    # slug drops the "W" must never attach the marker-less senior close.
+    ref = "oddschecker:basketball/wnba/las-vegas-aces-v-new-york-liberty/winner"
+    assert marker_safe_slug_names(ref, "Las Vegas Aces W", "New York Liberty W") is None
+    # A marker-preserving OddsChecker slug is returned normally.
+    assert marker_safe_slug_names(ref, "Las Vegas Aces", "New York Liberty") == (
+        "las vegas aces",
+        "new york liberty",
+    )
 
 
 def test_marker_safe_slug_names_passes_marker_free_and_marker_retaining_slugs() -> None:

@@ -2629,7 +2629,7 @@ async def resolve_pinnacle_close_snaps(
         distinguishing_markers,
         match_event_hardened_scored,
         normalize_name,
-        oddsportal_slug_names,
+        slug_names,
     )
     from app.resolution.tennis_names import canonical_tennis_name
 
@@ -2727,7 +2727,7 @@ async def resolve_pinnacle_close_snaps(
         # the men's "Brasiliense v Sobradinho" close onto a "... U20" pick). So
         # use the slug only when it RETAINS every distinguishing marker the
         # display name has; otherwise the recovery is unsafe and we skip it.
-        slug = oddsportal_slug_names(pick_external_ref)
+        slug = slug_names(pick_external_ref)
         if slug is not None:
             sh = canonical_tennis_name(slug[0]) if is_tennis else slug[0]
             sa = canonical_tennis_name(slug[1]) if is_tennis else slug[1]
