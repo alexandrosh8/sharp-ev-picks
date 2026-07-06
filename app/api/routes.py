@@ -202,7 +202,11 @@ _LOGIN_HTML = """<!doctype html>
   <body>
     <form class="card" id="login-form" method="post" autocomplete="off">
       <div class="brand">
-        <svg class="brand-svg" viewBox="0 0 20 20" aria-hidden="true"><polyline points="3,15 8,11 12,7 16,4" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="4" r="2.4" fill="#22c55e"/></svg><span class="wm">sharp<span class="w-ev">-ev-</span>picks</span>
+        <svg class="brand-svg" viewBox="0 0 20 20" aria-hidden="true"><polyline
+          points="3,15 8,11 12,7 16,4" fill="none" stroke="#22c55e"
+          stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+          /><circle cx="16" cy="4" r="2.4" fill="#22c55e"/></svg>
+        <span class="wm">sharp<span class="w-ev">-ev-</span>picks</span>
       </div>
       <div class="sub">+EV picks console · sign in</div>
       <label for="u">Username</label>
@@ -585,7 +589,11 @@ _SETUP_HTML = """<!doctype html>
   <body>
     <form class="card" id="setup-form" method="post" autocomplete="off">
       <div class="brand">
-        <svg class="brand-svg" viewBox="0 0 20 20" aria-hidden="true"><polyline points="3,15 8,11 12,7 16,4" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="4" r="2.4" fill="#22c55e"/></svg><span class="wm">sharp<span class="w-ev">-ev-</span>picks</span>
+        <svg class="brand-svg" viewBox="0 0 20 20" aria-hidden="true"><polyline
+          points="3,15 8,11 12,7 16,4" fill="none" stroke="#22c55e"
+          stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+          /><circle cx="16" cy="4" r="2.4" fill="#22c55e"/></svg>
+        <span class="wm">sharp<span class="w-ev">-ev-</span>picks</span>
       </div>
       <div class="sub">first run · create your admin password</div>
       <label for="u">Username</label>
