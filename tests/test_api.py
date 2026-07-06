@@ -825,6 +825,51 @@ def _pick_row(**over: object) -> dict[str, object]:
     return base
 
 
+def test_banner_fair_odds_reconciles_to_one_fair() -> None:
+    """FIX 5: the banner's Fair odds derives from the SAME fair as Edge and
+    Min-acceptable — closing_fair_probability if present, else model_probability
+    — NEVER fair_probability (which equals offered on value picks)."""
+    from app.storage.repositories import banner_fair_odds
+
+    # value pick: model_probability 0.62 (sharp fair) != 1/1.67 (offered implied).
+    # No re-price yet -> fair odds from model_probability = 1/0.62 = 1.61, NOT 1.67.
+    assert banner_fair_odds(None, 0.62) == f"{1.0 / 0.62:.2f}"
+    assert banner_fair_odds(None, 0.62) != "1.67"
+    # once a re-price exists, the live closing fair wins (0.50 -> 2.00).
+    assert banner_fair_odds(0.50, 0.62) == "2.00"
+    # degenerate stored prob -> None (no honest fair odds).
+    assert banner_fair_odds(None, None) is None
+    assert banner_fair_odds(None, 0.0) is None
+    assert banner_fair_odds(None, 1.0) is None
+
+
+def test_picks_serializer_stamps_structural_sane(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """FIX 1 display defense-in-depth: the /picks serializer stamps
+    ``structural_sane`` per row so a stored-impossible pick can never render
+    star-rated. Offered below its own min-acceptable floor => False; a normal
+    self-consistent row => True."""
+    from app.api import routes
+
+    rows = [
+        # offered 1.67 BELOW its own min-acceptable 2.06 (the reported totals row)
+        _pick_row(decimal_odds="1.67", min_acceptable_odds="2.06", edge="0.50"),
+        # inverted pair: fair (1/0.60 = 1.667) at/above offered 1.60, edge>0
+        _pick_row(decimal_odds="1.60", model_probability="0.60", edge="0.05"),
+        # normal self-consistent premium row
+        _pick_row(decimal_odds="2.00", model_probability="0.55", min_acceptable_odds="1.74"),
+    ]
+
+    async def fake_rows(session, limit, tier=None, min_edge=0.0, volume_min_edge=0.0):  # type: ignore[no-untyped-def]
+        return [dict(r) for r in rows]
+
+    monkeypatch.setattr(routes, "latest_picks_with_events", fake_rows)
+    body = TestClient(make_app()).get("/picks").json()
+
+    assert body[0]["structural_sane"] is False  # offered < min-acceptable
+    assert body[1]["structural_sane"] is False  # inverted fair/offered pair
+    assert body[2]["structural_sane"] is True  # self-consistent
+
+
 def test_picks_serializer_attaches_confidence_rating(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The /picks route enriches each row with a 1..5 star confidence block
     computed from existing fields — the dashboard headline that replaces the

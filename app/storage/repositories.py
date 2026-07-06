@@ -378,6 +378,24 @@ def _provisional_result_fields(
     return {"provisional_outcome": outcome, "provisional_pnl": pnl}
 
 
+def banner_fair_odds(
+    closing_fair_probability: float | None, model_probability: float | None
+) -> str | None:
+    """FIX 5: the reconciled fair ODDS string for the /picks banner.
+
+    Reasons against the SAME fair as ``min_acceptable_odds`` and the live edge:
+    the re-priced live fair (``closing_fair_probability``) once it exists, else
+    the entry sharp fair (``model_probability``). Deliberately NOT
+    ``fair_probability`` — on value picks that column stores the OFFERED implied
+    prob, so 1/fair_probability structurally equals the offered odds (the
+    reported "OFFERED 1.67 == FAIR 1.67" self-contradiction). Returns None for a
+    degenerate stored prob (outside (0, 1)). Pure function."""
+    fair = closing_fair_probability if closing_fair_probability is not None else model_probability
+    if fair is None or not 0.0 < fair < 1.0:
+        return None
+    return f"{1.0 / fair:.2f}"
+
+
 async def latest_picks_with_events(
     session: AsyncSession,
     limit: int = 50,
@@ -436,6 +454,15 @@ async def latest_picks_with_events(
             return None  # degenerate stored prob: no honest floor exists
         floor = min_acceptable_odds(fair, eff_min_edge, book=p.current_bookmaker or p.bookmaker)
         return f"{ceil_odds(floor):.2f}" if floor is not None else None
+
+    def _fair_odds(p: Pick) -> str | None:
+        # FIX 5: the banner's "Fair odds" must reference the SAME fair the Edge
+        # and Min-acceptable numbers reason against — NOT fair_probability (see
+        # banner_fair_odds). Delegated to the module-level pure helper.
+        return banner_fair_odds(
+            float(p.closing_fair_probability) if p.closing_fair_probability is not None else None,
+            float(p.model_probability) if p.model_probability is not None else None,
+        )
 
     home = aliased(Team)
     away = aliased(Team)
@@ -553,6 +580,11 @@ async def latest_picks_with_events(
             # execution helper: "still +EV down to X.XX" (null = not
             # computable — min_edge unset or fair prob >= floor impossible)
             "min_acceptable_odds": _min_acceptable(p),
+            # FIX 5: reconciled fair ODDS for the banner — 1/(closing_fair_probability
+            # ?? model_probability), the SAME fair min_acceptable_odds and the live
+            # edge reason against. NOT 1/fair_probability (which equals offered on
+            # value picks). null = degenerate stored prob.
+            "fair_odds": _fair_odds(p),
             # tier-resolved edge floor (premium=min_edge, volume=volume_min_edge)
             # so the dashboard colours edges/verdicts tier-aware (dash-2/EEV-1).
             "edge_floor": _edge_floor(p),

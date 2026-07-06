@@ -427,6 +427,58 @@ def ah_candidate_plausible(
     return bet.sharp_fair_prob / bet.implied_prob <= max_sharp_soft_ratio
 
 
+def structural_sanity_violation(
+    bet: ValueBet,
+    *,
+    min_edge: float,
+    sanity_max_edge: float,
+    commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
+) -> bool:
+    """Market-agnostic STRUCTURAL-SANITY check on one value candidate's
+    (fair, offered, edge) triple — the defensive backstop behind FIX 1.
+
+    A phantom "impossible-edge" candidate can be minted by ANY upstream data
+    defect (a totals/spreads line dropped so the fair and the offered price come
+    from DIFFERENT lines; a derived double-chance fair inheriting a stale/
+    mislabeled sharp anchor). Rather than fix each cause here, this predicate
+    catches the *shape* of the impossibility so the pipeline can HARD-DEMOTE such
+    a premium candidate to the shadow (volume) tier — still persisted + CLV-
+    tracked, never a silent drop, never alerted.
+
+    Returns True (impossible) when ANY holds:
+      * ``edge > sanity_max_edge`` — an edge above the SEPARATE, stricter sanity
+        ceiling (default 0.15) is a data error on any liquid market. This is a
+        DIFFERENT, tighter control than the coarse ``max_edge`` (0.20) data-error
+        cap in ``_scan_against_fair`` — both stay in force.
+      * ``sharp_fair_prob`` is not a usable probability in (0, 1); or
+      * ``fair_odds`` (1 / sharp_fair_prob) ``>= best_odds_effective`` — the fair
+        price is at or above the offered EFFECTIVE price, i.e. no real edge (an
+        inverted/crossed fair-vs-offered pair); or
+      * the min-acceptable floor for ``min_edge`` is None (no price retains the
+        edge against this fair); or
+      * the RAW ``best_odds`` sits BELOW that min-acceptable floor — the offered
+        price is under its own qualifying minimum, a contradiction for a
+        would-be value pick.
+
+    Pure function (no IO); informational-only platform — nothing here places a
+    bet. A self-consistent legitimate candidate (edge in [min_edge,
+    sanity_max_edge], offered at/above its floor) never violates.
+    """
+    if bet.edge > sanity_max_edge:
+        return True
+    if not 0.0 < bet.sharp_fair_prob < 1.0:
+        return True
+    fair_odds = 1.0 / bet.sharp_fair_prob
+    if fair_odds >= bet.best_odds_effective:
+        return True
+    floor = min_acceptable_odds(
+        bet.sharp_fair_prob, min_edge, book=bet.best_book, commissions=commissions
+    )
+    if floor is None:
+        return True
+    return bet.best_odds < floor
+
+
 def _norm(s: str) -> str:
     return s.strip().lower()
 

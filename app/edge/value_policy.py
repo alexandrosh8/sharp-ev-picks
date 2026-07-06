@@ -76,6 +76,17 @@ class ValuePolicy:
     # liquid market, so the value scan rejects it (a feed defect can't mint a
     # phantom +EV pick). Default math.inf = OFF; set from Settings.value_max_edge.
     max_edge: float = math.inf
+    # FIX 1 — STRUCTURAL-SANITY CEILING (a SEPARATE, stricter control than
+    # max_edge above; both stay in force). A premium candidate whose edge
+    # exceeds this — or whose (fair, offered) pair is otherwise structurally
+    # impossible (inverted, or offered below its own min-acceptable floor) — is
+    # HARD-DEMOTED to the volume (shadow) tier at the value-mint chokepoint:
+    # still persisted + CLV-tracked, never a silent drop, never alerted. This is
+    # the market-agnostic backstop that neutralizes phantom impossible-edge picks
+    # regardless of the upstream data defect that produced them (see
+    # app/edge/value.structural_sanity_violation). Default 0.15; set from
+    # Settings.value_sanity_max_edge at the composition root.
+    sanity_max_edge: float = 0.15
     # (market_key, ceiling): per-market DATA-ERROR ceiling override — the per-market
     # sibling of max_edge. Markets without an entry use the GLOBAL max_edge passed
     # alongside this policy (Settings.value_max_edge). Empty () = DISABLED — every

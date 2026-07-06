@@ -1515,8 +1515,17 @@
           body.appendChild(buildTimeline(p));
 
           const ml = document.createElement("div"); ml.className = "metric-list";
-          const fairProb = numOf(p.fair_probability);
-          const fairOdds = isFinite(fairProb) && fairProb > 0 ? (1 / fairProb).toFixed(2) : "—";
+          // FIX 5: the banner's Fair odds, Edge, and Min-acceptable must all
+          // reference ONE fair. Prefer the reconciled server-serialized fair_odds
+          // (1/(closing_fair_probability ?? model_probability)); fall back to the
+          // same computation client-side — NEVER 1/fair_probability, which on
+          // value picks equals the offered odds (the "OFFERED == FAIR" symptom).
+          let fairOdds = fmtOdds(p.fair_odds);
+          if (fairOdds === "—") {
+            const cf = numOf(p.closing_fair_probability), mf = numOf(p.model_probability);
+            const fair = isFinite(cf) && cf > 0 ? cf : mf;
+            fairOdds = isFinite(fair) && fair > 0 && fair < 1 ? (1 / fair).toFixed(2) : "—";
+          }
           ml.appendChild(metricEl("Offered odds", fmtOdds(p.decimal_odds)));
           ml.appendChild(metricEl("Fair odds", fairOdds));
           ml.appendChild(metricEl("Min acceptable odds", fmtOdds(p.min_acceptable_odds)));

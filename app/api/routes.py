@@ -868,6 +868,39 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
+def _row_structural_sane(row: dict[str, Any]) -> bool:
+    """FIX 1 display defense-in-depth: whether a stored /picks row's headline
+    numbers are internally consistent, so a stored-impossible pick can NEVER
+    render star-rated on the dashboard even if it slipped past the mint gate.
+
+    Impossible (returns False) when EITHER:
+      * the offered ``decimal_odds`` sits BELOW the row's own
+        ``min_acceptable_odds`` floor (the pick fails its own qualifying
+        minimum — the reported "MIN ACCEPTABLE 2.06 > OFFERED 1.67" symptom); or
+      * the fair odds (1 / ``model_probability`` — the sharp fair on value picks)
+        are at or above the offered price while a POSITIVE edge is claimed (an
+        inverted fair/offered pair — no real edge).
+    Missing/degenerate fields => sane (True): absence is never a violation."""
+    offered = _coerce_float(row.get("decimal_odds"))
+    if offered is None or offered <= 1.0:
+        return True
+    min_acc = _coerce_float(row.get("min_acceptable_odds"))
+    if min_acc is not None and offered < min_acc:
+        return False
+    edge = _coerce_float(row.get("current_edge"))
+    if edge is None:
+        edge = _coerce_float(row.get("edge")) or 0.0
+    fair_prob = _coerce_float(row.get("model_probability"))
+    # inverted fair/offered pair: fair odds (1/fair_prob) at/above the offered
+    # price while a positive edge is claimed => structurally impossible.
+    return not (
+        fair_prob is not None
+        and 0.0 < fair_prob < 1.0
+        and edge > 0.0
+        and 1.0 / fair_prob >= offered
+    )
+
+
 def _attach_confidence(
     rows: list[dict[str, Any]], threshold: float, volume_threshold: float
 ) -> list[dict[str, Any]]:
@@ -903,6 +936,10 @@ def _attach_confidence(
             "label": rating.label,
             "reasons": list(rating.reasons),
         }
+        # FIX 1 display defense-in-depth: a stored-impossible row (offered below
+        # its own min-acceptable, or an inverted fair/offered pair) is flagged so
+        # the dashboard can refuse to render it star-rated.
+        row["structural_sane"] = _row_structural_sane(row)
     return rows
 
 

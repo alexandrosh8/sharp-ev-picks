@@ -344,6 +344,15 @@ class Settings(BaseSettings):
     # never real value — the value scan rejects it so a feed defect can't mint a
     # phantom +EV pick. Must stay > value_min_edge. Soccer-appropriate at 0.20.
     value_max_edge: float = Field(default=0.20, gt=0.0)
+    # FIX 1 — STRUCTURAL-SANITY CEILING. A SEPARATE, stricter ceiling than
+    # value_max_edge above (which stays the coarse data-error cap in the value
+    # scan). A premium candidate whose edge exceeds this — or whose fair/offered
+    # pair is otherwise structurally impossible — is HARD-DEMOTED to the volume
+    # (shadow) tier at the mint chokepoint (persisted + CLV-tracked, never
+    # alerted, never a silent drop). The permanent backstop for phantom
+    # impossible-edge picks. Must stay > value_min_edge (a legit premium edge
+    # must never be demoted). Default 0.15.
+    value_sanity_max_edge: float = Field(default=0.15, gt=0.0)
     # Volume tier (informational shadow tier): candidates whose edge clears
     # this floor but NOT value_min_edge are persisted with tier='volume' —
     # no alert, no daily-exposure reservation — purely to accumulate live
@@ -1313,6 +1322,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "VALUE_MAX_EDGE must be > VALUE_MIN_EDGE (it is the data-error ceiling)."
             )
+        if self.value_sanity_max_edge <= self.value_min_edge:
+            raise ValueError(
+                "VALUE_SANITY_MAX_EDGE must be > VALUE_MIN_EDGE (a legit premium edge "
+                "must never trip the structural-sanity backstop)."
+            )
         return self
 
     @model_validator(mode="after")
@@ -1488,6 +1502,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         major_leagues=parse_major_leagues(settings.value_major_leagues),
         require_sharp_anchor=settings.value_require_sharp_anchor,
         max_edge=settings.value_max_edge,
+        sanity_max_edge=settings.value_sanity_max_edge,
         max_edge_by_market=parse_market_max_edges(settings.value_max_edge_per_market),
         devig_by_market=parse_market_devig(settings.value_devig_per_market),
         consensus_logit_pool=settings.value_consensus_logit_pool,

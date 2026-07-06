@@ -350,6 +350,50 @@ async def test_require_sharp_anchor_keeps_sharp_anchored_premium() -> None:
     assert LAST_POLL["soccer"]["picks"] == 1
 
 
+def impossible_edge_snapshots(age_s: float = 30.0) -> list[OddsSnapshotIn]:
+    # Pinnacle prices a sane 3-way (fair Home ~0.39); a soft book offers Home at
+    # an absurd 8.0 (implied 0.125) — an impossible ~26% edge, the shape a totals
+    # line-loss or a stale/mislabeled anchor mints (DC 1.19-fair vs 3.25-offered).
+    return [
+        snap("Pinnacle", "Home FC", 2.50, age_s),
+        snap("Pinnacle", "Draw", 3.30, age_s),
+        snap("Pinnacle", "Away FC", 3.10, age_s),
+        snap("SoftBook", "Home FC", 8.00, age_s),
+        snap("SoftBook", "Draw", 3.20, age_s),
+        snap("SoftBook", "Away FC", 2.95, age_s),
+    ]
+
+
+async def test_structural_sanity_demotes_impossible_edge_premium_to_shadow(caplog) -> None:  # type: ignore[no-untyped-def]
+    # FIX 1: an impossible-edge premium candidate (edge > sanity_max_edge 0.15)
+    # is HARD-DEMOTED to the volume (shadow) tier — never alerted, never a silent
+    # drop. Neutralizes the reported phantom picks (DC 1.19-fair vs 3.25-offered ·
+    # +53%; totals min-acc 2.06 > offered 1.67).
+    import logging
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(impossible_edge_snapshots()))
+    with caplog.at_level(logging.WARNING):
+        await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # never alerted as premium
+    assert LAST_POLL["soccer"]["picks"] == 0  # n_premium == 0
+    # demoted (to shadow), NOT dropped — the backstop logs the demotion.
+    assert any("structural-sanity net demoted" in r.message for r in caplog.records)
+
+
+async def test_structural_sanity_keeps_legit_small_edge_premium() -> None:
+    # No false demotion: the normal ~4.5% edge in market_snapshots (offered
+    # >= its own min-acceptable floor) stays PREMIUM and alerts.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1
+    assert all(p.tier == "premium" for p in picks)
+    assert all("STRUCTURAL SANITY" not in p.reason_summary for p in picks)
+
+
 async def test_require_sharp_anchor_disabled_keeps_consensus_premium() -> None:
     # require_sharp_anchor defaults False = gate OFF: a consensus-anchored
     # premium pick still alerts (current behavior, the non-breaking default).

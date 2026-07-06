@@ -3,14 +3,18 @@
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from app.edge.value import (
+    ValueBet,
     anchor_fair_probs,
     ceil_odds,
     effective_odds,
     find_value_bets,
     find_value_bets_with_fair,
     min_acceptable_odds,
+    structural_sanity_violation,
 )
 from app.probabilities.devig import DevigMethod, devig
 
@@ -407,6 +411,88 @@ def test_min_acceptable_odds_rejects_degenerate_inputs() -> None:
         min_acceptable_odds(1.0, 0.03)
     with pytest.raises(ValueError):
         min_acceptable_odds(0.5, -0.01)
+
+
+# --- FIX 1: structural-sanity net (market-agnostic impossible-edge backstop) --
+
+
+def _vbet(*, fair: float, best_odds: float, eff: float | None = None) -> ValueBet:
+    """A ValueBet whose edge is derived from (fair, effective offered) exactly
+    like the value scanner — so the sanity helper sees a self-consistent triple."""
+    eff = best_odds if eff is None else eff
+    implied = 1.0 / eff
+    return ValueBet(
+        selection="X",
+        best_book="SoftBook",
+        best_odds=best_odds,
+        best_odds_effective=eff,
+        sharp_book="Pinnacle",
+        sharp_fair_prob=fair,
+        implied_prob=implied,
+        edge=fair - implied,
+        ev=fair * (eff - 1.0) - (1.0 - fair),
+    )
+
+
+def test_structural_sanity_flags_edge_above_sanity_ceiling() -> None:
+    # The two reported rows: DC 1.19-fair (0.84) vs 3.25-offered (0.31) => edge
+    # ~0.53; a totals Over min-acc 2.06 > offered 1.67. Both carry an edge far
+    # above the 0.15 sanity ceiling and MUST be flagged impossible.
+    dc = _vbet(fair=1.0 / 1.19, best_odds=3.25)  # edge ~0.53
+    assert dc.edge > 0.5
+    assert structural_sanity_violation(dc, min_edge=0.03, sanity_max_edge=0.15)
+    for edge_target in (0.16, 0.35, 0.51, 0.53):
+        # fair chosen so that fair - 1/best_odds == edge_target at best_odds=10.0
+        fair = edge_target + 1.0 / 10.0
+        bet = _vbet(fair=fair, best_odds=10.0)
+        assert bet.edge == pytest.approx(edge_target, abs=1e-9)
+        assert structural_sanity_violation(bet, min_edge=0.03, sanity_max_edge=0.15)
+
+
+def test_structural_sanity_passes_legit_small_edge() -> None:
+    # A normal 3-8% edge with offered >= its own min-acceptable floor is NOT a
+    # violation — the net must never demote a real value pick.
+    bet = _vbet(fair=0.55, best_odds=2.0)  # edge = 0.55 - 0.5 = 0.05
+    assert bet.edge == pytest.approx(0.05, abs=1e-9)
+    assert not structural_sanity_violation(bet, min_edge=0.03, sanity_max_edge=0.15)
+
+
+def test_structural_sanity_flags_inverted_fair_offered_pair() -> None:
+    # fair price (1/0.6 = 1.667) at/above the offered effective price => no real
+    # edge: an inverted pair the net must catch even when edge <= ceiling.
+    bet = _vbet(fair=0.60, best_odds=1.60)  # implied 0.625 > fair => edge < 0
+    assert structural_sanity_violation(bet, min_edge=0.03, sanity_max_edge=0.15)
+
+
+def test_structural_sanity_flags_offered_below_min_acceptable() -> None:
+    # A triple where the offered raw price sits below its own min-acceptable
+    # floor for the premium min_edge => structurally impossible qualifying pick.
+    # Build fair/eff so edge is just under the ceiling but the min_edge floor is
+    # not actually retained at best_odds.
+    fair = 0.20
+    # min_acceptable_odds(0.20, 0.05) = 1/0.15 = 6.667; offer 5.0 (< floor) but
+    # eff gives edge 0.20 - 0.20 = 0.0 ... craft eff so edge in (min_edge, ceiling)
+    bet = _vbet(fair=fair, best_odds=5.0, eff=5.0)  # implied 0.2, edge 0.0
+    # edge 0 <= ceiling, but fair_odds (5.0) == eff (5.0) => inverted-pair branch
+    assert structural_sanity_violation(bet, min_edge=0.05, sanity_max_edge=0.15)
+
+
+@given(
+    fair_a=st.floats(min_value=0.60, max_value=0.95),
+    offered_b=st.floats(min_value=2.5, max_value=8.0),
+)
+def test_structural_sanity_property_crossed_pair_never_survives(
+    fair_a: float, offered_b: float
+) -> None:
+    # A CROSSED pair: selection A's sharp fair (a FAVOURITE, >=0.60) paired with
+    # a DIFFERENT selection's soft OFFERED longshot price (>=2.5, implied <=0.40)
+    # — the exact shape of the reported bug (DC favourite-fair 0.84 vs a 3.25
+    # longshot offer). edge = fair_a - 1/offered_b >= 0.60 - 0.40 = 0.20, always
+    # above the 0.15 ceiling, so the net must flag EVERY such phantom as
+    # impossible (no minted premium can carry it forward).
+    bet = _vbet(fair=fair_a, best_odds=offered_b)
+    assert bet.edge > 0.15
+    assert structural_sanity_violation(bet, min_edge=0.03, sanity_max_edge=0.15)
 
 
 def test_ceil_odds_never_rounds_the_floor_down() -> None:

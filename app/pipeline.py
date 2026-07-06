@@ -964,6 +964,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         anchor_type_for,
         find_value_bets_with_fair,
         is_sharp_anchored,
+        structural_sanity_violation,
     )
 
     # thin-coverage gate measures SOFT liquidity — exclude sharp/injected books
@@ -1145,6 +1146,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_visibility_capped = 0
     n_ah_rejected = 0
     n_moneyline_capped = 0
+    n_sanity_demoted = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
     # min() guards a deps-level inversion (Settings already validates the
     # ordering at startup) so a bad override can widen nothing. Per-market
@@ -1442,6 +1444,33 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                             else "na",
                             reason_str,
                         )
+            # FIX 1 — STRUCTURAL-SANITY HARD-DEMOTE (market-agnostic safety net).
+            # Runs LAST among the demotion gates, at the value-mint chokepoint:
+            # a premium candidate whose (fair, offered, edge) triple is
+            # structurally impossible — edge above the SEPARATE, stricter sanity
+            # ceiling (value_policy.sanity_max_edge, default 0.15), an inverted
+            # fair/offered pair, or an offered price below its own min-acceptable
+            # floor — is HARD-DEMOTED to the volume (shadow) tier: still
+            # persisted + CLV-tracked, NEVER alerted, NEVER a silent drop. This is
+            # the permanent backstop that stops the phantom impossible-edge picks
+            # from EVER alerting as premium, regardless of which upstream data
+            # defect produced them (spreads mispairing, totals line-loss, a
+            # derived double-chance fair inheriting a stale/mislabeled anchor).
+            # The existing value_max_edge (0.20) data-error cap and the overround
+            # gate are left intact — this is a SEPARATE, stricter ceiling. The
+            # `tier == "premium"` guard means an already-demoted candidate stays
+            # volume (the gates never stack confusingly).
+            sanity_note = ""
+            if tier == "premium" and structural_sanity_violation(
+                v,
+                min_edge=premium_floor,
+                sanity_max_edge=deps.value_policy.sanity_max_edge,
+            ):
+                tier = "volume"
+                n_sanity_demoted += 1
+                sanity_note = (
+                    " | STRUCTURAL SANITY: impossible fair/offered pair — demoted to shadow"
+                )
             # Stake from the sharp fair prob at the EFFECTIVE (net) price. The
             # daily-exposure ledger is consumed AFTER persistence (below), and
             # ONLY for brand-new premium detections — so the pick is built with
@@ -1522,6 +1551,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     + experimental_note
                     + ml_note
                     + steam_note
+                    + sanity_note
                 ),
                 tier=tier,
                 value_filter_score=ml_score,
@@ -1746,6 +1776,18 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "value pipeline %s: moneyline odds ceiling capped %d longshot(s) at volume (shadow)",
             sport_key,
             n_moneyline_capped,
+        )
+    if n_sanity_demoted:
+        # FIX 1 — the structural-sanity backstop is never silent: these premium
+        # candidates carried a structurally impossible (fair, offered, edge)
+        # triple (a phantom edge from an upstream data defect) and were HARD-
+        # DEMOTED to the volume (shadow) tier — persisted + CLV-tracked, never
+        # alerted, never a silent drop.
+        logger.warning(
+            "value pipeline %s: structural-sanity net demoted %d impossible-edge "
+            "candidate(s) to volume (shadow)",
+            sport_key,
+            n_sanity_demoted,
         )
     if n_off_band:
         # VALUE_ODDS_BANDS intervention is never silent either: these
