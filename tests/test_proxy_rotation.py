@@ -113,6 +113,25 @@ async def test_failover_records_failures_and_next_sweep_moves_on() -> None:
     assert [c["proxy_url"] for c in calls] == ["http://h3:1", "http://h4:1", "http://h5:1"]
 
 
+async def test_failover_reraises_import_error_not_masked_as_proxy_failure() -> None:
+    # A missing scrape dependency (ModuleNotFoundError/ImportError, e.g.
+    # pycryptodome for the JSON-feed AES decrypt) is INFRASTRUCTURAL — it must
+    # RAISE, not be retried across the whole pool and masked as a silent-empty
+    # "0 matches" scrape that reads like "no games".
+    registry = ProxyHealthRegistry()
+    calls: list[dict[str, Any]] = []
+
+    async def missing_dep_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        raise ModuleNotFoundError("No module named 'Crypto'")
+
+    loader = make_loader(make_pool(5), registry, scrape_fn=missing_dep_scrape)
+    with pytest.raises(ImportError):
+        await loader.fetch_odds("soccer")
+    # aborted on the FIRST attempt — never burned the pool
+    assert len(calls) == 1
+
+
 # --------------------------------------------------------------------------- #
 # Site 3: oddsportal JSON per-match fan-out (attribution by pool index)
 # --------------------------------------------------------------------------- #

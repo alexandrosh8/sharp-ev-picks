@@ -1491,6 +1491,16 @@ class OddsPortalLoader:
                     proxy_user=proxy.username,
                     proxy_pass=proxy.password,
                 )
+            except ImportError:
+                # A missing scrape dependency (e.g. pycryptodome for the JSON-feed
+                # AES decrypt) is INFRASTRUCTURAL, not a per-proxy failure —
+                # retrying across the pool just masks it as a silent-empty scrape
+                # ("0 matches") that reads like "no games". Fail loudly instead.
+                logger.error(
+                    "oddsportal scrape aborted: missing dependency (import failure) — "
+                    "not a proxy fault; the scrape did not run"
+                )
+                raise
             except Exception as exc:  # network / anti-bot / timeout -> try next proxy
                 self._proxy_health.record_failure(idx, type(exc).__name__)
                 logger.warning(
