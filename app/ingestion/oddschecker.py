@@ -1787,7 +1787,27 @@ class OddsCheckerLoader:
 
         async def _one(url: str) -> list[OddsSnapshotIn]:
             async with semaphore:
-                return await self.fetch_match_odds(url, session=session)
+                try:
+                    return await self.fetch_match_odds(url, session=session)
+                except Exception as exc:
+                    # A reused per-proxy pooled session can carry a stale
+                    # keep-alive connection (idle-dropped by the proxy/site), so
+                    # the next request stalls to the 8s CONNECT timeout. Live
+                    # instrumentation (2026-07-06) found ~7% of match-page fetches
+                    # hitting this, almost all on pooled sessions; a retry on a
+                    # fresh cold session + rotated proxy recovers ~all of them
+                    # (net failures fell ~7% -> ~1.4%). Only timeouts retry.
+                    if "timeout" not in type(exc).__name__.lower():
+                        raise
+                    retry_session = _new_impersonated_session(self._next_proxy())
+                    try:
+                        return await self.fetch_match_odds(url, session=retry_session)
+                    finally:
+                        closer = getattr(retry_session, "close", None)
+                        if closer is not None:
+                            closed = closer()
+                            if inspect.isawaitable(closed):
+                                await closed
 
         results = await asyncio.gather(*(_one(url) for url in deduped), return_exceptions=True)
         snapshots: list[OddsSnapshotIn] = []

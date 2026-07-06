@@ -836,3 +836,40 @@ async def test_fetch_odds_reuses_persistent_session_per_proxy(
     # The cycle closed the session and dropped the pool (no leak).
     assert session.closed is True
     assert loader._session_pool is None
+
+
+async def test_gather_snapshots_retries_once_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A match-page fetch that times out (stale pooled keep-alive connection) is
+    retried ONCE on a fresh session and recovers; non-timeout errors do not
+    retry. Regression for the ~7%->~1.4% net-timeout fix (2026-07-06)."""
+    from app.ingestion import oddschecker as oc
+
+    # The retry builds a fresh session via the module factory — stub it so no
+    # network is touched.
+    monkeypatch.setattr(oc, "_new_impersonated_session", lambda proxy: _PoolFakeSession([]))
+
+    class _Timeout(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    class _RetryLoader(oc.OddsCheckerLoader):
+        async def fetch_match_odds(self, url, *, session=None, **kw):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _Timeout("connect timeout")
+            return ["snap"]  # type: ignore[list-item]  # sentinel; _gather only len()s it
+
+    loader = _RetryLoader(
+        match_urls=["https://www.oddschecker.com/football/a/1/winner"],
+        directory=EventDirectory(),
+        proxy_pool=(ScraperProxy(url="http://p0", username="", password=""),),
+        max_clients=2,
+    )
+    snaps = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/football/a/1/winner"], session=None
+    )
+    assert calls["n"] == 2  # timed out once, retried once
+    assert len(snaps) == 1  # the retry recovered the page
