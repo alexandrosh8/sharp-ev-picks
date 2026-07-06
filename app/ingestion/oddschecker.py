@@ -11,6 +11,7 @@ no betslip surface.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -18,7 +19,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from types import MappingProxyType
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
 
@@ -1340,6 +1341,75 @@ SCHEDULER_SPORT_KEY_MAP: Mapping[str, str] = MappingProxyType(
 )
 
 
+def _new_impersonated_session(proxy: ScraperProxy | None) -> AsyncGetSession:
+    """Build one persistent curl_cffi AsyncSession, optionally proxy-bound.
+
+    Reused across many match-page fetches in a poll cycle (keep-alive +
+    connection pool + retained cf cookies) — the validated
+    ``session-reuse-per-proxy`` strategy. Same impersonation profile and read
+    timeout as the per-call fetch path; the pool that owns it closes it."""
+    from curl_cffi.requests import AsyncSession
+
+    kwargs: dict[str, Any] = {
+        "impersonate": PINNED_IMPERSONATE,
+        "default_headers": True,
+        "timeout": DEFAULT_TIMEOUT,
+        "allow_redirects": True,
+    }
+    if proxy is not None and proxy.url:
+        inline = _proxy_with_creds(proxy)
+        kwargs["proxies"] = {"http": inline, "https": inline}
+    # curl_cffi types get() with a narrower **RequestParams than the AsyncGetSession
+    # Protocol's **Any; the shapes we use are compatible (the per-call fetch path
+    # uses AsyncSession the same way via `async with`).
+    return cast(AsyncGetSession, AsyncSession(**kwargs))
+
+
+class _ProxySessionPool:
+    """One persistent AsyncSession per proxy, reused across a poll cycle.
+
+    ``acquire`` round-robins the proxy pool and returns that proxy's session,
+    created lazily on first use and cached — so match-page fetches keep the TLS
+    handshake + connection pool + cf cookies warm instead of paying a cold
+    handshake per request. ``aclose`` closes every created session at cycle end
+    (never leaked). Single-threaded asyncio: ``acquire`` has no await points, so
+    no lock is needed."""
+
+    def __init__(
+        self,
+        proxies: Sequence[ScraperProxy],
+        *,
+        session_factory: Callable[[ScraperProxy | None], AsyncGetSession] | None = None,
+    ) -> None:
+        self._proxies = tuple(proxies)
+        # Resolved at call time (not bound as a default) so tests can monkeypatch
+        # the module-level factory.
+        self._factory = session_factory or _new_impersonated_session
+        self._sessions: dict[int, AsyncGetSession] = {}
+        self._cursor = 0
+
+    def acquire(self) -> AsyncGetSession:
+        if not self._proxies:
+            raise OddsCheckerError("proxy session pool is empty")
+        index = self._cursor % len(self._proxies)
+        self._cursor += 1
+        session = self._sessions.get(index)
+        if session is None:
+            session = self._factory(self._proxies[index])
+            self._sessions[index] = session
+        return session
+
+    async def aclose(self) -> None:
+        for session in self._sessions.values():
+            close = getattr(session, "close", None)
+            if close is None:
+                continue
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        self._sessions.clear()
+
+
 class OddsCheckerLoader:
     """Fetch OddsChecker match URLs or competition pages over curl_cffi."""
 
@@ -1376,6 +1446,10 @@ class OddsCheckerLoader:
         self._football_daily_days = football_daily_days
         self._proxy_pool = tuple(proxy_pool)
         self._proxy_cursor = 0
+        # Per-proxy persistent-session pool, live only for the duration of one
+        # fetch_odds cycle (created/closed in _run_with_session). None outside a
+        # cycle and whenever a session is injected (tests) or no proxy pool.
+        self._session_pool: _ProxySessionPool | None = None
         self._max_clients = max(1, max_clients)
         self._markets = tuple(markets) if markets is not None else None
         # Per-sport scheduler mode: when set, ``fetch_odds(sport_key)`` discovers
@@ -1486,6 +1560,13 @@ class OddsCheckerLoader:
         # ``markets`` mirrors OddsPortalLoader.fetch_match_odds so the shared
         # off-window CLV re-price path (app/clv_trueup.py) can call either loader
         # with the same signature; None falls back to the loader's own scope.
+        #
+        # No injected session, but a poll cycle is active with a proxy pool:
+        # borrow this match's persistent per-proxy session (round-robin). The
+        # page fetch AND its market-API round-trip then share one warm session
+        # (same proxy, kept-alive) instead of a cold handshake per request.
+        if session is None and self._session_pool is not None:
+            session = self._session_pool.acquire()
         page = await fetch_html(
             url,
             session=session,
@@ -1635,13 +1716,20 @@ class OddsCheckerLoader:
         *,
         session: AsyncGetSession | None = None,
     ) -> Sequence[OddsSnapshotIn]:
-        # An injected session (tests) is used verbatim. With a proxy pool each
-        # request pins its own rotating proxy (no shared session); otherwise one
+        # An injected session (tests) is used verbatim. With a proxy pool we open
+        # ONE persistent session per proxy and reuse it across the cycle's
+        # match-page fetches (session-reuse-per-proxy); otherwise one
         # impersonating session serves the whole fetch.
         if session is not None:
             return await runner(session)
         if self._proxy_pool:
-            return await runner(None)
+            pool = _ProxySessionPool(self._proxy_pool)
+            self._session_pool = pool
+            try:
+                return await runner(None)
+            finally:
+                await pool.aclose()
+                self._session_pool = None
 
         from curl_cffi.requests import AsyncSession
 

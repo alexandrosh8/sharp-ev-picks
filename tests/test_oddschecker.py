@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from app.ingestion.base import EventDirectory
+from app.ingestion.base import EventDirectory, ScraperProxy
 from app.ingestion.oddschecker import (
     OddsCheckerChallenge,
     _line_bearing_selection,
@@ -723,3 +723,116 @@ class _FakeSession:
 async def test_fetch_html_raises_on_challenge_response() -> None:
     with pytest.raises(OddsCheckerChallenge):
         await fetch_html("https://www.oddschecker.com/football", session=_FakeSession())
+
+
+class _PoolFakeSession:
+    """Fake per-proxy pool session: routes GETs by URL substring and records
+    every GET plus whether the pool closed it (aclose lifecycle)."""
+
+    def __init__(self, routes: list[tuple[str, _QueuedResponse]]) -> None:
+        self.routes = routes
+        self.urls: list[str] = []
+        self.closed = False
+
+    async def get(self, url: str, **kwargs: object) -> _QueuedResponse:
+        del kwargs
+        self.urls.append(url)
+        for substring, response in self.routes:
+            if substring in url:
+                return response
+        raise AssertionError(f"no route for {url}")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_proxy_session_pool_reuses_one_session_per_proxy() -> None:
+    """The pool builds ONE session per proxy, reuses it, and closes all on aclose."""
+    from app.ingestion.oddschecker import _ProxySessionPool
+
+    proxies = (
+        ScraperProxy(url="http://p0", username="", password=""),
+        ScraperProxy(url="http://p1", username="", password=""),
+    )
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+
+    def factory(proxy: ScraperProxy | None) -> _PoolFakeSession:
+        session = _PoolFakeSession([])
+        created.append((proxy, session))
+        return session
+
+    pool = _ProxySessionPool(proxies, session_factory=factory)
+
+    first_p0 = pool.acquire()  # proxy 0
+    first_p1 = pool.acquire()  # proxy 1
+    second_p0 = pool.acquire()  # proxy 0 again -> reused, no rebuild
+    second_p1 = pool.acquire()  # proxy 1 again -> reused
+
+    assert first_p0 is second_p0
+    assert first_p1 is second_p1
+    assert first_p0 is not first_p1
+    # Exactly one session built per distinct proxy, bound to the right proxy.
+    assert [proxy for proxy, _ in created] == [proxies[0], proxies[1]]
+
+    await pool.aclose()
+    assert all(session.closed for _, session in created)
+
+
+@pytest.mark.asyncio
+async def test_fetch_odds_reuses_persistent_session_per_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poll cycle with a proxy pool reuses ONE persistent session per proxy
+    across all match-page fetches, then closes it (no leak)."""
+    from app.ingestion import oddschecker as oc
+
+    created: list[_PoolFakeSession] = []
+
+    def factory(proxy: ScraperProxy | None) -> _PoolFakeSession:
+        del proxy
+        session = _PoolFakeSession(
+            [
+                (
+                    "api/markets/v2/all-odds",
+                    _QueuedResponse(text="[]", url="https://www.oddschecker.com/api/markets"),
+                ),
+                (
+                    "/winner",
+                    _QueuedResponse(
+                        text=_match_html(),
+                        url="https://www.oddschecker.com/football/x/y/winner",
+                        headers={"content-type": "text/html"},
+                    ),
+                ),
+            ]
+        )
+        created.append(session)
+        return session
+
+    monkeypatch.setattr(oc, "_new_impersonated_session", factory)
+
+    match_urls = [
+        "https://www.oddschecker.com/football/a/1/winner",
+        "https://www.oddschecker.com/football/b/2/winner",
+        "https://www.oddschecker.com/football/c/3/winner",
+    ]
+    loader = oc.OddsCheckerLoader(
+        match_urls=match_urls,
+        directory=EventDirectory(),
+        proxy_pool=(ScraperProxy(url="http://p0", username="", password=""),),
+        max_clients=2,
+    )
+
+    snapshots = await loader.fetch_odds("soccer")  # no injected session -> pool path
+
+    # Single proxy -> exactly one persistent session built and reused for all
+    # three match pages (+ their all-odds round-trips).
+    assert len(created) == 1
+    session = created[0]
+    assert sum("/winner" in url for url in session.urls) == 3
+    # 3 matches x 3 active snapshots each (all-odds returns [] -> bestOdds fallback).
+    assert len(snapshots) == 9
+    # The cycle closed the session and dropped the pool (no leak).
+    assert session.closed is True
+    assert loader._session_pool is None
