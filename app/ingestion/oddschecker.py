@@ -1475,13 +1475,19 @@ class OddsCheckerLoader:
         *,
         now: datetime | None = None,
         session: AsyncGetSession | None = None,
+        markets: Sequence[Market] | None = None,
     ) -> list[OddsSnapshotIn]:
+        # ``markets`` mirrors OddsPortalLoader.fetch_match_odds so the shared
+        # off-window CLV re-price path (app/clv_trueup.py) can call either loader
+        # with the same signature; None falls back to the loader's own scope.
         page = await fetch_html(
             url,
             session=session,
             proxy=None if session is not None else self._next_proxy(),
         )
-        snapshots = await self._parse_modern_or_legacy_match_page(page, now=now, session=session)
+        snapshots = await self._parse_modern_or_legacy_match_page(
+            page, now=now, session=session, markets=markets
+        )
         return snapshots
 
     async def _parse_modern_or_legacy_match_page(
@@ -1490,9 +1496,11 @@ class OddsCheckerLoader:
         *,
         now: datetime | None,
         session: AsyncGetSession | None,
+        markets: Sequence[Market] | None = None,
     ) -> list[OddsSnapshotIn]:
+        eff_markets = markets if markets is not None else self._markets
         market_ids = supported_market_ids_from_match_page(
-            page.html, markets=self._markets, include_other=self._capture_other
+            page.html, markets=eff_markets, include_other=self._capture_other
         )
         if market_ids:
             try:
