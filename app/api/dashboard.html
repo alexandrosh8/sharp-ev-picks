@@ -554,7 +554,10 @@
 
       <!-- ================= RADAR — market coverage ========================== -->
       <section class="view" id="view-radar" data-view-key="radar" hidden>
-        <div class="view-h"><h2>Radar</h2></div>
+        <div class="desk-head-row">
+          <div class="view-h"><h2>Radar</h2><span class="eyebrow">market coverage</span></div>
+          <div class="desk-ticker" id="radar-summary" role="status" aria-live="polite" aria-label="Coverage vitals"></div>
+        </div>
         <section class="tile" aria-labelledby="coverage-h">
           <div class="tile-h"><h3 id="coverage-h">Coverage summary</h3></div>
           <p class="muted" id="coverage-summary">Not loaded yet.</p>
@@ -564,7 +567,10 @@
 
       <!-- ================= LAB — evidence ==================================== -->
       <section class="view" id="view-lab" data-view-key="lab" hidden>
-        <div class="view-h"><h2>Lab</h2></div>
+        <div class="desk-head-row">
+          <div class="view-h"><h2>Lab</h2><span class="eyebrow">evidence &amp; validation</span></div>
+          <div class="desk-ticker" id="lab-summary" role="status" aria-live="polite" aria-label="Evidence vitals"></div>
+        </div>
         <div class="tilegrid cols2">
           <section class="tile wide" aria-labelledby="claims-h">
             <div class="tile-h"><h3 id="claims-h">Claims ledger</h3></div>
@@ -628,7 +634,10 @@
 
       <!-- ================= SOURCES — source-quality command center ========== -->
       <section class="view" id="view-sources" data-view-key="sources" hidden>
-        <div class="view-h"><h2>Sources</h2></div>
+        <div class="desk-head-row">
+          <div class="view-h"><h2>Sources</h2><span class="eyebrow">operations &amp; health</span></div>
+          <div class="desk-ticker" id="sources-summary" role="status" aria-live="polite" aria-label="Operations vitals"></div>
+        </div>
         <section class="tile wide" aria-labelledby="matrix-h">
           <div class="tile-h"><h3 id="matrix-h">Source matrix</h3></div>
           <div class="tscroll">
@@ -981,6 +990,7 @@
           renderPill();
           renderStaleBanner();
           renderToday();
+          renderViewHeaders();
           renderEdgesList();
           renderEdgeDetail();
           if (activeView === "radar") renderRadar();
@@ -1799,6 +1809,43 @@
         $("eq-status").addEventListener("change", renderEdgesList);
 
         // ===== RADAR ============================================================
+        // Fills the Radar / Lab / Sources desk-header tickers from global state so
+        // each view carries the same live-vitals signature as Today and Edges.
+        function renderViewHeaders() {
+          const health = state.health, perf = state.perf;
+          const ageTxt = health && health.newest_poll_age_seconds != null
+            ? fmtRelAge(new Date(Date.now() - Number(health.newest_poll_age_seconds) * 1000).toISOString()) : "—";
+          const sportCount = health && health.polls ? Object.keys(health.polls).length : 0;
+          const pc = classifyProxyPool(health && health.proxy_pool);
+          const staleH = dataIsStale(health);
+          const feedName = (health && health.odds_source) ? String(health.odds_source) : "odds";
+          const fill = (id, cells) => {
+            const box = $(id); if (!box) return; box.replaceChildren();
+            cells.forEach((c) => {
+              const t = document.createElement("div"); t.className = "tk";
+              if (c[0]) { const d = document.createElement("span"); d.className = "tkdot " + c[0]; t.appendChild(d); }
+              const kk = document.createElement("span"); kk.className = "tkk"; kk.textContent = c[1];
+              const b = document.createElement("b"); b.textContent = String(c[2]);
+              t.append(kk, b); box.appendChild(t);
+            });
+          };
+          fill("radar-summary", [
+            [state.gamesErr ? "warn" : "ok", "fixtures", state.gamesErr ? "—" : state.games.length],
+            [null, "sport polls", sportCount || "—"],
+            [null, "feed", feedName],
+          ]);
+          const nSharp = perf ? Number(perf.n_sharp_close) || 0 : null;
+          const floorN = perf ? Number(perf.min_headline_n) || 50 : null;
+          const settledCount = state.picks.filter((p) => p.outcome != null || p.provisional_outcome != null).length;
+          fill("lab-summary", [
+            [perf ? (perf.sharp_status === "ok" ? "ok" : "warn") : "warn", "sharp clv", perf ? nSharp + "/" + floorN : "—"],
+            [null, "settled", settledCount],
+          ]);
+          fill("sources-summary", [
+            [pc.level, "proxy", pc.label],
+            [staleH ? "warn" : "ok", "feed", (staleH ? "stale" : "verified") + " · " + ageTxt],
+          ]);
+        }
         function renderRadar() {
           loadMatchRate();
           const covEl = $("coverage-summary");
