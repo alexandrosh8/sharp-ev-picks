@@ -1692,6 +1692,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 record_drift=deps.clv_record_drift,
                 value_policy=deps.value_policy,
             )
+        except Exception as exc:  # revalidation must never break picking
+            # exc_info=True: the intermittent TypeError here was undiagnosable
+            # from the class name alone — log the full traceback so the root
+            # cause is pinpointable. Isolated from the off-window call below so
+            # one failing revalidation path cannot skip the other.
+            logger.error("open-pick revalidation failed: %s", type(exc).__name__, exc_info=True)
+        try:
             await revalidate_offwindow_picks(
                 deps.loader,
                 deps.session_factory,
@@ -1701,7 +1708,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 value_policy=deps.value_policy,
             )
         except Exception as exc:  # revalidation must never break picking
-            logger.error("open-pick revalidation failed: %s", type(exc).__name__)
+            logger.error("off-window revalidation failed: %s", type(exc).__name__, exc_info=True)
 
     n_premium = len(picks) - n_volume
     logger.info(
