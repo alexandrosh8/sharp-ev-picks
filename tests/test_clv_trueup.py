@@ -479,6 +479,33 @@ async def test_offwindow_open_picks_revalidated_via_match_links(factory) -> None
         assert pick.revalidated_at is not None
 
 
+async def test_scrape_passes_skip_non_oddsportal_loaders() -> None:  # type: ignore[no-untyped-def]
+    # Regression (dual-provider results-scrape TypeError): a loader that is NOT
+    # an OddsPortal-style match-page scraper exposes a same-named but url-based
+    # fetch_match_odds (OddsChecker/Betfair) and opts out via
+    # supports_match_scrape=False. Both the finished-score capture and the
+    # off-window re-price pass MUST skip it — never call the (sport_key,
+    # match_links, ...) scrape API (which raises TypeError), and never touch the
+    # DB — rather than duck-typing on the ambiguous method name.
+    from app.clv_trueup import capture_finished_scores, revalidate_offwindow_picks
+
+    class OddsCheckerLike:
+        supports_match_scrape = False
+
+        async def fetch_match_odds(self, url, *, now=None, session=None, markets=None):  # type: ignore[no-untyped-def]
+            raise AssertionError("scrape API must not be called for a non-scrape loader")
+
+    def boom_factory():  # type: ignore[no-untyped-def]
+        raise AssertionError("DB must not be queried when the loader cannot scrape")
+
+    loader = OddsCheckerLike()
+    assert await capture_finished_scores(loader, boom_factory, object(), "tennis") == 0
+    assert (
+        await revalidate_offwindow_picks(loader, boom_factory, "tennis", covered_event_ids=set())
+        == 0
+    )
+
+
 async def test_capture_finished_scores_writes_score_for_settlement(factory) -> None:  # type: ignore[no-untyped-def]
     # A FINISHED, still-open pick in a league with no results feed: re-scraping
     # its match page captures the final score -> Event.scraped_* -> auto-settle

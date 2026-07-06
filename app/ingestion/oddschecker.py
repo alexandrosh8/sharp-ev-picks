@@ -1343,6 +1343,12 @@ SCHEDULER_SPORT_KEY_MAP: Mapping[str, str] = MappingProxyType(
 class OddsCheckerLoader:
     """Fetch OddsChecker match URLs or competition pages over curl_cffi."""
 
+    #: OddsChecker's fetch_match_odds is url-based (a single match page), NOT the
+    #: OddsPortal (sport_key, match_links, ...) scrape API. Opt out of the
+    #: clv_trueup off-window re-price / finished-score capture passes so they
+    #: SKIP this loader instead of raising TypeError (dual-provider fix).
+    supports_match_scrape: bool = False
+
     def __init__(
         self,
         directory: EventDirectory,

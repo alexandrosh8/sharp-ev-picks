@@ -555,7 +555,11 @@ async def revalidate_offwindow_picks(
     other loaders silently skip. Returns rows updated.
     """
     fetch = getattr(loader, "fetch_match_odds", None)
-    if fetch is None:
+    # Skip non-scrape loaders. OddsChecker / Betfair expose a same-named but
+    # url-based fetch_match_odds and opt out via supports_match_scrape=False;
+    # calling them with the (sport_key, match_links, ...) scrape API raises
+    # TypeError. Default True keeps every OddsPortal-style loader working.
+    if fetch is None or not getattr(loader, "supports_match_scrape", True):
         return 0
     now = datetime.now(tz=UTC)
     async with session_factory() as session:
@@ -817,7 +821,11 @@ async def capture_finished_scores(
     only — never the URL) and the link is simply retried next cycle.
     """
     fetch = getattr(loader, "fetch_match_odds", None)
-    if fetch is None:
+    # Skip non-scrape loaders (OddsChecker / Betfair opt out via
+    # supports_match_scrape=False) — their url-based fetch_match_odds cannot take
+    # the (sport_key, match_links, ...) scrape API. Default True keeps every
+    # OddsPortal-style loader working.
+    if fetch is None or not getattr(loader, "supports_match_scrape", True):
         return 0
     now = now or datetime.now(tz=UTC)
     window = window or RESULTS_SCRAPE_WINDOW  # wider = clear an older backlog
