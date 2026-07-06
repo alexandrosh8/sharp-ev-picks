@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from app.edge.value import ValueBet, ah_candidate_plausible
+from app.edge.value import ValueBet, ah_candidate_plausible, dc_candidate_plausible
 from app.edge.value_policy import ValuePolicy, is_visibility_only_market
 from app.ingestion.base import EventDirectory
 from app.ingestion.oddsportal import _market_for_key, _validate_markets
@@ -140,6 +140,42 @@ def test_ah_guard_default_policy_rejects_22_sentinel() -> None:
     assert not ah_candidate_plausible(
         sentinel, max_odds=pol.ah_max_odds, max_sharp_soft_ratio=pol.ah_max_sharp_soft_ratio
     )
+
+
+# --- 3b. DOUBLE-CHANCE IMPLAUSIBILITY GUARD ---------------------------------
+
+
+def _dc_bet(best_odds: float, sharp_fair: float, implied: float) -> ValueBet:
+    return ValueBet(
+        selection="Arsenal or Draw",
+        best_book=BOOK,
+        best_odds=best_odds,
+        best_odds_effective=best_odds,
+        sharp_book="pinnacle",
+        sharp_fair_prob=sharp_fair,
+        implied_prob=implied,
+        edge=sharp_fair - implied,
+        ev=0.0,
+    )
+
+
+def test_dc_guard_rejects_wild_sharp_soft_disagreement() -> None:
+    # Soft prices DC at ~1.43 (implied ~0.70) but the DERIVED fair (from a defective
+    # 1X2 anchor) says 0.95 -> ratio 1.36 > 1.5? no; push higher: fair 0.99 impossible.
+    bad = _dc_bet(best_odds=1.43, sharp_fair=0.99, implied=0.70)  # ratio 1.41... tighten
+    assert not dc_candidate_plausible(bad, max_sharp_soft_ratio=1.2)
+
+
+def test_dc_guard_accepts_plausible_derived_fair() -> None:
+    good = _dc_bet(best_odds=1.43, sharp_fair=0.74, implied=0.70)  # ratio ~1.06
+    assert dc_candidate_plausible(good, max_sharp_soft_ratio=1.5)
+
+
+def test_dc_guard_default_policy_rejects_defective_anchor() -> None:
+    pol = ValuePolicy()
+    # sharp fair 0.95 vs soft implied 0.60 -> ratio 1.58 > default 1.5
+    bad = _dc_bet(best_odds=1.67, sharp_fair=0.95, implied=0.60)
+    assert not dc_candidate_plausible(bad, max_sharp_soft_ratio=pol.dc_max_sharp_soft_ratio)
 
 
 # --- 4. VISIBILITY-ONLY SCOPING ---------------------------------------------

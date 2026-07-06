@@ -230,6 +230,37 @@ async def test_betfair_close_filters_out_non_betfair_rows(factory) -> None:  # t
     assert snaps == []
 
 
+async def test_betfair_close_excludes_soft_betfair_sportsbook(factory) -> None:  # type: ignore[no-untyped-def]
+    # DUAL-PROVIDER REGRESSION (OddsChecker): the inline feed emits BOTH the sharp
+    # "Betfair Exchange" (code OE) AND the SOFT "Betfair Sportsbook" (code BF) on the
+    # SAME canonical event. The old startswith("betfair") prefix admitted the soft
+    # Sportsbook into the sharp BACK-close set (corrupting the sharp-freshness verdict
+    # and inline sharp-anchor provenance); the exact-name filter must return ONLY the
+    # Exchange rows.
+    ref = "evt-betfair-soft-vs-sharp"
+    pick_id = await seed_pick(factory, ref)
+    await seed_betfair_event(factory, ref)  # sharp Exchange rows on the canonical event
+    async with factory() as session:
+        pick = await session.get(Pick, pick_id)
+        assert pick is not None
+        captured = KICKOFF - timedelta(hours=1)
+        session.add(
+            OddsSnapshot(
+                event_id=pick.event_id,
+                bookmaker="Betfair Sportsbook",  # soft book, must NOT be graded as sharp
+                market="1x2",
+                selection=HOME,
+                decimal_odds=Decimal("2.10"),
+                captured_at=captured,
+                ingested_at=captured,
+            )
+        )
+        await session.flush()
+        snaps = await _betfair_exchange_close(session, pick, ref, KICKOFF)
+    assert len(snaps) == 3
+    assert {s.bookmaker for s in snaps} == {"Betfair Exchange"}
+
+
 async def test_betfair_close_ignores_dead_betfair_namespace(factory) -> None:  # type: ignore[no-untyped-def]
     # REGRESSION (audit 2026-06-28): a stray legacy "betfair:"+ref event carrying a
     # full Betfair BACK close must be IGNORED — the resolver keys the CANONICAL event,

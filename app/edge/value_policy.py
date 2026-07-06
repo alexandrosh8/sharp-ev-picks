@@ -135,6 +135,14 @@ class ValuePolicy:
     # Settings (VALUE_AH_MAX_ODDS / VALUE_AH_MAX_SHARP_SOFT_RATIO).
     ah_max_odds: float = 15.0
     ah_max_sharp_soft_ratio: float = 3.0
+    # DOUBLE-CHANCE IMPLAUSIBILITY guard bound (app/edge/value.dc_candidate_plausible).
+    # A DERIVED double-chance candidate (fair summed from the 1X2 anchor) is REJECTED
+    # at the candidate-building boundary when its sharp-fair / soft-implied probability
+    # ratio exceeds ``dc_max_sharp_soft_ratio`` — a stale/mislabeled 1X2 anchor yields a
+    # DC fair that disagrees wildly with the soft DC price. DC is short-priced so this
+    # is tighter than the AH ratio. Guard is ON by default; scoped to double_chance in
+    # the pipeline. Set from Settings (VALUE_DC_MAX_SHARP_SOFT_RATIO).
+    dc_max_sharp_soft_ratio: float = 1.5
     # MONEYLINE (H2H/1X2) ODDS CEILING. A H2H candidate whose RAW best price
     # exceeds ``moneyline_max_odds`` is DROPPED at the candidate-building boundary:
     # the 1X2 away/draw LONGSHOT band is structurally CLV-NEGATIVE vs the Betfair

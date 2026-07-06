@@ -962,6 +962,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         SHARP_BOOKS,
         ah_candidate_plausible,
         anchor_type_for,
+        dc_candidate_plausible,
         find_value_bets_with_fair,
         is_sharp_anchored,
         structural_sanity_violation,
@@ -1145,6 +1146,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_thin_books = 0
     n_visibility_capped = 0
     n_ah_rejected = 0
+    n_dc_rejected = 0
     n_moneyline_capped = 0
     n_sanity_demoted = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
@@ -1223,6 +1225,17 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 max_sharp_soft_ratio=deps.value_policy.ah_max_sharp_soft_ratio,
             ):
                 n_ah_rejected += 1
+                continue
+            # DOUBLE-CHANCE IMPLAUSIBILITY guard (app/edge/value.dc_candidate_plausible):
+            # a DERIVED DC fair (summed from the 1X2 anchor) that disagrees wildly with
+            # the soft DC price signals a stale/mislabeled/swapped 1X2 anchor — reject
+            # the candidate BEFORE it mints any pick (premium OR shadow). Scoped to
+            # double_chance; complements the structural-sanity DEMOTE below (this fires
+            # even when the edge sits below the sanity ceiling).
+            if market is Market.DOUBLE_CHANCE and not dc_candidate_plausible(
+                v, max_sharp_soft_ratio=deps.value_policy.dc_max_sharp_soft_ratio
+            ):
+                n_dc_rejected += 1
                 continue
             # (The 1X2/moneyline odds ceiling is applied as a SHADOW-tier CAP in the
             # demotion chain below — NOT a hard drop — so the CLV-negative longshot
@@ -1766,6 +1779,15 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "value pipeline %s: AH sentinel/implausibility guard rejected %d candidate(s)",
             sport_key,
             n_ah_rejected,
+        )
+    if n_dc_rejected:
+        # The DC implausibility guard is never silent: these double-chance candidates
+        # carried a derived fair that disagreed wildly with the soft price (a defective
+        # 1X2 anchor) and were rejected before minting any pick.
+        logger.info(
+            "value pipeline %s: double-chance implausibility guard rejected %d candidate(s)",
+            sport_key,
+            n_dc_rejected,
         )
     if n_moneyline_capped:
         # The moneyline odds ceiling is never silent: these premium H2H candidates

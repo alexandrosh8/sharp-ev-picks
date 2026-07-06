@@ -918,6 +918,7 @@ def parse_match_page(
         market_key, market_detail = mapped
         if wanted is not None and market_key not in wanted:
             continue
+        selection = _line_bearing_selection(selection, bet.get("line"), market_key)
         for code, raw_odd in per_book.items():
             if not isinstance(raw_odd, Mapping):
                 continue
@@ -1095,6 +1096,7 @@ def parse_market_api_payloads(
                 market_key, market_detail = mapped
                 if wanted is not None and market_key not in wanted:
                     continue
+                selection = _line_bearing_selection(selection, line, market_key)
             elif other_ok:
                 market_key = Market.OTHER
                 market_detail = _other_market_detail(market_type, line)
@@ -1172,7 +1174,7 @@ def parse_legacy_match_page(
         market_key, market_detail = mapped
         if wanted is not None and market_key not in wanted:
             continue
-        selection = _strip_selection_line(raw_selection, line, market_key)
+        selection = _line_bearing_selection(raw_selection, line, market_key)
         for cell in row.select("td[data-bk][data-odig]"):
             decimal = _decimal(cell.get("data-odig"))
             if decimal is None:
@@ -1269,13 +1271,40 @@ def _legacy_row_line(row: Any, selection: str) -> str | None:
     return match.group(1)
 
 
-def _strip_selection_line(selection: str, line: Any, market: Market) -> str:
-    if market not in {Market.SPREADS, Market.TOTALS, Market.TEAM_TOTALS}:
+_LINE_BEARING_MARKETS: frozenset[Market] = frozenset(
+    {Market.SPREADS, Market.TOTALS, Market.TEAM_TOTALS}
+)
+
+
+def _line_value(line: Any) -> float | None:
+    if line in {None, ""}:
+        return None
+    try:
+        return float(line)
+    except (TypeError, ValueError):
+        return None
+
+
+def _line_bearing_selection(selection: str, line: Any, market: Market) -> str:
+    """Bake the line into a line-market selection, mirroring the OddsPortal
+    contract (app/ingestion/oddsportal.py: ``Over {line:g}`` for totals,
+    ``{team} {line:+g}`` for spreads/AH).
+
+    OddsChecker emits a BARE betName ("Over"/"Under" or a bare team name) and
+    carries the line separately. The whole downstream — the CLV re-price keys,
+    the settlement parsers, and the picks uniqueness constraint — keys on
+    ``selection`` and expects the line to live INSIDE it (as it does under
+    OddsPortal). This is the exact reverse of the old ``_strip_selection_line``
+    used by the legacy grid path; the line is appended once, never duplicated."""
+    if market not in _LINE_BEARING_MARKETS:
         return selection
-    line_text = str(line or "").strip()
-    if not line_text:
+    value = _line_value(line)
+    if value is None:
         return selection
-    return re.sub(rf"\s*{re.escape(line_text)}\s*$", "", selection).strip() or selection
+    suffix = f"{value:+g}" if market is Market.SPREADS else f"{value:g}"
+    if selection.endswith(suffix):
+        return selection  # already line-bearing (legacy grid rows carry it in the name)
+    return f"{selection} {suffix}".strip()
 
 
 def parse_competition_match_urls(

@@ -65,6 +65,22 @@ def test_totals_integer_line_pushes_on_exact() -> None:
     assert settle("totals", "Under 3", 2, 1) is Outcome.PUSH
 
 
+def test_oddschecker_line_bearing_selections_settle() -> None:
+    # DUAL-PROVIDER BRIDGE: the exact line-bearing selection strings the OddsChecker
+    # parser now emits (app.ingestion.oddschecker._line_bearing_selection) must grade
+    # here — previously bare "Over"/"Carolina Panthers" raised ValueError('unparseable').
+    from app.ingestion.oddschecker import _line_bearing_selection
+    from app.schemas.base import Market
+
+    totals_sel = _line_bearing_selection("Over", "41.5", Market.TOTALS)
+    assert totals_sel == "Over 41.5"
+    assert settle("totals", totals_sel, 30, 12) is Outcome.WON  # 42 > 41.5
+
+    spread_sel = _line_bearing_selection(HOME, "-1.5", Market.SPREADS)
+    assert spread_sel == f"{HOME} -1.5"
+    assert settle("spreads", spread_sel, 3, 1) is Outcome.WON  # margin 2 - 1.5 > 0
+
+
 # --- btts ---------------------------------------------------------------------
 
 

@@ -427,6 +427,39 @@ def ah_candidate_plausible(
     return bet.sharp_fair_prob / bet.implied_prob <= max_sharp_soft_ratio
 
 
+def dc_candidate_plausible(
+    bet: ValueBet,
+    *,
+    max_sharp_soft_ratio: float,
+) -> bool:
+    """Sentinel/implausibility guard for a DERIVED double-chance value candidate.
+
+    A double-chance fair is NOT devigged from a DC book (the three DC quotes
+    overlap and sum to ~200%); it is DERIVED by summing the 1X2 anchor's fair
+    pair (``double_chance_fair``). That makes it inherit any defect in the 1X2
+    anchor — a stale, mislabeled, or swapped 1X2 fair yields a DC fair that
+    disagrees wildly with the soft DC price, minting a phantom edge. Because a
+    DC selection covers two outcomes it sits at a SHORT price (high implied
+    prob), so a large sharp-fair / soft-implied ratio is even less plausible
+    here than for a 2-way AH line.
+
+    Mirrors ``ah_candidate_plausible``'s ratio arm (the odds-ceiling arm does
+    not apply — DC is inherently short-priced). Returns False (reject at the
+    candidate-building boundary) when the sharp fair probability exceeds the
+    soft best-price implied probability by more than ``max_sharp_soft_ratio``×.
+    Complements ``structural_sanity_violation`` (which DEMOTES an
+    already-impossible-EDGE premium to shadow): this catches the wild
+    fair-vs-soft DISAGREEMENT before any pick — premium OR shadow — is minted,
+    including cases whose edge sits below the sanity ceiling.
+
+    Pure function (no IO); informational-only platform — nothing here places a
+    bet. Applied ONLY to double_chance candidates in the pipeline.
+    """
+    if bet.implied_prob <= 0.0:
+        return False
+    return bet.sharp_fair_prob / bet.implied_prob <= max_sharp_soft_ratio
+
+
 def structural_sanity_violation(
     bet: ValueBet,
     *,

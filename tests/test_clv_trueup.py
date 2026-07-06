@@ -90,6 +90,64 @@ def make_pick(
     )
 
 
+def totals_line_snapshots(event_id: str) -> list[OddsSnapshotIn]:
+    """Two DISTINCT totals lines on one event, each with a full Over/Under pair
+    so the per-line devig is well posed. Line-bearing selections ("Over 2.5" vs
+    "Over 3.5") + distinct market_detail keep the two lines in separate devig
+    groups. 2.5 fair(Over) ~0.50, 3.5 fair(Over) ~0.32 — a collapse would give
+    the two picks the SAME close fair."""
+    rows: list[OddsSnapshotIn] = []
+    lines = {
+        "over_under_2_5": {"Over 2.5": 1.90, "Under 2.5": 1.90},
+        "over_under_3_5": {"Over 3.5": 3.00, "Under 3.5": 1.40},
+    }
+    for detail, sels in lines.items():
+        for book in ("Pinnacle", "SoftBook"):
+            for sel, odds in sels.items():
+                rows.append(
+                    OddsSnapshotIn(
+                        event_id=event_id,
+                        bookmaker=book,
+                        market=Market.TOTALS,
+                        selection=sel,
+                        decimal_odds=odds,
+                        captured_at=NOW,
+                        ingested_at=NOW,
+                        market_detail=detail,
+                    )
+                )
+    return rows
+
+
+def make_totals_pick(
+    event_id: str, selection: str, decimal_odds: float, pick_id: str, reason: str
+) -> PickOut:
+    return PickOut(
+        pick_id=pick_id,
+        sport="soccer",
+        league="test-league-totals",
+        event="Home FC vs Away FC",
+        event_id=event_id,
+        market=Market.TOTALS,
+        selection=selection,
+        bookmaker="SoftBook",
+        tier="premium",
+        decimal_odds=decimal_odds,
+        model_probability=0.40,
+        fair_probability=0.40,
+        edge=0.03,
+        ev=0.05,
+        confidence=0.9,
+        recommended_stake_fraction=0.02,
+        recommended_stake_amount=Decimal("20.00"),
+        stake_breakdown=StakeBreakdownOut(raw_kelly=0.1, fractional=0.025, capped=True, final=0.02),
+        odds_age_seconds=30.0,
+        liquidity=None,
+        reason_summary=reason,
+        created_at=NOW,
+    )
+
+
 @pytest.fixture
 async def factory():  # type: ignore[no-untyped-def]
     engine = create_async_engine(DB_URL)
@@ -195,6 +253,46 @@ async def test_true_up_stamps_close_provenance(factory) -> None:  # type: ignore
         # (created_at is DB-stamped at insert, so no cross-clock comparison here;
         # the echo-vs-fresh semantics are covered in tests/test_close_evidence.py).
         assert pick.close_snapshot_captured_at == NOW
+
+
+async def test_true_up_disambiguates_totals_lines(factory) -> None:  # type: ignore[no-untyped-def]
+    """Dual-provider regression: two picks on DIFFERENT totals lines of ONE event
+    (Over 2.5 and Over 3.5) must each be re-priced against their OWN line's fair.
+    Under the old OddsChecker bare-"Over" selections both keys collapsed and the
+    second line's fair overwrote the first -> a wrong-line close. Line-bearing
+    selections keep the keys distinct."""
+    event_id = "evt-clv-totals-lines"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_totals_pick(event_id, "Over 2.5", 2.00, "p-o25", "totals 2.5 pick"),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await persist_pick(
+            session,
+            make_totals_pick(event_id, "Over 3.5", 3.20, "p-o35", "totals 3.5 pick"),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    loader = FakeLoader(totals_line_snapshots(event_id))
+    assert await true_up_clv(loader, factory, ["soccer"]) == 2
+
+    async with factory() as session:
+        o25 = await session.scalar(select(Pick).where(Pick.reason_summary == "totals 2.5 pick"))
+        o35 = await session.scalar(select(Pick).where(Pick.reason_summary == "totals 3.5 pick"))
+        assert o25 is not None and o35 is not None
+        assert o25.closing_fair_probability is not None
+        assert o35.closing_fair_probability is not None
+        # Each line got its OWN fair (2.5 Over ~0.50, 3.5 Over ~0.32), not one
+        # collapsed value — the anti-collapse invariant.
+        assert float(o25.closing_fair_probability) == pytest.approx(0.50, abs=0.02)
+        assert float(o35.closing_fair_probability) == pytest.approx(0.32, abs=0.03)
+        assert o25.closing_fair_probability != o35.closing_fair_probability
 
 
 def test_offwindow_order_boosts_imminent_kickoffs_inside_band() -> None:

@@ -511,6 +511,14 @@ class Settings(BaseSettings):
     # for AH); scoped to AH so non-AH markets are untouched.
     value_ah_max_odds: float = Field(default=15.0, gt=1.0)
     value_ah_max_sharp_soft_ratio: float = Field(default=3.0, gt=1.0)
+    # DOUBLE-CHANCE IMPLAUSIBILITY guard (app/edge/value.dc_candidate_plausible),
+    # applied at the DC candidate-building boundary. A DERIVED double-chance fair
+    # (summed from the 1X2 anchor) is REJECTED when its sharp-fair / soft-implied
+    # probability ratio exceeds VALUE_DC_MAX_SHARP_SOFT_RATIO — a stale/mislabeled
+    # 1X2 anchor yields a DC fair that disagrees wildly with the soft DC price. DC
+    # is short-priced, so this ratio is tighter than the AH one. SANE DEFAULT
+    # (guard ON for DC); scoped to double_chance so other markets are untouched.
+    value_dc_max_sharp_soft_ratio: float = Field(default=1.5, gt=1.0)
     # MONEYLINE (H2H/1X2) ODDS CEILING (research 2026-06-30): the 1X2 away/draw
     # LONGSHOT band (raw best odds above this) is structurally CLV-NEGATIVE vs the
     # Betfair sharp close (held-out CLV -0.087, >4 SE; favourite-longshot bias),
@@ -1511,6 +1519,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         ),
         ah_max_odds=settings.value_ah_max_odds,
         ah_max_sharp_soft_ratio=settings.value_ah_max_sharp_soft_ratio,
+        dc_max_sharp_soft_ratio=settings.value_dc_max_sharp_soft_ratio,
         moneyline_max_odds=settings.value_moneyline_max_odds,
         exchange_min_liquidity=settings.value_exchange_min_liquidity,
         betfair_api_promote=settings.value_betfair_api_promote,

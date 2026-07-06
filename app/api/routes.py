@@ -80,7 +80,7 @@ _LOGIN_HTML = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SignalDesk — sign in</title>
+    <title>sharp-ev-picks — sign in</title>
     <style>
       :root {
         --bg: #0e1116;
@@ -201,9 +201,9 @@ _LOGIN_HTML = """<!doctype html>
   <body>
     <form class="card" id="login-form" method="post" autocomplete="off">
       <div class="brand">
-        <span class="mark">&#9670;</span>SignalDesk<span class="tick">.</span>
+        <span class="mark">&#9670;</span>sharp-ev-picks<span class="tick">.</span>
       </div>
-      <div class="sub">trading console · sign in</div>
+      <div class="sub">+EV picks console · sign in</div>
       <label for="u">Username</label>
       <input id="u" name="username" type="text" autocomplete="username" autofocus required />
       <label for="p">Password</label>

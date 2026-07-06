@@ -983,6 +983,16 @@ def test_dashboard_avoids_promotional_language() -> None:
         assert "not a profit" in ctx or "never a profit" in ctx, ctx
 
 
+def test_login_page_uses_sharp_ev_picks_wordmark() -> None:
+    """Login branding matches the README/dashboard wordmark 'sharp-ev-picks';
+    the legacy 'SignalDesk' name is gone from the login page."""
+    from app.api.routes import _LOGIN_HTML
+
+    assert "sharp-ev-picks" in _LOGIN_HTML
+    assert "SignalDesk" not in _LOGIN_HTML
+    assert "<title>sharp-ev-picks — sign in</title>" in _LOGIN_HTML
+
+
 def test_login_page_hardened_against_double_submit() -> None:
     """_LOGIN_HTML only (no auth-logic change): both fields are required with
     proper autocomplete tokens, and the submit button disables on first submit

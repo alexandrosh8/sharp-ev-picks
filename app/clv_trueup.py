@@ -155,14 +155,27 @@ async def revalidate_open_picks(
     # the trusted CLV subset drops asymmetric mint/close fallbacks.
     fell_back_by_market: dict[tuple[str, Market, str | None], bool] = {}
     fell_back_by_key: dict[tuple[str, str, str], bool] = {}
+    # Defense-in-depth (dual-provider line safety): the pick key is line-blind
+    # (event, market, selection). Line-bearing selections keep alt-lines distinct,
+    # but a PERIOD submarket (1st-half "Over 2.5" vs full-match "Over 2.5") still
+    # carries its distinction only in market_detail, not the selection. Track the
+    # detail behind each key so a pick whose key maps to >1 detail is SKIPPED
+    # (fail-closed) rather than re-priced against whichever line's fair last won
+    # the dict — the OddsChecker key-collapse failure mode, belt-and-suspenders.
+    detail_by_key: dict[tuple[str, str, str], str | None] = {}
+    ambiguous_keys: set[tuple[str, str, str]] = set()
     for (event_id, market, _detail), (book, fair) in event_fair_probs(
         grouped, devig_method, value_policy, fell_back_out=fell_back_by_market
     ).items():
         fb = fell_back_by_market.get((event_id, market, _detail), False)
         for sel, p in fair.items():
-            fair_by_key[(event_id, str(market), sel)] = p
-            anchor_by_key[(event_id, str(market), sel)] = book
-            fell_back_by_key[(event_id, str(market), sel)] = fb
+            key = (event_id, str(market), sel)
+            if key in detail_by_key and detail_by_key[key] != _detail:
+                ambiguous_keys.add(key)
+            detail_by_key[key] = _detail
+            fair_by_key[key] = p
+            anchor_by_key[key] = book
+            fell_back_by_key[key] = fb
     prices_by_key: dict[tuple[str, str, str], dict[str, float]] = {}
     # D3 close provenance: the group's (selection, book) -> captured_at map per
     # pick key, so the close writer can stamp WHEN the anchor rows were captured.
@@ -196,6 +209,15 @@ async def revalidate_open_picks(
         ).all()
         for pick, external_ref in rows:
             key = (external_ref, pick.market, pick.selection)
+            if key in ambiguous_keys:
+                logger.warning(
+                    "pick %d: %s/%s maps to >1 market line this cycle "
+                    "(line-ambiguous key) — skipping CLV write",
+                    pick.id,
+                    pick.market,
+                    pick.selection,
+                )
+                continue
             closing_fair = fair_by_key.get(key)
             if closing_fair is None or not 0.0 < closing_fair < 1.0:
                 continue
@@ -1074,14 +1096,32 @@ async def finalize_closing_from_snapshots(
     # close_devig_fell_back so the trusted CLV subset drops asymmetric fallbacks.
     fell_back_by_market: dict[tuple[str, Market, str | None], bool] = {}
     fell_back_by_key: dict[tuple[str, str], bool] = {}
+    # Defense-in-depth (see revalidate_open_picks): the (market, selection) key is
+    # line-blind. Track the detail behind each key so a period submarket that
+    # collapses to the same selection is refused (keep the revalidation close)
+    # rather than finalizing a close stamped from the wrong line.
+    detail_by_key: dict[tuple[str, str], str | None] = {}
+    ambiguous_keys: set[tuple[str, str]] = set()
     for (_event, market, _detail), (anchor, fair_by_sel) in event_fair_probs(
         grouped, devig_method, value_policy, fell_back_out=fell_back_by_market
     ).items():
         fb = fell_back_by_market.get((_event, market, _detail), False)
         for sel, p in fair_by_sel.items():
-            fair_by_key[(str(market), sel)] = p
-            anchor_by_key[(str(market), sel)] = anchor
-            fell_back_by_key[(str(market), sel)] = fb
+            key = (str(market), sel)
+            if key in detail_by_key and detail_by_key[key] != _detail:
+                ambiguous_keys.add(key)
+            detail_by_key[key] = _detail
+            fair_by_key[key] = p
+            anchor_by_key[key] = anchor
+            fell_back_by_key[key] = fb
+    if (pick.market, pick.selection) in ambiguous_keys:
+        logger.info(
+            "pick %d: snapshot close key %s/%s maps to >1 market line — keeping revalidation close",
+            pick.id,
+            pick.market,
+            pick.selection,
+        )
+        return False
     fair = fair_by_key.get((pick.market, pick.selection))
     if fair is None or not 0.0 < fair < 1.0:
         logger.info(
@@ -1270,7 +1310,14 @@ async def resolve_betfair_back_snaps(
     # Dedicated source contract: ONLY the Betfair Exchange BACK rows (equivalent to
     # SQL ``bookmaker ILIKE 'betfair%'``); the canonical event also carries soft-book
     # and possibly other sharp rows the main pipeline handles separately.
-    return [snap for snap in snaps if snap.bookmaker.strip().lower().startswith("betfair")]
+    # EXACT Exchange-name membership, NOT a loose ``startswith("betfair")`` prefix:
+    # under ODDS_SOURCE=oddschecker the inline feed emits BOTH the sharp
+    # "Betfair Exchange" (code OE) AND the SOFT "Betfair Sportsbook" (code BF) on
+    # the same canonical event. The prefix admitted the soft Sportsbook into the
+    # sharp BACK-close set, corrupting the CLV freshness verdict and the inline
+    # sharp-anchor provenance. The dedicated OddsPortal capture already writes
+    # exactly "Betfair Exchange", so this is bit-identical for OddsPortal.
+    return [snap for snap in snaps if snap.bookmaker.strip().lower() == "betfair exchange"]
 
 
 async def _betfair_exchange_close(

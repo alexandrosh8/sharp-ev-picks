@@ -10,6 +10,7 @@ import pytest
 from app.ingestion.base import EventDirectory
 from app.ingestion.oddschecker import (
     OddsCheckerChallenge,
+    _line_bearing_selection,
     discover_football_daily_match_urls,
     fetch_html,
     football_listing_context,
@@ -22,7 +23,38 @@ from app.ingestion.oddschecker import (
     parse_static_sport_match_urls,
     supported_market_ids_from_match_page,
 )
+from app.ingestion.oddsportal import _fmt_line
 from app.schemas.base import Market
+
+
+@pytest.mark.parametrize(
+    ("selection", "line", "market"),
+    [
+        ("Over", "2.5", Market.TOTALS),
+        ("Under", "3.5", Market.TEAM_TOTALS),
+    ],
+)
+def test_line_bearing_totals_match_oddsportal_form(
+    selection: str, line: str, market: Market
+) -> None:
+    # OddsPortal totals selections are f"Over {line:g}" (unsigned); OddsChecker
+    # emits a bare betName + separate line — they must end up identical.
+    assert _line_bearing_selection(selection, line, market) == f"{selection} {float(line):g}"
+
+
+@pytest.mark.parametrize(("team", "line"), [("Carolina Panthers", "-1.5"), ("Alpha FC", "+1.5")])
+def test_line_bearing_spreads_match_oddsportal_signed_form(team: str, line: str) -> None:
+    # OddsPortal spreads selections are f"{team} {_fmt_line(line)}" (signed).
+    assert _line_bearing_selection(team, line, Market.SPREADS) == f"{team} {_fmt_line(float(line))}"
+
+
+def test_line_bearing_is_idempotent_and_skips_non_line_markets() -> None:
+    # Already-line-bearing legacy grid rows are not double-appended.
+    assert _line_bearing_selection("Over 2.5", "2.5", Market.TOTALS) == "Over 2.5"
+    assert _line_bearing_selection("Guinea -3.5", "-3.5", Market.SPREADS) == "Guinea -3.5"
+    # h2h / non-line markets and missing lines pass through unchanged.
+    assert _line_bearing_selection("Arsenal", None, Market.H2H) == "Arsenal"
+    assert _line_bearing_selection("Over", None, Market.TOTALS) == "Over"
 
 
 def _json_script(payload: dict[str, object]) -> str:
@@ -191,7 +223,7 @@ def test_parse_match_page_emits_snapshots_and_registers_event() -> None:
     assert {(snapshot.market, snapshot.selection) for snapshot in snapshots} == {
         (Market.H2H, "Arsenal"),
         (Market.H2H, "Draw"),
-        (Market.TOTALS, "Over"),
+        (Market.TOTALS, "Over 2.5"),
     }
     total = next(snapshot for snapshot in snapshots if snapshot.market is Market.TOTALS)
     assert total.market_detail == "totals_2_5"
@@ -308,9 +340,9 @@ def test_parse_market_api_payloads_emits_totals_and_spreads() -> None:
         (snapshot.market, snapshot.selection, snapshot.market_detail) for snapshot in snapshots
     }
     assert actual == {
-        (Market.SPREADS, "Carolina Panthers", "spreads_minus_1_5"),
-        (Market.SPREADS, "Arizona Cardinals", "spreads_plus_1_5"),
-        (Market.TOTALS, "Over", "totals_41_5"),
+        (Market.SPREADS, "Carolina Panthers -1.5", "spreads_minus_1_5"),
+        (Market.SPREADS, "Arizona Cardinals +1.5", "spreads_plus_1_5"),
+        (Market.TOTALS, "Over 41.5", "totals_41_5"),
     }
     teams = directory.lookup("oddschecker:9001")
     assert teams is not None
@@ -352,8 +384,8 @@ def test_parse_legacy_match_page_reads_old_table_grid() -> None:
         for snapshot in snapshots
     }
     assert actual == {
-        ("Guinea", "spreads_minus_3_5", 1.91),
-        ("Tunisia", "spreads_plus_3_5", 1.95),
+        ("Guinea -3.5", "spreads_minus_3_5", 1.91),
+        ("Tunisia +3.5", "spreads_plus_3_5", 1.95),
     }
     teams = directory.lookup(
         "oddschecker:basketball/fiba-world-cup-qualification/guinea-at-tunisia"
