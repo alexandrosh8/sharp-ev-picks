@@ -131,15 +131,16 @@ _LOGIN_HTML = """<!doctype html>
       }
       .brand {
         display: flex;
-        align-items: baseline;
+        align-items: center;
+        gap: 9px;
         font-family: var(--font-display);
-        font-size: 20px;
+        font-size: 19px;
         font-weight: 700;
-        letter-spacing: 0.22em;
+        letter-spacing: 0.03em;
         color: var(--text);
       }
-      .brand .mark { color: var(--pos); letter-spacing: 0; margin-right: 7px; }
-      .brand .tick { color: var(--pos); }
+      .brand .brand-svg { display: block; width: 22px; height: 22px; }
+      .brand .w-ev { color: #22c55e; }
       .sub {
         color: var(--faint);
         font-size: 10px;
@@ -201,7 +202,7 @@ _LOGIN_HTML = """<!doctype html>
   <body>
     <form class="card" id="login-form" method="post" autocomplete="off">
       <div class="brand">
-        <span class="mark">&#9670;</span>sharp-ev-picks<span class="tick">.</span>
+        <svg class="brand-svg" viewBox="0 0 20 20" aria-hidden="true"><polyline points="3,15 8,11 12,7 16,4" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="4" r="2.4" fill="#22c55e"/></svg><span class="wm">sharp<span class="w-ev">-ev-</span>picks</span>
       </div>
       <div class="sub">+EV picks console · sign in</div>
       <label for="u">Username</label>
@@ -513,15 +514,16 @@ _SETUP_HTML = """<!doctype html>
       }
       .brand {
         display: flex;
-        align-items: baseline;
+        align-items: center;
+        gap: 9px;
         font-family: var(--font-display);
-        font-size: 20px;
+        font-size: 19px;
         font-weight: 700;
-        letter-spacing: 0.22em;
+        letter-spacing: 0.03em;
         color: var(--text);
       }
-      .brand .mark { color: var(--pos); letter-spacing: 0; margin-right: 7px; }
-      .brand .tick { color: var(--pos); }
+      .brand .brand-svg { display: block; width: 22px; height: 22px; }
+      .brand .w-ev { color: #22c55e; }
       .sub {
         color: var(--faint);
         font-size: 10px;
@@ -583,7 +585,7 @@ _SETUP_HTML = """<!doctype html>
   <body>
     <form class="card" id="setup-form" method="post" autocomplete="off">
       <div class="brand">
-        <span class="mark">&#9670;</span>SignalDesk<span class="tick">.</span>
+        <svg class="brand-svg" viewBox="0 0 20 20" aria-hidden="true"><polyline points="3,15 8,11 12,7 16,4" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="4" r="2.4" fill="#22c55e"/></svg><span class="wm">sharp<span class="w-ev">-ev-</span>picks</span>
       </div>
       <div class="sub">first run · create your admin password</div>
       <label for="u">Username</label>
