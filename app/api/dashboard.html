@@ -288,6 +288,12 @@
       .er-trust { grid-area: trust; font-size: 11px; color: var(--dim); justify-self: end; }
       .er-row.is-stale, .edge-row.is-stale { opacity: 0.6; }
       .edge-row.is-stale .er-event { color: var(--dim); }
+      /* tier-accented rows tie the stream to the desk palette; hover lifts */
+      .edge-row { border-left-width: 2px; transition: transform 0.12s ease, border-color 0.12s ease; }
+      .edge-row.tier-premium { border-left-color: rgba(87, 199, 227, 0.55); }
+      .edge-row.tier-shadow { border-left-color: rgba(139, 131, 120, 0.5); }
+      .edge-row:hover { transform: translateY(-1px); }
+      .edge-row.active { border-left-color: var(--cyan); }
 
       .edge-detail { display: none; }
       .edge-detail.visible {
@@ -509,7 +515,10 @@
 
       <!-- ================= EDGES — master-detail console =================== -->
       <section class="view" id="view-edges" data-view-key="edges" hidden>
-        <div class="view-h"><h2>Edges</h2></div>
+        <div class="desk-head-row">
+          <div class="view-h"><h2>Edges</h2><span class="eyebrow">signal stream</span></div>
+          <div class="desk-ticker" id="edges-summary" role="status" aria-live="polite" aria-label="Edge counts"></div>
+        </div>
         <div class="edges-layout">
           <section aria-label="Signal stream">
             <div class="edge-stream-head">
@@ -1487,7 +1496,7 @@
         }
         function edgeRowEl(p, health) {
           const row = document.createElement("button");
-          row.type = "button"; row.className = "edge-row"; row.setAttribute("role", "listitem");
+          row.type = "button"; row.className = "edge-row " + (tierOf(p) === "volume" ? "tier-shadow" : "tier-premium"); row.setAttribute("role", "listitem");
           row.dataset.id = String(p.id);
           if (String(p.id) === String(selectedId)) row.classList.add("active");
           const stale = tierOf(p) === "premium" && !isRevalidationFresh(p, health) && p.status === "alerted" && !hasStarted(p);
@@ -1514,6 +1523,27 @@
           const tierWant = $("eq-tier").value;
           const statusWant = $("eq-status").value;
           const health = state.health;
+          // ---- edges overview ticker (all picks, by group) ----
+          const sumBox = $("edges-summary");
+          if (sumBox) {
+            sumBox.replaceChildren();
+            const all = state.picks;
+            const cQual = all.filter((p) => isActionable(p, health)).length;
+            const cTrack = all.filter((p) => edgeGroupOf(p) === "tracked").length;
+            const cClosed = all.filter((p) => edgeGroupOf(p) === "closed").length;
+            const cStale = all.filter((p) => tierOf(p) === "premium" && p.status === "alerted" && !hasStarted(p) && !isRevalidationFresh(p, health)).length;
+            const mkS = (dot, k, v) => {
+              const t = document.createElement("div"); t.className = "tk";
+              if (dot) { const d = document.createElement("span"); d.className = "tkdot " + dot; t.appendChild(d); }
+              const kk = document.createElement("span"); kk.className = "tkk"; kk.textContent = k;
+              const b = document.createElement("b"); b.textContent = String(v);
+              t.append(kk, b); sumBox.appendChild(t);
+            };
+            mkS(cQual > 0 ? "ok" : null, "qualified", cQual);
+            mkS(null, "tracked", cTrack);
+            mkS(null, "closed", cClosed);
+            if (cStale > 0) mkS("warn", "stale", cStale);
+          }
           const matches = (p) => {
             if (tierWant && tierOf(p) !== tierWant) return false;
             const group = edgeGroupOf(p);
