@@ -220,14 +220,16 @@
       .tilegrid { display: grid; grid-template-columns: 1fr; gap: 14px; }
       @media (min-width: 900px) { .tilegrid.cols2 { grid-template-columns: 1fr 1fr; }
         .tilegrid.cols2 > .tile.wide2 { grid-column: 1 / -1; } }
-      /* Today packs tiles as balanced masonry COLUMNS so short tiles (Qualified,
-         Needs attention) never leave a staggered-height gap beside a tall one
-         (Top edges, Next kickoffs). System health spans full width at the end. */
-      #view-today .tilegrid { display: block; column-gap: 14px; }
-      #view-today .tilegrid > .tile { break-inside: avoid; margin: 0 0 14px; width: 100%; }
-      #view-today .tilegrid > .tile.wide { column-span: all; }
-      @media (min-width: 760px) { #view-today .tilegrid { column-count: 2; } }
-      @media (min-width: 1200px) { #view-today .tilegrid { column-count: 3; } }
+      /* Today is a purpose-built "desk": a wide primary lane (qualified + edge
+         board + evidence) beside a stacked rail (attention / kickoffs / results),
+         closing on a full-width systems footer. A deliberate grid — no masonry
+         guesswork — so heights align and there are no staggered gaps. */
+      .desk-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+      .desk-main, .desk-rail { display: grid; gap: 14px; align-content: start; }
+      .desk-main > .tile, .desk-rail > .tile { margin: 0; }
+      @media (min-width: 1000px) {
+        .desk-grid { grid-template-columns: minmax(0, 1.72fr) minmax(272px, 1fr); align-items: start; }
+      }
       .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }
       .tile.wide { grid-column: 1 / -1; }
       .tile-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
@@ -348,14 +350,24 @@
       /* ---- Sources ----------------------------------------------------------- */
       td.pending { color: var(--faint); font-style: italic; }
 
-      /* ---- Today: KPI strip + system-health strip -------------------------- */
-      .stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin-bottom: 14px; }
-      .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; min-width: 0; }
-      .stat .sv { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.1; }
+      /* ---- Today: signal board (KPI strip) + system-health strip ----------- */
+      /* The KPIs read as one instrument cluster: hairline-joined cells (1px line
+         gap over a line-coloured base) rather than floating chips. The primary
+         KPI (Qualified now) carries the desk's one accent — a cyan edge + wash. */
+      .signal-board {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 1px; background: var(--line);
+        border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden;
+        margin-bottom: 14px;
+      }
+      .stat { background: var(--panel); border: 0; border-radius: 0; padding: 13px 15px 12px; min-width: 0; position: relative; }
+      .stat.primary { background: linear-gradient(180deg, rgba(87,199,227,0.07), rgba(87,199,227,0)); }
+      .stat.primary::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--cyan); }
+      .stat .sv { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 25px; font-weight: 700; color: var(--text); line-height: 1.05; letter-spacing: -0.01em; }
       .stat .sv.pos { color: var(--cyan); }
       .stat .sv.warn { color: var(--warm); }
       .stat .sv.neg { color: var(--danger); }
-      .stat .sk { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-top: 4px; }
+      .stat .sk { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-top: 5px; }
       .health-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
       .health-cell { display: grid; gap: 3px; align-content: start; }
       .health-cell .hk { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
@@ -377,6 +389,39 @@
       /* ---- Sources: labeled ops lists -------------------------------------- */
       .ops-list { display: grid; gap: 2px; margin-top: 4px; }
       .ops-cap { color: var(--faint); font-size: 11.5px; line-height: 1.45; margin: 0 0 8px; }
+
+      /* ---- Today desk: head ticker, edge board, accents, footer ------------ */
+      .desk-head-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px 18px; flex-wrap: wrap; margin-bottom: 14px; }
+      .desk-head-row .view-h { margin-bottom: 0; }
+      /* live vitals read out as a joined instrument strip — the desk's heartbeat */
+      .desk-ticker { display: flex; flex-wrap: wrap; font-family: var(--mono); font-size: 11px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+      .desk-ticker .tk { display: inline-flex; align-items: center; gap: 6px; padding: 7px 13px; border-left: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
+      .desk-ticker .tk:first-child { border-left: 0; }
+      .desk-ticker .tk b { color: var(--text); font-weight: 600; }
+      .desk-ticker .tk .tkk { color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-size: 9.5px; }
+      .tkdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+      .tkdot.ok { background: var(--success); box-shadow: 0 0 5px var(--success); }
+      .tkdot.warn { background: var(--warm); }
+      .tkdot.bad { background: var(--danger); box-shadow: 0 0 5px var(--danger); }
+
+      /* the desk's one accent lives on the actionable tile */
+      .tile-accent { border-top: 2px solid var(--cyan); }
+      .tile-foot { margin-top: 14px; }
+
+      /* edge depth board — inline SVG-free bars scaled to each tracked edge's
+         magnitude; a labelled instrument, not decoration (cyan=premium, warm=shadow) */
+      .edgechart { display: flex; align-items: flex-end; gap: 3px; height: 46px; margin: 2px 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+      .edgechart .bar { flex: 1 1 0; min-width: 0; min-height: 3px; border-radius: 2px 2px 0 0; opacity: 0.9; }
+      .edgechart .bar.premium { background: var(--cyan); }
+      .edgechart .bar.shadow { background: var(--warm); }
+      .edgechart.empty { display: none; }
+      .te-cap { color: var(--faint); font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+
+      /* systems footer — persistent picks-only framing + live desk vitals */
+      .desk-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 14px; margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); }
+      .desk-foot b { color: var(--dim); font-weight: 600; }
+      .desk-foot .fsep { color: var(--line); }
+      .desk-foot .fsafe { color: var(--warm); }
 
       @media (prefers-reduced-motion: reduce) {
         * { animation: none !important; transition: none !important; }
@@ -419,38 +464,47 @@
 
       <!-- ================= TODAY — the command screen ==================== -->
       <section class="view" id="view-today" data-view-key="today">
-        <div class="view-h"><h2>Today</h2><span class="eyebrow" id="today-asof"></span></div>
-        <div class="stat-strip" id="today-stats"></div>
-        <div class="tilegrid cols2">
-          <section class="tile" aria-labelledby="actionable-h">
-            <div class="tile-h"><h3 id="actionable-h">Qualified now</h3><span class="tag tag-cyan" id="actionable-count">—</span></div>
-            <div id="actionable-now"></div>
-          </section>
-          <section class="tile" aria-labelledby="attn-h">
-            <div class="tile-h"><h3 id="attn-h">Needs attention</h3></div>
-            <div id="needs-attention"></div>
-          </section>
-          <section class="tile" aria-labelledby="topedge-h">
-            <div class="tile-h"><h3 id="topedge-h">Top tracked edges</h3></div>
-            <div id="top-edges"></div>
-          </section>
-          <section class="tile" aria-labelledby="next-h">
-            <div class="tile-h"><h3 id="next-h">Next kickoffs</h3></div>
-            <div id="next-kickoffs"></div>
-          </section>
-          <section class="tile wide2" aria-labelledby="evpos-h">
-            <div class="tile-h"><h3 id="evpos-h">Evidence position</h3></div>
-            <p class="muted" id="evidence-position">—</p>
-          </section>
-          <section class="tile" aria-labelledby="recent-h">
-            <div class="tile-h"><h3 id="recent-h">Recent results</h3></div>
-            <div id="recent-results"></div>
-          </section>
-          <section class="tile wide" aria-labelledby="syshealth-h">
-            <div class="tile-h"><h3 id="syshealth-h">System health</h3></div>
-            <div class="health-strip" id="today-health"></div>
-          </section>
+        <div class="desk-head-row">
+          <div class="view-h"><h2>Today</h2><span class="eyebrow" id="today-asof"></span></div>
+          <div class="desk-ticker" id="desk-ticker" role="status" aria-live="polite" aria-label="Desk vitals"></div>
         </div>
+        <div class="signal-board" id="today-stats"></div>
+        <div class="desk-grid">
+          <div class="desk-main">
+            <section class="tile tile-accent" aria-labelledby="actionable-h">
+              <div class="tile-h"><h3 id="actionable-h">Qualified now</h3><span class="tag tag-cyan" id="actionable-count">—</span></div>
+              <div id="actionable-now"></div>
+            </section>
+            <section class="tile" aria-labelledby="topedge-h">
+              <div class="tile-h"><h3 id="topedge-h">Top tracked edges</h3><span class="te-cap">edge magnitude</span></div>
+              <div class="edgechart empty" id="edge-chart" aria-hidden="true"></div>
+              <div id="top-edges"></div>
+            </section>
+            <section class="tile" aria-labelledby="evpos-h">
+              <div class="tile-h"><h3 id="evpos-h">Evidence position</h3></div>
+              <p class="muted" id="evidence-position">—</p>
+            </section>
+          </div>
+          <aside class="desk-rail" aria-label="Desk rail">
+            <section class="tile" aria-labelledby="attn-h">
+              <div class="tile-h"><h3 id="attn-h">Needs attention</h3></div>
+              <div id="needs-attention"></div>
+            </section>
+            <section class="tile" aria-labelledby="next-h">
+              <div class="tile-h"><h3 id="next-h">Next kickoffs</h3></div>
+              <div id="next-kickoffs"></div>
+            </section>
+            <section class="tile" aria-labelledby="recent-h">
+              <div class="tile-h"><h3 id="recent-h">Recent results</h3></div>
+              <div id="recent-results"></div>
+            </section>
+          </aside>
+        </div>
+        <section class="tile tile-foot" aria-labelledby="syshealth-h">
+          <div class="tile-h"><h3 id="syshealth-h">System health</h3></div>
+          <div class="health-strip" id="today-health"></div>
+        </section>
+        <footer class="desk-foot" id="desk-foot"></footer>
       </section>
 
       <!-- ================= EDGES — master-detail console =================== -->
@@ -1269,6 +1323,24 @@
             });
           }
 
+          // edge depth board — bars scaled to each top edge's magnitude so the
+          // strongest tracked signals read at a glance (cyan premium / warm shadow)
+          const ecBox = $("edge-chart"); ecBox.replaceChildren();
+          if (topEdges.length >= 2) {
+            const mags = topEdges.map((p) => numOf(p.current_edge == null ? p.edge : p.current_edge));
+            const mx = Math.max.apply(null, mags) || 1;
+            ecBox.classList.remove("empty");
+            topEdges.forEach((p, i) => {
+              const b = document.createElement("div");
+              b.className = "bar " + (tierOf(p) === "premium" ? "premium" : "shadow");
+              b.style.height = Math.max(4, Math.round((mags[i] / mx) * 46)) + "px";
+              b.title = fmt(p.event) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
+              ecBox.appendChild(b);
+            });
+          } else {
+            ecBox.classList.add("empty");
+          }
+
           // next kickoffs (any status, pre-kickoff, both tiers, soonest first)
           const upcoming = state.picks.filter((p) => !hasStarted(p) && p.starts_at != null)
             .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at)).slice(0, 6);
@@ -1335,14 +1407,14 @@
             ? fmtRelAge(new Date(Date.now() - Number(health.newest_poll_age_seconds) * 1000).toISOString())
             : "—";
           const stripBox = $("today-stats"); stripBox.replaceChildren();
-          const mkStat = (val, label, cls) => {
-            const c = document.createElement("div"); c.className = "stat";
+          const mkStat = (val, label, cls, primary) => {
+            const c = document.createElement("div"); c.className = "stat" + (primary ? " primary" : "");
             const v = document.createElement("div"); v.className = "sv" + (cls ? " " + cls : ""); v.textContent = val;
             const k = document.createElement("div"); k.className = "sk"; k.textContent = label;
             c.append(v, k); return c;
           };
           if (state.picksErr === null) {
-            stripBox.appendChild(mkStat(String(actionable.length), "Qualified now", actionable.length > 0 ? "pos" : null));
+            stripBox.appendChild(mkStat(String(actionable.length), "Qualified now", actionable.length > 0 ? "pos" : null, true));
             stripBox.appendChild(mkStat(String(trackedOpen), "Tracked open", null));
             stripBox.appendChild(mkStat(String(next24), "Next 24h", null));
             stripBox.appendChild(mkStat(String(settledCount), "Settled shown", null));
@@ -1380,6 +1452,31 @@
           mkCell("Odds staleness", staleH ? "warn" : "ok",
             staleH ? "Stale — picks not current" : "Within freshness window",
             "Auto-refresh every 60s");
+
+          // ---- desk ticker (head vitals) ----
+          const tick = $("desk-ticker"); tick.replaceChildren();
+          const mkTick = (dot, key, val) => {
+            const t = document.createElement("div"); t.className = "tk";
+            if (dot) { const d = document.createElement("span"); d.className = "tkdot " + dot; t.appendChild(d); }
+            const kk = document.createElement("span"); kk.className = "tkk"; kk.textContent = key;
+            const b = document.createElement("b"); b.textContent = val;
+            t.append(kk, b); tick.appendChild(t);
+          };
+          mkTick(degradedH ? "bad" : staleH ? "warn" : "ok", "feed",
+            (degradedH ? "degraded" : staleH ? "stale" : "verified") + " · " + ageTxt);
+          mkTick(null, "sources", (state.gamesErr ? "—" : state.games.length) + " fixtures");
+          mkTick(pc.level, "proxy", pc.label);
+          if (perf) mkTick(perf.sharp_status === "ok" ? "ok" : "warn", "sharp clv", nSharp + "/" + floorN);
+
+          // ---- systems footer (persistent picks-only framing + vitals) ----
+          const foot = $("desk-foot"); foot.replaceChildren();
+          const feedName = (health && health.odds_source) ? String(health.odds_source) : "odds";
+          const sep = () => { const s = document.createElement("span"); s.className = "fsep"; s.textContent = "·"; return s; };
+          const fMeta = (label, val) => { const s = document.createElement("span"); const b = document.createElement("b"); b.textContent = val; s.append(document.createTextNode(label + " "), b); return s; };
+          const safe = document.createElement("span"); safe.className = "fsafe"; safe.textContent = "Picks-only · informational · never places bets";
+          foot.append(safe, sep(), fMeta("feed", feedName), sep(),
+            fMeta("window", fmtNum(verifiedWindowMs(health) / 60000, 0) + "m"), sep(),
+            fMeta("data age", ageTxt));
         }
 
         // ===== EDGES — list ====================================================
