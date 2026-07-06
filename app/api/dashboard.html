@@ -428,6 +428,10 @@
             <div class="tile-h"><h3 id="attn-h">Needs attention</h3></div>
             <div id="needs-attention"></div>
           </section>
+          <section class="tile" aria-labelledby="topedge-h">
+            <div class="tile-h"><h3 id="topedge-h">Top tracked edges</h3></div>
+            <div id="top-edges"></div>
+          </section>
           <section class="tile" aria-labelledby="next-h">
             <div class="tile-h"><h3 id="next-h">Next kickoffs</h3></div>
             <div id="next-kickoffs"></div>
@@ -1236,6 +1240,30 @@
               const r = document.createElement("div"); r.className = "attn-row";
               const t = document.createElement("span"); t.className = "attn-text"; t.textContent = line;
               r.appendChild(t); attnBox.appendChild(r);
+            });
+          }
+
+          // top tracked edges (any tier, positive edge, pre-kickoff, best first) —
+          // fills the Today view with the strongest live edges even when nothing
+          // clears the premium gate (most are shadow / tracked-informational).
+          const topEdges = state.picks
+            .filter((p) => !hasStarted(p) && numOf(p.current_edge == null ? p.edge : p.current_edge) > 0)
+            .sort((a, b) => numOf(b.current_edge == null ? b.edge : b.current_edge) - numOf(a.current_edge == null ? a.edge : a.current_edge))
+            .slice(0, 8);
+          const teBox = $("top-edges"); teBox.replaceChildren();
+          if (topEdges.length === 0) {
+            const p0 = document.createElement("p"); p0.className = "muted";
+            p0.textContent = state.picksErr !== null ? "Could not load picks." : "No tracked edges yet.";
+            teBox.appendChild(p0);
+          } else {
+            topEdges.forEach((p) => {
+              const r = document.createElement("div"); r.className = "kickoff-row";
+              const t = document.createElement("span"); t.className = "kr-t mono";
+              t.textContent = fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
+              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
+              const s = document.createElement("span"); s.className = "kr-s";
+              s.textContent = fmt(p.selection) + " @ " + fmtOdds(p.decimal_odds) + " · " + (tierOf(p) === "premium" ? "Premium" : "Shadow");
+              r.append(t, e, s); teBox.appendChild(r);
             });
           }
 
