@@ -224,6 +224,24 @@ async def test_in_running_fork_duplicate_is_deduped(session) -> None:  # type: i
     assert len(await _result_rows(session, clean.id, fork_pick.id)) == 1
 
 
+async def test_duplicate_superseded_even_without_own_score(session) -> None:  # type: ignore[no-untyped-def]
+    """A duplicate whose OWN event never gets a matched score (e.g. an
+    `[In Running]`-named fork the score book cannot match) must STILL be
+    superseded once its twin has settled — otherwise it lingers 'alerted' /
+    pending forever. Requires the guard to run BEFORE the score lookup."""
+    clean = await seed_pick(session, "evt-noscore-A")
+    await _mark_settled(session, clean)  # the settled sibling
+    dup = await seed_pick(session, "evt-noscore-B")  # same fixture, still alerted
+
+    # Non-empty book that does NOT contain this fixture -> dup's own lookup is None.
+    book = ScoreBook([FinalScore("Zzz Home", "Zzz Away", KICKOFF.date(), 1, 0)])
+    n = await settle_open_picks(session, book, NOW)
+
+    assert n == 0  # clean already settled; dup has no own score to settle from
+    await session.refresh(dup)
+    assert dup.status == "superseded", "duplicate must supersede without its own score"
+
+
 async def test_distinct_fixtures_both_settle(session) -> None:  # type: ignore[no-untyped-def]
     """Fail-safe: two DIFFERENT fixtures (different teams), same market+selection,
     both settle — the guard must not over-skip."""

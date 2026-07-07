@@ -353,15 +353,16 @@ async def settle_open_picks(
     for pick, home_name, away_name, starts_at, external_ref, sport_key, sport_id in rows:
         if starts_at > now - settle_delay_for(sport_key, delay):
             continue  # sport floor not reached — the game may still be in play
-        score = book.lookup(home_name, away_name, starts_at)
-        if score is None:
-            continue  # close_pending — stays open, retried next cycle
-        # DEDUP GUARD: cross-source event dedup can mint this SAME bet on a second
-        # event row of one fixture. uq_result_tracking_pick is per pick_id, so
-        # both would settle and BOTH count into pnl/ROI/CLV. If an equivalent pick
-        # on a sibling event of the same fixture already settled, skip this one —
-        # never write the phantom second result row. Fail-safe (see
-        # DEDUP_FIXTURE_TOLERANCE): can only skip a true duplicate.
+        # DEDUP GUARD (runs BEFORE the score lookup): cross-source event dedup can
+        # mint this SAME bet on a second event row of one fixture.
+        # uq_result_tracking_pick is per pick_id, so both would settle and BOTH
+        # count into pnl/ROI/CLV. If an equivalent pick on a sibling event of the
+        # same fixture already settled, supersede this one — never write the
+        # phantom second result row. Placed BEFORE the score lookup so a duplicate
+        # whose OWN event never gets a matched score (an [In Running]-forked event
+        # the score book cannot match) is still closed, not left pending forever; a
+        # settled sibling already proves the fixture finished. Fail-safe (see
+        # DEDUP_FIXTURE_TOLERANCE): only supersedes a true duplicate.
         pair = fixture_pair_key(home_name, away_name)
         if pair is not None and await _settled_sibling_exists(
             session,
@@ -392,6 +393,9 @@ async def settle_open_picks(
                 pick.selection,
             )
             continue
+        score = book.lookup(home_name, away_name, starts_at)
+        if score is None:
+            continue  # close_pending — stays open, retried next cycle
         if await _settle_one(
             session,
             pick,
