@@ -1106,6 +1106,8 @@ def parse_market_api_payloads(
             for raw_odd in odds_by_bet.get(str(raw_bet.get("betId") or ""), []):
                 if str(raw_odd.get("status") or "").upper() != "ACTIVE":
                     continue
+                if raw_odd.get("expired") is True or raw_odd.get("notExpired") is False:
+                    continue
                 decimal = _decimal(raw_odd.get("oddsDecimal"))
                 if decimal is None:
                     continue
