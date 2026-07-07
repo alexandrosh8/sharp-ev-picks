@@ -94,6 +94,15 @@ if ! grep -q "not in _ALLOWED_OPS" app/ingestion/betfair_api.py; then
   fail=1
 fi
 
+echo "== 10. app/ must not import the autoresearch answer key (research/) =="
+# The autoresearch scorer's ground truth lives in research/. Production ingestion
+# must NEVER import it: a parser that reads research.corpus could special-case the
+# scored fixtures instead of generalising (overfit the objective). Fail closed.
+if grep -I --exclude-dir=__pycache__ -rnE "^[[:space:]]*(import|from)[[:space:]]+research([.[:space:]]|$)" app/; then
+  echo "FAIL: app/ imports the research/ autoresearch package (answer-key leak)"
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "SAFETY AUDIT: FAILED"
   exit 1

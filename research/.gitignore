@@ -1,0 +1,5 @@
+# The run log is untracked by doctrine (per-run experiment ledger).
+results.tsv
+__pycache__/
+*.pyc
+db_context_*.json
