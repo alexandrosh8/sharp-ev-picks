@@ -1338,6 +1338,15 @@
                     An excluded close is unusable evidence, not a loss.</p>
                 </div>
               </section>
+              <section class="panel" aria-labelledby="closesla-h" data-testid="panel-close-sla">
+                <div class="panel-h"><h3 id="closesla-h">Close coverage SLA — CLV reliability</h3></div>
+                <div class="panel-b">
+                  <div id="close-sla"></div>
+                  <p class="muted">Share of each sport-market's settled picks with a trusted
+                    independent sharp close. Below the SLA the CLV/ROI number is built on
+                    thin closing-line coverage — the claim is flagged unreliable, not the picks.</p>
+                </div>
+              </section>
               <section class="panel" aria-labelledby="promodist-h" data-testid="panel-promo-distance">
                 <div class="panel-h"><h3 id="promodist-h">Evidence distance — sport / market</h3></div>
                 <div class="panel-b">
@@ -2785,6 +2794,35 @@
             row.append(nm, kn, s); box.appendChild(row);
           });
         }
+        // CLOSE/FRESHNESS SLA (audit #8): per sport-market close coverage + SLA
+        // verdict — rendered straight from /performance (close_coverage_sla), no
+        // new fetch. When coverage is below the SLA the CLV/ROI number is built on
+        // thin closing-line coverage, so the CLAIM is flagged unreliable (the
+        // claim, not the picks). Report annotation only — nothing is demoted.
+        function renderCloseCoverageSla() {
+          const box = $("close-sla"); box.replaceChildren();
+          const perf = state.perf;
+          const p0 = document.createElement("p"); p0.className = "muted";
+          if (!perf) { p0.textContent = "Could not load performance data."; box.appendChild(p0); return; }
+          const rows = perf.close_coverage_sla || [];
+          if (rows.length === 0) { p0.textContent = "No settled picks yet."; box.appendChild(p0); return; }
+          rows.forEach((r0) => {
+            const row = document.createElement("div"); row.className = "kickoff-row";
+            const nm = document.createElement("span"); nm.className = "kr-t mono";
+            nm.textContent = String(r0.sport).replace(/_/g, " ") + " · " + String(r0.market).replace(/_/g, " ");
+            const cov = document.createElement("span"); cov.className = "kr-s";
+            cov.textContent = "coverage " + fmtPct(r0.close_coverage) + " (trusted "
+              + (Number(r0.n_trusted_close) || 0) + " / " + fmt(r0.n_settled) + ")";
+            const tag = document.createElement("span");
+            const belowSla = !!r0.below_sla;
+            const noData = r0.close_coverage === null || r0.close_coverage === undefined;
+            tag.className = "tag " + (belowSla ? "tag-warm" : (noData ? "tag-neutral" : "tag-success"));
+            tag.textContent = belowSla
+              ? ("below SLA " + fmtPct(r0.sla_threshold, 0) + " — CLV unreliable")
+              : (noData ? "no settled picks" : "meets SLA");
+            row.append(nm, cov, tag); box.appendChild(row);
+          });
+        }
         // B4: steam shadow-verdict summary — counts + mint-week trend + the
         // trusted-CLV split by verdict, with the SAME min-n discipline as every
         // other aggregate: below the floor it reads "n=X — insufficient",
@@ -2941,6 +2979,7 @@
           }
 
           renderCloseQualityBySport();
+          renderCloseCoverageSla();
           renderSteamShadow();
           renderPromotionDistance();
           renderBankroll();

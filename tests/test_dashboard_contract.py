@@ -261,6 +261,21 @@ def test_close_quality_by_sport_renders_from_performance_payload() -> None:
     assert "Could not load performance data." in text
 
 
+def test_close_coverage_sla_renders_from_performance_payload() -> None:
+    """Audit #8: the per sport-market CLOSE/FRESHNESS SLA panel renders straight
+    from the existing /performance payload (close_coverage_sla) — no new fetch —
+    flags the CLV/ROI CLAIM (not the picks) when coverage is below the SLA, with
+    an honest empty state."""
+    text = _text()
+    assert 'id="close-sla"' in text
+    assert "function renderCloseCoverageSla" in text
+    assert "close_coverage_sla" in text
+    # the claim is flagged, never the picks
+    assert "CLV unreliable" in text
+    assert "No settled picks yet." in text
+    assert "Could not load performance data." in text
+
+
 def test_match_ceiling_is_lazy_collapsed_disclosure() -> None:
     """B3: the Sources match-ceiling decomposition is a collapsed-by-default
     <details> that lazy-fetches GET /resolution/match-ceiling on expand with the

@@ -359,7 +359,7 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
     from app.api import routes
     from app.backtesting.live_evidence import SettledPickRow
 
-    async def fake_perf(session):  # type: ignore[no-untyped-def]
+    async def fake_perf(session, *, close_coverage_sla=0.85):  # type: ignore[no-untyped-def]
         return {
             "n_settled": 2,
             "tier_scope": "premium",

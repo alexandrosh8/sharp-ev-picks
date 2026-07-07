@@ -845,6 +845,16 @@ _SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
 # n (n_sharp_close), which is naturally thinner than n_settled.
 MIN_HEADLINE_N = 50
 
+# CLOSE/FRESHNESS SLA (external-audit item #8) default — REPORT-ONLY. The share
+# of a sport-market's settled picks that must carry a TRUSTED independent sharp
+# snapshot close (n_sharp_close / n_settled) for that sport-market's CLV/ROI to
+# be presented as trustworthy. The live value is Settings.value_close_coverage_sla,
+# threaded in by the route (this module stays Settings-free — the default here is
+# only the fallback used by callers that don't pass one, e.g. tests). Below the
+# SLA the CLAIM is flagged; the picks are never hidden and NO selection/stake/
+# threshold changes.
+DEFAULT_CLOSE_COVERAGE_SLA = 0.85
+
 # CLV-1 data-error tripwire. A settled pick whose CLOSE-IMPLIED edge
 # (closing_fair_probability - 1/decimal_odds) exceeds this ceiling carries a
 # physically impossible close: it is the residue of the since-fixed
@@ -1295,6 +1305,61 @@ def _aggregate_settled_by_sport(
     return {k: _aggregate_settled(v) for k, v in sorted(by_sport.items())}
 
 
+def _close_coverage_by_sport_market(
+    rows: Sequence[tuple[tuple[str, str], Sequence[Any]]],
+    *,
+    sla_threshold: float,
+) -> list[dict[str, Any]]:
+    """CLOSE/FRESHNESS SLA (external-audit item #8) — per (sport, market) close
+    coverage + SLA verdict. REPORT-ONLY.
+
+    ``rows`` are ((sport_key, market), settled_row) pairs where ``settled_row`` is
+    the same tuple ``_aggregate_settled`` consumes. Close coverage reuses the
+    EXACT trust logic already in ``_aggregate_settled`` (no reinvention): the
+    numerator is ``n_sharp_close`` — settled picks whose close is a GENUINE
+    independent sharp snapshot (has_snapshot_close + a named sharp anchor +
+    independent of the fill + not tautological/fabricated), i.e. the closes whose
+    CLV the platform can stand behind — over ``n_settled`` (all settled picks in
+    that sport-market).
+
+    When coverage is below ``sla_threshold`` the sport-market's CLV/ROI number is
+    built on too-thin closing-line coverage to be trustworthy, so the CLAIM is
+    flagged ``below_sla`` with a human-readable verdict. Nothing is hidden and NO
+    selection/stake/threshold behaviour changes — this only annotates what the
+    REPORT asserts. ``close_coverage`` is None (verdict "no settled picks") when a
+    sport-market has no settled picks yet — there is no claim to flag.
+    """
+    grouped: dict[tuple[str, str], list[Sequence[Any]]] = {}
+    for key, settled_row in rows:
+        grouped.setdefault(key, []).append(settled_row)
+    out: list[dict[str, Any]] = []
+    for (sport_key, market), settled_rows in sorted(grouped.items()):
+        agg = _aggregate_settled(settled_rows)
+        n_settled = int(agg["n_settled"])
+        n_trusted_close = int(agg["n_sharp_close"])
+        coverage = (n_trusted_close / n_settled) if n_settled else None
+        below_sla = coverage is not None and coverage < sla_threshold
+        out.append(
+            {
+                "sport": sport_key,
+                "market": market,
+                "n_settled": n_settled,
+                "n_trusted_close": n_trusted_close,
+                "close_coverage": coverage,
+                "sla_threshold": sla_threshold,
+                "below_sla": below_sla,
+                # convenience verdict for the dashboard/report consumer — the
+                # audit's exact wording when the CLV number is not trustworthy.
+                "verdict": (
+                    "coverage below SLA — CLV unreliable"
+                    if below_sla
+                    else ("no settled picks" if coverage is None else "ok")
+                ),
+            }
+        )
+    return out
+
+
 #: Mint-week trend window for the B4 steam shadow-verdict summary — long enough
 #: to see a drift, short enough that one SELECT stays cheap.
 STEAM_WEEKLY_WINDOW_WEEKS = 8
@@ -1336,7 +1401,11 @@ def _weekly_steam_counts(
     return [{"week_start": ws, **counts} for ws, counts in sorted(weeks.items())]
 
 
-async def performance_report(session: AsyncSession) -> dict[str, Any]:
+async def performance_report(
+    session: AsyncSession,
+    *,
+    close_coverage_sla: float = DEFAULT_CLOSE_COVERAGE_SLA,
+) -> dict[str, Any]:
     """ROI + stake-weighted log-CLV over settled picks (phase 4 report).
 
     Headline numbers are PREMIUM-scoped ("tier_scope" says so): the volume
@@ -1373,6 +1442,10 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         # _clv_row_is_tautological for the documented strategy coupling)
     ]
     sport_idx = 7
+    # Per (sport, market) split key for the CLOSE/FRESHNESS SLA panel (audit #8).
+    # Appended like the other split keys — not passed to _aggregate_settled.
+    market_idx = len(select_cols)
+    select_cols.append(Pick.market)
     close_anchor_idx = indep_idx = snapshot_idx = None
     if close_anchor_attr is not None:
         close_anchor_idx = len(select_cols)
@@ -1477,6 +1550,14 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     # own forward CLV/ROI evidence. Each sport is gated on its OWN n inside
     # _aggregate_settled (MIN_HEADLINE_N), so a thin sport reads "insufficient".
     by_sport = _aggregate_settled_by_sport([(r[sport_idx], _settled_tuple(r)) for r in rows])
+    # CLOSE/FRESHNESS SLA (audit #8): per (sport, market), the share of settled
+    # picks that carry a TRUSTED independent sharp close — below the SLA the
+    # sport-market's CLV/ROI claim is flagged UNRELIABLE (report annotation only;
+    # no pick is hidden and NO selection/stake/threshold changes).
+    close_coverage = _close_coverage_by_sport_market(
+        [((r[sport_idx], r[market_idx]), _settled_tuple(r)) for r in rows],
+        sla_threshold=close_coverage_sla,
+    )
     # D4 EVIDENCE QUALITY: tier-AGNOSTIC (the exclusion mass spans both tiers,
     # matching the audit SQL's population) + per-stratum tautology tallies. Pure
     # diagnostics — no headline/trusted figure above changes.
@@ -1535,6 +1616,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         "tier_scope": "premium",
         "volume": volume,
         "by_sport": by_sport,
+        "close_coverage_sla": close_coverage,
         "clv_quality": clv_quality,
         "steam_shadow": steam_shadow,
     }

@@ -376,6 +376,16 @@ class Settings(BaseSettings):
     # Must stay <= value_min_edge; setting it EQUAL disables the volume
     # tier cleanly (no edge can be >= volume and < premium at once).
     value_volume_min_edge: float = Field(default=0.015, ge=0.0)
+    # CLOSE/FRESHNESS SLA (external-audit item #8) — REPORT-ONLY, never a
+    # selection/stake/threshold gate. The minimum share of a sport-market's
+    # settled picks that must carry a TRUSTED independent sharp snapshot close
+    # for that sport-market's CLV/ROI claim to be presented as trustworthy.
+    # Below this, /performance flags the CLAIM "coverage below SLA — CLV
+    # unreliable" (the picks are NOT hidden; only the reliability of the number
+    # is annotated). Default 0.85 per the audit. Threaded into
+    # performance_report at the composition root — repositories.py stays
+    # Settings-free.
+    value_close_coverage_sla: float = Field(default=0.85, gt=0.0, le=1.0)
     # Floor on candidate odds, set to the VALIDATED floor (1.30 = the engine
     # default). A 2026-06-18 held-out floor sweep showed 1.60->1.30 adds ~1
     # pick over two seasons with ROI/CLV unchanged (high-edge sub-1.60 value

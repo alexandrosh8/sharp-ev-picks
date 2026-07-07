@@ -818,6 +818,59 @@ async def test_performance_report_keeps_volume_out_of_headline(session) -> None:
     assert vol["n_pending"] == 0
 
 
+async def test_performance_report_close_coverage_sla(session) -> None:  # type: ignore[no-untyped-def]
+    """Audit #8 CLOSE/FRESHNESS SLA: a sport-market whose settled picks carry a
+    trusted independent sharp close meets the SLA; one without trusted close is
+    flagged below-SLA (its CLV/ROI claim is unreliable). REPORT ANNOTATION ONLY —
+    no pick is hidden and no selection/stake/threshold changes."""
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import update as sa_update
+
+    from app.storage.repositories import performance_report
+
+    await session.execute(sa_delete(ResultTracking))
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+
+    # WELL-COVERED sport-market (soccer/totals): a GENUINE independent Pinnacle
+    # snapshot close — the trust guard admits it to n_sharp_close.
+    covered = await seed_pick(
+        session, "evt-sla-covered", market=Market.TOTALS, selection="Over 2.5"
+    )
+    covered.clv_log = Decimal("0.05")
+    covered.beat_close = True
+    covered.closing_anchor_type = "pinnacle"
+    covered.has_snapshot_close = True
+    covered.close_independent_of_fill = True
+    # POORLY-COVERED sport-market (soccer/btts): a CLV exists but from an
+    # untrusted close (no snapshot / no sharp anchor) -> n_sharp_close 0.
+    thin = await seed_pick(session, "evt-sla-thin", market=Market.BTTS, selection="BTTS Yes")
+    thin.clv_log = Decimal("0.01")
+    # Both settle from the same 2-1 scoreline (Over 2.5 wins; both teams scored).
+    assert (await settle_event_picks(session, covered.event_id, 2, 1, NOW))[0] == 1
+    assert (await settle_event_picks(session, thin.event_id, 2, 1, NOW))[0] == 1
+
+    report = await performance_report(session, close_coverage_sla=0.85)
+    panel = {row["market"]: row for row in report["close_coverage_sla"]}
+
+    covered_row = panel["totals"]
+    assert covered_row["sport"] == "soccer"
+    assert covered_row["n_settled"] == 1
+    assert covered_row["n_trusted_close"] == 1
+    assert covered_row["close_coverage"] == 1.0
+    assert covered_row["sla_threshold"] == 0.85
+    assert covered_row["below_sla"] is False
+    assert covered_row["verdict"] == "ok"
+
+    thin_row = panel["btts"]
+    assert thin_row["n_settled"] == 1
+    assert thin_row["n_trusted_close"] == 0
+    assert thin_row["close_coverage"] == 0.0
+    assert thin_row["below_sla"] is True
+    assert thin_row["verdict"] == "coverage below SLA — CLV unreliable"
+
+
 async def test_run_settlement_cycle_refuses_when_providers_empty(factory, caplog) -> None:  # type: ignore[no-untyped-def]
     async with factory() as session:
         pick = await seed_pick(session, "evt-settle-cycle-2")

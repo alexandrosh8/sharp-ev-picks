@@ -1159,7 +1159,11 @@ async def performance(
     flip decision. Every stratum carries its n; strata under min_n are
     flagged insufficient and the dashboard shows the state, not estimates.
     """
-    report = await performance_report(session)
+    from app.config import get_settings
+
+    report = await performance_report(
+        session, close_coverage_sla=get_settings().value_close_coverage_sla
+    )
     rows = await live_evidence_rows(session)
     report["live_evidence"] = live_evidence_report(rows, ml_threshold=_ml_operating_point())
     # P1-1 claimed-fair RELIABILITY MONITOR (report-only — NOT a release gate,
