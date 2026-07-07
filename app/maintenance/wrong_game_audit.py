@@ -71,11 +71,13 @@ def _names_same_game(a: str, b: str) -> bool:
     helpers so this is an INDEPENDENT check, not the matcher vouching for itself."""
     from app.resolution.matching import (
         _DISAMBIGUATING_TOKENS,
+        _tennis_initial,
         default_aliases,
         jaro_winkler,
         strip_markers,
         token_sort_ratio,
     )
+    from app.resolution.tennis_names import canonical_tennis_name
 
     aliases = default_aliases()
     base_a = aliases.canonical(strip_markers(a))
@@ -84,6 +86,18 @@ def _names_same_game(a: str, b: str) -> bool:
         return False
     if base_a == base_b:
         return True
+    # Tennis cross-form: a pick carries the DISPLAY name ("Jannik Sinner") while
+    # the anchor is the canonical "surname initial" form ("sinner j") (or vice
+    # versa), so the bases never match. When EITHER base already has the tennis
+    # canonical shape ("surname f"), reduce BOTH names to that shape and compare
+    # — same surname + first-initial is the same player. A first-initial MISMATCH
+    # ("mcdonald m" vs "mcdonald n") stays distinct. This only fires for tennis
+    # (team names have no trailing single-letter token) and, in the log-only
+    # audit, can only SUPPRESS a false ERROR — never accept a close.
+    if _tennis_initial(base_a) is not None or _tennis_initial(base_b) is not None:
+        ca, cb = canonical_tennis_name(a), canonical_tennis_name(b)
+        if ca and cb and ca == cb:
+            return True
     # Two base names differing ONLY by a club-disambiguating token (United/City/
     # Sociedad/B/II/...) are DIFFERENT clubs — never the same game.
     tokens_a, tokens_b = set(base_a.split()), set(base_b.split())

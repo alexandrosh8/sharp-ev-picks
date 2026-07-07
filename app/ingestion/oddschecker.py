@@ -1761,6 +1761,19 @@ class OddsCheckerLoader:
                 "oddschecker %s daily discovery skipped (%s)", oc_key, type(exc).__name__
             )
             match_urls = []
+        except Exception as exc:
+            # A discovery-fetch TIMEOUT must not fail the whole poll_odds cycle
+            # (it surfaced as "poll_odds failed for soccer: Timeout"). Skip this
+            # sport's slate this cycle like an OddsCheckerError; it retries next
+            # cycle. Non-timeout errors still propagate unchanged.
+            if "timeout" not in type(exc).__name__.lower():
+                raise
+            logger.warning(
+                "oddschecker %s daily discovery timed out (%s) — skipping this cycle",
+                oc_key,
+                type(exc).__name__,
+            )
+            match_urls = []
         deduped = self._dedupe_urls(match_urls)
         self.last_fetch_matches[pipeline_key] = len(deduped)
         return await self._gather_snapshots(deduped, session, pipeline_key=pipeline_key)

@@ -176,3 +176,22 @@ def test_nordic_vowel_digraph_variants_do_not_false_flag() -> None:
     # ...but the digraph fold must NOT merge genuinely different clubs.
     assert _names_same_game("Manchester United", "Manchester City") is False
     assert _names_same_game("Lazio", "Inter") is False
+
+
+def test_names_same_game_tennis_cross_form() -> None:
+    """Regression: a tennis pick carries the DISPLAY name ('Jannik Sinner') while
+    the anchor is the canonical 'surname initial' form ('sinner j'); the audit
+    must treat them as the SAME player (previously a false-positive
+    wrong_game_anchor ERROR). A first-initial MISMATCH stays distinct, and the
+    tennis path must not affect team-sport names."""
+    from app.maintenance.wrong_game_audit import _names_same_game
+
+    assert _names_same_game("Jannik Sinner", "sinner j") is True
+    assert _names_same_game("Naomi Osaka", "osaka n") is True
+    assert _names_same_game("Jessica Pegula", "pegula j") is True
+    # different first initial -> different player, still correctly flagged
+    assert _names_same_game("Mackenzie McDonald", "mcdonald n") is False
+    # team-sport non-regression (no trailing single-letter token -> tennis path
+    # never fires): distinct clubs stay distinct, same club stays same.
+    assert _names_same_game("Manchester United", "Manchester City") is False
+    assert _names_same_game("Arsenal", "Arsenal") is True
