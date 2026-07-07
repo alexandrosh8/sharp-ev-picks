@@ -1125,6 +1125,9 @@ def parse_market_api_payloads(
             if not bet_id:
                 continue
             odds_by_bet.setdefault(bet_id, []).append(raw_odd)
+        # Thread the payload's bookmaker entities so off-map book codes resolve to
+        # the feed's canonical name (matches the bestOdds path); {} when absent.
+        bm_entities = _entity_map(market_payload.get("bookmakers"))
         for raw_bet in raw_bets:
             if not isinstance(raw_bet, Mapping):
                 continue
@@ -1151,7 +1154,7 @@ def parse_market_api_payloads(
                 decimal = _decimal(raw_odd.get("oddsDecimal"))
                 if decimal is None:
                     continue
-                bookmaker = _bookmaker_name(str(raw_odd.get("bookmakerCode") or ""), {})
+                bookmaker = _bookmaker_name(str(raw_odd.get("bookmakerCode") or ""), bm_entities)
                 snapshots.append(
                     OddsSnapshotIn(
                         event_id=event_id,
