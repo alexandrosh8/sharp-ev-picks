@@ -333,6 +333,56 @@ def _soft_fill_odds(
     return fills
 
 
+def _book_fill_groups(market: str) -> list[tuple[str, tuple[str, ...], bool]]:
+    """(book_key, per-outcome column tuple, is_exchange) groups for one market.
+
+    The single source of truth mapping a football-data book to its outcome
+    columns, used by the 'user_allowlist' fill universe to keep or drop a book
+    by its key. Mirrors SOFT_FILL_BOOKS / EXCHANGE_FILL_BOOKS (which lose the
+    book identity) without touching them, so 'soft' / 'max' stay unchanged."""
+    if market == "1x2":
+        groups: list[tuple[str, tuple[str, ...], bool]] = [
+            (b, (f"{b}H", f"{b}D", f"{b}A"), False) for b in _SOFT_1X2_BOOKS
+        ]
+        groups.append(("BFE", ("BFEH", "BFED", "BFEA"), True))
+        return groups
+    if market == "ou25":
+        return [
+            ("B365", ("B365>2.5", "B365<2.5"), False),
+            ("BFE", ("BFE>2.5", "BFE<2.5"), True),
+        ]
+    return []
+
+
+def _user_allowlist_fill_odds(
+    r: dict,
+    market: str,
+    n_outcomes: int,
+    exchange_commission: float,
+    allowlist: frozenset[str],
+) -> list[float | None]:
+    """Best takeable price per outcome among ONLY the operator's allowlist books.
+
+    Kills the optimistic Max-of-books fill (external-audit #10): the operator can
+    bet only the books they actually hold. Soft books enter at their gross price;
+    exchange books (Betfair Exchange) only NET of commission (parity with
+    app/edge/value.effective_odds). None per outcome when no ALLOWED book prices
+    it (no fallback to the composite Max or the sharp anchor). Book keys are
+    matched case-insensitively against ``allowlist`` (e.g. {"b365", "wh", "bfe"})."""
+    fills: list[float | None] = [None] * n_outcomes
+    for book, cols, is_exchange in _book_fill_groups(market):
+        if book.lower() not in allowlist:
+            continue
+        for i, c in enumerate(cols):
+            v = _f(r.get(c))
+            if v is None:
+                continue
+            price = 1.0 + (v - 1.0) * (1.0 - exchange_commission) if is_exchange else v
+            if price > 1.0 and (fills[i] is None or price > fills[i]):
+                fills[i] = price
+    return fills
+
+
 def bets_for(
     rows: list[dict],
     thr: float,
@@ -344,16 +394,23 @@ def bets_for(
     *,
     fill_universe: str = "max",
     exchange_commission: float = EXCHANGE_COMMISSION_DEFAULT,
+    book_allowlist: frozenset[str] = frozenset(),
 ) -> list[VBet]:
     """One bet per (match, market): the highest-edge selection >= threshold.
 
     ``markets_map`` defaults to the football MARKETS dict; the tennis path passes
     TENNIS_MARKETS so the parity-locked MARKETS stays football-only.
     ``fill_universe`` selects the takeable price: 'max' (composite Max, gross —
-    original behavior) or 'soft' (best named soft book; exchange net of
-    commission; see the block comment above SOFT_FILL_BOOKS)."""
-    if fill_universe not in ("max", "soft"):
-        raise ValueError(f"unknown fill_universe {fill_universe!r} (expected 'max' or 'soft')")
+    original behavior), 'soft' (best named soft book; exchange net of
+    commission; see the block comment above SOFT_FILL_BOOKS), or 'user_allowlist'
+    (best price among ONLY ``book_allowlist`` books, exchange net of commission —
+    kills the optimistic Max fill, external-audit #10)."""
+    if fill_universe not in ("max", "soft", "user_allowlist"):
+        raise ValueError(
+            f"unknown fill_universe {fill_universe!r} (expected 'max', 'soft', or 'user_allowlist')"
+        )
+    if fill_universe == "user_allowlist" and not book_allowlist:
+        raise ValueError("fill_universe 'user_allowlist' requires a non-empty book_allowlist")
     mkts = MARKETS if markets_map is None else markets_map
     out: list[VBet] = []
     for ri, r in enumerate(rows):
@@ -362,6 +419,10 @@ def bets_for(
             ps = [_f(r.get(c)) for c in ps_c]
             if fill_universe == "soft":
                 mx = _soft_fill_odds(r, market, len(ps_c), exchange_commission)
+            elif fill_universe == "user_allowlist":
+                mx = _user_allowlist_fill_odds(
+                    r, market, len(ps_c), exchange_commission, book_allowlist
+                )
             else:
                 mx = [_f(r.get(c)) for c in mx_c]
             psc = [_f(r.get(c)) for c in psc_c]
@@ -1542,13 +1603,25 @@ async def main() -> None:
     )
     p.add_argument(
         "--fill-universe",
-        choices=("max", "soft"),
+        choices=("max", "soft", "user_allowlist"),
         default="max",
         help=(
             "takeable-price universe (football-data source): 'max' = composite "
             "Max across ALL books, gross (original headline behavior — OPTIMISTIC "
             "vs live); 'soft' = best NAMED soft book only, sharp (Pinnacle) never "
-            "a fill, exchange (Betfair Exchange) prices only NET of commission"
+            "a fill, exchange (Betfair Exchange) prices only NET of commission; "
+            "'user_allowlist' = best price among ONLY --book-allowlist books "
+            "(exchange net of commission) — kills the optimistic Max fill (#10)"
+        ),
+    )
+    p.add_argument(
+        "--book-allowlist",
+        default="",
+        help=(
+            "csv of BETTABLE football-data book keys for --fill-universe "
+            "user_allowlist — e.g. 'B365,WH,VC,BFE' (case-insensitive; BFE = "
+            "Betfair Exchange, netted of --exchange-commission). Required when "
+            "--fill-universe user_allowlist"
         ),
     )
     p.add_argument(
@@ -1561,6 +1634,8 @@ async def main() -> None:
         ),
     )
     args = p.parse_args()
+    if args.fill_universe == "user_allowlist" and not args.book_allowlist.strip():
+        p.error("--fill-universe user_allowlist requires --book-allowlist (csv of book keys)")
     if args.anchor_dataset and args.source != "betfair-bsp":
         p.error("--anchor-dataset is VALIDATION-ONLY and requires --source betfair-bsp")
     if args.frozen_eval and not args.anchor_dataset:
@@ -1589,6 +1664,9 @@ async def main() -> None:
 
     fill_universe: str = args.fill_universe
     exchange_commission: float = args.exchange_commission
+    book_allowlist: frozenset[str] = frozenset(
+        b.strip().lower() for b in args.book_allowlist.split(",") if b.strip()
+    )
 
     print(f"\nVALUE BACKTEST — {len(leagues)} leagues, markets {markets}, min_odds {min_odds}")
     if min_odds < 1.6:
@@ -1601,6 +1679,12 @@ async def main() -> None:
             "FILL UNIVERSE: max (composite Max across ALL books, GROSS — the original\n"
             "headline behavior; OPTIMISTIC vs live fills. Rerun with --fill-universe soft\n"
             "for the best-soft-book, exchange-net-of-commission variant.)\n"
+        )
+    elif fill_universe == "user_allowlist":
+        print(
+            f"FILL UNIVERSE: user_allowlist (best price among ONLY {sorted(book_allowlist)};\n"
+            f"exchange prices net of {exchange_commission:.0%} commission — kills the\n"
+            f"optimistic Max-of-books fill.)\n"
         )
     else:
         print(
@@ -1622,6 +1706,7 @@ async def main() -> None:
             max_odds,
             fill_universe=fill_universe,
             exchange_commission=exchange_commission,
+            book_allowlist=book_allowlist,
         )
 
     devig_methods = (

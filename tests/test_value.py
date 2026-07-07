@@ -1095,3 +1095,96 @@ def test_close_exclusion_reason_vocabulary_is_closed_and_column_safe() -> None:
     assert CLOSE_REASON_TRUSTED in CLOSE_EXCLUSION_REASONS
     assert len(CLOSE_EXCLUSION_REASONS) == len(set(CLOSE_EXCLUSION_REASONS)) == 6
     assert all(len(r) <= 32 for r in CLOSE_EXCLUSION_REASONS)
+
+
+# --- External-audit #2: BOOK ALLOWLIST fill realism -------------------------
+# The FILL price a pick is measured against must be restricted to books the
+# operator can actually bet; the UNRESTRICTED theoretical best is exposed
+# alongside so the fill gap is observable. Empty allowlist = exact no-op.
+
+
+def _allowlist_market() -> dict[str, dict[str, float]]:
+    """Pinnacle-anchored 1X2 with several soft books; Home is the value side.
+
+    Home best soft = Bet365 2.20 (theoretical); WilliamHill 2.10 and SoftX 2.15
+    are the other bettable soft prices. Pinnacle overround ~4.9% (anchor-eligible)."""
+    return {
+        "Home": {"Pinnacle": 2.00, "Bet365": 2.30, "WilliamHill": 2.15, "SoftX": 2.20},
+        "Draw": {"Pinnacle": 3.50, "Bet365": 3.40, "WilliamHill": 3.45, "SoftX": 3.42},
+        "Away": {"Pinnacle": 3.80, "Bet365": 3.70, "WilliamHill": 3.75, "SoftX": 3.72},
+    }
+
+
+def _home(bets: list[ValueBet]) -> ValueBet:
+    (home,) = [b for b in bets if b.selection == "Home"]
+    return home
+
+
+def test_book_allowlist_empty_is_byte_for_byte_non_regression() -> None:
+    prices = _allowlist_market()
+    baseline = find_value_bets(prices)
+    with_empty = find_value_bets(prices, book_allowlist=frozenset())
+    assert len(baseline) == len(with_empty) >= 1
+    for b, e in zip(baseline, with_empty, strict=True):
+        # The core actionable fields are identical to before the allowlist knob.
+        assert (b.selection, b.best_book, b.best_odds, b.best_odds_effective) == (
+            e.selection,
+            e.best_book,
+            e.best_odds,
+            e.best_odds_effective,
+        )
+        assert b.edge == pytest.approx(e.edge)
+        assert b.ev == pytest.approx(e.ev)
+        # With no allowlist the theoretical best equals the fill: gap is exactly 0.
+        assert e.theoretical_best_book == e.best_book
+        assert e.theoretical_best_odds == pytest.approx(e.best_odds)
+        assert e.theoretical_best_odds_effective == pytest.approx(e.best_odds_effective)
+        assert e.theoretical_edge == pytest.approx(e.edge)
+        assert e.fill_gap == pytest.approx(0.0)
+
+
+def test_book_allowlist_restricts_fill_and_exposes_theoretical_gap() -> None:
+    prices = _allowlist_market()
+    # Only WilliamHill (2.10) is bettable; Bet365 (2.20) is the theoretical best.
+    restricted = _home(find_value_bets(prices, book_allowlist=frozenset({"williamhill"})))
+    assert restricted.best_book == "WilliamHill"
+    assert restricted.best_odds == pytest.approx(2.15)  # the fillable price
+    # The theoretical (unrestricted) best is still the higher Bet365 price.
+    assert restricted.theoretical_best_book == "Bet365"
+    assert restricted.theoretical_best_odds == pytest.approx(2.30)
+    # fill_gap is the pure implied-prob difference (fair cancels): 1/2.10 - 1/2.20.
+    assert restricted.fill_gap == pytest.approx(1.0 / 2.15 - 1.0 / 2.30)
+    assert restricted.theoretical_edge > restricted.edge  # theoretical never worse
+    assert restricted.fill_gap == pytest.approx(restricted.theoretical_edge - restricted.edge)
+    # The fillable edge is measured against the restricted price, not the optimum.
+    assert restricted.edge == pytest.approx(restricted.sharp_fair_prob - 1.0 / 2.15)
+
+
+def test_book_allowlist_skips_selection_with_no_bettable_book() -> None:
+    prices = _allowlist_market()
+    # No available soft book normalizes into the allowlist -> nothing is fillable.
+    assert find_value_bets(prices, book_allowlist=frozenset({"no_such_book"})) == []
+
+
+def test_book_allowlist_matching_is_normalization_robust() -> None:
+    # Book names in the feed carry mixed case; the allowlist is normalized
+    # (strip + lower, the project's _norm). "Bet365" in the feed matches "bet365".
+    prices = _allowlist_market()
+    picked = _home(find_value_bets(prices, book_allowlist=frozenset({"bet365"})))
+    assert picked.best_book == "Bet365"
+    assert picked.best_odds == pytest.approx(2.30)
+
+
+def test_book_allowlist_threads_through_find_value_bets_with_fair() -> None:
+    prices = _allowlist_market()
+    anchored = anchor_fair_probs(prices, devig_method=DevigMethod.POWER)
+    assert anchored is not None
+    anchor_book, fair = anchored
+    picked = _home(
+        find_value_bets_with_fair(
+            prices, fair, anchor_book, book_allowlist=frozenset({"williamhill"})
+        )
+    )
+    assert picked.best_book == "WilliamHill"
+    assert picked.theoretical_best_book == "Bet365"
+    assert picked.fill_gap == pytest.approx(1.0 / 2.15 - 1.0 / 2.30)

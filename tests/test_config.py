@@ -724,3 +724,24 @@ def test_parse_visibility_only_markets_malformed_keys_fail_fast(raw: str) -> Non
 
     with pytest.raises(ValueError, match="VALUE_VISIBILITY_ONLY_MARKETS"):
         parse_visibility_only_markets(raw)
+
+
+def test_parse_book_allowlist_normalizes_and_drops_blanks() -> None:
+    from app.config import parse_book_allowlist
+
+    assert parse_book_allowlist(" Bet365 , WilliamHill ,, PINNACLE ") == frozenset(
+        {"bet365", "williamhill", "pinnacle"}
+    )
+    # Empty = disabled (the no-op default).
+    assert parse_book_allowlist("") == frozenset()
+    assert parse_book_allowlist("  ,  ,") == frozenset()
+
+
+def test_value_policy_book_allowlist_default_empty_and_wired() -> None:
+    from app.config import value_policy
+
+    # Default Settings -> empty allowlist (no-op, current live behavior).
+    assert value_policy(make_settings()).book_allowlist == frozenset()
+    # Configured csv flows to the frozen policy field, normalized.
+    policy = value_policy(make_settings(value_book_allowlist="Bet365,WilliamHill"))
+    assert policy.book_allowlist == frozenset({"bet365", "williamhill"})

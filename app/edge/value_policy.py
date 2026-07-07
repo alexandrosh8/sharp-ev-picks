@@ -60,6 +60,19 @@ class ValuePolicy:
     # 2026-06-20: ~37% sharp coverage is structural; scope, don't fuzzy-match).
     # Stored as given; normalized at compare time (see is_major_league).
     major_leagues: tuple[str, ...] = ()
+    # BOOK ALLOWLIST for FILL realism (external-audit #2). Normalized book
+    # names/keys (strip + lower — see app/edge/value._norm) the operator can
+    # ACTUALLY bet. Empty = gate DISABLED (the no-op default, current behavior):
+    # the value finder prices a pick against the best available soft book. When
+    # set, the FILL price is restricted to the intersection of this set with the
+    # available soft books, so a "best price" at a book the operator cannot bet
+    # (region-locked, limited, unfillable) no longer inflates edge/ROI. The
+    # UNRESTRICTED theoretical best is still exposed alongside the fillable best
+    # (ValueBet.theoretical_* / fill_gap) for downstream logging. A frozenset so
+    # the policy stays immutable across the pure-math boundary; constructed at
+    # the composition root from Settings.value_book_allowlist. The restriction
+    # is applied in app/edge/value._best_other_book (pure).
+    book_allowlist: frozenset[str] = frozenset()
     # When True, a PREMIUM candidate whose fair-value anchor is the soft
     # CONSENSUS median (no genuine sharp book — Pinnacle or Betfair — priced
     # the full market) is DEMOTED to the volume (shadow) tier: still persisted +

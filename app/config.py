@@ -157,6 +157,21 @@ def parse_major_leagues(raw: str) -> tuple[str, ...]:
     return tuple(name.strip() for name in raw.split(",") if name.strip())
 
 
+def parse_book_allowlist(raw: str) -> frozenset[str]:
+    """VALUE_BOOK_ALLOWLIST csv of BETTABLE book names/keys for FILL realism.
+
+    Empty = gate DISABLED (the no-op default): the value finder prices a pick
+    against the best available soft book exactly as today. When set, the FILL
+    price a pick is priced against is restricted to books whose NORMALIZED name
+    is in this set (∩ available), so a "best price" at a book the operator
+    cannot actually bet (region-locked, limited, or unfillable) no longer
+    inflates edge/ROI (external-audit item #2). Names are normalized here the
+    same way app/edge/value._norm normalizes book names (strip + lower) so
+    membership is robust to case/whitespace; blank entries dropped.
+    """
+    return frozenset(name.strip().lower() for name in raw.split(",") if name.strip())
+
+
 def parse_visibility_only_markets(raw: str) -> tuple[str, ...]:
     """VALUE_VISIBILITY_ONLY_MARKETS csv of market keys CAPPED at the volume tier.
 
@@ -480,6 +495,18 @@ class Settings(BaseSettings):
     # dropped. Live via .env (VALUE_REQUIRE_SHARP_ANCHOR=true) since 2026-06-26;
     # this makes the safe behavior the code default rather than a .env override.
     value_require_sharp_anchor: bool = True
+    # BOOK ALLOWLIST for FILL realism (external-audit #2), csv of bettable book
+    # names/keys — e.g. "bet365,williamhill,pinnacle". Empty = DISABLED (the
+    # no-op default, current live behavior): every soft book is a candidate
+    # fill. When set, the FILL price a value pick is priced against is
+    # restricted to books whose normalized name is in this set (∩ available) —
+    # so a "best price" the operator cannot actually bet (region-locked,
+    # limited, unfillable) can no longer inflate edge/ROI. The UNRESTRICTED
+    # theoretical best is still computed alongside the fillable best (see
+    # app/edge/value.ValueBet.theoretical_* / fill_gap) so the fill gap is
+    # observable downstream. Names normalized at parse time (strip + lower) to
+    # match app/edge/value._norm; blank entries dropped.
+    value_book_allowlist: str = ""
     # Per-market-type devig override (ADR-0006), csv of "market_key:method" —
     # e.g. "over_under_2_5:probit,asian_handicap_-1_5:probit,1x2:shin". Keys are
     # the line-qualified source market (market_detail) or the market family
@@ -1519,6 +1546,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         odds_bands=parse_odds_bands(settings.value_odds_bands),
         min_books_by_market=parse_market_min_books(settings.value_min_books_per_market),
         major_leagues=parse_major_leagues(settings.value_major_leagues),
+        book_allowlist=parse_book_allowlist(settings.value_book_allowlist),
         require_sharp_anchor=settings.value_require_sharp_anchor,
         max_edge=settings.value_max_edge,
         sanity_max_edge=settings.value_sanity_max_edge,

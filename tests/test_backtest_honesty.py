@@ -174,6 +174,73 @@ def test_fill_universe_soft_excludes_sharp_and_gross_max() -> None:
     assert bets == []
 
 
+def test_fill_universe_user_allowlist_picks_best_allowed_book() -> None:
+    # Best gross soft is B365 2.10; but the operator can only bet WH (2.05) and
+    # VC (2.08). The user_allowlist fill must take VC 2.08 (best ALLOWED), never
+    # the higher B365 2.10 the operator cannot use — killing the optimistic Max.
+    row = _row_1x2(
+        B365H="2.10",
+        B365D="3.40",
+        B365A="4.00",
+        WHH="2.05",
+        WHD="3.35",
+        WHA="3.95",
+        VCH="2.08",
+        VCD="3.38",
+        VCA="3.98",
+    )
+    bets = vb.bets_for(
+        [row],
+        0.0,
+        DevigMethod.POWER,
+        ("1x2",),
+        1.0,
+        fill_universe="user_allowlist",
+        book_allowlist=frozenset({"wh", "vc"}),
+    )
+    assert len(bets) == 1
+    assert bets[0].odds == pytest.approx(2.08)  # best ALLOWED, not the 2.10 B365
+
+
+def test_fill_universe_user_allowlist_nets_exchange_commission() -> None:
+    # BFE 2.30 gross nets to 1 + 1.30*0.95 = 2.235; with only BFE allowed the
+    # exchange price is taken NET of commission, never gross.
+    row = _row_1x2(B365H="2.10", WHH="2.05", BFEH="2.30")
+    bets = vb.bets_for(
+        [row],
+        0.0,
+        DevigMethod.POWER,
+        ("1x2",),
+        1.0,
+        fill_universe="user_allowlist",
+        book_allowlist=frozenset({"bfe"}),
+    )
+    assert len(bets) == 1
+    assert bets[0].odds == pytest.approx(2.235)
+
+
+def test_fill_universe_user_allowlist_skips_outcomes_no_allowed_book_prices() -> None:
+    # Only the sharp anchor + composite Max are present; no allowed soft/exchange
+    # book prices the outcome -> no bet (never fall back to PS/Max).
+    bets = vb.bets_for(
+        [_row_1x2()],
+        0.0,
+        DevigMethod.POWER,
+        ("1x2",),
+        1.0,
+        fill_universe="user_allowlist",
+        book_allowlist=frozenset({"b365"}),
+    )
+    assert bets == []
+
+
+def test_fill_universe_user_allowlist_requires_nonempty_allowlist() -> None:
+    with pytest.raises(ValueError, match="user_allowlist"):
+        vb.bets_for(
+            [_row_1x2()], 0.0, DevigMethod.POWER, ("1x2",), 1.0, fill_universe="user_allowlist"
+        )
+
+
 def test_bets_share_cluster_per_match_across_markets() -> None:
     row = _row_1x2(**{"P>2.5": "1.90", "P<2.5": "1.90", "Max>2.5": "2.10", "Max<2.5": "2.05"})
     row2 = _row_1x2()

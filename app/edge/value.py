@@ -393,6 +393,19 @@ class ValueBet:
     # mint_devig_fell_back so the trusted CLV subset can drop ASYMMETRIC mint/close
     # fallbacks. Defaults False (the common case: the configured method applied).
     sharp_devig_fell_back: bool = False
+    # FILL REALISM (external-audit #2): the UNRESTRICTED theoretical best "other
+    # book" — the price the pick WOULD be measured against with NO book allowlist.
+    # When no allowlist is configured this equals the fill (best_*) exactly, so
+    # ``fill_gap`` is 0.0 and behavior is bit-identical to before the allowlist.
+    # When an allowlist restricts the fill to bettable books, best_*/edge become
+    # the FILLABLE price the operator can actually take, while these expose the
+    # theoretical optimum so the fill gap (theoretical edge vs fillable edge) is
+    # observable downstream. Defaults mirror the empty-allowlist / no-fill state.
+    theoretical_best_book: str = ""
+    theoretical_best_odds: float = 0.0  # raw price of the unrestricted best
+    theoretical_best_odds_effective: float = 0.0  # net of exchange commission
+    theoretical_edge: float = 0.0  # sharp_fair_prob - 1/theoretical_best_odds_effective
+    fill_gap: float = 0.0  # theoretical_edge - edge (>= 0; 0 when no allowlist)
 
 
 def ah_candidate_plausible(
@@ -675,6 +688,7 @@ def find_value_bets(
     consensus_logit_pool: bool = False,
     liquidity: Mapping[str, Mapping[str, float]] | None = None,
     exchange_min_liquidity: float = 0.0,
+    book_allowlist: frozenset[str] = frozenset(),
 ) -> list[ValueBet]:
     """Find value selections for one market.
 
@@ -682,6 +696,11 @@ def find_value_bets(
     market's mutually-exclusive outcomes (e.g. home/Draw/away). Returns value
     bets sorted by edge (desc). Returns [] when no trustworthy fair-value
     anchor exists (better no pick than a contaminated one).
+
+    ``book_allowlist`` (external-audit #2, default empty = no-op): when set, the
+    FILL price a pick is priced against is restricted to bettable books in the
+    set; the unrestricted theoretical best is still exposed on each ValueBet
+    (theoretical_* / fill_gap). Empty is bit-identical to before.
     """
     anchored = anchor_fair_probs_with_provenance(
         prices,
@@ -705,6 +724,7 @@ def find_value_bets(
         commissions,
         max_edge=max_edge,
         devig_fell_back=devig_fell_back,
+        book_allowlist=book_allowlist,
     )
 
 
@@ -738,11 +758,15 @@ def find_value_bets_with_fair(
     max_edge: float = math.inf,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
     devig_fell_back: bool = False,
+    book_allowlist: frozenset[str] = frozenset(),
 ) -> list[ValueBet]:
     """Value scan against EXTERNALLY-derived fair probabilities (e.g. double
     chance derived from the 1X2 anchor via `double_chance_fair`). Selections
     without a derived fair probability are skipped. `devig_fell_back` carries the
-    P2-2 fallback flag of the anchor the external fair was derived from."""
+    P2-2 fallback flag of the anchor the external fair was derived from.
+
+    ``book_allowlist`` (external-audit #2, default empty = no-op): restricts the
+    fill price to bettable books (see ``find_value_bets``)."""
     return _scan_against_fair(
         prices,
         fair_by_sel,
@@ -752,6 +776,7 @@ def find_value_bets_with_fair(
         commissions,
         max_edge=max_edge,
         devig_fell_back=devig_fell_back,
+        book_allowlist=book_allowlist,
     )
 
 
@@ -818,6 +843,7 @@ def _scan_against_fair(
     max_edge: float = math.inf,
     anchor_swap_tolerance: float = ANCHOR_SWAP_TOLERANCE,
     devig_fell_back: bool = False,
+    book_allowlist: frozenset[str] = frozenset(),
 ) -> list[ValueBet]:
     # edge-ev-devig-r2-2: MARKET-LEVEL anchor-swap guard. If the anchor's devigged
     # ordering inverts the cross-book consensus ordering beyond tolerance, the anchor
@@ -830,10 +856,22 @@ def _scan_against_fair(
         fair_p = fair_by_sel.get(sel)
         if fair_p is None:
             continue
-        best = _best_other_book(prices[sel], anchor_book, commissions)
-        if best is None:
+        # THEORETICAL (unrestricted) best "other book" — the fill-realism
+        # baseline; equals the fill exactly when no allowlist is configured.
+        theoretical = _best_other_book(prices[sel], anchor_book, commissions)
+        if theoretical is None:
             continue
-        best_book, raw, eff = best
+        # FILL price (external-audit #2): with an allowlist the pick is priced
+        # against the best BETTABLE book only; without one, fill == theoretical.
+        # A selection no allowed book prices is NOT fillable -> skip it (no
+        # phantom edge from an unbettable "best price").
+        if book_allowlist:
+            fill = _best_other_book(prices[sel], anchor_book, commissions, allowlist=book_allowlist)
+            if fill is None:
+                continue
+        else:
+            fill = theoretical
+        best_book, raw, eff = fill
         # Floor on the REALIZABLE price: net exchange commission first so a raw
         # 1.31 that nets 1.295 at a 5% exchange is correctly rejected under a
         # 1.30 floor (edge/EV/Kelly all run on eff, and min_acceptable_odds
@@ -849,6 +887,12 @@ def _scan_against_fair(
         if edge < min_edge or edge > max_edge:
             continue
         ev = fair_p * (eff - 1.0) - (1.0 - fair_p)
+        # Fill gap: theoretical (unrestricted) edge minus the fillable edge. The
+        # theoretical best is a superset of the fill candidates, so its effective
+        # price >= the fill's -> theoretical_edge >= edge and fill_gap >= 0. When
+        # no allowlist is configured theoretical == fill, so the gap is exactly 0.
+        th_book, th_raw, th_eff = theoretical
+        theoretical_edge = fair_p - 1.0 / th_eff
         out.append(
             ValueBet(
                 selection=sel,
@@ -861,6 +905,11 @@ def _scan_against_fair(
                 edge=edge,
                 ev=ev,
                 sharp_devig_fell_back=devig_fell_back,
+                theoretical_best_book=th_book,
+                theoretical_best_odds=th_raw,
+                theoretical_best_odds_effective=th_eff,
+                theoretical_edge=theoretical_edge,
+                fill_gap=theoretical_edge - edge,
             )
         )
     out.sort(key=lambda v: v.edge, reverse=True)
@@ -1060,18 +1109,30 @@ def _best_other_book(
     book_odds: Mapping[str, float],
     anchor_book: str,
     commissions: Mapping[str, float],
+    allowlist: frozenset[str] = frozenset(),
 ) -> tuple[str, float, float] | None:
     """Best EFFECTIVE odds among SOFT books — never the anchor AND never any sharp
     book. The actionable pick must be a price you bet at a SOFT bookmaker; a sharp
     book (Pinnacle/Betfair/Smarkets, incl. an injected sharp-anchor line) sets the
     fair value, so betting it is not the edge and may be unbettable (review
-    2026-06-21). Returns (book, raw_odds, effective_odds)."""
+    2026-06-21). Returns (book, raw_odds, effective_odds).
+
+    FILL REALISM (external-audit #2): when ``allowlist`` is non-empty, the fill is
+    further restricted to books whose NORMALIZED name is in it (∩ available) — a
+    "best price" the operator cannot actually bet (region-locked, limited,
+    unfillable) must not price the pick. Empty ``allowlist`` (the default) is
+    bit-identical to before: every soft book is a candidate. The allowlist is an
+    ADDITIONAL restriction on top of the existing sharp-exclusion (a sharp book
+    named in the allowlist is still never a fill). Returns None when no eligible
+    book prices the selection."""
     anchor_norm = _norm(anchor_book)
     sharp_norm = {_norm(b) for b in SHARP_BOOKS}
     best: tuple[str, float, float] | None = None
     for book, odds in book_odds.items():
         norm_book = _norm(book)
         if norm_book == anchor_norm or norm_book in sharp_norm:
+            continue
+        if allowlist and norm_book not in allowlist:
             continue
         if odds <= 1.0:
             continue
