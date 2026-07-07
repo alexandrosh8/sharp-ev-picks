@@ -623,7 +623,7 @@ def _ids(container: Any) -> list[str]:
     return [str(value) for value in ids]
 
 
-def _find_match_payload(html: str) -> dict[str, Any]:
+def _find_match_payload(html: str, *, prefer_subevent_id: str | None = None) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     for payload in hypernova_payloads(html):
         best = payload.get("bestOdds")
@@ -634,6 +634,18 @@ def _find_match_payload(html: str) -> dict[str, Any]:
             candidates.append(payload)
     if not candidates:
         raise OddsCheckerParseError("no populated OddsChecker bestOdds payload found")
+    # When the page's canonical subevent id is known (from the header breadcrumb),
+    # prefer the blob that actually prices THAT match. A page can embed several
+    # bestOdds blobs (accumulator / related matches); picking the byte-largest one
+    # can register and price a DIFFERENT game than the URL (wrong-game hazard).
+    if prefer_subevent_id:
+        for payload in candidates:
+            config = payload["bestOdds"].get("subeventConfig")
+            if (
+                isinstance(config, Mapping)
+                and str(config.get("subeventId") or "").strip() == prefer_subevent_id
+            ):
+                return payload
     return max(candidates, key=lambda item: len(json.dumps(item.get("bestOdds", {}))))
 
 
@@ -642,6 +654,17 @@ def _find_header_payload(html: str) -> dict[str, Any]:
         if "subeventStartTime" in payload and "subeventName" in payload:
             return payload
     return {}
+
+
+def _header_subevent_id(header: Mapping[str, Any]) -> str | None:
+    """The canonical subevent id of the page's match, from its breadcrumb —
+    used to disambiguate multiple embedded bestOdds blobs to the URL's game."""
+    for crumb in header.get("breadcrumbs", []):
+        if isinstance(crumb, Mapping) and crumb.get("type") == "subevent":
+            crumb_id = str(crumb.get("id") or "").strip()
+            if crumb_id:
+                return crumb_id
+    return None
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -887,8 +910,8 @@ def parse_match_page(
 ) -> list[OddsSnapshotIn]:
     """Parse one OddsChecker match page into normalized odds snapshots."""
     ingested_at = now or _utcnow()
-    payload = _find_match_payload(html)
     header = _find_header_payload(html)
+    payload = _find_match_payload(html, prefer_subevent_id=_header_subevent_id(header))
     best = payload["bestOdds"]
     if not isinstance(best, Mapping):
         raise OddsCheckerParseError("bestOdds payload is not an object")
