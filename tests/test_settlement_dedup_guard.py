@@ -41,10 +41,11 @@ def make_pick(
     event_label: str,
     market: Market = Market.TOTALS,
     selection: str = "Over 2.5",
+    sport: str = "soccer",
 ) -> PickOut:
     return PickOut(
         pick_id="p-dedup",
-        sport="soccer",
+        sport=sport,
         league="test-league-dedup",
         event=event_label,
         event_id=event_id,
@@ -106,11 +107,12 @@ async def seed_pick(  # type: ignore[no-untyped-def]
     starts_at: datetime = KICKOFF,
     market: Market = Market.TOTALS,
     selection: str = "Over 2.5",
+    sport: str = "soccer",
 ) -> Pick:
     teams = EventTeams(home=home, away=away, league="test-league-dedup", starts_at=starts_at)
     ok = await persist_pick(
         session,
-        make_pick(event_id, f"{home} vs {away}", market=market, selection=selection),
+        make_pick(event_id, f"{home} vs {away}", market=market, selection=selection, sport=sport),
         teams,
         "value",
         "test-v",
@@ -271,3 +273,79 @@ def test_fixture_pair_key_degenerate_returns_none() -> None:
 
     assert fixture_pair_key("", "Mexico") is None
     assert fixture_pair_key("Mexico", "Mexico") is None
+
+
+async def _mark_settled(session, pick, outcome: str = "won") -> None:  # type: ignore[no-untyped-def]
+    from app.storage.models import ResultTracking as RT
+
+    session.add(
+        RT(pick_id=pick.id, outcome=outcome, pnl=Decimal("0"), roi=Decimal("0"), settled_at=NOW)
+    )
+    pick.status = "settled"
+    await session.flush()
+
+
+async def test_tennis_fork_beyond_2h_is_deduped_by_wider_window(session) -> None:  # type: ignore[no-untyped-def]
+    """A tennis pair meets once per day, so an in-running fork whose start drifted
+    ~2h47m (the live Lehecka/Zverev case) must STILL be recognised as the same
+    fixture — the tight ±2h team-sport bound would miss it and double-settle."""
+    from app.resolution.matching import fixture_pair_key
+    from app.settlement.engine import _settled_sibling_exists
+
+    settled = await seed_pick(
+        session, "evt-tn-A", sport="tennis", home="Jiri Lehecka", away="Alexander Zverev"
+    )
+    await _mark_settled(session, settled)
+    sport_id = await session.scalar(select(Event.sport_id).where(Event.id == settled.event_id))
+    target = fixture_pair_key("Jiri Lehecka", "Alexander Zverev [In Running]")
+    assert target is not None
+
+    found = await _settled_sibling_exists(
+        session,
+        pick_id=-1,
+        event_id=-1,
+        sport_id=sport_id,
+        starts_at=KICKOFF + timedelta(hours=2, minutes=47),
+        market=settled.market,
+        selection=settled.selection,
+        model_version_id=settled.model_version_id,
+        target_pair=target,
+        sport_key="tennis",
+    )
+    assert found is True
+
+
+async def test_team_sport_fork_beyond_2h_is_not_deduped(session) -> None:  # type: ignore[no-untyped-def]
+    """A team sport keeps the tight ±2h bound (same-day doubleheaders/legs exist),
+    so a 2h47m gap is treated as a distinct fixture — no dedup."""
+    from app.resolution.matching import fixture_pair_key
+    from app.settlement.engine import _settled_sibling_exists
+
+    settled = await seed_pick(session, "evt-sc-A", sport="soccer", home="Alpha FC", away="Beta FC")
+    await _mark_settled(session, settled)
+    sport_id = await session.scalar(select(Event.sport_id).where(Event.id == settled.event_id))
+    target = fixture_pair_key("Alpha FC", "Beta FC")
+    assert target is not None
+
+    found = await _settled_sibling_exists(
+        session,
+        pick_id=-1,
+        event_id=-1,
+        sport_id=sport_id,
+        starts_at=KICKOFF + timedelta(hours=2, minutes=47),
+        market=settled.market,
+        selection=settled.selection,
+        model_version_id=settled.model_version_id,
+        target_pair=target,
+        sport_key="soccer",
+    )
+    assert found is False
+
+
+def test_dedup_tolerance_is_sport_aware() -> None:
+    from app.settlement.engine import _dedup_tolerance
+
+    assert _dedup_tolerance("tennis") == timedelta(hours=6)
+    assert _dedup_tolerance("soccer") == timedelta(hours=2)
+    assert _dedup_tolerance("basketball") == timedelta(hours=2)
+    assert _dedup_tolerance(None) == timedelta(hours=2)

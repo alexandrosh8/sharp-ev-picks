@@ -50,11 +50,26 @@ SCORE_WINDOW = timedelta(days=14)
 # Settlement dedup guard: two same-sport events with the same UNORDERED
 # normalized team pair whose kickoffs fall within this bound are treated as the
 # SAME real fixture (cross-source duplicate event rows). 2h is a hard physical
-# invariant — two teams/players cannot start a second meeting within 2h — so a
-# genuinely distinct fixture (home/away leg reversal, multi-day rematch,
-# doubleheader, playoff G1/G2) can NEVER fall inside it. The guard can therefore
-# only ever skip a true duplicate, never suppress a legitimate distinct pick.
+# invariant for TEAM sports — two teams cannot start a second meeting within 2h
+# (a game runs ~2h) — so a genuinely distinct fixture (home/away leg reversal,
+# multi-day rematch, doubleheader, playoff G1/G2) can NEVER fall inside it. The
+# guard can therefore only ever skip a true duplicate, never suppress a
+# legitimate distinct pick.
 DEDUP_FIXTURE_TOLERANCE = timedelta(hours=2)
+
+# TENNIS (and any 1v1 sport) needs a WIDER window: a given player pair meets at
+# most once per day, so there is no same-day distinct rematch to false-merge —
+# yet an in-running fork's captured start can drift by hours (the live
+# Lehecka/Zverev fork sat 2h47m off its clean twin, past the 2h team bound).
+# Widen tennis so those forks still dedup; team sports keep the tight bound.
+_DEDUP_TOLERANCE_BY_SPORT: dict[str, timedelta] = {"tennis": timedelta(hours=6)}
+
+
+def _dedup_tolerance(sport_key: str | None) -> timedelta:
+    """Same-fixture kickoff tolerance for the settlement dedup guard, per sport
+    (tennis wider — see _DEDUP_TOLERANCE_BY_SPORT; team sports keep 2h)."""
+    return _DEDUP_TOLERANCE_BY_SPORT.get(sport_key or "", DEDUP_FIXTURE_TOLERANCE)
+
 
 # Full time + stoppage + a buffer for the results CSVs to update. Scores are
 # matched by date anyway; the delay just avoids settling in-play fixtures.
@@ -239,17 +254,21 @@ async def _settled_sibling_exists(
     selection: str,
     model_version_id: int,
     target_pair: frozenset[str],
+    sport_key: str | None = None,
 ) -> bool:
     """True when an equivalent pick (same market+selection+model_version) on a
     DIFFERENT event of the SAME real fixture is ALREADY settled — so settling
     this pick again would double-count real-money pnl/ROI/CLV.
 
-    "Same real fixture" = same sport, kickoff within DEDUP_FIXTURE_TOLERANCE, and
-    the same UNORDERED fixture_pair_key (which folds a ``[In Running]`` live-fork
-    onto its clean twin and preserves women's/youth markers). Only rows that
-    already carry a result_tracking row are considered (the settled sibling).
-    Fail-safe: the ±2h same-teams bound makes a distinct fixture impossible to
-    match, so a match is only ever a genuine cross-source duplicate."""
+    "Same real fixture" = same sport, kickoff within the per-sport
+    _dedup_tolerance (tennis wider — a 1v1 pair meets once/day; team sports keep
+    the tight 2h), and the same UNORDERED fixture_pair_key (which folds a
+    ``[In Running]`` live-fork onto its clean twin and preserves women's/youth
+    markers). Only rows that already carry a result_tracking row are considered
+    (the settled sibling). Fail-safe: the same-teams + bounded-time match cannot
+    hit a genuinely distinct fixture, so a match is only ever a cross-source
+    duplicate."""
+    tol = _dedup_tolerance(sport_key)
     home_t, away_t = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
@@ -267,8 +286,8 @@ async def _settled_sibling_exists(
                 Pick.model_version_id == model_version_id,
                 Event.sport_id == sport_id,
                 Event.starts_at.is_not(None),
-                Event.starts_at >= starts_at - DEDUP_FIXTURE_TOLERANCE,
-                Event.starts_at <= starts_at + DEDUP_FIXTURE_TOLERANCE,
+                Event.starts_at >= starts_at - tol,
+                Event.starts_at <= starts_at + tol,
             )
         )
     ).all()
@@ -353,6 +372,7 @@ async def settle_open_picks(
             selection=pick.selection,
             model_version_id=pick.model_version_id,
             target_pair=pair,
+            sport_key=sport_key,
         ):
             logger.info(
                 "settlement: skipped duplicate pick %d (%s %s) — a sibling of the "
