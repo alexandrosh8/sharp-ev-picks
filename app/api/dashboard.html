@@ -1799,15 +1799,6 @@
           const m = { won: "Won", lost: "Lost", push: "Push", void: "Void", half_won: "Half Won", half_lost: "Half Lost" };
           return m[oc] || null;
         }
-        function starRating(level) {
-          const n = Math.max(1, Math.min(5, Number(level) || 1));
-          const filled = document.createElement("span"); filled.textContent = "★".repeat(n);
-          const empty = document.createElement("span"); empty.className = "empty"; empty.textContent = "☆".repeat(5 - n);
-          const wrap = document.createElement("span"); wrap.className = "stars-row";
-          wrap.append(filled, empty);
-          return wrap;
-        }
-
         // ===== load layer ======================================================
         async function jsonOf(settled) {
           if (settled.status === "rejected") throw settled.reason;
@@ -2641,11 +2632,10 @@
           const sk = document.createElement("span"); sk.className = "mk"; sk.textContent = "Suggested stake (informational)";
           const sv = document.createElement("span"); sv.className = "mv";
           const sf = numOf(p.recommended_stake_fraction);
-          const crLevel = Number(p.confidence_rating && p.confidence_rating.level);
-          // Bug fix (review 2026-07-04 #5): a missing rating must read "—",
-          // never a fabricated 1-star assessment.
-          if (isFinite(sf) && Number.isFinite(crLevel) && crLevel >= 1) sv.appendChild(starRating(crLevel));
-          else sv.textContent = "—";
+          // Show the actual fractional-Kelly stake (as a % of bankroll) — the
+          // label promises a stake figure, not a confidence rating. A missing or
+          // zero fraction (e.g. a cap-denied pick) reads "—".
+          sv.textContent = isFinite(sf) && sf > 0 ? (sf * 100).toFixed(2) + "% of bankroll" : "—";
           stakeRow.append(sk, sv); body.appendChild(stakeRow);
 
           if (p.status === "settled" || (hasStarted(p) && p.status === "alerted")) {
@@ -2663,7 +2653,7 @@
             statusRow.append(k, v); body.appendChild(statusRow);
           }
 
-          if (edgeGroupOf(p) === "closed" && p.status !== "settled" && p.event_id != null) {
+          if (edgeGroupOf(p) === "closed" && p.status !== "settled" && p.status !== "superseded" && p.event_id != null) {
             body.appendChild(buildResultForm(p));
           }
 
@@ -2684,7 +2674,11 @@
           const amc = numOf(p.anchor_match_confidence);
           evml.appendChild(metricEl("Match confidence", isFinite(amc) ? amc.toFixed(2) : "—"));
           evml.appendChild(metricEl("Match method", fmt(p.anchor_match_method)));
-          const freshTxt = tierOf(p) === "premium" && p.status === "alerted" && !hasStarted(p)
+          // Freshness applies to any live (alerted, pre-kickoff) pick — the
+          // revalidation loop runs for BOTH tiers, so a shadow/volume pick (e.g.
+          // an inline-Betfair-canonical match) has a real revalidated_at too.
+          // Started / settled / superseded picks are past the live window -> "—".
+          const freshTxt = p.status === "alerted" && !hasStarted(p)
             ? (isRevalidationFresh(p, state.health) ? "Fresh" : "Stale")
             : "—";
           evml.appendChild(metricEl("Freshness", freshTxt));

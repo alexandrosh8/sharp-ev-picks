@@ -148,6 +148,12 @@ async def test_duplicate_pick_on_sibling_event_settles_only_once(session) -> Non
     assert n == 1, "exactly one of the duplicate pair must settle"
     rows = await _result_rows(session, p1.id, p2.id)
     assert len(rows) == 1, "the sibling duplicate must NOT write a second result row"
+    await session.refresh(p1)
+    await session.refresh(p2)
+    # The skipped duplicate is closed as 'superseded' (terminal), NOT left
+    # 'alerted' — else it lingers on the dashboard as a pending pick asking for a
+    # manual result even though its twin already settled.
+    assert {p1.status, p2.status} == {"settled", "superseded"}
 
 
 async def test_duplicate_skipped_across_settlement_cycles(session) -> None:  # type: ignore[no-untyped-def]

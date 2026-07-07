@@ -349,6 +349,7 @@ async def settle_open_picks(
     ).all()
 
     settled = 0
+    superseded = 0
     for pick, home_name, away_name, starts_at, external_ref, sport_key, sport_id in rows:
         if starts_at > now - settle_delay_for(sport_key, delay):
             continue  # sport floor not reached — the game may still be in play
@@ -374,9 +375,18 @@ async def settle_open_picks(
             target_pair=pair,
             sport_key=sport_key,
         ):
+            # Close the duplicate TERMINALLY as 'superseded' (the same status a
+            # strategy-version bump uses for a duplicate open row), NOT left
+            # 'alerted' — an alerted past-kickoff row lingers on the dashboard as
+            # a pending pick asking for a manual result even though its twin has
+            # already settled. 'superseded' writes NO result_tracking row, so it
+            # never enters pnl/ROI/CLV, and settle_open_picks (status=='alerted')
+            # never revisits it.
+            pick.status = "superseded"
+            superseded += 1
             logger.info(
-                "settlement: skipped duplicate pick %d (%s %s) — a sibling of the "
-                "same fixture is already settled (cross-source event dedup)",
+                "settlement: superseded duplicate pick %d (%s %s) — a sibling of "
+                "the same fixture is already settled (cross-source event dedup)",
                 pick.id,
                 pick.market,
                 pick.selection,
@@ -411,9 +421,13 @@ async def settle_open_picks(
                     sharp_close_echo_gate=sharp_close_echo_gate,
                     value_policy=value_policy,
                 )
-    if settled:
+    if settled or superseded:
         await session.flush()  # status flips visible to the caller's transaction
-        logger.info("settlement cycle: %d picks settled", settled)
+        logger.info(
+            "settlement cycle: %d picks settled, %d duplicates superseded",
+            settled,
+            superseded,
+        )
     return settled
 
 
