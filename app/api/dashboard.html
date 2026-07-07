@@ -1737,7 +1737,7 @@
           // A premium pre-kickoff pick whose live price has gone stale is NOT
           // actionable (its shown price is unconfirmed) — surface it in its own
           // "Stale" group so the Actionable heading matches "Qualified now".
-          if (p.status === "alerted" && !isRevalidationFresh(p, state.health)) return "stale";
+          if (p.status === "alerted" && !isActionable(p, state.health)) return "stale";
           return "actionable";
         }
         function edgeFloorOf(p, health) {
@@ -2312,7 +2312,7 @@
             stripBox.appendChild(mkStat(String(actionable.length), "Qualified now", actionable.length > 0 ? "pos" : null, true));
             stripBox.appendChild(mkStat(String(trackedOpen), "Tracked open", null));
             stripBox.appendChild(mkStat(String(next24), "Next 24h", null));
-            stripBox.appendChild(mkStat(String(settledCount), "Settled shown", null));
+            stripBox.appendChild(mkStat(String(settledCount), "Settled (loaded)", null));
           } else {
             stripBox.appendChild(mkStat("—", "Picks", "neg"));
           }
@@ -2447,12 +2447,12 @@
             ["closed", "Closed"],
           ];
           const sortMode = ($("eq-sort") && $("eq-sort").value) || "edge";
-          const edgeVal = (p) => numOf(p.current_edge == null ? p.edge : p.current_edge);
+          const edgeVal = (p) => { const v = numOf(p.current_edge == null ? p.edge : p.current_edge); return Number.isFinite(v) ? v : -1e9; };
           const koVal = (p) => new Date(p.starts_at || 8e15).getTime();
           const sortList = (arr) => arr.slice().sort((a, b) =>
             sortMode === "kickoff" ? koVal(a) - koVal(b)
             : sortMode === "odds" ? (numOf(b.decimal_odds) || 0) - (numOf(a.decimal_odds) || 0)
-            : (edgeVal(b) || -1e9) - (edgeVal(a) || -1e9));
+            : edgeVal(b) - edgeVal(a));
           groups.forEach(([key, label]) => {
             const list = sortList(rows.filter((p) => edgeGroupOf(p) === key));
             const h = document.createElement("div"); h.className = "edge-group-h";
@@ -2576,6 +2576,9 @@
           const submit = document.createElement("button"); submit.type = "button"; submit.id = "result-submit"; submit.textContent = "Submit result";
           const note = document.createElement("span"); note.className = "result-note"; note.id = "result-note";
           submit.addEventListener("click", async () => {
+            if (home.i.value.trim() === "" || away.i.value.trim() === "") {
+              note.textContent = "Enter both scores."; note.classList.add("err"); return;
+            }
             const h2 = Number(home.i.value), a2 = Number(away.i.value);
             if (!Number.isInteger(h2) || !Number.isInteger(a2) || h2 < 0 || a2 < 0 || h2 > 250 || a2 > 250) {
               note.textContent = "Enter both scores."; note.classList.add("err"); return;
