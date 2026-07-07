@@ -154,7 +154,7 @@ All secrets live in `.env` only (copy from `.env.example`; `0600`, gitignored â€
 | `ODDSCHECKER_CAPTURE_SHARP_MARKETS` | `true` | Also capture every sharp-anchored (Betfair Exchange) prop/period/combo market as odds history (never priced or settled â€” pure capture). |
 | `DASHBOARD_AUTH_ENABLED` | `true` in `.env.example` | First-run `/setup` creates the admin password (stored hashed). `false` = no login. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Pick alerts. Blank just disables alerts; the dashboard still works. |
-| `VALUE_REQUIRE_SHARP_ANCHOR` | `false` | When `true`, a premium pick without a real Pinnacle/Betfair anchor demotes to shadow. |
+| `VALUE_REQUIRE_SHARP_ANCHOR` | `true` | When `true` (default since 2026-07-07), a premium pick without a real Pinnacle/Betfair anchor demotes to shadow. |
 | `SCRAPER_PROXY_POOL` | empty | Optional rotating proxies for the scrape *and* the Pinnacle close capture (see below). |
 | `BETFAIR_EXCHANGE_ENABLED` | `false` | Optional read-only Betfair Exchange BACK-odds capture as a second sharp anchor. |
 | `ODDSPORTAL_USE_JSON_FEED` | `false` | `true` swaps the per-match Playwright render for a faster `curl_cffi` JSON-feed reader. |
