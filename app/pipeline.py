@@ -1222,6 +1222,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_thin_books = 0
     n_visibility_capped = 0
     n_ah_rejected = 0
+    n_sanity_dropped = 0
     n_dc_rejected = 0
     n_moneyline_capped = 0
     n_sanity_demoted = 0
@@ -1331,6 +1332,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # value_min_odds floor, which also gates on raw odds.
             if not odds_in_bands(v.best_odds, deps.value_policy.odds_bands):
                 n_off_band += 1
+                continue
+            # Market-agnostic SANITY ceiling: the per-market AH/DC guards do not
+            # cover spreads/handicaps, so mis-mapped longshots (100-151.0) reached
+            # alerted picks with impossible EV. Drop above the ceiling, never alert.
+            if float(v.best_odds) > _SANITY_MAX_ODDS:
+                n_sanity_dropped += 1
                 continue
             # Per-market PREMIUM floor override (default: global floor).
             premium_floor = min_edge_for(
@@ -1931,6 +1938,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             sport_key,
             n_off_band,
         )
+    if n_sanity_dropped:
+        logger.info(
+            "value pipeline %s: %d candidate(s) dropped above the %.0f sanity odds ceiling",
+            sport_key,
+            n_sanity_dropped,
+            _SANITY_MAX_ODDS,
+        )
     if n_thin_books:
         logger.info(
             "value pipeline %s: %d market(s) skipped below their VALUE_MIN_BOOKS_PER_MARKET floor",
@@ -2029,6 +2043,12 @@ def group_market_liquidity(snapshots: Sequence[OddsSnapshotIn]) -> LiquidityByMa
 # anchor devig of one book is sound. Loader config guarantees SPREADS groups
 # are half-line AH (no pushes) or 3-way European handicap. Double chance is
 # NOT direct (overlapping legs, quotes sum ~200%) — derived from 1X2.
+# Market-agnostic absolute price ceiling. Above this, a value pick's best price is
+# a data artefact (mis-mapped/garbage longshot), not a real edge — the per-market
+# AH/DC guards miss spreads/handicaps, which surfaced picks at 100-151.0 with
+# impossible EV. Generous (real value picks sit near even money) so it only clips
+# garbage, never legitimate edges.
+_SANITY_MAX_ODDS = 50.0
 _DIRECT_MARKETS = frozenset({Market.H2H, Market.TOTALS, Market.BTTS, Market.DNB, Market.SPREADS})
 
 EventFairProbs = dict[tuple[str, Market, str | None], tuple[str, dict[str, float]]]
