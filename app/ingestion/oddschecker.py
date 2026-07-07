@@ -1079,6 +1079,12 @@ def parse_market_api_payloads(
         )
         event_id = _api_event_id(market_payload, url)
         home, away = _split_match_name(str(market_payload.get("subeventName") or "")) or ("", "")
+        if not home and not away:
+            # The subeventName separator was unrecognised; fall back to the
+            # structured team fields when the all-odds payload carries them
+            # (additive: absent -> unchanged, so no orientation guessing).
+            home = str(market_payload.get("homeTeamName") or "").strip()
+            away = str(market_payload.get("awayTeamName") or "").strip()
         directory.register(
             event_id,
             EventTeams(
