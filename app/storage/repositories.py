@@ -267,9 +267,21 @@ async def _get_or_create_league(
     return found
 
 
+_LIVE_STATUS_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
+
+
+def _strip_live_status(name: str) -> str:
+    """Drop a trailing scraper live-status token (e.g. ' [In Running]') that the
+    in-play OddsChecker/OddsPortal pages append to team names. It is NOT a
+    distinguishing fixture marker, so leaving it forks a team's canonical identity
+    (a clean-named twin already exists) and fragments stats/matching/settlement."""
+    return _LIVE_STATUS_RE.sub("", name).strip()
+
+
 async def _get_or_create_team(
     session: AsyncSession, sport_id: int, league_id: int, name: str
 ) -> int:
+    name = _strip_live_status(name)
     normalized = name.strip().lower()
     where = (Team.sport_id == sport_id, Team.normalized_name == normalized)
     found = await session.scalar(select(Team.id).where(*where))
