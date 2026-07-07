@@ -1187,6 +1187,15 @@ async def bankroll_ledger(
     return await bankroll_ledger_report(session)
 
 
+# Server-side TTL cache for the expensive multi-metric match-rate report (~12-20s
+# to compute; output is identical within the window). Keyed by ``days`` with a
+# short TTL so the Radar/Sources panels are instant after the first computation
+# without staleness risk (the frontend already tolerates 5-min-old data).
+# Read-only, per-process.
+_MATCH_RATE_CACHE: dict[int | None, tuple[float, dict[str, Any]]] = {}
+_MATCH_RATE_CACHE_TTL_S = 60.0
+
+
 @router.get("/resolution/match-rate", dependencies=[Depends(require_dashboard_auth)])
 async def resolution_match_rate(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1201,6 +1210,9 @@ async def resolution_match_rate(
     COVERAGE gap (capture more / enable ARCADIA_ENABLED), ``unmatched_with_
     candidates`` an ALIAS gap (extend the alias table).
     """
+    cached = _MATCH_RATE_CACHE.get(days)
+    if cached is not None and time.monotonic() - cached[0] < _MATCH_RATE_CACHE_TTL_S:
+        return cached[1]
     since = datetime.now(tz=UTC) - timedelta(days=days) if days is not None else None
     outcomes = await shadow_match_rate_outcomes(session, since=since)
     report = summarize_match_rate(outcomes).as_dict()
@@ -1270,6 +1282,7 @@ async def resolution_match_rate(
         configured=len(_s.scraper_proxies()),
         concurrency_floor=_floor,
     )
+    _MATCH_RATE_CACHE[days] = (time.monotonic(), report)
     return report
 
 

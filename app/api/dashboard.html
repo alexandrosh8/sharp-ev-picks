@@ -520,6 +520,8 @@
       .kr-s { font-family: var(--font-mono); font-size: 11px; color: var(--text2); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
       .edge-more { display: block; width: 100%; margin: 8px 0 2px; padding: 8px; background: var(--panel2); color: var(--text2); border: 1px solid var(--line); border-radius: 6px; font-family: var(--font-mono); font-size: 11px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
       .edge-more:hover { color: var(--text); border-color: var(--line2); }
+      .eq-export { padding: 6px 10px; background: var(--panel2); color: var(--text2); border: 1px solid var(--line); border-radius: 6px; font-family: var(--font-mono); font-size: 11px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
+      .eq-export:hover { color: var(--cyan); border-color: var(--cyan-line); }
 
       .attn-row {
         display: flex;
@@ -1277,6 +1279,7 @@
               <select id="eq-status" aria-label="Status filter" data-testid="edges-status-filter">
                 <option value="">All statuses</option>
                 <option value="actionable">Qualified</option>
+                <option value="stale">Stale</option>
                 <option value="tracked">Tracked</option>
                 <option value="closed">Closed</option>
               </select>
@@ -1285,6 +1288,7 @@
                 <option value="kickoff">Sort: Kickoff</option>
                 <option value="odds">Sort: Odds ↓</option>
               </select>
+              <button id="eq-export" type="button" class="eq-export" aria-label="Export the current edges view to CSV" data-testid="edges-export">⤓ CSV</button>
             </div>
             <div id="edge-list" role="list" aria-label="Edges" data-testid="edges-list"></div>
             <div class="edge-detail" id="edge-detail" data-testid="edge-detail-drawer">
@@ -1730,6 +1734,10 @@
         function edgeGroupOf(p) {
           if (hasStarted(p) || p.status === "settled" || p.status === "superseded") return "closed";
           if (tierOf(p) === "volume") return "tracked";
+          // A premium pre-kickoff pick whose live price has gone stale is NOT
+          // actionable (its shown price is unconfirmed) — surface it in its own
+          // "Stale" group so the Actionable heading matches "Qualified now".
+          if (p.status === "alerted" && !isRevalidationFresh(p, state.health)) return "stale";
           return "actionable";
         }
         function edgeFloorOf(p, health) {
@@ -2434,6 +2442,7 @@
           const rows = state.picks.filter(matches);
           const groups = [
             ["actionable", "Actionable"],
+            ["stale", "Stale — awaiting re-price"],
             ["tracked", "Tracked — informational"],
             ["closed", "Closed"],
           ];
@@ -2467,6 +2476,33 @@
               box.appendChild(more);
             }
           });
+        }
+        function exportEdgesCsv() {
+          const q = ($("eq-search").value || "").trim().toLowerCase();
+          const tierWant = $("eq-tier").value, statusWant = $("eq-status").value;
+          const sortMode = ($("eq-sort") && $("eq-sort").value) || "edge";
+          const edgeVal = (p) => numOf(p.current_edge == null ? p.edge : p.current_edge);
+          const match = (p) => {
+            if (tierWant && tierOf(p) !== tierWant) return false;
+            if (statusWant && edgeGroupOf(p) !== statusWant) return false;
+            if (!q) return true;
+            return [p.event, p.selection, p.league].some((v) => String(v || "").toLowerCase().indexOf(q) !== -1);
+          };
+          const rows = state.picks.filter(match).sort((a, b) =>
+            sortMode === "kickoff" ? new Date(a.starts_at || 8e15) - new Date(b.starts_at || 8e15)
+            : sortMode === "odds" ? (numOf(b.decimal_odds) || 0) - (numOf(a.decimal_odds) || 0)
+            : (edgeVal(b) || -1e9) - (edgeVal(a) || -1e9));
+          const cols = ["group", "tier", "status", "event", "league", "market", "selection", "decimal_odds", "edge", "current_edge", "confidence", "anchor_type", "starts_at", "revalidated_at"];
+          const esc = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+          const lines = [cols.join(",")];
+          rows.forEach((p) => lines.push(cols.map((c) => esc(c === "group" ? edgeGroupOf(p) : p[c])).join(",")));
+          const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "edges-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".csv";
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
         }
         function selectEdge(id) {
           selectedId = String(id);
@@ -2695,6 +2731,7 @@
         $("eq-tier").addEventListener("change", () => { edgeCaps = {}; renderEdgesList(); });
         $("eq-status").addEventListener("change", () => { edgeCaps = {}; renderEdgesList(); });
         $("eq-sort").addEventListener("change", () => { edgeCaps = {}; renderEdgesList(); });
+        $("eq-export").addEventListener("click", exportEdgesCsv);
 
         // ===== RADAR ============================================================
         // Fills the Radar / Lab / Sources desk-header tickers from global state so
@@ -3135,10 +3172,10 @@
           tb.appendChild(sourceRow(oddsSrcLabel, pollAge, String(state.games.length) + " fixtures", health && health.status === "ok" ? "Nominal" : "Source Degraded", "Live odds feed — active provider: " + (oddsSrc || "—") + ".", health && health.status === "ok" ? "tag-success" : "tag-danger"));
 
           const mr = state.matchRate;
-          const pinRate = mr && mr.coverage_summary ? fmtPct(mr.coverage_summary.pinnacle_rate) : (state.matchRateErr ? "Could not load coverage summary." : "Loading…");
+          const pinRate = mr && mr.coverage_summary ? fmtPct(mr.coverage_summary.pinnacle_rate) : (state.matchRateErr ? "Could not load coverage summary." : "Computing coverage… (~15s)");
           tb.appendChild(sourceRow("Pinnacle ARCADIA", "—", pinRate, mr ? "Nominal" : "Pending", "Sharp-close archive.", mr ? "tag-success" : "tag-neutral"));
 
-          const bfRate = mr && mr.coverage_summary ? fmtPct(mr.coverage_summary.betfair_rate) : (state.matchRateErr ? "Could not load coverage summary." : "Loading…");
+          const bfRate = mr && mr.coverage_summary ? fmtPct(mr.coverage_summary.betfair_rate) : (state.matchRateErr ? "Could not load coverage summary." : "Computing coverage… (~15s)");
           const bfSrc = (health && health.betfair_source) || "Canonical-event inline anchor.";
           tb.appendChild(sourceRow("Betfair inline", "—", bfRate, mr ? "Nominal" : "Pending", bfSrc, mr ? "tag-success" : "tag-neutral"));
 
@@ -3154,7 +3191,7 @@
 
           const staleBox = $("staleness-monitor"); staleBox.replaceChildren();
           if (!stale) {
-            staleBox.textContent = state.matchRateErr ? "Could not load the staleness monitor." : "Loading…";
+            staleBox.textContent = state.matchRateErr ? "Could not load the staleness monitor." : "Computing coverage… (~15s)";
           } else {
             const cap = document.createElement("p"); cap.className = "ops-cap";
             cap.textContent = "Monitor-only check on the Betfair price freshness guard — how many inline prices were fresh, demoted as stale, or had no matching live API price. Not a pick-feeding read.";
@@ -3169,7 +3206,7 @@
 
           const rq = $("review-queues"); rq.replaceChildren();
           if (!links) {
-            rq.textContent = state.matchRateErr ? "Could not load review queues." : "Loading…";
+            rq.textContent = state.matchRateErr ? "Could not load review queues." : "Computing coverage… (~15s)";
           } else {
             const cap = document.createElement("p"); cap.className = "ops-cap";
             cap.textContent = "Cross-source event links. Auto-linked matched automatically; in-review is held for human triage; weak links matched below 0.95 confidence.";
