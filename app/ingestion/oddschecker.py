@@ -623,7 +623,7 @@ def _ids(container: Any) -> list[str]:
     return [str(value) for value in ids]
 
 
-def _find_match_payload(html: str) -> dict[str, Any]:
+def _find_match_payload(html: str, *, prefer_subevent_id: str | None = None) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     for payload in hypernova_payloads(html):
         best = payload.get("bestOdds")
@@ -634,6 +634,18 @@ def _find_match_payload(html: str) -> dict[str, Any]:
             candidates.append(payload)
     if not candidates:
         raise OddsCheckerParseError("no populated OddsChecker bestOdds payload found")
+    # When the page's canonical subevent id is known (from the header breadcrumb),
+    # prefer the blob that actually prices THAT match. A page can embed several
+    # bestOdds blobs (accumulator / related matches); picking the byte-largest one
+    # can register and price a DIFFERENT game than the URL (wrong-game hazard).
+    if prefer_subevent_id:
+        for payload in candidates:
+            config = payload["bestOdds"].get("subeventConfig")
+            if (
+                isinstance(config, Mapping)
+                and str(config.get("subeventId") or "").strip() == prefer_subevent_id
+            ):
+                return payload
     return max(candidates, key=lambda item: len(json.dumps(item.get("bestOdds", {}))))
 
 
@@ -642,6 +654,17 @@ def _find_header_payload(html: str) -> dict[str, Any]:
         if "subeventStartTime" in payload and "subeventName" in payload:
             return payload
     return {}
+
+
+def _header_subevent_id(header: Mapping[str, Any]) -> str | None:
+    """The canonical subevent id of the page's match, from its breadcrumb —
+    used to disambiguate multiple embedded bestOdds blobs to the URL's game."""
+    for crumb in header.get("breadcrumbs", []):
+        if isinstance(crumb, Mapping) and crumb.get("type") == "subevent":
+            crumb_id = str(crumb.get("id") or "").strip()
+            if crumb_id:
+                return crumb_id
+    return None
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -689,11 +712,22 @@ def _other_market_detail(market_type: str, line: Any = None) -> str:
 
 
 def _odds_have_sharp_anchor(raw_odds: Sequence[Any]) -> bool:
-    """True when any odd in the market carries a sharp-anchor book quote (OE)."""
-    return any(
-        isinstance(odd, Mapping) and str(odd.get("bookmakerCode") or "") in _SHARP_ANCHOR_BOOK_CODES
-        for odd in raw_odds
-    )
+    """True when any LIVE odd carries a sharp-anchor book quote (active OE).
+
+    A SUSPENDED or expired exchange quote is not a live anchor: the OTHER-capture
+    gate must require the sharp book to actually be pricing the market now, not
+    merely to appear in the grid."""
+    for odd in raw_odds:
+        if not isinstance(odd, Mapping):
+            continue
+        if str(odd.get("bookmakerCode") or "") not in _SHARP_ANCHOR_BOOK_CODES:
+            continue
+        if str(odd.get("status") or "").upper() != "ACTIVE":
+            continue
+        if odd.get("expired") is True or odd.get("notExpired") is False:
+            continue
+        return True
+    return False
 
 
 def _market_for_type(
@@ -876,8 +910,8 @@ def parse_match_page(
 ) -> list[OddsSnapshotIn]:
     """Parse one OddsChecker match page into normalized odds snapshots."""
     ingested_at = now or _utcnow()
-    payload = _find_match_payload(html)
     header = _find_header_payload(html)
+    payload = _find_match_payload(html, prefer_subevent_id=_header_subevent_id(header))
     best = payload["bestOdds"]
     if not isinstance(best, Mapping):
         raise OddsCheckerParseError("bestOdds payload is not an object")
@@ -1068,6 +1102,12 @@ def parse_market_api_payloads(
         )
         event_id = _api_event_id(market_payload, url)
         home, away = _split_match_name(str(market_payload.get("subeventName") or "")) or ("", "")
+        if not home and not away:
+            # The subeventName separator was unrecognised; fall back to the
+            # structured team fields when the all-odds payload carries them
+            # (additive: absent -> unchanged, so no orientation guessing).
+            home = str(market_payload.get("homeTeamName") or "").strip()
+            away = str(market_payload.get("awayTeamName") or "").strip()
         directory.register(
             event_id,
             EventTeams(
@@ -1105,6 +1145,8 @@ def parse_market_api_payloads(
                 continue
             for raw_odd in odds_by_bet.get(str(raw_bet.get("betId") or ""), []):
                 if str(raw_odd.get("status") or "").upper() != "ACTIVE":
+                    continue
+                if raw_odd.get("expired") is True or raw_odd.get("notExpired") is False:
                     continue
                 decimal = _decimal(raw_odd.get("oddsDecimal"))
                 if decimal is None:
