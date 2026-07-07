@@ -172,6 +172,48 @@ def test_market_from_snapshot_key_roundtrip() -> None:
     assert market_from_snapshot_key("frobnicate") is None
 
 
+def test_market_from_snapshot_key_roundtrips_oddschecker_line_markets() -> None:
+    # OddsChecker encodes its line-bearing submarkets as ``<enum_value>[_period]
+    # [_line]`` ("totals_2_5", "spreads_minus_1_5", "team_totals_1_5") — a scheme
+    # DISTINCT from OddsPortal's OddsHarvester keys ("over_under_2_5",
+    # "asian_handicap_-1_5"). The reverse mapper must recognize it too, else an
+    # OddsChecker totals/spreads/team-totals close silently fails to round-trip
+    # and closing_odds_from_snapshots drops it — biasing OddsChecker close
+    # coverage. Build the keys with the loader's OWN emitters so this test can
+    # never drift from what the ingestion path actually writes.
+    from app.ingestion.oddschecker import _market_detail
+
+    totals_key = _market_detail("totals", "total goals", "2.5")
+    totals_period_key = _market_detail("totals", "total points over/under 1st half", "110.5")
+    spreads_key = _market_detail("spreads", "asian handicap", "-1.5")
+    spreads_period_key = _market_detail("spreads", "handicap 1st quarter", "-5.5")
+    team_totals_key = _market_detail("team_totals", "home team total", "1.5")
+    team_totals_period_key = _market_detail("team_totals", "away team total 2nd half", "0.5")
+
+    # Sanity: these are the exact provider-neutral forms the audit flagged.
+    assert totals_key == "totals_2_5"
+    assert spreads_key == "spreads_minus_1_5"
+    assert team_totals_key == "team_totals_1_5"
+
+    # The full key is preserved as market_detail so distinct lines stay distinct
+    # devig groups (same invariant the OddsPortal keys satisfy).
+    assert market_from_snapshot_key(totals_key) == (Market.TOTALS, totals_key)
+    assert market_from_snapshot_key(totals_period_key) == (Market.TOTALS, totals_period_key)
+    assert market_from_snapshot_key(spreads_key) == (Market.SPREADS, spreads_key)
+    assert market_from_snapshot_key(spreads_period_key) == (Market.SPREADS, spreads_period_key)
+    assert market_from_snapshot_key(team_totals_key) == (Market.TEAM_TOTALS, team_totals_key)
+    assert market_from_snapshot_key(team_totals_period_key) == (
+        Market.TEAM_TOTALS,
+        team_totals_period_key,
+    )
+
+    # Capture-only OTHER keys ("oc_<slug>") must STILL be skipped — they never
+    # mint picks or CLV and must never enter a devig pool.
+    from app.ingestion.oddschecker import _other_market_detail
+
+    assert market_from_snapshot_key(_other_market_detail("player shots", "2.5")) is None
+
+
 def test_snapshot_market_key_does_not_truncate_long_submarket_lines() -> None:
     # A real tennis/quarter-line handicap-games key is 33 chars; the old 32-char
     # clamp silently dropped the trailing axis token, merging it into a DIFFERENT

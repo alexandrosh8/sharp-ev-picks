@@ -1855,9 +1855,24 @@ def market_from_snapshot_key(key: str) -> tuple[Market, str | None] | None:
     from app.ingestion.oddsportal import _market_for_key
 
     market = _market_for_key(key)
-    if market is None:
-        return None
-    return market, key
+    if market is not None:
+        return market, key
+    # Provider-neutral fallback for the OddsChecker submarket scheme
+    # (app.ingestion.oddschecker._market_detail): line-bearing keys are encoded
+    # as ``<enum_value>[_period][_line]`` — "totals_2_5", "spreads_minus_1_5",
+    # "team_totals_1_5" — DISTINCT from OddsPortal's OddsHarvester keys
+    # ("over_under_2_5", "asian_handicap_-1_5") that _market_for_key handles.
+    # Without this, an OddsChecker totals/spreads/team-totals close silently
+    # fails to round-trip and closing_odds_from_snapshots drops it, biasing
+    # OddsChecker close coverage. The FULL key is kept as market_detail so
+    # distinct lines rebuild as distinct devig groups (same invariant as above).
+    # TEAM_TOTALS is tested first so its "team_totals_" prefix wins over any
+    # shorter enum value. Capture-only OTHER keys ("oc_<slug>") are deliberately
+    # NOT mapped — they never mint picks or CLV and must never enter a devig pool.
+    for line_market in (Market.TEAM_TOTALS, Market.SPREADS, Market.TOTALS):
+        if key.startswith(f"{line_market.value}_"):
+            return line_market, key
+    return None
 
 
 async def persist_odds_snapshots(
