@@ -3356,7 +3356,10 @@ async def betfair_inline_capture_by_sport(
                     select(func.count(func.distinct(OddsSnapshot.event_id))).where(
                         OddsSnapshot.event_id.in_(soft_event_ids),
                         func.lower(OddsSnapshot.bookmaker) == _BETFAIR_BOOKMAKER.lower(),
-                        OddsSnapshot.market == moneyline_key,
+                        # OddsPortal stores moneyline as '1x2'/'home_away'; OddsChecker
+                        # (the active source) stores it as 'h2h' — accept both so the
+                        # inline-Betfair metric is not falsely 0% under oddschecker.
+                        OddsSnapshot.market.in_((moneyline_key, "h2h")),
                     )
                 )
             ) or 0

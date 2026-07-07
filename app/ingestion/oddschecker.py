@@ -128,6 +128,19 @@ _BOOKMAKER_FALLBACKS: Mapping[str, str] = {
     "VE": "Virgin Bet",
     "WA": "Betway",
     "WH": "William Hill",
+    # Harvested 2026-07-07 from the live bestOdds bookmakers.entities feed (the
+    # all-odds/legacy paths carry no entities map, so off-map codes were emitting
+    # raw 2-letter codes — a split identity vs bestOdds' canonical name).
+    "AKB": "AK Bets",
+    "BAH": "BetAhoy",
+    "BRS": "BresBet",
+    "BTT": "BetTom",
+    "G5": "BetGoodwin",
+    "PUP": "PricedUp",
+    "QN": "QuinnBet",
+    "S6": "Star Sports",
+    "SI": "Sporting Index",
+    "SX": "Spreadex",
 }
 
 
