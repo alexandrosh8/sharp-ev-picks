@@ -848,6 +848,33 @@ def test_exchange_liquidity_gate_demotes_known_thin_keeps_unknown() -> None:
     assert res2 is not None and res2[0] == "betfair exchange"
 
 
+def test_exchange_liquidity_gate_main_scrape_none_anchors_premium() -> None:
+    # audit-item-#1 regression: the audit asked to "demote unknown-liquidity
+    # exchange anchors from premium". That blanket rule is FORBIDDEN here — the
+    # dominant main-scrape Betfair rows carry liquidity=None BY DESIGN and anchor
+    # 59/62 Betfair events (memory: do-not-remove-main-scrape-betfair). This
+    # locks the safe discriminator (liquidity IS the source signal: None =
+    # main-scrape) even when a liquidity MAP IS PRESENT for the event (a mixed
+    # event where the dedicated capture set liquidity on OTHER books but the
+    # Betfair line is main-scrape). Two unknown encodings must both stay
+    # anchor-ELIGIBLE and premium-eligible (is_sharp_anchored True):
+    #   (1) the exchange key is ABSENT from the per-selection liquidity map,
+    #   (2) the exchange key is present with an explicit None value.
+    from app.edge.value import anchor_fair_probs, is_sharp_anchored
+
+    # (1) map present, betfair key absent -> unknown -> stays the sharp anchor
+    key_absent = {s: {"SoftA": 250.0} for s in _EX_PRICES}
+    res = anchor_fair_probs(_EX_PRICES, liquidity=key_absent, exchange_min_liquidity=100.0)
+    assert res is not None and res[0] == "betfair exchange"
+    assert is_sharp_anchored(res[0])  # premium-eligible, not demoted to consensus
+
+    # (2) map present, betfair value explicitly None -> unknown -> stays eligible
+    value_none = {s: {"betfair exchange": None} for s in _EX_PRICES}
+    res2 = anchor_fair_probs(_EX_PRICES, liquidity=value_none, exchange_min_liquidity=100.0)
+    assert res2 is not None and res2[0] == "betfair exchange"
+    assert is_sharp_anchored(res2[0])
+
+
 def test_exchange_liquidity_gate_keeps_liquid_exchange() -> None:
     # build #3: liquidity >= floor on every selection -> Betfair stays the sharp anchor.
     from app.edge.value import anchor_fair_probs
