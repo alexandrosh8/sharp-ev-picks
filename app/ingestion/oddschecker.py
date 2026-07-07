@@ -689,11 +689,22 @@ def _other_market_detail(market_type: str, line: Any = None) -> str:
 
 
 def _odds_have_sharp_anchor(raw_odds: Sequence[Any]) -> bool:
-    """True when any odd in the market carries a sharp-anchor book quote (OE)."""
-    return any(
-        isinstance(odd, Mapping) and str(odd.get("bookmakerCode") or "") in _SHARP_ANCHOR_BOOK_CODES
-        for odd in raw_odds
-    )
+    """True when any LIVE odd carries a sharp-anchor book quote (active OE).
+
+    A SUSPENDED or expired exchange quote is not a live anchor: the OTHER-capture
+    gate must require the sharp book to actually be pricing the market now, not
+    merely to appear in the grid."""
+    for odd in raw_odds:
+        if not isinstance(odd, Mapping):
+            continue
+        if str(odd.get("bookmakerCode") or "") not in _SHARP_ANCHOR_BOOK_CODES:
+            continue
+        if str(odd.get("status") or "").upper() != "ACTIVE":
+            continue
+        if odd.get("expired") is True or odd.get("notExpired") is False:
+            continue
+        return True
+    return False
 
 
 def _market_for_type(
