@@ -94,7 +94,10 @@ def _names_same_game(a: str, b: str) -> bool:
     # ("mcdonald m" vs "mcdonald n") stays distinct. This only fires for tennis
     # (team names have no trailing single-letter token) and, in the log-only
     # audit, can only SUPPRESS a false ERROR — never accept a close.
-    if _tennis_initial(base_a) is not None or _tennis_initial(base_b) is not None:
+    # Gate on the RAW names, not base_a/base_b: strip_markers removes a
+    # first-initial that is also a club marker ("b" -> B team), which would hide
+    # a tennis "surname b" anchor ("tomic b", "shick b") and defeat this branch.
+    if _tennis_initial(a) is not None or _tennis_initial(b) is not None:
         ca, cb = canonical_tennis_name(a), canonical_tennis_name(b)
         if ca and cb and ca == cb:
             return True
@@ -194,6 +197,24 @@ def verify_same_game(
             pick_away, anchor_home
         )
         if markers_ok_swap and names_ok_swap:
+            return None
+
+    # Tennis marker false positive: distinguishing_markers reads a trailing
+    # first-initial ("tomic b") as a B/reserve marker, so markers_ok is False
+    # even for the SAME player. When this is a tennis fixture (anchor names are
+    # the canonical "surname initial" form) AND the tennis-canonical NAMES match
+    # (forward or, unordered, swapped), the marker "conflict" is only the initial
+    # — suppress the false ERROR. Team-sport names have no trailing single-letter
+    # token, so this never fires for them; their real marker conflicts still flag.
+    from app.resolution.matching import _tennis_initial
+
+    if _tennis_initial(anchor_home) is not None and _tennis_initial(anchor_away) is not None:
+        names_swap = (
+            not ordered
+            and _names_same_game(pick_home, anchor_away)
+            and _names_same_game(pick_away, anchor_home)
+        )
+        if names_ok_fwd or names_swap:
             return None
 
     if not markers_ok_fwd:

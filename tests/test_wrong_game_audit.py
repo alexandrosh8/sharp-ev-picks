@@ -195,3 +195,8 @@ def test_names_same_game_tennis_cross_form() -> None:
     # never fires): distinct clubs stay distinct, same club stays same.
     assert _names_same_game("Manchester United", "Manchester City") is False
     assert _names_same_game("Arsenal", "Arsenal") is True
+    # first-initial "b": strip_markers removes it as a B-team marker, so the
+    # gate must key off the RAW name — else "tomic b"/"shick b" stay unmatched
+    # and the audit false-flags a distinguishing-marker conflict.
+    assert _names_same_game("Braden Shick", "shick b") is True
+    assert _names_same_game("Bernard Tomic", "tomic b") is True
