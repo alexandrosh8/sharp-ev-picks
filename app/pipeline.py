@@ -835,6 +835,82 @@ async def _persist_stake_clip(deps: "PipelineDeps", pick: PickOut, event_id: str
         )
 
 
+async def _record_candidate_audit(
+    deps: "PipelineDeps",
+    pick: PickOut,
+    market_detail: str,
+    reasons: tuple[str, ...],
+    anchor_age_seconds: float | None,
+    now: datetime,
+) -> None:
+    """Stage ONE candidate-evaluation audit row (external-audit #3 + fill #2).
+
+    Pure MEASUREMENT: records the tier a candidate landed in ('premium' kept vs
+    'volume' demoted/shadow), the demotion reason slug(s) that fired (empty for a
+    clean premium keep), and the anchor/fill provenance behind it — so later ROI
+    diagnosis can tune false positives, tier demotions, and fill realism. It NEVER
+    gates minting; a failure here must NEVER drop or alter a real pick, so it is
+    fully isolated and type-only logged (project logging rule — never the exception
+    string or a URL). Mirrors _maybe_persist's own-session pattern (the pipeline
+    opens a session per pick, not a shared one); evaluated_at=now makes the write
+    idempotent per cycle (ON CONFLICT DO NOTHING on the cycle key).
+
+    The realistic (post-book-allowlist) fill is recorded via best_book/best_odds/
+    edge — the fill side of audit #2. The theoretical-vs-fill GAP number itself has
+    no column on CandidateEvaluationInput, so it is not persisted here (a schema
+    extension would be needed — see app/storage/candidate_audit.py).
+    """
+    if deps.session_factory is None:
+        return
+    from sqlalchemy import select
+
+    from app.storage.candidate_audit import (
+        CandidateEvaluationInput,
+        record_candidate_evaluation,
+    )
+    from app.storage.models import Event
+
+    try:
+        async with deps.session_factory() as session:
+            event_pk = await session.scalar(
+                select(Event.id).where(Event.external_ref == pick.event_id)
+            )
+            if event_pk is None:
+                return  # event not persisted (e.g. unpersisted pick): no FK target
+            await record_candidate_evaluation(
+                session,
+                CandidateEvaluationInput(
+                    event_id=event_pk,
+                    sport_key=pick.sport,
+                    market=str(pick.market),
+                    market_detail=market_detail,
+                    selection=pick.selection,
+                    tier=pick.tier,
+                    reasons=reasons,
+                    anchor_book=pick.anchor_book,
+                    anchor_type=pick.anchor_type,
+                    anchor_age_seconds=(
+                        Decimal(str(anchor_age_seconds)) if anchor_age_seconds is not None else None
+                    ),
+                    best_book=pick.bookmaker,
+                    best_odds=Decimal(str(pick.decimal_odds)),
+                    edge=Decimal(str(pick.edge)),
+                    # PickOut.model_probability carries the sharp devigged fair prob
+                    # (v.sharp_fair_prob) the edge was measured against.
+                    fair_probability=Decimal(str(pick.model_probability)),
+                    evaluated_at=now,
+                ),
+            )
+            await session.commit()
+    except Exception as exc:  # audit write must NEVER break the pick flow
+        logger.error(
+            "candidate audit write failed for %s/%s: %s",
+            pick.sport,
+            pick.event_id,
+            type(exc).__name__,
+        )
+
+
 async def _reserve_for_outcome(
     deps: "PipelineDeps",
     pick: PickOut,
@@ -1607,6 +1683,35 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # (kr-1 / kelly-risk-r2-1) — and an exhausted cap never skips the
             # re-dispatch of an already-persisted pick.
             outcome = await _maybe_persist(deps, pick, event_id)
+            # Candidate/rejection audit trail (external-audit #3, fill #2): record
+            # EVERY evaluated candidate — premium kept (empty reasons) AND every
+            # tier demotion — with its tier + demotion reason slug(s) + anchor/fill
+            # provenance, so ROI diagnosis can later tune false positives, tier
+            # demotions, and fill realism. The slugs derive from the demotion NOTES
+            # already computed above (each note is set only when its gate demotes;
+            # steam's SHADOW note — a would-demote that leaves the tier premium — is
+            # excluded so an empty reasons tuple stays the clean-keep signal). Pure
+            # MEASUREMENT: isolated, never gates or alters a pick (see helper).
+            audit_reasons: list[str] = []
+            if visibility_note:
+                audit_reasons.append("visibility_only")
+            if moneyline_note:
+                audit_reasons.append("odds_ceiling")
+            if major_note:
+                audit_reasons.append("non_major_league")
+            if sharp_note:
+                audit_reasons.append("no_sharp_anchor")
+            if experimental_note:
+                audit_reasons.append("experimental_sport")
+            if ml_note:
+                audit_reasons.append("ml_filter")
+            if steam_note.startswith(" | steam ("):  # DEMOTE form only (not shadow)
+                audit_reasons.append("steam")
+            if sanity_note:
+                audit_reasons.append("structural_sanity")
+            await _record_candidate_audit(
+                deps, pick, detail or "", tuple(audit_reasons), steam_anchor_age_seconds, now
+            )
             if tier == "volume":
                 # Shadow tier: persisted + CLV-tracked but NOT alerted and NEVER
                 # on the exposure ledger. (Volume alerting was trialed 2026-06-23
