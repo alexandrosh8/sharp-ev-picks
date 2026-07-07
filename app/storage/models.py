@@ -684,3 +684,66 @@ class PickLineDrift(Base):
     clv_log: Mapped[Decimal | None] = mapped_column(METRIC)
     anchor_type: Mapped[str | None] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class CandidateEvaluation(Base):
+    """Per-candidate audit trail for the value pipeline (external-audit #3).
+
+    Today the pipeline only keeps AGGREGATE counters (n_stale, n_no_sharp_demoted,
+    ...), so a false-positive spike, a freshness drop, a book miss, or a tier
+    demotion cannot be diagnosed after the fact. This table records ONE row per
+    candidate evaluation per cycle: what tier it landed in (``premium`` kept vs
+    ``volume`` demoted), WHY (the demotion/rejection reason slugs the pipeline
+    already distinguishes, in ``reasons``), and the anchor/fill provenance behind
+    the decision. Pure MEASUREMENT infrastructure — never gates minting, never
+    changes a pick. See ``app/storage/candidate_audit.py`` for the writer and the
+    documented reason vocabulary.
+
+    Idempotent by (event, market, market_detail, selection, evaluated_at): the
+    pipeline's per-cycle ``now`` is the cycle discriminator, so one call per
+    candidate per cycle can never double-insert (ON CONFLICT DO NOTHING at write
+    time). ``market_detail`` is NOT NULL ('' when the market has no line suffix) —
+    a NULL would read as distinct in the unique index and defeat that dedup (the
+    leagues.country lesson). Standalone tap like event_source_links /
+    match_review_queue: no FK to model_versions/model_predictions, so an audit
+    write can never fail on pipeline churn. Additive only — leaves the RESERVED
+    DetectedEdge (model-strategy shaped) untouched for its intended use."""
+
+    __tablename__ = "candidate_evaluations"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "market",
+            "market_detail",
+            "selection",
+            "evaluated_at",
+            name="uq_candidate_evaluations_cycle",
+        ),
+        Index("idx_candidate_evaluations_event", "event_id", "evaluated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
+    sport_key: Mapped[str] = mapped_column(String(64))  # sports.key form, e.g. "soccer"
+    market: Mapped[str] = mapped_column(String(64))  # matches odds_snapshots.market width
+    # '' when the market has no line suffix (NOT NULL — see class docstring).
+    market_detail: Mapped[str] = mapped_column(String(64), nullable=False, server_default="")
+    selection: Mapped[str] = mapped_column(String(64))
+    # Decision tier: 'premium' (kept — alerted, reserves exposure) or 'volume'
+    # (demoted/shadow — persisted + CLV-tracked only). Same vocabulary as picks.tier.
+    tier: Mapped[str] = mapped_column(String(16))
+    # Demotion/rejection reason slugs, {"reasons": [...]} (DetectedEdge.reject_reasons
+    # shape). NULL/absent = a clean premium keep (no gate tripped).
+    reasons: Mapped[dict[str, Any] | None]
+    # --- anchor + fill provenance behind the decision (all nullable) ------------
+    anchor_book: Mapped[str | None] = mapped_column(String(64))
+    anchor_type: Mapped[str | None] = mapped_column(String(16))  # pinnacle|sharp|consensus
+    anchor_age_seconds: Mapped[Decimal | None] = mapped_column(METRIC)
+    anchor_liquidity: Mapped[Decimal | None] = mapped_column(MONEY)
+    best_book: Mapped[str | None] = mapped_column(String(64))  # best fill book
+    best_odds: Mapped[Decimal | None] = mapped_column(ODDS)
+    edge: Mapped[Decimal | None] = mapped_column(METRIC)
+    fair_probability: Mapped[Decimal | None] = mapped_column(PROB)
+    # The pipeline's per-cycle timestamp — the idempotency discriminator.
+    evaluated_at: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

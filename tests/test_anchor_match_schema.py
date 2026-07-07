@@ -129,4 +129,4 @@ def test_alembic_graph_has_single_head() -> None:
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["b8e5d2f7a4c1"]  # bankroll_ledger (A8)
+    assert heads == ["d1e2f3a4b5c6"]  # candidate_evaluations (external-audit #3)
