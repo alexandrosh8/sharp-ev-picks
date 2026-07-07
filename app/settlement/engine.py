@@ -24,6 +24,7 @@ from sqlalchemy.orm import aliased
 
 from app.edge.value_policy import ValuePolicy
 from app.probabilities.devig import DevigMethod
+from app.resolution.matching import fixture_pair_key
 from app.schemas.base import Outcome
 from app.settlement.outcomes import (
     TENNIS_SETTLEMENT_CONVENTION,
@@ -45,6 +46,15 @@ logger = logging.getLogger(__name__)
 # How far back the score book reaches. Anything older than this with no
 # score available needs manual settlement anyway.
 SCORE_WINDOW = timedelta(days=14)
+
+# Settlement dedup guard: two same-sport events with the same UNORDERED
+# normalized team pair whose kickoffs fall within this bound are treated as the
+# SAME real fixture (cross-source duplicate event rows). 2h is a hard physical
+# invariant — two teams/players cannot start a second meeting within 2h — so a
+# genuinely distinct fixture (home/away leg reversal, multi-day rematch,
+# doubleheader, playoff G1/G2) can NEVER fall inside it. The guard can therefore
+# only ever skip a true duplicate, never suppress a legitimate distinct pick.
+DEDUP_FIXTURE_TOLERANCE = timedelta(hours=2)
 
 # Full time + stoppage + a buffer for the results CSVs to update. Scores are
 # matched by date anyway; the delay just avoids settling in-play fixtures.
@@ -218,6 +228,53 @@ async def void_unsettleable_known_kickoff_picks(
     return voided
 
 
+async def _settled_sibling_exists(
+    session: AsyncSession,
+    *,
+    pick_id: int,
+    event_id: int,
+    sport_id: int,
+    starts_at: datetime,
+    market: str,
+    selection: str,
+    model_version_id: int,
+    target_pair: frozenset[str],
+) -> bool:
+    """True when an equivalent pick (same market+selection+model_version) on a
+    DIFFERENT event of the SAME real fixture is ALREADY settled — so settling
+    this pick again would double-count real-money pnl/ROI/CLV.
+
+    "Same real fixture" = same sport, kickoff within DEDUP_FIXTURE_TOLERANCE, and
+    the same UNORDERED fixture_pair_key (which folds a ``[In Running]`` live-fork
+    onto its clean twin and preserves women's/youth markers). Only rows that
+    already carry a result_tracking row are considered (the settled sibling).
+    Fail-safe: the ±2h same-teams bound makes a distinct fixture impossible to
+    match, so a match is only ever a genuine cross-source duplicate."""
+    home_t, away_t = aliased(Team), aliased(Team)
+    rows = (
+        await session.execute(
+            select(home_t.name, away_t.name)
+            .select_from(Pick)
+            .join(ResultTracking, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .join(home_t, Event.home_team_id == home_t.id)
+            .join(away_t, Event.away_team_id == away_t.id)
+            .where(
+                Pick.id != pick_id,
+                Pick.event_id != event_id,
+                Pick.market == market,
+                Pick.selection == selection,
+                Pick.model_version_id == model_version_id,
+                Event.sport_id == sport_id,
+                Event.starts_at.is_not(None),
+                Event.starts_at >= starts_at - DEDUP_FIXTURE_TOLERANCE,
+                Event.starts_at <= starts_at + DEDUP_FIXTURE_TOLERANCE,
+            )
+        )
+    ).all()
+    return any(fixture_pair_key(h, a) == target_pair for h, a in rows)
+
+
 async def settle_open_picks(
     session: AsyncSession,
     book: ScoreBook,
@@ -252,7 +309,15 @@ async def settle_open_picks(
     home, away = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
-            select(Pick, home.name, away.name, Event.starts_at, Event.external_ref, Sport.key)
+            select(
+                Pick,
+                home.name,
+                away.name,
+                Event.starts_at,
+                Event.external_ref,
+                Sport.key,
+                Event.sport_id,
+            )
             .join(Event, Pick.event_id == Event.id)
             .join(home, Event.home_team_id == home.id)
             .join(away, Event.away_team_id == away.id)
@@ -265,12 +330,38 @@ async def settle_open_picks(
     ).all()
 
     settled = 0
-    for pick, home_name, away_name, starts_at, external_ref, sport_key in rows:
+    for pick, home_name, away_name, starts_at, external_ref, sport_key, sport_id in rows:
         if starts_at > now - settle_delay_for(sport_key, delay):
             continue  # sport floor not reached — the game may still be in play
         score = book.lookup(home_name, away_name, starts_at)
         if score is None:
             continue  # close_pending — stays open, retried next cycle
+        # DEDUP GUARD: cross-source event dedup can mint this SAME bet on a second
+        # event row of one fixture. uq_result_tracking_pick is per pick_id, so
+        # both would settle and BOTH count into pnl/ROI/CLV. If an equivalent pick
+        # on a sibling event of the same fixture already settled, skip this one —
+        # never write the phantom second result row. Fail-safe (see
+        # DEDUP_FIXTURE_TOLERANCE): can only skip a true duplicate.
+        pair = fixture_pair_key(home_name, away_name)
+        if pair is not None and await _settled_sibling_exists(
+            session,
+            pick_id=pick.id,
+            event_id=pick.event_id,
+            sport_id=sport_id,
+            starts_at=starts_at,
+            market=pick.market,
+            selection=pick.selection,
+            model_version_id=pick.model_version_id,
+            target_pair=pair,
+        ):
+            logger.info(
+                "settlement: skipped duplicate pick %d (%s %s) — a sibling of the "
+                "same fixture is already settled (cross-source event dedup)",
+                pick.id,
+                pick.market,
+                pick.selection,
+            )
+            continue
         if await _settle_one(
             session,
             pick,

@@ -174,6 +174,41 @@ def strip_markers(name: str) -> str:
     return " ".join(kept) if kept else norm
 
 
+# A trailing scraper live-status token (" [In Running]", " [HT]", …) the in-play
+# OddsChecker/OddsPortal pages append to a team name. It is NOT a distinguishing
+# fixture marker — leaving it forks a team's canonical identity. `normalize_name`
+# alone does NOT remove it (the brackets become word-separators, so
+# "England [In Running]" -> "england in running" != "england"), so it MUST be
+# stripped before normalizing. Mirror of repositories._strip_live_status (kept
+# here in the pure module so name-keying reuses one definition).
+_LIVE_STATUS_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
+
+
+def strip_live_status(name: str) -> str:
+    """Drop a trailing bracketed live-status token, e.g. ``"England [In Running]"``
+    -> ``"England"``. A non-live name is returned unchanged (minus surrounding
+    whitespace)."""
+    return _LIVE_STATUS_RE.sub("", name).strip()
+
+
+def fixture_pair_key(home: str, away: str) -> frozenset[str] | None:
+    """The UNORDERED normalized team pair identifying one real fixture, or None
+    when degenerate (an empty side, or the two sides normalize equal — cannot
+    tell the fixture apart, so never key on it).
+
+    Live-status-stripped then `normalize_name`-d, so a live-forked side
+    ("England [In Running]") keys equal to its clean twin ("England"), while
+    women's/youth/reserve markers are PRESERVED (a women's fixture stays distinct
+    from the men's). Unordered so a home/away orientation flip across sources
+    still identifies the same fixture. Used by the settlement dedup guard (and
+    reusable by the mint-time resolver) to detect same-fixture sibling events."""
+    home_key = normalize_name(strip_live_status(home))
+    away_key = normalize_name(strip_live_status(away))
+    if not home_key or not away_key or home_key == away_key:
+        return None
+    return frozenset({home_key, away_key})
+
+
 def _jaro(s1: str, s2: str) -> float:
     """Jaro similarity in [0, 1] (stdlib-only; matches rapidfuzz.Jaro semantics).
     Two empty strings are identical (1.0); one empty is 0.0."""

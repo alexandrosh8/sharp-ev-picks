@@ -94,8 +94,10 @@ async def session():  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
-async def seed_pick(session, event_id: str, **kwargs) -> Pick:  # type: ignore[no-untyped-def]
-    teams = EventTeams(home=HOME, away=AWAY, league="test-league-settlement", starts_at=KICKOFF)
+async def seed_pick(  # type: ignore[no-untyped-def]
+    session, event_id: str, *, home: str = HOME, away: str = AWAY, **kwargs
+) -> Pick:
+    teams = EventTeams(home=home, away=away, league="test-league-settlement", starts_at=KICKOFF)
     assert await persist_pick(session, make_pick(event_id, **kwargs), teams, "value", "test-v")
     pick = await session.scalar(
         select(Pick).where(Pick.reason_summary == "settlement test").order_by(Pick.id.desc())
@@ -736,18 +738,22 @@ async def test_performance_report_aggregates(session, monkeypatch) -> None:  # t
     # This test predates that column, so set it — else n_sharp_close is 0.
     won.close_independent_of_fill = True
     won.closing_odds = Decimal("2.1000")
-    lost = await seed_pick(session, "evt-perf-2")
+    # A DISTINCT fixture (different teams) — not a second event row of the same
+    # game. The settlement dedup guard collapses same-fixture/same-selection
+    # duplicates, so an aggregation test of one won + one lost must use two
+    # genuinely different fixtures.
+    lost = await seed_pick(session, "evt-perf-2", home="Perf Gamma", away="Perf Delta")
     lost.clv_log = Decimal("-0.01")
     lost.beat_close = False
     # The lost pick has NO sharp close (no closing_odds / anchor) -> excluded
     # from the trusted sharp-close headline below.
     book = ScoreBook(
         [
-            FinalScore(HOME, AWAY, KICKOFF.date(), 2, 1),  # only evt-perf-1's event? no —
+            FinalScore(HOME, AWAY, KICKOFF.date(), 2, 1),  # settles the WON pick (evt-perf-1)
         ]
     )
-    # Both picks share team names/date, so both settle from one score (2-1):
-    # but evt-perf-2 needs a loss -> settle it manually as 1-0 first.
+    # The lost pick is a different fixture -> settle it manually as 1-0 (Over 2.5
+    # with 1 goal = LOST); the won pick settles from the 2-1 score above.
     settled, _ = await settle_event_picks(session, lost.event_id, 1, 0, NOW)
     assert settled == 1
     assert await settle_open_picks(session, book, NOW) == 1
