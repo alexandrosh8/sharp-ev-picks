@@ -67,7 +67,7 @@
         --hair: rgba(255, 255, 255, 0.05);
         --text: #fafafa;
         --text2: #a1a1aa;
-        --text3: #62626c;
+        --text3: #8b8b96;
         --cyan: #10b981;
         --cyan-dim: rgba(16, 185, 129, 0.12);
         --cyan-line: rgba(16, 185, 129, 0.35);
@@ -517,7 +517,9 @@
       .kickoff-row .tag { justify-self: start; align-self: center; }
       .kr-t { font-family: var(--font-mono); font-size: 11.5px; color: var(--cyan); white-space: nowrap; }
       .kr-e { font-size: 13px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .kr-s { font-family: var(--font-mono); font-size: 11px; color: var(--text2); white-space: nowrap; }
+      .kr-s { font-family: var(--font-mono); font-size: 11px; color: var(--text2); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .edge-more { display: block; width: 100%; margin: 8px 0 2px; padding: 8px; background: var(--panel2); color: var(--text2); border: 1px solid var(--line); border-radius: 6px; font-family: var(--font-mono); font-size: 11px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
+      .edge-more:hover { color: var(--text); border-color: var(--line2); }
 
       .attn-row {
         display: flex;
@@ -1278,6 +1280,11 @@
                 <option value="tracked">Tracked</option>
                 <option value="closed">Closed</option>
               </select>
+              <select id="eq-sort" aria-label="Sort edges" data-testid="edges-sort">
+                <option value="edge">Sort: Edge ↓</option>
+                <option value="kickoff">Sort: Kickoff</option>
+                <option value="odds">Sort: Odds ↓</option>
+              </select>
             </div>
             <div id="edge-list" role="list" aria-label="Edges" data-testid="edges-list"></div>
             <div class="edge-detail" id="edge-detail" data-testid="edge-detail-drawer">
@@ -1417,7 +1424,7 @@
                 <div class="panel-h"><h3 id="proxyh-h">Proxy pool health</h3><span class="tag tag-neutral" id="proxyh-verdict">—</span></div>
                 <div class="panel-b">
                   <div id="proxy-health"></div>
-                  <p class="muted">Proxies power the odds scrape. A degraded pool only slows scraping — the freshness gate discards any stale price, so no stale pick is ever minted. Dead or quarantined slots are listed automatically.</p>
+                  <p class="muted">Proxies power the odds scrape. A degraded pool only slows scraping — no pick is ever <em>minted</em> from a stale price (the mint-time freshness gate drops it first). If a live pick's price later ages out because its market stops refreshing, it is flagged <strong>Stale</strong> and drops out of “Qualified now” until it re-prices. Dead or quarantined slots are listed automatically.</p>
                 </div>
               </section>
               <section class="panel" aria-labelledby="stale-mon-h" data-testid="panel-staleness">
@@ -1653,6 +1660,8 @@
           return (h >= 24 ? Math.floor(h / 24) + "d " + (h % 24) + "h" : h + "h " + m + "m");
         }
         const numOf = (v) => (v === null || v === undefined || v === "" ? NaN : Number(v));
+        const EDGE_CHUNK = 30;              // edges rendered per group before "Show more"
+        let edgeCaps = {};                  // per-group reveal cap; reset on filter/sort change
         const clvPctFromLog = (log) => (Math.exp(Number(log)) - 1) * 100;
 
         // ===== shared state ===================================================
@@ -2250,7 +2259,8 @@
               const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
               const s = document.createElement("span"); s.className = "kr-s mono";
               const oc = String(p.outcome == null ? p.provisional_outcome : p.outcome).replace("_", " ");
-              s.textContent = oc.toUpperCase() + (p.outcome == null ? " (provisional)" : "");
+              const sel = p.selection ? String(p.selection) : "";
+              s.textContent = (sel ? sel + " · " : "") + oc.toUpperCase() + (p.outcome == null ? " (provisional)" : "");
               r.append(t0, e, s); rr.appendChild(r);
             });
           }
@@ -2427,8 +2437,15 @@
             ["tracked", "Tracked — informational"],
             ["closed", "Closed"],
           ];
+          const sortMode = ($("eq-sort") && $("eq-sort").value) || "edge";
+          const edgeVal = (p) => numOf(p.current_edge == null ? p.edge : p.current_edge);
+          const koVal = (p) => new Date(p.starts_at || 8e15).getTime();
+          const sortList = (arr) => arr.slice().sort((a, b) =>
+            sortMode === "kickoff" ? koVal(a) - koVal(b)
+            : sortMode === "odds" ? (numOf(b.decimal_odds) || 0) - (numOf(a.decimal_odds) || 0)
+            : (edgeVal(b) || -1e9) - (edgeVal(a) || -1e9));
           groups.forEach(([key, label]) => {
-            const list = rows.filter((p) => edgeGroupOf(p) === key);
+            const list = sortList(rows.filter((p) => edgeGroupOf(p) === key));
             const h = document.createElement("div"); h.className = "edge-group-h";
             const t = document.createElement("span"); t.className = "egt"; t.textContent = label;
             const n = document.createElement("span"); n.className = "egn"; n.textContent = "(" + list.length + ")";
@@ -2438,9 +2455,17 @@
               e.textContent = key === "actionable" ? "No pick currently qualifies." : "None right now.";
               box.appendChild(e); return;
             }
+            const cap = edgeCaps[key] || EDGE_CHUNK;
             const grid = document.createElement("div"); grid.className = "edge-grid";
-            list.forEach((p) => grid.appendChild(edgeRowEl(p, health)));
+            list.slice(0, cap).forEach((p) => grid.appendChild(edgeRowEl(p, health)));
             box.appendChild(grid);
+            if (list.length > cap) {
+              const remaining = list.length - cap;
+              const more = document.createElement("button"); more.type = "button"; more.className = "edge-more";
+              more.textContent = "Show " + Math.min(EDGE_CHUNK, remaining) + " more · " + remaining + " hidden";
+              more.addEventListener("click", () => { edgeCaps[key] = cap + EDGE_CHUNK; renderEdgesList(); });
+              box.appendChild(more);
+            }
           });
         }
         function selectEdge(id) {
@@ -2662,9 +2687,14 @@
           }
         });
 
-        $("eq-search").addEventListener("input", renderEdgesList);
-        $("eq-tier").addEventListener("change", renderEdgesList);
-        $("eq-status").addEventListener("change", renderEdgesList);
+        let edgeSearchT = null;
+        $("eq-search").addEventListener("input", () => {
+          clearTimeout(edgeSearchT);
+          edgeSearchT = setTimeout(() => { edgeCaps = {}; renderEdgesList(); }, 150);
+        });
+        $("eq-tier").addEventListener("change", () => { edgeCaps = {}; renderEdgesList(); });
+        $("eq-status").addEventListener("change", () => { edgeCaps = {}; renderEdgesList(); });
+        $("eq-sort").addEventListener("change", () => { edgeCaps = {}; renderEdgesList(); });
 
         // ===== RADAR ============================================================
         // Fills the Radar / Lab / Sources desk-header tickers from global state so
@@ -3017,7 +3047,7 @@
             return {
               level: "bad",
               label: "Degraded",
-              detail: "Pool degraded — scraping is slower, but the freshness gate discards stale prices so no stale pick is minted.",
+              detail: "Pool degraded — scraping is slower, but no pick is minted from a stale price (the mint-time gate drops it). A live pick whose price later ages out is flagged Stale and leaves Qualified now until it re-prices.",
             };
           }
           if (headroom !== null && headroom <= 0) {
