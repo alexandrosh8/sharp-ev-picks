@@ -473,7 +473,13 @@ class Settings(BaseSettings):
     # sharp anchor actually backed the price) rather than by curated league name,
     # so it stops obscure-league bleed (~37% sharp coverage is structural, see
     # .claude/memory/pitfalls.md 2026-06-20) without any per-season list upkeep.
-    value_require_sharp_anchor: bool = False
+    # DEFAULT True (2026-07-07 diagnosis): consensus-anchored premium bleeds CLV
+    # (soccer consensus-mint CLV ~-9% vs sharp-anchored ~break-even; see
+    # docs/research/2026-07-07-negative-clv-diagnosis.md). The gate DEMOTES such a
+    # candidate to the volume (shadow) tier — still persisted + CLV-tracked, never
+    # dropped. Live via .env (VALUE_REQUIRE_SHARP_ANCHOR=true) since 2026-06-26;
+    # this makes the safe behavior the code default rather than a .env override.
+    value_require_sharp_anchor: bool = True
     # Per-market-type devig override (ADR-0006), csv of "market_key:method" —
     # e.g. "over_under_2_5:probit,asian_handicap_-1_5:probit,1x2:shin". Keys are
     # the line-qualified source market (market_detail) or the market family
@@ -519,13 +525,18 @@ class Settings(BaseSettings):
     # is short-priced, so this ratio is tighter than the AH one. SANE DEFAULT
     # (guard ON for DC); scoped to double_chance so other markets are untouched.
     value_dc_max_sharp_soft_ratio: float = Field(default=1.5, gt=1.0)
-    # MONEYLINE (H2H/1X2) ODDS CEILING (research 2026-06-30): the 1X2 away/draw
-    # LONGSHOT band (raw best odds above this) is structurally CLV-NEGATIVE vs the
-    # Betfair sharp close (held-out CLV -0.087, >4 SE; favourite-longshot bias),
-    # so candidates priced above the ceiling are dropped BEFORE minting any pick.
-    # Scoped to H2H — OU/AH rarely price this high, so they are untouched. Set a
-    # large value (e.g. 1000) to effectively disable.
-    value_moneyline_max_odds: float = Field(default=5.0, gt=1.0)
+    # MONEYLINE (H2H/1X2) ODDS CEILING (research 2026-06-30, tightened 2026-07-07):
+    # a PREMIUM H2H candidate whose RAW best price exceeds this ceiling is DEMOTED
+    # to the volume (shadow) tier — persisted + CLV-tracked, never alerted, never
+    # reserving exposure (see the pipeline demotion gate; it is NOT a hard drop).
+    # The 1X2 away/draw LONGSHOT band is structurally CLV-NEGATIVE vs the sharp
+    # close (favourite-longshot bias): the >4 SE ceiling was 5.0, tightened to 4.0
+    # after the 2026-07-07 diagnosis measured the odds>=4.0 tail at ~-0.30 held-out
+    # CLV (docs/research/2026-07-07-negative-clv-diagnosis.md). Tightening is
+    # shadow-first by construction — the [4.0, 5.0) band moves alerted -> shadow,
+    # never the reverse. Scoped to H2H — OU/AH rarely price this high, so they are
+    # untouched. Set a large value (e.g. 1000) to effectively disable.
+    value_moneyline_max_odds: float = Field(default=4.0, gt=1.0)
     # EXCHANGE ANCHOR LIQUIDITY FLOOR (WP5) — £ matched best-back size, the
     # unit the dedicated Betfair capture writes into odds_snapshots.liquidity
     # (app/ingestion/betfair_api.py "best-back available £"). An exchange row
