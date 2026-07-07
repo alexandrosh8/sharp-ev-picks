@@ -1,112 +1,66 @@
-# Autoresearch program — capture-freshness (2026-07-07)
+# Autoresearch program — evidence-flow (2026-07-07)
 
-Human-owned instruction file (Karpathy `autoresearch` style). The agent MAY read
-this during a run but MUST NOT edit it mid-run. Between runs, the human (GodFather)
-owns and edits it. It defines the whole experiment contract.
-
----
+Human-owned instruction file. Read-only during a run.
 
 ## Run tag
-`autoresearch/2026-07-07-capture-freshness`  (git branch of the same name)
+`autoresearch/2026-07-07-evidence-flow` (branched off main after the saturated
+`cycle_health` parser run; that harness lives in main's git history).
 
 ## Objective metric (one number, higher is better)
-`cycle_health_score`, emitted on stdout by the locked scorer `research/score.py`.
-It is a deterministic, network-free replay of the OddsChecker **parse layer**
-over the frozen corpus `research/corpus.py`, scoring every parser-controllable
-dimension of capture health:
+`evidence_flow_score`, emitted by `research/score.py`. Maximize fresh, independent,
+sharp-anchored evidence flow WITHOUT weakening safety or increasing
+wrong-game/circular-close risk. Deterministic replay of the parse layer over the
+frozen corpus. Formula + weights are in `score.py` (max **2550**).
 
-```
-cycle_health_score =
-      1000 * fresh_mintable_candidate_rate   # correct, live snapshots emitted (recall vs objective GT)
-    +  500 * sharp_anchor_score              # OTHER-capture sharp-anchor decision correctness
-    +  250 * matched_event_rate              # events registered with correct home/away (matcher-ready)
-    - 1000 * stale_drop_ratio                # share of relevant emissions that are stale / wrong-game
-    - 5000 * swap_count                      # orientation-swapped registration (plausible wrong game)
-    - 5000 * crash_count                     # parser crashed on a payload it should handle
-    - 10000 * safety_audit_fails             # scripts/safety_audit.sh non-zero
-    - 10000 * gate_tests_fail                # parser / wrong-game / matcher contract regression
-```
+## Editable asset group (exactly one)
+**C — Bookmaker normalization.** Only the bookmaker-naming code in
+`app/ingestion/oddschecker.py` (`_bookmaker_name`, `_BOOKMAKER_FALLBACKS`, and how
+the all-odds / legacy parse paths pass bookmaker entities). Everything else is
+read-only unless a gate failure needs a minimal obvious fix the program permits.
 
-Baseline (HEAD of the branch at run start): **526.52**. Theoretical max with all
-four headroom suboptimalities resolved and gates green: **1750**.
-
-The weights mirror the operator's example scoring rule. `fresh_mintable`,
-`sharp_anchor`, and `matched` map 1:1 onto the DB `cycle_health` components
-(fresh-snapshot coverage, sharp-anchor share, matched-event rate) measured at the
-SOURCE (the parser) — which is the only place a `oddschecker.py` edit can move,
-deterministically. A read-only live-DB snapshot is recorded ALONGSIDE each kept
-experiment (`research/db_context.py`) for monitoring — it is NOT part of the score
-(a parser edit can't move live production state without a fresh scrape).
-
-## Editable asset (exactly one)
-`app/ingestion/oddschecker.py` — the OddsChecker parse layer.
-No other production file may be edited during the run.
-
-## Locked scorer
-`research/score.py` (and its frozen corpus `research/corpus.py`). Run it, never
-edit it. `bash scripts/safety_audit.sh` and the contract tests are folded INTO
-the number, so an unsafe or regressing edit can never score higher.
-
-## Success threshold
-Stop when `cycle_health_score >= 1745` (all four headroom fixtures resolved,
-gates green) **or** the human stops the run. Partial progress is kept along the
-way (see keep/revert).
+## Baseline / target
+Baseline = **2150** (off-map books emit raw 2-letter codes). Target = **2470**
+(max reachable via bookmaker normalization: all emitted books canonical, dup 0,
+guards held). The corpus's legacy fixture carries a permanent −80
+unknown-timestamp penalty (legacy grid has no provider time) that a FUTURE asset
+D run would address, not C. Stop at target — do not continue on this scorer;
+author a new corpus + program/score for the next run.
 
 ## Keep / revert rule
-1. Make ONE small, GENERAL change to the editable asset.
-2. Commit it on the run branch.
-3. Run `research/score.py`.
-4. KEEP the commit iff the number strictly increases (Δ > 1e-6) AND
-   `safety_audit_fails == 0` AND `gate_tests_fail == 0` AND `swap_count == 0`
-   AND `crash_count == 0`.
-5. Otherwise `git revert`/reset the commit back to the prior baseline.
-6. Log every attempt (kept or reverted) to `research/results.tsv`.
-Changes MUST be general parser fixes, never corpus-specific special-casing
-(hardcoding a fixture's subeventId / team strings is forbidden). Three
-anti-overfitting defenses, most robust first:
-1. Each headroom behavior appears in the corpus TWICE with different literals
-   (`headroom_subN_*` + `headroom_subN_variant_*`), so a value-keyed hack fixes
-   one instance and never reaches max — only a GENERAL fix does.
-2. `scripts/safety_audit.sh` check #10 fails (hard gate in the score) if
-   `app/` imports `research/` — the parser can never read the answer key.
-3. The human reviews every kept diff for generality (attended-run guard).
+One small change to the asset group → commit → `uv run python research/score.py`
+→ gates → keep iff score strictly increases AND `safety_audit_fail==0` AND
+`gate_tests_fail==0` AND `wrong_game_count==0` AND `crash_count==0`; else reset.
+Never keep a fixture-shaped hack (e.g. hardcoding a corpus code); never keep a
+change that improves score by hiding stale/unknown/ambiguous data.
 
 ## Forbidden files (never edit during a run)
-- `research/program.md` (this file)
-- `research/score.py`, `research/corpus.py`, `research/db_context.py` (locked scorer)
-- `scripts/safety_audit.sh` and any safety flag in `app/config.py`
-- the frozen contract tests used as gates
-  (`tests/test_oddschecker.py`, `tests/test_wrong_game_audit.py`, `tests/test_resolution.py`)
-- anything outside `app/ingestion/oddschecker.py`
+`research/*` (program/score/corpus/run/db_context), `.env`/secrets/credentials,
+`scripts/safety_audit.sh` + safety flags in `app/config.py`, the gate tests
+(`tests/test_oddschecker.py`, `tests/test_wrong_game_audit.py`,
+`tests/test_resolution.py`), deployment files, and anything outside the
+bookmaker-normalization code in `app/ingestion/oddschecker.py`.
 
-## Safety constraints (doctrine — never override)
-- Never weaken safety flags or `scripts/safety_audit.sh`; it is a hard gate in the score.
-- This system never places bets; edits are read-only parse-layer improvements only.
-- Never broaden the sharp-anchor book set beyond Betfair `OE` (SUB-4) — that is an
-  operator-gated premium-scoping / shadow-first policy change, out of scope. The
-  score deliberately does NOT reward it.
-- No profit guarantees; no ROI-narrative optimization. Trusted CLV, freshness,
-  sharp-anchor coverage, source agreement, settlement reliability, match precision only.
+## Safety constraints (doctrine)
+Never place bets / weaken safety_audit / store betting credentials / imply
+guaranteed profit. `safety_audit.sh` (incl. check #10: app must not import
+`research/`) is a hard gate folded into the score. Preserve the manual-review,
+evidence-first model.
 
-## Improvement backlog (headroom found by the 2026-07-07 parser audit)
-Each maps to one headroom fixture; each is a SAFE, objectively-correct, general fix.
-- **SUB-1** `parse_market_api_payloads` (primary path) keeps `expired`/`notExpired`
-  odds that the bestOdds path drops -> stale leak. Apply the same drop.
-- **SUB-3** `_odds_have_sharp_anchor` accepts a SUSPENDED Betfair OE quote ->
-  require the OE anchor odd to be status==ACTIVE (and non-expired).
-- **SUB-5** api team-split ignores structured `homeTeamName`/`awayTeamName` when
-  `_split_match_name` fails -> read them (additive-safe; absent in prod = unchanged).
-- **SUB-7** `_find_match_payload` picks the byte-largest bestOdds blob, not the
-  URL's subevent -> select the blob whose subevent id/slug matches the URL.
+## Known headroom (asset C)
+SUB-6: `parse_market_api_payloads` (L1154) and `parse_legacy_match_page` (L1231)
+call `_bookmaker_name(code, {})` with EMPTY entities, so a book whose code is not
+in the 16-entry `_BOOKMAKER_FALLBACKS` (e.g. Smarkets "SM", Spreadex "SX") emits
+the RAW CODE instead of the feed's canonical name — a split identity vs bestOdds.
+Additive-safe fix: thread the payload's `bookmakers.entities` map into the
+all-odds path (absent → unchanged; no new invented codes → not fixture-shaped).
 
 ## Loop cadence
-Autonomous. One change per iteration; keep-or-revert per the rule; log each.
-Checkpoint back to the human at each KEPT improvement; hard-stop on any safety
-trip (`safety_audit_fails > 0`), swap, or crash. Human may say "stop" anytime.
+Autonomous short experiments; keep winners, reset losers; log every attempt to
+`research/results.tsv`. On reaching max, STOP and open a PR (do not deploy from
+this branch).
 
-## How to run
+## Run
 ```bash
-uv run python research/score.py                 # -> one number on stdout, breakdown on stderr
-bash scripts/safety_audit.sh                    # must exit 0
-uv run python research/db_context.py            # read-only live-DB monitor snapshot (context only)
+uv run python research/score.py                 # one number on stdout, breakdown on stderr
+uv run python research/run.py --iter N --status attempt --desc "..."   # score + log a row
 ```
