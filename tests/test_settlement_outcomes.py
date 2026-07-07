@@ -366,6 +366,28 @@ def test_retired_non_h2h_markets_void() -> None:
     assert settle_selection_retired("spreads", f"{HOME} -1.5", HOME, AWAY, "away") is Outcome.VOID
 
 
+def test_oddschecker_tennis_totals_selection_grades_as_total_sets() -> None:
+    # DUAL-PROVIDER BRIDGE (tennis): the OddsChecker parser now emits a
+    # line-bearing totals selection identical to OddsPortal ("Over 2.5"). For
+    # tennis the score is SETS won, so settle_selection grades the exact produced
+    # string against the total SETS played — no settler change was needed.
+    from app.ingestion.oddschecker import _line_bearing_selection
+    from app.schemas.base import Market
+
+    sel = _line_bearing_selection("Over", "2.5", Market.TOTALS)
+    assert sel == "Over 2.5"
+    # best-of-3 gone the distance: 2 + 1 = 3 sets > 2.5
+    assert settle("totals", sel, 2, 1) is Outcome.WON
+    assert settle("totals", "Under 2.5", 2, 1) is Outcome.LOST
+    # straight-sets: 2 + 0 = 2 sets < 2.5
+    assert settle("totals", sel, 2, 0) is Outcome.LOST
+    assert settle("totals", "Under 2.5", 2, 0) is Outcome.WON
+    # void-before-a-decided-total (pinnacle_one_set): on retirement/abnormal
+    # completion the match total is undefined and is never inferred from a
+    # fragment — the same produced string VOIDs, it does not grade.
+    assert settle_selection_retired("totals", sel, HOME, AWAY, "home") is Outcome.VOID
+
+
 def test_retired_refuses_unknown_winner_or_selection() -> None:
     with pytest.raises(ValueError, match="advancing side"):
         settle_selection_retired("h2h", HOME, HOME, AWAY, None)
