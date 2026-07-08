@@ -14,6 +14,7 @@ Asian handicaps would push instead, but the loader config rejects push lines
 import re
 from decimal import Decimal
 
+from app.resolution.matching import normalize_name
 from app.schemas.base import Outcome
 
 # DECLARED tennis settlement convention (ADR-0019 sport-shadow appendix,
@@ -187,13 +188,44 @@ def _settle_dnb(selection: str, home: str, away: str, hs: int, as_: int) -> Outc
 
 
 def _settle_double_chance(selection: str, home: str, away: str, hs: int, as_: int) -> Outcome:
-    if selection == f"{home} or Draw":
-        return _won(hs >= as_)
-    if selection == f"{home} or {away}":
-        return _won(hs != as_)
-    if selection == f"Draw or {away}":
-        return _won(as_ >= hs)
-    raise ValueError(f"double_chance selection {selection!r} unparseable")
+    """Grade double-chance ORIENTATION-INDEPENDENTLY (like h2h/dnb).
+
+    A cross-source duplicate can mint the event with home/away swapped relative
+    to the pick's stored selection text; rebuilding "{home} or Draw" from the
+    CURRENT order would then wrongly raise. Instead we parse the selection into
+    its component token(s) and resolve which physical side each named team is by
+    exact NORMALIZED-name match against either side — never by string rebuild.
+    A token matching neither team is genuinely unparseable and still fails loud.
+    """
+    parts = [part.strip() for part in selection.split(" or ")]
+    if len(parts) != 2:
+        raise ValueError(f"double_chance selection {selection!r} unparseable")
+
+    if "Draw" in parts:
+        # "{T} or Draw" -> WON iff T did not lose (T is home & hs>=as, or away & as>=hs).
+        team = parts[0] if parts[1] == "Draw" else parts[1]
+        side = _dc_side(team, home, away)
+        if side is None:
+            raise ValueError(f"double_chance selection {selection!r} matches neither team")
+        return _won(hs >= as_ if side == "home" else as_ >= hs)
+
+    # "{A} or {B}" (no Draw) -> "not a draw"; both tokens must be the two teams.
+    named = {normalize_name(parts[0]), normalize_name(parts[1])}
+    if named != {normalize_name(home), normalize_name(away)}:
+        raise ValueError(f"double_chance selection {selection!r} matches neither team")
+    return _won(hs != as_)
+
+
+def _dc_side(team: str, home: str, away: str) -> str | None:
+    """Physical side of a named double-chance team by exact normalized match."""
+    token = normalize_name(team)
+    if not token:
+        return None
+    if token == normalize_name(home):
+        return "home"
+    if token == normalize_name(away):
+        return "away"
+    return None
 
 
 def _settle_spreads(selection: str, home: str, away: str, hs: int, as_: int) -> Outcome:

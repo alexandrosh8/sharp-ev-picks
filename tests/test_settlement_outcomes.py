@@ -114,6 +114,44 @@ def test_double_chance_legs() -> None:
     assert settle("double_chance", f"Draw or {AWAY}", 1, 0) is Outcome.LOST
 
 
+def test_double_chance_reversed_event_orientation() -> None:
+    # A cross-source duplicate can mint the event with home/away SWAPPED relative
+    # to the pick's stored selection text. DC must grade orientation-independently
+    # (like h2h/dnb) — the selection names a team, not a physical side. Here the
+    # event is reversed: physical home=AWAY(Beta), physical away=HOME(Alpha); the
+    # (home_score, away_score) tuple is in that reversed frame.
+    # "{HOME} or Draw" == Alpha not-lose. Alpha is physical away here.
+    assert (
+        settle_selection("double_chance", f"{HOME} or Draw", AWAY, HOME, 0, 1) is Outcome.WON
+    )  # Alpha won
+    assert (
+        settle_selection("double_chance", f"{HOME} or Draw", AWAY, HOME, 1, 1) is Outcome.WON
+    )  # draw
+    assert (
+        settle_selection("double_chance", f"{HOME} or Draw", AWAY, HOME, 2, 0) is Outcome.LOST
+    )  # Alpha lost
+    # "Draw or {AWAY}" == Beta not-lose. Beta is physical home here.
+    assert (
+        settle_selection("double_chance", f"Draw or {AWAY}", AWAY, HOME, 1, 0) is Outcome.WON
+    )  # Beta won
+    assert (
+        settle_selection("double_chance", f"Draw or {AWAY}", AWAY, HOME, 0, 1) is Outcome.LOST
+    )  # Beta lost
+    # "{A} or {B}" (no Draw) == not-a-draw, orientation-independent.
+    assert settle_selection("double_chance", f"{HOME} or {AWAY}", AWAY, HOME, 2, 1) is Outcome.WON
+    assert settle_selection("double_chance", f"{HOME} or {AWAY}", AWAY, HOME, 1, 1) is Outcome.LOST
+
+
+def test_double_chance_unparseable_token_still_fails_loud() -> None:
+    # A token matching NEITHER team is genuinely unparseable — never silently pass.
+    with pytest.raises(ValueError, match="matches neither"):
+        settle("double_chance", "Gamma or Draw", 1, 1)
+    with pytest.raises(ValueError, match="matches neither"):
+        settle("double_chance", f"{HOME} or Gamma", 1, 1)
+    with pytest.raises(ValueError, match="unparseable"):
+        settle("double_chance", "just one token", 1, 1)
+
+
 # --- spreads: Asian half-lines ------------------------------------------------
 
 
