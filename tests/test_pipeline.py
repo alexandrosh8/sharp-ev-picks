@@ -88,6 +88,25 @@ def make_deps(sink: RecordingSink) -> PipelineDeps:
     )
 
 
+def test_non_settleable_market_details_are_filtered() -> None:
+    """Period / corner / card sub-markets have no score in the results feed, so a
+    pick on them can only ever void — the candidate gate must reject them while
+    passing the full-match markets the settler can grade."""
+    from app.pipeline import _is_settleable_market_detail
+
+    assert _is_settleable_market_detail(None) is True
+    assert _is_settleable_market_detail("over_under_2_5") is True
+    assert _is_settleable_market_detail("spreads_minus_1_5") is True
+    assert _is_settleable_market_detail("asian_handicap_minus_0_5") is True
+    assert _is_settleable_market_detail("totals_1st_half_0_5") is False
+    assert _is_settleable_market_detail("totals_2nd_half_1") is False
+    assert _is_settleable_market_detail("h2h_1st_quarter") is False
+    assert _is_settleable_market_detail("spreads_4th_quarter_minus_5_5") is False
+    assert _is_settleable_market_detail("totals_1st_set_5_5") is False
+    assert _is_settleable_market_detail("oc_total_corners_3_5") is False
+    assert _is_settleable_market_detail("oc_cards_over_3_5") is False
+
+
 async def test_pipeline_produces_pick_and_alert() -> None:
     sink = RecordingSink()
     picks = await run_pick_pipeline(make_deps(sink), "soccer_epl")

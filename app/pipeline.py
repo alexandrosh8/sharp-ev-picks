@@ -7,6 +7,7 @@ joins in roadmap phase 2 alongside event/entity resolution.
 
 import logging
 import math
+import re
 import uuid
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -702,6 +703,25 @@ def pick_tier(edge: float, premium_min_edge: float, volume_min_edge: float) -> s
     return None
 
 
+# Sub-markets the settler cannot grade from a full-time home/away score — period
+# markets (halves / quarters / sets), corners, and cards/bookings. The results
+# feed carries no score for them, so a pick on one can only ever VOID (or
+# mis-grade as full-match), cluttering the ledger and corrupting the void-rate.
+# Detected on the line-qualified market_detail at the candidate boundary.
+_NON_SETTLEABLE_DETAIL_RE = re.compile(
+    r"(?:1st_half|2nd_half|first_half|second_half|_quarter|1st_set|2nd_set|3rd_set|_set_|corner|card|booking)"
+)
+
+
+def _is_settleable_market_detail(detail: str | None) -> bool:
+    """False for period / corner / card sub-markets that can never be graded from
+    a final score (they only ever void). A None / full-match detail is
+    settleable — the settler grades it from the final home/away score."""
+    if not detail:
+        return True
+    return _NON_SETTLEABLE_DETAIL_RE.search(detail.lower()) is None
+
+
 def _is_asian_handicap(market_detail: str | None) -> bool:
     """True for a 2-way Asian-handicap line key ("asian_handicap_-1_5",
     "asian_handicap_games_-7_5") — the scope of the AH sentinel/implausibility
@@ -1220,6 +1240,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_experimental = 0
     n_off_band = 0
     n_thin_books = 0
+    n_non_settleable = 0
     n_visibility_capped = 0
     n_ah_rejected = 0
     n_sanity_dropped = 0
@@ -1264,6 +1285,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     for (event_id, market, detail), (prices, captured) in grouped.items():
         if event_id in started:
             continue  # kicked off: in-play odds never become picks/upgrades
+        # NON-SETTLEABLE market drop: period (half/quarter/set), corner, and
+        # card/booking sub-markets have no score in the results feed, so any pick
+        # on them can only ever void (or mis-grade as full-match). Drop the whole
+        # group at the candidate boundary — never mint a pick that cannot grade.
+        if not _is_settleable_market_detail(detail):
+            n_non_settleable += 1
+            continue
         # Per-market book-count floor (default 0 = off): a market quoted by
         # too few books is skipped wholesale — scaffolding for new lines/
         # divisions where thin coverage makes the anchor untrustworthy.
@@ -1944,6 +1972,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             sport_key,
             n_sanity_dropped,
             _SANITY_MAX_ODDS,
+        )
+    if n_non_settleable:
+        logger.info(
+            "value pipeline %s: %d ungradeable market group(s) dropped "
+            "(period/corner/card — no results-feed score, would only ever void)",
+            sport_key,
+            n_non_settleable,
         )
     if n_thin_books:
         logger.info(
