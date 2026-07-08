@@ -145,9 +145,13 @@ class SettledPickRow:
     @property
     def is_fabricated(self) -> bool:
         """CLV is physically impossible (CLV-1 pollution) — mirrors the headline
-        _clv_row_is_fabricated. Primary: close-implied edge (closing_fair - 1/odds)
-        exceeds CLV_IMPLAUSIBLE_CLOSE_EDGE; fallback (fair/odds absent): |clv_log|
-        exceeds CLV_IMPLAUSIBLE_LOG. No clv_log => nothing to judge (not fabricated)."""
+        _clv_row_is_fabricated. When BOTH real inputs (decimal_odds + closing_fair_
+        probability) are present the CLV is computed from them, so the close-implied
+        edge (closing_fair - 1/odds) exceeding CLV_IMPLAUSIBLE_CLOSE_EDGE is the ONLY
+        fabrication test — a genuine plausible-close longshot (modest edge yet
+        |clv_log| > 0.5) is NOT fabricated. The |clv_log| magnitude cutoff is a
+        FALLBACK, used ONLY when an input is absent (edge uncomputable). No clv_log
+        => nothing to judge (not fabricated)."""
         if self.clv_log is None:
             return False
         if self.decimal_odds is not None and self.closing_fair_probability is not None:
@@ -155,11 +159,10 @@ class SettledPickRow:
                 implied = 1.0 / float(self.decimal_odds)
             except (ZeroDivisionError, ValueError, TypeError):
                 implied = None
-            if (
-                implied is not None
-                and (self.closing_fair_probability - implied) > CLV_IMPLAUSIBLE_CLOSE_EDGE
-            ):
-                return True
+            if implied is not None:
+                # Both real inputs present: judge by the close-implied edge ONLY.
+                return (self.closing_fair_probability - implied) > CLV_IMPLAUSIBLE_CLOSE_EDGE
+        # Fallback (fair prob or odds absent / unusable): magnitude is the tripwire.
         return abs(self.clv_log) > CLV_IMPLAUSIBLE_LOG
 
     @property

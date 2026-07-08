@@ -509,3 +509,40 @@ def test_null_independence_excluded_from_trusted_subset() -> None:
     ]
     agg_true = _aggregate_settled(true_indep)
     assert agg_true["n_sharp_close"] == MIN_HEADLINE_N  # only definite True counts
+
+
+def test_clv_row_fabricated_magnitude_cutoff_is_fallback_only() -> None:
+    # REGRESSION (2026-07-08): the |clv_log| > CLV_IMPLAUSIBLE_LOG cutoff is a
+    # FALLBACK for rows that LACK the real inputs (odds or close prob), NOT an
+    # unconditional verdict. A legitimate plausible-close longshot that HAS both
+    # decimal_odds and closing_fair_probability and a modest close-implied edge
+    # (<= CLV_IMPLAUSIBLE_CLOSE_EDGE) must NOT be classed fabricated just because
+    # |clv_log| exceeds 0.5 — that silently deleted NEGATIVE sharp-close evidence.
+    from app.storage.repositories import _clv_row_is_fabricated
+
+    # decimal_odds=8.0 -> implied 0.125; closing_fair 0.30 -> close_edge 0.175 <= 0.20.
+    # clv_log magnitude 0.92 > 0.5, yet the close is genuine: NOT fabricated.
+    assert (
+        _clv_row_is_fabricated(clv_log=0.92, decimal_odds=8.0, closing_fair_probability=0.30)
+        is False
+    )
+    # Real fabrication by an impossible close-implied edge still trips.
+    assert (
+        _clv_row_is_fabricated(clv_log=1.5, decimal_odds=6.5, closing_fair_probability=0.891433)
+        is True
+    )
+    # Fallback still fires when the close prob is absent (edge uncomputable).
+    assert (
+        _clv_row_is_fabricated(clv_log=1.76, decimal_odds=8.0, closing_fair_probability=None)
+        is True
+    )
+    # Fallback still fires when the odds are absent.
+    assert (
+        _clv_row_is_fabricated(clv_log=1.76, decimal_odds=None, closing_fair_probability=0.30)
+        is True
+    )
+    # No CLV at all -> never fabricated.
+    assert (
+        _clv_row_is_fabricated(clv_log=None, decimal_odds=None, closing_fair_probability=None)
+        is False
+    )

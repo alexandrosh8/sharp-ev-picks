@@ -1202,9 +1202,13 @@ def _clv_row_is_fabricated(
 
     Primary test: close-implied edge = closing_fair_probability - 1/decimal_odds
     exceeds CLV_IMPLAUSIBLE_CLOSE_EDGE (the favorite-prob-on-underdog-leg signature).
-    Fallback (when fair prob or odds is absent): |clv_log| exceeds
-    CLV_IMPLAUSIBLE_LOG. A row with no CLV at all (clv_log is None) is not
-    fabricated — it simply has no close to judge.
+    When BOTH real inputs (decimal_odds + closing_fair_probability) are present the
+    row's CLV is computed from them, so this close-implied edge is the ONLY fabrication
+    test — a legitimate plausible-close longshot (modest edge but |clv_log| > 0.5) is
+    NOT fabricated. The |clv_log| magnitude cutoff is a FALLBACK, evaluated ONLY when
+    the row LACKS an input (odds or fair prob absent / unusable), where the edge cannot
+    be computed. A row with no CLV at all (clv_log is None) is not fabricated — it
+    simply has no close to judge.
     """
     if clv_log is None:
         return False
@@ -1214,9 +1218,12 @@ def _clv_row_is_fabricated(
         except (ZeroDivisionError, ValueError, TypeError):
             implied = None
         if implied is not None:
+            # Both real inputs present: judge by the close-implied edge ONLY; the
+            # |clv_log| magnitude cutoff must NOT fire on a genuine odds+close row.
             close_edge = float(closing_fair_probability) - implied
-            if close_edge > CLV_IMPLAUSIBLE_CLOSE_EDGE:
-                return True
+            return close_edge > CLV_IMPLAUSIBLE_CLOSE_EDGE
+    # Fallback (fair prob or odds absent / unusable): edge uncomputable, so the
+    # |clv_log| magnitude is the only available tripwire.
     return abs(float(clv_log)) > CLV_IMPLAUSIBLE_LOG
 
 

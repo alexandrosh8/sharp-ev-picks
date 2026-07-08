@@ -314,9 +314,12 @@ def close_exclusion_reason(
     exactly one member of ``CLOSE_EXCLUSION_REASONS``, first guard wins:
 
     1. ``fabricated`` — physically implausible close: close-implied edge
-       (closing_fair - 1/fill_eff) above the CLV-1 ceiling, or |clv_log| =
-       |ln(fill_eff * closing_fair)| implausibly large (same double-guard as
-       ``_clv_row_is_fabricated``).
+       (closing_fair - 1/fill_eff) above the CLV-1 ceiling. Here fill_eff and
+       closing_fair ARE the real inputs (this is close-write time), so the edge is
+       always computable and is the ONLY fabrication test — the |clv_log| magnitude
+       cutoff is a FALLBACK for the headline/panel rows that LACK an input, and must
+       NOT fire on a genuine plausible-close longshot (modest edge, |clv_log| > 0.5).
+       Mirrors ``_clv_row_is_fabricated`` (both present -> edge only).
     2. ``circular_self_priced`` — the fill book priced its own close (or the
        same sharp source anchored both sides): ``close_is_independent_of_fill``
        is False, so clv_log is mechanical.
@@ -343,11 +346,12 @@ def close_exclusion_reason(
     if (
         fill_eff > 0.0
         and 0.0 < closing_fair < 1.0
-        and (
-            closing_fair - 1.0 / fill_eff > _CLV_IMPLAUSIBLE_CLOSE_EDGE
-            or abs(math.log(fill_eff * closing_fair)) > _CLV_IMPLAUSIBLE_LOG
-        )
+        and closing_fair - 1.0 / fill_eff > _CLV_IMPLAUSIBLE_CLOSE_EDGE
     ):
+        # Both real inputs present at close-write: judge by the close-implied edge
+        # ONLY. The |clv_log| = |ln(fill_eff * closing_fair)| magnitude cutoff is a
+        # FALLBACK for rows lacking an input elsewhere; firing it here dropped
+        # legitimate plausible-close longshots (modest edge, |clv_log| > 0.5).
         return "fabricated"
     if not close_is_independent_of_fill(close_anchor_book, fill_book):
         return "circular_self_priced"

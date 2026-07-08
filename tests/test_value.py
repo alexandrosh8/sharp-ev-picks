@@ -933,9 +933,14 @@ def test_close_exclusion_reason_fabricated_close_implied_edge() -> None:
     assert _reason(closing_fair=0.95, close_anchor_book="SoftBook") == "fabricated"
 
 
-def test_close_exclusion_reason_fabricated_clv_log_fallback() -> None:
-    # edge = 0.25 - 1/8 = 0.125 <= 0.20, but |ln(8.0 * 0.25)| = ln(2) ~ 0.69 > 0.5.
-    assert _reason(closing_fair=0.25, fill_eff=8.0) == "fabricated"
+def test_close_exclusion_reason_plausible_longshot_not_fabricated_by_magnitude() -> None:
+    # REGRESSION (2026-07-08): the |clv_log| magnitude is a FALLBACK, not an
+    # unconditional 'fabricated' verdict. edge = 0.25 - 1/8 = 0.125 <= 0.20 (a
+    # plausible close), yet |ln(8.0 * 0.25)| = ln(2) ~ 0.69 > 0.5. With a genuine
+    # fill_eff + closing_fair whose close-implied edge is modest, the row is a
+    # legitimate longshot with a real (here positive) CLV — it must NOT be dropped
+    # as fabricated. Base has a moved fair, pinnacle anchor, independent fill book.
+    assert _reason(closing_fair=0.25, fill_eff=8.0) == "trusted"
 
 
 def test_close_exclusion_reason_circular_self_priced() -> None:

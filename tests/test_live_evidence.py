@@ -88,6 +88,29 @@ def test_fabricated_clv_close_is_excluded_from_panel_and_sharp_subset() -> None:
     assert sc["sufficient"] is True
 
 
+def test_fabricated_magnitude_cutoff_is_fallback_only() -> None:
+    # REGRESSION (2026-07-08): with BOTH decimal_odds and closing_fair_probability
+    # present and a modest close-implied edge (<= CLV_IMPLAUSIBLE_CLOSE_EDGE), a
+    # large |clv_log| must NOT mark the row fabricated. The magnitude cutoff is a
+    # FALLBACK for rows that LACK those inputs; firing it unconditionally deleted
+    # legitimate NEGATIVE sharp-close evidence from the trusted subset.
+    # decimal_odds=8.0 -> implied 0.125; closing_fair 0.30 -> close_edge 0.175.
+    genuine_longshot = row(
+        clv=0.92,
+        closing_fair=0.30,
+        decimal_odds=8.0,
+        closing_anchor="pinnacle",
+        has_snapshot=True,
+    )
+    assert genuine_longshot.is_fabricated is False
+    # Fallback: close prob absent -> |clv_log| > 0.5 still trips.
+    no_close = row(clv=1.76, closing_fair=None, decimal_odds=8.0)
+    assert no_close.is_fabricated is True
+    # Real edge-based fabrication still trips (close-implied edge 0.70 >> 0.20).
+    impossible = row(clv=0.05, closing_fair=0.90, decimal_odds=5.0)
+    assert impossible.is_fabricated is True
+
+
 def test_by_sport_stratifies_and_suppresses_thin_buckets() -> None:
     # Per-sport evidence: soccer has enough CLV obs to be sufficient at min_n=2;
     # basketball has one — flagged insufficient with estimates nulled at source,
