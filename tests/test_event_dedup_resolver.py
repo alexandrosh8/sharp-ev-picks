@@ -164,3 +164,114 @@ async def test_link_fast_path_idempotent(session) -> None:  # type: ignore[no-un
     again = await _mint(session, ids, "oddschecker:71")
     assert again == a
     assert await _event_count(session) == before
+
+
+# --- PR1b: Tier-2 fixture_pair_key resolver ---------------------------------
+# A name-twin / [In Running] fork mints DIFFERENT home/away team_ids across
+# sources (so Tier-1's exact-id key misses), yet the normalized UNORDERED team
+# pair is identical. Constructed here with a club-form noise token ("FC") that
+# normalize_name drops: "Res Alpha FC" is a DISTINCT team row from "Res Alpha"
+# (distinct normalized_name), but fixture_pair_key("Res Alpha FC", "Res Beta")
+# == fixture_pair_key("Res Alpha", "Res Beta"). (The live-status marker route is
+# no longer usable — _get_or_create_team strips it, folding the id at Tier-0.)
+
+
+async def test_name_twin_fork_resolves_via_fixture_pair_key(session) -> None:  # type: ignore[no-untyped-def]
+    """Different team_ids but identical fixture_pair_key within tolerance ->
+    Tier-2 folds onto the existing canonical (no new event, link written with the
+    'fixture_pair_key' method)."""
+    ids1 = await _ids(session, home="Res Alpha", away="Res Beta")
+    ids2 = await _ids(session, home="Res Alpha FC", away="Res Beta")
+    assert ids1[2] != ids2[2], "the 'FC' twin must be a distinct team row (Tier-1 misses)"
+    before = await _event_count(session)
+    a = await _mint(session, ids1, "oddsportal:100", starts_at=KICKOFF)
+    b = await _mint(session, ids2, "oddschecker:101", starts_at=KICKOFF + timedelta(hours=1))
+    assert a == b, "Tier-2 fixture_pair_key must fold the name-twin fork"
+    assert await _event_count(session) == before + 1, "no duplicate event minted"
+    link = await session.scalar(
+        select(EventSourceLink).where(EventSourceLink.source_event_id == "oddschecker:101")
+    )
+    assert link is not None
+    assert link.canonical_event_id == a
+    assert link.source == "oddschecker"
+    assert link.match_method == "fixture_pair_key"
+
+
+async def test_name_twin_fork_beyond_tolerance_mints_separate(session) -> None:  # type: ignore[no-untyped-def]
+    """Same fixture_pair_key but kickoffs >2h apart (team sport) are DISTINCT
+    fixtures -> Tier-2 must NOT merge."""
+    ids1 = await _ids(session, home="Res Alpha", away="Res Beta")
+    ids2 = await _ids(session, home="Res Alpha FC", away="Res Beta")
+    before = await _event_count(session)
+    a = await _mint(session, ids1, "oddsportal:110", starts_at=KICKOFF)
+    b = await _mint(session, ids2, "oddschecker:111", starts_at=KICKOFF + timedelta(hours=3))
+    assert a != b
+    assert await _event_count(session) == before + 2
+
+
+async def test_name_twin_fork_cross_sport_mints_separate(session) -> None:  # type: ignore[no-untyped-def]
+    """Same names/pair-key but DIFFERENT sport -> Tier-2 never matches across
+    sport_id (a same-named basketball and soccer fixture are unrelated)."""
+    ids1 = await _ids(session, home="Res Alpha", away="Res Beta", sport="soccer")
+    ids2 = await _ids(session, home="Res Alpha FC", away="Res Beta", sport="basketball")
+    before = await _event_count(session)
+    a = await _mint(session, ids1, "oddsportal:120", starts_at=KICKOFF)
+    b = await _mint(session, ids2, "oddschecker:121", starts_at=KICKOFF)
+    assert a != b
+    assert await _event_count(session) == before + 2
+
+
+async def test_distinct_club_near_normalization_mints_separate(session) -> None:  # type: ignore[no-untyped-def]
+    """Guards the normalization-collision trap: two clubs sharing a base token
+    ('CD Nacional' vs 'Nacional') have DIFFERENT fixture_pair_keys ('cd' is NOT a
+    noise token), so Tier-2 (exact normalized pair only) must NOT merge them."""
+    ids1 = await _ids(session, home="CD Nacional", away="Res Beta")
+    ids2 = await _ids(session, home="Nacional", away="Res Beta")
+    before = await _event_count(session)
+    a = await _mint(session, ids1, "oddsportal:130", starts_at=KICKOFF)
+    b = await _mint(session, ids2, "oddschecker:131", starts_at=KICKOFF)
+    assert a != b
+    assert await _event_count(session) == before + 2
+
+
+async def test_name_twin_fork_null_or_midnight_incoming_not_tier2_matched(session) -> None:  # type: ignore[no-untyped-def]
+    """A NULL or date-only-midnight incoming kickoff is an unsafe merge key -> the
+    Tier-2 pair resolver is never attempted -> mints separately (same exclusion
+    Tier-1 applies)."""
+    ids1 = await _ids(session, home="Res Alpha", away="Res Beta")
+    ids2 = await _ids(session, home="Res Alpha FC", away="Res Beta")
+    canon = await _mint(session, ids1, "oddsportal:140", starts_at=KICKOFF)
+    midnight = await _mint(
+        session, ids2, "oddschecker:141", starts_at=datetime(2026, 6, 10, 0, 0, tzinfo=UTC)
+    )
+    nul = await _mint(session, ids2, "oddschecker:142", starts_at=None)
+    assert midnight != canon, "midnight sentinel must not Tier-2-match"
+    assert nul != canon, "NULL kickoff must not Tier-2-match"
+
+
+async def test_tier2_excludes_midnight_candidate(session) -> None:  # type: ignore[no-untyped-def]
+    """A stored canonical carrying the date-only-midnight sentinel is a
+    placeholder, so a real-kickoff incoming twin must NOT fold onto it (candidate
+    side excluded) -> mints separately."""
+    ids1 = await _ids(session, home="Res Alpha", away="Res Beta")
+    ids2 = await _ids(session, home="Res Alpha FC", away="Res Beta")
+    midnight_canon = await _mint(
+        session, ids1, "oddsportal:150", starts_at=datetime(2026, 6, 10, 0, 0, tzinfo=UTC)
+    )
+    real = await _mint(session, ids2, "oddschecker:151", starts_at=KICKOFF)
+    assert real != midnight_canon
+
+
+async def test_tennis_fork_beyond_2h_folds_via_wider_tolerance(session) -> None:  # type: ignore[no-untyped-def]
+    """Tennis uses the wider 6h dedup tolerance (a 1v1 pair meets once/day), so a
+    fork whose start drifted ~2h47m still folds via Tier-2 — where a team sport at
+    the same gap would mint separately (see beyond_tolerance test)."""
+    ids1 = await _ids(session, home="Jiri Lehecka", away="Alexander Zverev", sport="tennis")
+    ids2 = await _ids(session, home="Jiri Lehecka FC", away="Alexander Zverev", sport="tennis")
+    before = await _event_count(session)
+    a = await _mint(session, ids1, "oddsportal:160", starts_at=KICKOFF)
+    b = await _mint(
+        session, ids2, "oddschecker:161", starts_at=KICKOFF + timedelta(hours=2, minutes=47)
+    )
+    assert a == b, "tennis wider tolerance must fold the drifted fork"
+    assert await _event_count(session) == before + 1

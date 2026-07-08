@@ -377,6 +377,99 @@ async def _resolve_canonical_event(
     return canon_id
 
 
+async def _resolve_canonical_event_by_pair(
+    session: AsyncSession,
+    sport_id: int,
+    home_id: int,
+    away_id: int,
+    starts_at: datetime,
+    external_ref: str,
+) -> int | None:
+    """Tier-2: the existing canonical event for this fixture matched by the
+    NORMALIZED UNORDERED team pair (``fixture_pair_key``) within the sport-aware
+    ``_dedup_tolerance`` — or None. Runs ONLY after Tier-1's exact team-id key
+    misses.
+
+    Catches ``[In Running]`` / name-twin forks where the two source rows minted
+    DIFFERENT ``home_team_id``/``away_team_id`` (so the deterministic Tier-1 key
+    misses) yet the normalized unordered team pair is identical — e.g. a
+    club-form suffix ("Alpha FC" vs "Alpha") or an accent variant. Uses the SAME
+    proven pure ``fixture_pair_key`` the settlement dedup guard uses: strict
+    normalized-pair equality only, NO fuzzy/substring matching, so a distinct
+    club sharing a base token ("CD Nacional" vs "Nacional") never merges.
+
+    Safety (wrong-game-unsafe zone): never crosses ``sport_id``; excludes NULL
+    and date-only-midnight kickoffs on BOTH sides (unsafe merge keys); requires
+    the same UNORDERED normalized pair AND a kickoff within the per-sport
+    tolerance (tennis 6h — a 1v1 pair meets once/day; team sports 2h). When
+    several canonicals match, the LOWEST-id one is chosen (deterministic). On a
+    hit: upgrade the canonical kickoff (prefer_kickoff) and record the source ref
+    in ``event_source_links`` with method ``fixture_pair_key`` — the same
+    best-effort link + return contract as Tier-1."""
+    # Lazy imports: the pure fixture-pair key + the sport-aware tolerance already
+    # proven by the settlement dedup guard. Lazy to keep this module's import
+    # graph free of the settlement engine at load time.
+    from app.resolution.matching import fixture_pair_key
+    from app.settlement.engine import _dedup_tolerance
+
+    name_rows = (
+        await session.execute(select(Team.id, Team.name).where(Team.id.in_({home_id, away_id})))
+    ).all()
+    names = {tid: name for tid, name in name_rows}
+    target_pair = fixture_pair_key(names.get(home_id, ""), names.get(away_id, ""))
+    if target_pair is None:  # degenerate (empty side / both sides normalize equal)
+        return None
+
+    sport_key = await session.scalar(select(Sport.key).where(Sport.id == sport_id))
+    tol = _dedup_tolerance(sport_key)
+    home_t, away_t = aliased(Team), aliased(Team)
+    rows = (
+        await session.execute(
+            select(Event.id, Event.external_ref, Event.starts_at, home_t.name, away_t.name)
+            .select_from(Event)
+            .join(home_t, Event.home_team_id == home_t.id)
+            .join(away_t, Event.away_team_id == away_t.id)
+            .where(
+                Event.sport_id == sport_id,
+                Event.external_ref != external_ref,
+                Event.starts_at.is_not(None),
+                Event.starts_at >= starts_at - tol,
+                Event.starts_at <= starts_at + tol,
+            )
+        )
+    ).all()
+    matches = [
+        (eid, ref, kickoff)
+        for (eid, ref, kickoff, cand_home, cand_away) in rows
+        if not _is_date_only_midnight(kickoff)  # candidate placeholder excluded
+        and fixture_pair_key(cand_home, cand_away) == target_pair
+    ]
+    if not matches:
+        return None
+    # Deterministic: lowest-id canonical when several same-fixture rows match.
+    canon_id, canon_ref, _ = min(matches, key=lambda r: r[0])
+    canon = await session.get(Event, canon_id)
+    if canon is not None:
+        target = prefer_kickoff(canon.starts_at, starts_at)
+        if target != canon.starts_at:
+            canon.starts_at = target
+    await upsert_event_source_links(
+        session,
+        [
+            SourceLinkByRef(
+                source=_source_of_ref(external_ref),
+                source_event_id=external_ref,
+                canonical_external_ref=canon_ref,
+                confidence=1.0,
+                method="fixture_pair_key",
+                matched_at=datetime.now(UTC),
+            )
+        ],
+    )
+    await session.flush()
+    return canon_id
+
+
 async def _get_or_create_event(
     session: AsyncSession,
     sport_id: int,
@@ -434,6 +527,14 @@ async def _get_or_create_event(
     # kickoff: NULL and the date-only-midnight sentinel are unsafe merge keys.
     if starts_at is not None and not _is_date_only_midnight(starts_at):
         canonical_id = await _resolve_canonical_event(
+            session, sport_id, home_id, away_id, starts_at, external_ref
+        )
+        if canonical_id is not None:
+            return canonical_id
+        # STAGE 2b — Tier-2 fixture_pair_key resolve: an [In Running]/name-twin
+        # fork minted DIFFERENT team ids (Tier-1 exact-id key missed) but the
+        # normalized unordered team pair is identical. Same real-kickoff gate.
+        canonical_id = await _resolve_canonical_event_by_pair(
             session, sport_id, home_id, away_id, starts_at, external_ref
         )
         if canonical_id is not None:
