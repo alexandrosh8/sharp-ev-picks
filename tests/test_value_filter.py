@@ -20,6 +20,7 @@ from app.edge.value import CONSENSUS_ANCHOR
 from app.models.value_filter import (
     ValueFilterModel,
     _adopt_confirmed_by_holdout,
+    _market_key,
     calibrate,
     league_code,
     live_features,
@@ -121,6 +122,40 @@ def test_only_the_2_5_totals_line_is_in_scope() -> None:
         )
         is None
     )
+
+
+def test_market_key_accepts_both_ou25_detail_aliases() -> None:
+    # Train/serve skew: OddsPortal (OddsHarvester) + The Odds API emit the O/U
+    # 2.5 goals line as "over_under_2_5"; live OddsChecker emits "totals_2_5"
+    # (app.ingestion.oddschecker._market_detail). Both are the SAME trained
+    # market and must map to the "ou25" key — otherwise every live OddsChecker
+    # O/U-2.5 candidate silently bypasses the meta-filter (maps to None).
+    assert _market_key(Market.TOTALS, "over_under_2_5", 2) == "ou25"
+    assert _market_key(Market.TOTALS, "totals_2_5", 2) == "ou25"
+    # A different totals line is unchanged — still out of scope.
+    assert _market_key(Market.TOTALS, "totals_3_5", 2) is None
+    assert _market_key(Market.TOTALS, "over_under_3_5", 2) is None
+    # Half/period totals-2.5 are a different market — not the full-match O/U 2.5.
+    assert _market_key(Market.TOTALS, "totals_1st_half_2_5", 2) is None
+    # 1x2 mapping is unchanged.
+    assert _market_key(Market.H2H, None, 3) == "1x2"
+
+
+def test_live_features_scores_oddschecker_totals_2_5_alias() -> None:
+    prices = {
+        "Over 2.5": {"Pinnacle": 1.95, "SoftBook": 2.05},
+        "Under 2.5": {"Pinnacle": 1.95, "SoftBook": 1.90},
+    }
+    fair = {"Over 2.5": 0.51, "Under 2.5": 0.49}
+    ok = feats_1x2(
+        market=Market.TOTALS,
+        market_detail="totals_2_5",  # live OddsChecker alias
+        selection="Over 2.5",
+        prices=prices,
+        fair_by_sel=fair,
+    )
+    assert ok is not None
+    assert ok["market"] == "ou25"
 
 
 def test_other_markets_are_out_of_scope() -> None:

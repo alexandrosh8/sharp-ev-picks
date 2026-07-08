@@ -160,6 +160,16 @@ def _norm_book(s: str) -> str:
     return s.strip().lower()
 
 
+# Source-neutral aliases for the full-match Over/Under 2.5 goals line — the
+# single trained totals market. OddsPortal (OddsHarvester) and The Odds API
+# emit "over_under_2_5"; live OddsChecker emits "totals_2_5"
+# (app.ingestion.oddschecker._market_detail: "<enum>_<line>"). Both name the
+# SAME market, so both must map to the "ou25" key. Period/half totals-2.5
+# ("totals_1st_half_2_5") and other lines ("over_under_3_5") are deliberately
+# NOT here — they are different markets the model never saw.
+_OU25_MARKET_DETAILS = frozenset({"over_under_2_5", "totals_2_5"})
+
+
 def _market_key(market: Market, market_detail: str | None, n_selections: int) -> str | None:
     """Trained market key, or None when out of the model's scope.
 
@@ -169,7 +179,7 @@ def _market_key(market: Market, market_detail: str | None, n_selections: int) ->
     """
     if market is Market.H2H and n_selections == 3:
         return "1x2"
-    if market is Market.TOTALS and market_detail == "over_under_2_5":
+    if market is Market.TOTALS and market_detail in _OU25_MARKET_DETAILS:
         return "ou25"
     return None
 
