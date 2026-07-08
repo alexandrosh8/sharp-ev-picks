@@ -289,6 +289,45 @@ def test_provisional_result_outcome_without_stake_has_no_pnl() -> None:
     assert pnl is None
 
 
+def test_provisional_fields_null_for_superseded_pick_with_score() -> None:
+    # A superseded (deduplicated) pick that happens to carry a scraped final
+    # score must NOT surface a provisional result: the dashboard count tiles key
+    # on provisional_outcome, so a graded superseded row inflates "Settled
+    # (loaded)" as if the dedup'd bet had landed (the exact dedup mislead).
+    from app.storage.models import Pick
+    from app.storage.repositories import _provisional_result_fields
+
+    pick = Pick(
+        market="totals",
+        selection="Under 170.5",  # total 167 -> would grade WON if not suppressed
+        status="superseded",
+        recommended_stake_amount=Decimal("10.00"),
+        decimal_odds=Decimal("1.90"),
+    )
+    assert _provisional_result_fields(pick, HOME, AWAY, 80, 87) == {
+        "provisional_outcome": None,
+        "provisional_pnl": None,
+    }
+
+
+def test_provisional_fields_graded_for_alerted_pick_with_score() -> None:
+    # The real (non-superseded) open pick still gets its CLOSED-tab read-time
+    # provisional grade — the fix must not stop counting genuine settled picks.
+    from app.storage.models import Pick
+    from app.storage.repositories import _provisional_result_fields
+
+    pick = Pick(
+        market="totals",
+        selection="Under 170.5",
+        status="alerted",
+        recommended_stake_amount=Decimal("10.00"),
+        decimal_odds=Decimal("1.90"),
+    )
+    fields = _provisional_result_fields(pick, HOME, AWAY, 80, 87)
+    assert fields["provisional_outcome"] == "won"
+    assert fields["provisional_pnl"] == "9.00"
+
+
 # --- football Asian Handicap (visibility-only volume market, commit 706f87e) ---
 #
 # A football AH pick persists with market=spreads and the human-readable

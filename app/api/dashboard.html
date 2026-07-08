@@ -3035,7 +3035,21 @@
               const tr = document.createElement("tr");
               const c0 = document.createElement("td"); c0.textContent = label; tr.appendChild(c0);
               const c1 = document.createElement("td"); c1.className = "r"; c1.textContent = String(agg.n_settled || 0); tr.appendChild(c1);
-              const won = Number(agg.won) || 0, lost = Number(agg.lost) || 0, pv = (Number(agg.push) || 0) + (Number(agg.void) || 0);
+              // Fold Asian/quarter-line HALF settlements into the headline W-L
+              // so the record reconciles to n_settled. The backend emits all six
+              // outcome buckets (won, lost, push, void, half_won, half_lost);
+              // dropping the two half buckets silently made W-L understate and
+              // NOT sum to n_settled the moment any half settlement lands.
+              const won = (Number(agg.won) || 0) + (Number(agg.half_won) || 0);
+              const lost = (Number(agg.lost) || 0) + (Number(agg.half_lost) || 0);
+              const pv = (Number(agg.push) || 0) + (Number(agg.void) || 0);
+              // Integrity guard: displayed segments must partition n_settled. A
+              // mismatch means an outcome bucket is unaccounted for — surface it
+              // rather than silently drop it (diagnostic only, never throws).
+              const nSettled = Number(agg.n_settled) || 0;
+              if (won + lost + pv !== nSettled) {
+                console.warn("tier record segments do not reconcile to n_settled", label, { won, lost, pv, nSettled });
+              }
               const c2 = document.createElement("td"); c2.className = "r"; c2.textContent = won + "-" + lost + "-" + pv; tr.appendChild(c2);
               const c3 = document.createElement("td"); c3.className = "r pending"; c3.textContent = agg.roi_status === "ok" ? fmtPct(agg.roi) : "insufficient sample"; tr.appendChild(c3);
               tb.appendChild(tr);

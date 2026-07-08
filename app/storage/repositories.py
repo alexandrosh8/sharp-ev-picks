@@ -623,6 +623,14 @@ def _provisional_result_fields(
     final score, BEFORE formal settlement. provisional_* are null until a final
     score exists / when the selection can't be graded; the SETTLED tab still
     uses the authoritative persisted outcome + P&L (ResultTracking)."""
+    # Superseded (deduplicated) picks are terminal-but-resultless: they never
+    # settle and carry no ResultTracking row, yet a scraped final score would
+    # otherwise grade them here — inflating the dashboard's provisional-keyed
+    # count tiles ("Settled (loaded)") with dedup'd bets that never actually
+    # landed. Suppress the provisional grade so a superseded row is never
+    # counted as settled/landed (the P&L ledger already excludes them).
+    if pick.status == "superseded":
+        return {"provisional_outcome": None, "provisional_pnl": None}
     outcome, pnl = provisional_result(
         pick.market,
         pick.selection,
