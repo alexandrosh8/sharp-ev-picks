@@ -11,7 +11,9 @@ and a fast-path redirects it on later cycles.
 Rollback-isolated against the compose Postgres; skips when the DB is absent.
 """
 
+import os
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
@@ -25,7 +27,9 @@ from app.storage.repositories import (
     _get_or_create_team,
 )
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = os.environ.get(
+    "TEST_DB_URL", "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+)
 
 KICKOFF = datetime(2026, 6, 10, 18, 0, tzinfo=UTC)
 
@@ -275,3 +279,109 @@ async def test_tennis_fork_beyond_2h_folds_via_wider_tolerance(session) -> None:
     )
     assert a == b, "tennis wider tolerance must fold the drifted fork"
     assert await _event_count(session) == before + 1
+
+
+# --- PR2b redirect-link fold-shell guard ------------------------------------
+# PR2b could not delete a fold event still referenced by an actively-live
+# fixture, so it leaves an active REDIRECT event_source_link (fold's own ref ->
+# keep). Without the Stage-0b consult below, the own-row external_ref fast-path
+# re-selects the lingering fold shell and re-mints duplicate picks on it (live
+# example: fold 11686 -> keep 11685 kept re-minting dup spread/total picks). The
+# consult must resolve the incoming fold ref to the keep event BEFORE the
+# fast-path, sport-fenced and exact-ref only.
+
+
+async def _insert_event(  # type: ignore[no-untyped-def]
+    session, ids, external_ref: str, starts_at=KICKOFF
+) -> int:
+    """Insert a standalone event row directly (a pre-existing fold shell) —
+    bypassing the resolver so it is a genuine separate row, not an auto-merge."""
+    sport_id, league_id, home_id, away_id = ids
+    ev = Event(
+        sport_id=sport_id,
+        league_id=league_id,
+        home_team_id=home_id,
+        away_team_id=away_id,
+        external_ref=external_ref,
+        starts_at=starts_at,
+    )
+    session.add(ev)
+    await session.flush()
+    return ev.id
+
+
+async def _redirect_link(  # type: ignore[no-untyped-def]
+    session, keep_id: int, fold_ref: str, source: str = "oddschecker"
+) -> None:
+    """Write an active redirect link (fold's own ref -> keep), the marker PR2b
+    Phase 4 leaves for a live fold it could not delete."""
+    session.add(
+        EventSourceLink(
+            canonical_event_id=keep_id,
+            source=source,
+            source_event_id=fold_ref,
+            confidence_score=Decimal("1.0"),
+            match_method="pr2b_redirect",
+            matched_at=datetime.now(UTC),
+            active=True,
+        )
+    )
+    await session.flush()
+
+
+async def test_redirect_link_resolves_to_keep_not_fold(session) -> None:  # type: ignore[no-untyped-def]
+    """(a) An active redirect link for a lingering fold ref resolves to the KEEP
+    event, never the fold shell — and mints nothing new, so no duplicate pick is
+    re-minted on the fold."""
+    ids = await _ids(session)
+    keep = await _mint(session, ids, "oddsportal:keepA", starts_at=KICKOFF)
+    # A genuine separate fold shell row (beyond tolerance so it did NOT auto-merge
+    # — a pre-resolver duplicate PR2b later mapped fold -> keep).
+    fold_ref = "oddschecker:foldA"
+    fold_id = await _insert_event(session, ids, fold_ref, starts_at=KICKOFF + timedelta(hours=3))
+    assert fold_id != keep
+    fold_start_before = (await session.get(Event, fold_id)).starts_at
+    await _redirect_link(session, keep, fold_ref)
+
+    before = await _event_count(session)
+    got = await _mint(session, ids, fold_ref, starts_at=KICKOFF + timedelta(hours=3))
+    assert got == keep, "redirect must resolve to the keep event"
+    assert got != fold_id, "the fold shell must never be re-selected"
+    assert await _event_count(session) == before, "no new event minted"
+    # the fold shell is untouched (the resolver upgrades the keep, not the fold)
+    assert (await session.get(Event, fold_id)).starts_at == fold_start_before
+
+
+async def test_no_redirect_normal_ref_uses_fast_path(session) -> None:  # type: ignore[no-untyped-def]
+    """(b) Regression guard: with NO redirect link, an existing own-row ref still
+    resolves via the external_ref fast-path to its OWN event (the fold-shell
+    consult must not disturb normal ingestion)."""
+    ids = await _ids(session)
+    a = await _mint(session, ids, "oddsportal:normalB", starts_at=KICKOFF)
+    before = await _event_count(session)
+    again = await _mint(session, ids, "oddsportal:normalB", starts_at=KICKOFF)
+    assert again == a
+    assert await _event_count(session) == before, "fast-path returns own row, mints nothing"
+    n_links = await session.scalar(
+        select(func.count())
+        .select_from(EventSourceLink)
+        .where(EventSourceLink.source_event_id == "oddsportal:normalB")
+    )
+    assert n_links == 0, "the fast-path writes no source link"
+
+
+async def test_redirect_cross_sport_ignored(session) -> None:  # type: ignore[no-untyped-def]
+    """(c) A redirect whose target is a DIFFERENT sport is ignored (never resolve
+    across sport): the soccer fold ref falls through to its own-row fast-path (the
+    fold shell), never the basketball keep."""
+    soccer_ids = await _ids(session, home="Res Alpha", away="Res Beta", sport="soccer")
+    bball_ids = await _ids(session, home="Res Alpha", away="Res Beta", sport="basketball")
+    keep_bball = await _mint(session, bball_ids, "oddsportal:xsportKeep", starts_at=KICKOFF)
+    fold_ref = "oddschecker:xsportFold"
+    fold_id = await _insert_event(session, soccer_ids, fold_ref, starts_at=KICKOFF)
+    # a (wrong) redirect pointing the soccer fold ref at the basketball keep
+    await _redirect_link(session, keep_bball, fold_ref)
+
+    got = await _mint(session, soccer_ids, fold_ref, starts_at=KICKOFF)
+    assert got != keep_bball, "must never resolve across sport"
+    assert got == fold_id, "cross-sport redirect ignored -> own-row fast-path"

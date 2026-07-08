@@ -244,12 +244,17 @@ DROP PROCEDURE pr2b_repoint_odds_batched(int);
 -- event of a currently-in-play fixture (stale dup source-link -> new odds). So
 -- Phase 4 must (a) re-repoint EVERY FK table, not just odds, and (b) delete only
 -- fold events that are now REFERENCE-FREE. An actively-scraped live fixture may
--- out-race this delete; that is fine — it is left as an empty shell (its picks
--- and odds already live on the keep event, so no duplicate alert shows) and the
--- NEXT run of this script sweeps it once the match ends (its map row still maps
--- fold -> keep). NEVER force-delete a referenced fold event.
+-- out-race this delete; that is fine — it is left as a shell, but NOT a bare one:
+-- we write an active REDIRECT event_source_link (the fold's OWN external_ref ->
+-- keep_id) so the mint-time resolver (_get_or_create_event Stage-0b) routes every
+-- future scrape of that ref to the keep event instead of re-selecting the shell
+-- and re-minting duplicate picks on it. Its picks and odds already live on keep,
+-- so no duplicate alert shows; the NEXT run of this script sweeps the shell once
+-- the match ends (its map row still maps fold -> keep). NEVER force-delete a
+-- referenced fold event.
 BEGIN;
 -- drop stale duplicate fold links so the scraper resolves to the keep event
+-- (these point AT the fold as a canonical target — the fold is going away).
 DELETE FROM event_source_links l USING pr2b_event_merge_map m
 WHERE l.canonical_event_id = m.fold_id;
 -- re-repoint any straggler rows that raced onto a fold event during Phase 3
@@ -263,6 +268,25 @@ UPDATE model_predictions x  SET event_id = m.keep_id                    FROM pr2
 UPDATE candidate_evaluations c SET event_id = m.keep_id                 FROM pr2b_event_merge_map m WHERE c.event_id = m.fold_id;
 UPDATE detected_edges e     SET event_id = m.keep_id                    FROM pr2b_event_merge_map m WHERE e.event_id = m.fold_id;
 UPDATE match_review_queue q SET candidate_canonical_event_id = m.keep_id FROM pr2b_event_merge_map m WHERE q.candidate_canonical_event_id = m.fold_id;
+-- REDIRECT links for fold shells that will SURVIVE the delete below (an
+-- actively-live fixture still holding picks/odds): an active link (fold's OWN
+-- external_ref -> keep) so the mint-time resolver routes future scrapes of that
+-- ref to keep even while the shell lingers, instead of re-selecting it and
+-- re-minting duplicate picks. source_event_id is the exact ref an incoming scrape
+-- presents; source mirrors _source_of_ref (prefix before ':', else 'unknown',
+-- length-capped to the String(32) column). The uq is
+-- (source, source_event_id, canonical_event_id) -> ON CONFLICT DO NOTHING keeps
+-- it one row and never collides. Inserting canonical = keep adds NO reference to
+-- the fold, so a reference-free fold is still deleted right after (its ref -> keep
+-- link then behaves as a normal merged-ref link).
+INSERT INTO event_source_links
+  (canonical_event_id, source, source_event_id, confidence_score, match_method, matched_at, active)
+SELECT m.keep_id,
+       CASE WHEN position(':' in e.external_ref) > 0
+            THEN left(split_part(e.external_ref, ':', 1), 32) ELSE 'unknown' END,
+       e.external_ref, 1.0, 'pr2b_redirect', now(), true
+FROM events e JOIN pr2b_event_merge_map m ON m.fold_id = e.id
+ON CONFLICT ON CONSTRAINT uq_event_source_links_source_event DO NOTHING;
 -- delete only fold events now clear of ALL references (skips actively-live ones)
 DELETE FROM events e USING pr2b_event_merge_map m
 WHERE e.id = m.fold_id

@@ -488,6 +488,42 @@ async def _get_or_create_event(
     (OddsPortal shows a live running score, OddsHarvester exposes no finished
     flag), so letting it write scraped_* could record an in-play partial as the
     result and corrupt settlement + ROI (review 2026-06-21)."""
+    # STAGE 0b — REDIRECT consult (PR2b live-shell guard). A fold event that the
+    # PR2b merge could not delete (still referenced by an actively-live fixture)
+    # lingers as a shell whose OWN external_ref equals this incoming ref — so the
+    # fast-path below would re-SELECT that fold row and re-mint duplicate picks on
+    # it (the operator then sees one fixture double-alerted on two event rows).
+    # An ACTIVE event_source_link whose source_event_id is this exact ref and
+    # whose canonical target is a DIFFERENT, SAME-SPORT event is a REDIRECT
+    # (written by PR2b Phase 4): resolve to that keep event and NEVER touch the
+    # fold shell. Runs BEFORE the own-row fast-path so the redirect wins over the
+    # lingering shell. Safety: EXACT (source, source_event_id) ref match only (no
+    # fuzzy — source_event_id encodes the source prefix); lowest-id canonical wins
+    # (deterministic, mirrors PR2b keep = min(id)); a cross-sport target
+    # (Event.sport_id != sport_id) or a missing/dangling target is IGNORED — fall
+    # through to the fast-path / mint (fail toward a separate event, never across
+    # sport). This is the same active-link lookup Stage-1 uses, ordered for the
+    # fold case and sport-fenced.
+    redirect_id = await session.scalar(
+        select(Event.id)
+        .join(EventSourceLink, EventSourceLink.canonical_event_id == Event.id)
+        .where(
+            EventSourceLink.source_event_id == external_ref,
+            EventSourceLink.active.is_(True),
+            Event.sport_id == sport_id,
+            Event.external_ref != external_ref,
+        )
+        .order_by(Event.id.asc())
+        .limit(1)
+    )
+    if redirect_id is not None:
+        canon = await session.get(Event, redirect_id)
+        if canon is not None:
+            target = prefer_kickoff(canon.starts_at, starts_at)
+            if target != canon.starts_at:
+                canon.starts_at = target
+                await session.flush()
+            return canon.id
     existing = await session.scalar(select(Event).where(Event.external_ref == external_ref))
     if existing is not None:
         # Earlier rows may be NULL (or carry a legacy placeholder); a real kickoff
