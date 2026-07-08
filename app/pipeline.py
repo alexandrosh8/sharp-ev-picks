@@ -540,15 +540,29 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
         return []
 
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
-    fair = _fair_probabilities(snapshots, deps.devig_method)
+    # POST-KICKOFF DROP (leakage guard): identical protection to
+    # run_value_pipeline via the SAME shared helpers. An in-play snapshot —
+    # captured at or after its event's kickoff — must never mint a model pick
+    # nor stamp a CLV close. The raw ``snapshots`` (persisted/counted above)
+    # stay intact; only the pricing view drops in-play rows. ``started`` then
+    # skips a started event wholesale (belt-and-suspenders for an event whose
+    # surviving rows are pre-match but which has since kicked off). The
+    # persisted ``events.starts_at`` is preferred over the ephemeral directory,
+    # and a NULL/unknown kickoff is KEPT (cannot be proven post-KO).
+    kickoff_by_event = await _load_kickoffs(deps, {s.event_id for s in snapshots})
+    priced_snapshots = drop_post_kickoff_snapshots(snapshots, kickoff_by_event)
+    started = started_event_ids({s.event_id for s in priced_snapshots}, kickoff_by_event, now)
+    fair = _fair_probabilities(priced_snapshots, deps.devig_method)
     picks: list[PickOut] = []
     n_unpersisted_withheld = 0
 
-    for event_id in sorted({s.event_id for s in snapshots}):
+    for event_id in sorted({s.event_id for s in priced_snapshots}):
+        if event_id in started:
+            continue  # kicked off: in-play odds never become picks/upgrades
         predictions = {(p.market, p.selection): p for p in await deps.model.predict(event_id)}
         if not predictions:
             continue
-        for snap in (s for s in snapshots if s.event_id == event_id):
+        for snap in (s for s in priced_snapshots if s.event_id == event_id):
             prediction = predictions.get((snap.market, snap.selection))
             fair_p = fair.get((snap.event_id, snap.bookmaker, snap.market, snap.selection))
             if prediction is None or fair_p is None:

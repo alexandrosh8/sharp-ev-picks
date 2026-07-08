@@ -270,6 +270,43 @@ async def test_pick_pipeline_duplicate_price_move_realerts(
     assert "2.20" in sink.sent[1].title
 
 
+async def test_model_pipeline_drops_post_kickoff_snapshot() -> None:
+    """Post-kickoff leakage guard parity with run_value_pipeline (shared
+    helpers): a snapshot captured AT OR AFTER its event's kickoff is an in-play
+    price and must mint NO model pick and send NO alert — the operator cannot
+    take a pre-match price on a started game. Mirrors
+    test_value_pipeline_skips_started_events for PICK_STRATEGY=model."""
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    directory = EventDirectory()
+    directory.register(
+        "evt-1",
+        EventTeams(home="Over Town", away="Under City", starts_at=NOW - timedelta(minutes=20)),
+    )
+    deps.directory = directory
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+    assert picks == []
+    assert sink.sent == []
+    assert deps.ledger.used(datetime.now(tz=UTC).date()) == 0.0
+
+
+async def test_model_pipeline_keeps_pre_kickoff_snapshot() -> None:
+    """Regression: a legit strictly-pre-kickoff snapshot (future kickoff) still
+    prices and alerts — the guard drops only in-play rows, never pre-match
+    value. A NULL/absent kickoff is likewise kept (cannot be proven post-KO)."""
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    directory = EventDirectory()
+    directory.register(
+        "evt-1",
+        EventTeams(home="Over Town", away="Under City", starts_at=NOW + timedelta(hours=3)),
+    )
+    deps.directory = directory
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(picks) == 1
+    assert len(sink.sent) == 1
+
+
 async def test_unpersisted_premium_pick_does_not_accumulate_exposure() -> None:
     """kelly-risk-r2-1: with persistence unavailable (no session factory),
     _maybe_persist returns 'unpersisted'. A premium pick re-detected every
