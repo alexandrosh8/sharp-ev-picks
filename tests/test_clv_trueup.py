@@ -972,15 +972,24 @@ async def test_capture_finished_scores_commits_before_a_later_link_stalls(  # ty
         await session.execute(
             sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
         )
-        for ref in (good_ref, poison_ref):
-            await persist_pick(
-                session,
-                make_pick(ref),
-                # 5h past kickoff -> past the soccer FINISHED floor (3.5h).
-                EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=5)),
-                "value-sharp-vs-soft",
-                "v2-test",
-            )
+        # Two SEPARATE finished-event links. Both 5h+ past kickoff (past the soccer
+        # FINISHED floor of 3.5h), but 3h apart so the forward dedup resolver keeps
+        # them as distinct events — same teams within 2h would now (correctly)
+        # resolve to ONE canonical, collapsing the two-link scenario under test.
+        await persist_pick(
+            session,
+            make_pick(good_ref),
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=5)),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await persist_pick(
+            session,
+            make_pick(poison_ref),
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=8)),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
         await session.commit()
 
     directory = EventDirectory()
@@ -1135,10 +1144,13 @@ async def test_offwindow_excludes_stale_null_kickoff_picks(factory) -> None:  # 
 async def _seed_offwindow_pick(
     session: AsyncSession, ref: str, attempted_at: datetime | None, tier: str = "premium"
 ) -> None:
+    # A UNIQUE away team per ref -> a genuinely distinct fixture, so the forward
+    # dedup resolver keeps one event per ref (each off-window pick is its own
+    # fixture; identical teams+kickoff would now correctly collapse to one).
     await persist_pick(
         session,
         make_pick(ref, tier=tier),
-        EventTeams(home="Home FC", away="Away FC", starts_at=NOW + timedelta(days=12)),
+        EventTeams(home="Home FC", away=f"Away {ref[-45:]}", starts_at=NOW + timedelta(days=12)),
         "value-sharp-vs-soft",
         "v2-test",
     )

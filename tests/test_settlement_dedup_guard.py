@@ -25,7 +25,7 @@ from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.settlement.engine import settle_open_picks
 from app.settlement.results import FinalScore, ScoreBook
-from app.storage.models import Event, Pick, ResultTracking
+from app.storage.models import Event, Pick, ResultTracking, Team
 from app.storage.repositories import persist_pick
 
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
@@ -135,11 +135,63 @@ async def _result_rows(session, *pick_ids):  # type: ignore[no-untyped-def]
     )
 
 
+async def _insert_dup_pick(  # type: ignore[no-untyped-def]
+    session, canonical, ref: str, *, selection=None, starts_at=None, away_name=None
+) -> Pick:
+    """Directly insert a duplicate Event (bypassing the mint-time resolver, which
+    now correctly merges same-fixture events) plus an alerted Pick on it,
+    mirroring ``canonical``. Reproduces the legacy / cross-source / forked-team
+    dup the settlement guard must still catch after the resolver ships."""
+    ev = await session.get(Event, canonical.event_id)
+    away_id = ev.away_team_id
+    if away_name is not None:
+        t = Team(
+            sport_id=ev.sport_id,
+            league_id=ev.league_id,
+            name=away_name,
+            normalized_name=away_name.lower(),
+        )
+        session.add(t)
+        await session.flush()
+        away_id = t.id
+    dup_event = Event(
+        sport_id=ev.sport_id,
+        league_id=ev.league_id,
+        home_team_id=ev.home_team_id,
+        away_team_id=away_id,
+        external_ref=ref,
+        starts_at=starts_at or ev.starts_at,
+    )
+    session.add(dup_event)
+    await session.flush()
+    pick = Pick(
+        event_id=dup_event.id,
+        model_version_id=canonical.model_version_id,
+        market=canonical.market,
+        selection=selection or canonical.selection,
+        bookmaker=canonical.bookmaker,
+        decimal_odds=canonical.decimal_odds,
+        model_probability=canonical.model_probability,
+        fair_probability=canonical.fair_probability,
+        edge=canonical.edge,
+        ev=canonical.ev,
+        confidence=canonical.confidence,
+        recommended_stake_fraction=canonical.recommended_stake_fraction,
+        recommended_stake_amount=canonical.recommended_stake_amount,
+        reason_summary="dedup-guard test",
+        status="alerted",
+        tier="premium",
+    )
+    session.add(pick)
+    await session.flush()
+    return pick
+
+
 async def test_duplicate_pick_on_sibling_event_settles_only_once(session) -> None:  # type: ignore[no-untyped-def]
     """Two picks, same market+selection+model, on two event rows of ONE fixture
     (the cross-source dup) — only ONE settles; no second result_tracking row."""
     p1 = await seed_pick(session, "evt-dup-A")
-    p2 = await seed_pick(session, "evt-dup-B")
+    p2 = await _insert_dup_pick(session, p1, "evt-dup-B")
     assert p1.id != p2.id
     assert p1.event_id != p2.event_id  # genuinely two event rows for one fixture
 
@@ -162,7 +214,7 @@ async def test_duplicate_skipped_across_settlement_cycles(session) -> None:  # t
     p1 = await seed_pick(session, "evt-xc-A")
     assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 1
 
-    p2 = await seed_pick(session, "evt-xc-B")
+    p2 = await _insert_dup_pick(session, p1, "evt-xc-B")
     assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 0, (
         "duplicate must be skipped"
     )
@@ -231,7 +283,7 @@ async def test_duplicate_superseded_even_without_own_score(session) -> None:  # 
     pending forever. Requires the guard to run BEFORE the score lookup."""
     clean = await seed_pick(session, "evt-noscore-A")
     await _mark_settled(session, clean)  # the settled sibling
-    dup = await seed_pick(session, "evt-noscore-B")  # same fixture, still alerted
+    dup = await _insert_dup_pick(session, clean, "evt-noscore-B")  # same fixture, still alerted
 
     # Non-empty book that does NOT contain this fixture -> dup's own lookup is None.
     book = ScoreBook([FinalScore("Zzz Home", "Zzz Away", KICKOFF.date(), 1, 0)])
@@ -266,7 +318,7 @@ async def test_different_selection_not_deduped(session) -> None:  # type: ignore
     """Fail-safe: two picks on the same fixture with DIFFERENT selections are
     distinct bets — both settle (the guard keys on selection)."""
     p1 = await seed_pick(session, "evt-sel-A", selection="Over 2.5")
-    p2 = await seed_pick(session, "evt-sel-B", selection="Under 2.5")
+    p2 = await _insert_dup_pick(session, p1, "evt-sel-B", selection="Under 2.5")
     n = await settle_open_picks(session, book_with_score(2, 1), NOW)
     assert n == 2
     assert len(await _result_rows(session, p1.id, p2.id)) == 2

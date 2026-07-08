@@ -433,7 +433,9 @@ async def test_voids_unsettleable_known_kickoff_pick(session) -> None:  # type: 
     assert await persist_pick(
         session,
         make_pick("evt-unsettle-scored", selection="Under 2.5"),
-        EventTeams(home=HOME, away=AWAY, starts_at=now - old),
+        # Distinct fixture (own event) so the resolver keeps it separate from the
+        # voidable pick above and the scraped-score UPDATE below lands on it.
+        EventTeams(home=HOME, away="Scored Beta", starts_at=now - old),
         "value",
         "test-v",
     )
@@ -804,7 +806,9 @@ async def test_performance_report_keeps_volume_out_of_headline(session) -> None:
     )
 
     premium = await seed_pick(session, "evt-perf-tier-p")  # Over 2.5 @ 2.10
-    volume = await seed_pick(session, "evt-perf-tier-v", tier="volume")
+    # Distinct fixture so the resolver keeps a separate event (same teams+kickoff
+    # would merge, and its pick would collide on the premium row's unique key).
+    volume = await seed_pick(session, "evt-perf-tier-v", tier="volume", away="Volume Beta")
     settled, _ = await settle_event_picks(session, premium.event_id, 2, 1, NOW)  # won
     assert settled == 1
     settled, _ = await settle_event_picks(session, volume.event_id, 0, 0, NOW)  # lost
@@ -842,7 +846,7 @@ async def test_performance_report_close_coverage_sla(session) -> None:  # type: 
     # WELL-COVERED sport-market (soccer/totals): a GENUINE independent Pinnacle
     # snapshot close — the trust guard admits it to n_sharp_close.
     covered = await seed_pick(
-        session, "evt-sla-covered", market=Market.TOTALS, selection="Over 2.5"
+        session, "evt-sla-covered", market=Market.TOTALS, selection="Over 2.5", away="Covered Beta"
     )
     covered.clv_log = Decimal("0.05")
     covered.beat_close = True
@@ -851,7 +855,11 @@ async def test_performance_report_close_coverage_sla(session) -> None:  # type: 
     covered.close_independent_of_fill = True
     # POORLY-COVERED sport-market (soccer/btts): a CLV exists but from an
     # untrusted close (no snapshot / no sharp anchor) -> n_sharp_close 0.
-    thin = await seed_pick(session, "evt-sla-thin", market=Market.BTTS, selection="BTTS Yes")
+    # Distinct fixture (own event) so the resolver does not merge it into the
+    # covered pick's event (same teams+kickoff would collapse to one).
+    thin = await seed_pick(
+        session, "evt-sla-thin", market=Market.BTTS, selection="BTTS Yes", away="Thin Beta"
+    )
     thin.clv_log = Decimal("0.01")
     # Both settle from the same 2-1 scoreline (Over 2.5 wins; both teams scored).
     assert (await settle_event_picks(session, covered.event_id, 2, 1, NOW))[0] == 1

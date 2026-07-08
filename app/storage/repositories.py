@@ -298,6 +298,85 @@ async def _get_or_create_team(
     return found
 
 
+# Forward mint-time dedup resolver (PR1a). Two same-sport events with the same
+# ORIENTED team pair whose kickoffs fall within this bound are the SAME real
+# fixture — a deterministic key, no fuzzy matching, so it can never merge two
+# DISTINCT games (the same two teams cannot start a second meeting within ~2h;
+# leg reversals swap the ids and so miss the oriented key entirely).
+_RESOLVER_TOLERANCE = timedelta(hours=2)
+
+
+def _source_of_ref(external_ref: str) -> str:
+    """The event_source_links.source tag for an external_ref — the prefix before
+    the first ':' ('oddschecker:101644967' -> 'oddschecker'); 'unknown' for a
+    ref with no prefix."""
+    prefix = external_ref.split(":", 1)[0]
+    return prefix if prefix and prefix != external_ref else "unknown"
+
+
+def _is_date_only_midnight(dt: datetime) -> bool:
+    """True for the 00:00:00 date-only sentinel (OddsPortal's date-only header) —
+    a placeholder, never a real kickoff, so the resolver must not key on it (it
+    would collapse distinct same-day fixtures stored under the placeholder)."""
+    return dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0
+
+
+async def _resolve_canonical_event(
+    session: AsyncSession,
+    sport_id: int,
+    home_id: int,
+    away_id: int,
+    starts_at: datetime,
+    external_ref: str,
+) -> int | None:
+    """Tier-1: the existing canonical event for this fixture (same sport, same
+    ORIENTED team pair, kickoff within _RESOLVER_TOLERANCE), or None.
+
+    On a hit: upgrades the canonical kickoff (prefer_kickoff — a real time from
+    this source improves a stored midnight/NULL) and records the source ref in
+    event_source_links. The link is a best-effort fast-path + audit cache;
+    correctness never depends on it — a lost write just means the next cycle
+    re-resolves to the SAME id deterministically. Multiple in-window rows are all
+    the same fixture (same oriented ids), so it collapses to the nearest."""
+    rows = (
+        await session.execute(
+            select(Event.id, Event.external_ref, Event.starts_at).where(
+                Event.sport_id == sport_id,
+                Event.home_team_id == home_id,
+                Event.away_team_id == away_id,
+                Event.starts_at.is_not(None),
+                Event.starts_at >= starts_at - _RESOLVER_TOLERANCE,
+                Event.starts_at <= starts_at + _RESOLVER_TOLERANCE,
+            )
+        )
+    ).all()
+    if not rows:
+        return None
+    canon_id, canon_ref, _ = min(
+        rows, key=lambda r: (abs((r[2] - starts_at).total_seconds()), r[0])
+    )
+    canon = await session.get(Event, canon_id)
+    if canon is not None:
+        target = prefer_kickoff(canon.starts_at, starts_at)
+        if target != canon.starts_at:
+            canon.starts_at = target
+    await upsert_event_source_links(
+        session,
+        [
+            SourceLinkByRef(
+                source=_source_of_ref(external_ref),
+                source_event_id=external_ref,
+                canonical_external_ref=canon_ref,
+                confidence=1.0,
+                method="exact_team_id" if len(rows) == 1 else "exact_team_id_multi",
+                matched_at=datetime.now(UTC),
+            )
+        ],
+    )
+    await session.flush()
+    return canon_id
+
+
 async def _get_or_create_event(
     session: AsyncSession,
     sport_id: int,
@@ -330,6 +409,36 @@ async def _get_or_create_event(
             existing.starts_at = target
             await session.flush()
         return existing.id
+    # STAGE 1 — link fast-path: this ref was merged into a canonical on an earlier
+    # cycle (no own event row, only an active source link). Deterministic
+    # (most-recent active link) so a re-get never splits back into two rows.
+    linked_id = await session.scalar(
+        select(EventSourceLink.canonical_event_id)
+        .where(
+            EventSourceLink.source_event_id == external_ref,
+            EventSourceLink.active.is_(True),
+        )
+        .order_by(EventSourceLink.matched_at.desc(), EventSourceLink.id.desc())
+        .limit(1)
+    )
+    if linked_id is not None:
+        canon = await session.get(Event, linked_id)
+        if canon is not None:
+            target = prefer_kickoff(canon.starts_at, starts_at)
+            if target != canon.starts_at:
+                canon.starts_at = target
+                await session.flush()
+            return canon.id
+        # dangling link (canonical row gone) -> fall through to Tier-1 / mint
+    # STAGE 2 — Tier-1 deterministic cross-source resolve. Only with a REAL
+    # kickoff: NULL and the date-only-midnight sentinel are unsafe merge keys.
+    if starts_at is not None and not _is_date_only_midnight(starts_at):
+        canonical_id = await _resolve_canonical_event(
+            session, sport_id, home_id, away_id, starts_at, external_ref
+        )
+        if canonical_id is not None:
+            return canonical_id
+    # STAGE 3 — mint (unchanged): a genuinely new fixture.
     await session.execute(
         pg_insert(Event)
         .values(
