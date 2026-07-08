@@ -1621,6 +1621,20 @@
         // ===== formatting family — missing/invalid always renders "—" =======
         const $ = (id) => document.getElementById(id);
         function fmt(v) { return v === null || v === undefined || v === "" ? "—" : v; }
+        // Market-qualified selection label: bare Yes/No markets (e.g. BTTS) are
+        // ambiguous without the market name — prefix it so "Yes @ 3.75" reads
+        // "BTTS Yes @ 3.75". Self-describing selections (team names, Over/Under
+        // lines, handicaps) are returned unchanged.
+        function selLabel(p) {
+          const sel = fmt(p && p.selection);
+          const raw = String((p && p.selection) || "").trim().toLowerCase();
+          if (raw === "yes" || raw === "no") {
+            const m = String((p && p.market) || "").toLowerCase();
+            const mk = m === "btts" ? "BTTS" : (m ? m.replace(/_/g, " ").toUpperCase() : "");
+            return mk ? mk + " " + sel : sel;
+          }
+          return sel;
+        }
         function fmtNum(v, digits) {
           const n = Number(v);
           if (v === null || v === undefined || v === "" || !isFinite(n)) return "—";
@@ -2157,7 +2171,7 @@
               const r = document.createElement("div"); r.className = "kickoff-row";
               const t = document.createElement("span"); t.className = "kr-t mono"; t.textContent = fmtCountdown(p.starts_at);
               const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
-              const s = document.createElement("span"); s.className = "kr-s"; s.textContent = fmt(p.selection) + " @ " + fmtOdds(p.decimal_odds) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
+              const s = document.createElement("span"); s.className = "kr-s"; s.textContent = selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
               r.append(t, e, s); box.appendChild(r);
             });
             const go = document.createElement("button"); go.type = "button"; go.textContent = "Open in Edges →";
@@ -2203,7 +2217,7 @@
               t.textContent = fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
               const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
               const s = document.createElement("span"); s.className = "kr-s";
-              s.textContent = fmt(p.selection) + " @ " + fmtOdds(p.decimal_odds) + " · " + (tierOf(p) === "premium" ? "Premium" : "Shadow");
+              s.textContent = selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · " + (tierOf(p) === "premium" ? "Premium" : "Shadow");
               r.append(t, e, s); teBox.appendChild(r);
             });
           }
@@ -2383,7 +2397,7 @@
           const tier = document.createElement("span"); tier.className = "er-tier tag " + (tierOf(p) === "volume" ? "tag-warm" : "tag-cyan");
           tier.textContent = tierOf(p) === "volume" ? "Shadow" : "Premium";
           const sel = document.createElement("span"); sel.className = "er-sel mono";
-          sel.textContent = fmt(p.selection) + " @ " + fmtOdds(p.decimal_odds) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
+          sel.textContent = selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
           const trust = document.createElement("span"); trust.className = "er-trust"; trust.textContent = trustGlyph(p); trust.title = anchorLabel(p);
           row.append(ko, ev, tier, sel, trust);
           row.addEventListener("click", () => selectEdge(p.id));
@@ -2707,7 +2721,7 @@
           const eff = p.current_edge == null ? p.edge : p.current_edge;
           const lines = [
             fmt(p.event),
-            fmt(p.selection) + " @ " + fmtOdds(p.decimal_odds),
+            selLabel(p) + " @ " + fmtOdds(p.decimal_odds),
             "Edge: " + fmtSignedPct(eff),
             "Tier: " + (tierOf(p) === "volume" ? "Shadow" : "Premium"),
             "Anchor: " + anchorLabel(p),
