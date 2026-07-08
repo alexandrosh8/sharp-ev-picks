@@ -1004,8 +1004,10 @@ def test_candidate_age_fails_closed_on_unknown_capture() -> None:
     CLOSED. A candidate whose best-book capture time is unknown (None) has an
     UNKNOWABLE age — minting from it (the old ``... if cap else 0.0`` which made
     age 0.0) silently bypasses the freshness guarantee. Unknown age => +inf so
-    the gate always drops it. A future capture (live scrapes stamp DURING the
-    multi-minute fetch) still clamps to 0.0 (fresh, never negative)."""
+    the gate always drops it. ``now`` is taken AFTER the fetch, so a capture in
+    the FUTURE relative to it is a clock/data error, NOT a fresh price — it must
+    also fail closed (+inf), never clamp to 0.0 (that let an in-play/mis-stamped
+    row pose as fresh)."""
     from app.pipeline import _candidate_age_seconds
 
     now = datetime.now(tz=UTC)
@@ -1013,8 +1015,63 @@ def test_candidate_age_fails_closed_on_unknown_capture() -> None:
     assert _candidate_age_seconds(now, None) == float("inf")
     # Old price -> positive age (would trip a 300s gate).
     assert _candidate_age_seconds(now, now - timedelta(seconds=400)) == pytest.approx(400.0)
-    # Future capture -> clamped to 0.0, never negative.
-    assert _candidate_age_seconds(now, now + timedelta(seconds=90)) == 0.0
+    # Future capture -> stale/invalid (+inf), NOT clamped to fresh.
+    assert _candidate_age_seconds(now, now + timedelta(seconds=90)) == float("inf")
+
+
+def test_drop_post_kickoff_snapshots_excludes_in_play() -> None:
+    """A snapshot captured AT OR AFTER its event's kickoff is an in-play price and
+    must be dropped from candidate pricing / the CLV close; strictly-pre-kickoff
+    rows and rows for a NULL/unknown kickoff are KEPT (a NULL kickoff cannot be
+    proven post-KO). The surviving 'close' is the last snapshot strictly before
+    kickoff, never an in-play one."""
+    from app.pipeline import drop_post_kickoff_snapshots
+
+    ko = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
+
+    def s(event_id: str, offset_s: float) -> OddsSnapshotIn:
+        return OddsSnapshotIn(
+            event_id=event_id,
+            bookmaker="pinnacle",
+            market=Market.H2H,
+            selection="Home",
+            decimal_odds=2.0,
+            captured_at=ko + timedelta(seconds=offset_s),
+            ingested_at=ko + timedelta(seconds=offset_s),
+        )
+
+    pre_old = s("evt-1", -600)
+    pre_close = s("evt-1", -60)  # last strictly-pre-kickoff row -> the close
+    at_ko = s("evt-1", 0)  # exactly kickoff == in-play, dropped
+    in_play = s("evt-1", 45)  # after kickoff, dropped
+    null_ko = s("evt-null", 120)  # unknown kickoff -> kept
+    kept = drop_post_kickoff_snapshots(
+        [pre_old, pre_close, at_ko, in_play, null_ko],
+        {"evt-1": ko, "evt-null": None},
+    )
+    assert at_ko not in kept
+    assert in_play not in kept
+    assert null_ko in kept
+    evt1 = [x for x in kept if x.event_id == "evt-1"]
+    assert set(evt1) == {pre_old, pre_close}
+    # the CLV close = latest surviving capture is STRICTLY before kickoff
+    assert max(x.captured_at for x in evt1) == pre_close.captured_at < ko
+
+
+def test_started_event_ids_prefers_persisted_kickoff() -> None:
+    """An event whose kickoff (persisted-preferred) is <= now is 'started' even
+    when the in-memory directory never carried its start time; a future kickoff
+    and a NULL/absent kickoff are never 'started'."""
+    from app.pipeline import started_event_ids
+
+    now = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
+    kickoffs = {
+        "past": now - timedelta(minutes=5),  # persisted, absent from directory
+        "future": now + timedelta(minutes=30),
+        "null": None,
+    }
+    started = started_event_ids(["past", "future", "null", "absent"], kickoffs, now)
+    assert started == {"past"}
 
 
 async def test_stale_drop_ratio_observable_and_warns_on_starvation(
@@ -1079,14 +1136,14 @@ async def test_value_pipeline_keeps_future_kickoff_events() -> None:
     assert len(picks) == 1
 
 
-async def test_value_pipeline_handles_future_captured_at() -> None:
-    # Live scrapes stamp captured_at DURING the multi-minute fetch; a snapshot
-    # "newer than now" must clamp to age 0, not crash PickOut validation.
+async def test_value_pipeline_drops_future_captured_at() -> None:
+    # ``now`` is taken AFTER the fetch, so a snapshot stamped in the FUTURE is a
+    # clock/data error (or an in-play row with a bad stamp), never a fresh price.
+    # The odds-age gate must DROP it (age +inf), not clamp it to fresh and mint.
     sink = RecordingSink()
     deps = make_deps(sink, FakeLoader(market_snapshots(age_s=-90.0)))  # future
     picks = await run_value_pipeline(deps, "soccer")
-    assert len(picks) == 1
-    assert picks[0].odds_age_seconds == 0.0
+    assert picks == []
 
 
 async def test_value_pipeline_prices_half_line_handicap_directly() -> None:

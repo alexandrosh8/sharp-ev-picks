@@ -38,14 +38,14 @@ from app.edge.value import (
 )
 from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import EventDirectory, OddsLoader
-from app.pipeline import event_fair_probs, group_market_prices
+from app.pipeline import drop_post_kickoff_snapshots, event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
 from app.resolution.shadow import arcadia_base_sport
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.settlement.engine import STALE_NULL_KICKOFF_AGE
 from app.storage.models import Event, Pick, PickLineDrift, Sport, Team
-from app.storage.repositories import closing_odds_from_snapshots
+from app.storage.repositories import closing_odds_from_snapshots, load_event_kickoffs
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -142,6 +142,23 @@ async def revalidate_open_picks(
     price would inflate CLV by ~ln(1/(1-c)) on every exchange pick. Picks at
     commission-free books are unaffected (effective == raw).
     """
+    if not snapshots:
+        return 0
+    # POST-KICKOFF DROP (leakage guard): an IN-PLAY snapshot (captured at/after
+    # its event's kickoff) must never price a pre-match CLV close. A late/absent
+    # kickoff (tennis) previously let OddsPortal's in-play page stamp a fabricated
+    # close. Use the PERSISTED events.starts_at; a NULL kickoff cannot be proven
+    # post-KO, so those rows are kept (the pick query below still excludes started
+    # events). A DB read failure degrades to no filter — revalidation never blocks.
+    try:
+        async with session_factory() as session:
+            kickoffs = await load_event_kickoffs(session, {s.event_id for s in snapshots})
+    except Exception as exc:  # kickoff read must never block revalidation
+        logger.error(
+            "clv kickoff load failed: %s (post-kickoff filter skipped)", type(exc).__name__
+        )
+        kickoffs = {}
+    snapshots = drop_post_kickoff_snapshots(snapshots, kickoffs)
     if not snapshots:
         return 0
     # Same devig + same fair rules as the pick pipeline (event_fair_probs),

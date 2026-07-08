@@ -10,7 +10,7 @@ import math
 import re
 import uuid
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -147,11 +147,16 @@ def _candidate_age_seconds(now: datetime, captured_at: datetime | None) -> float
     cannot take a price of unknown age. An UNKNOWABLE capture time (None) returns
     +inf so the gate ALWAYS drops the candidate rather than minting from it. (The
     prior ``... if cap else 0.0`` failed OPEN: a None cap became age 0.0 and
-    sailed through the gate.) A future captured_at — live scrapes stamp DURING the
-    multi-minute fetch — clamps to 0.0 (fresh, never negative)."""
+    sailed through the gate.) ``now`` is taken AFTER the fetch, so a captured_at
+    in the FUTURE relative to it is a clock/data error (or an in-play row with a
+    bad stamp), NOT a fresh price — it too fails closed (+inf). The old clamp to
+    0.0 let such a stamp pose as fresh and mint."""
     if captured_at is None:
         return float("inf")
-    return max((now - captured_at).total_seconds(), 0.0)
+    age = (now - captured_at).total_seconds()
+    if age < 0.0:
+        return float("inf")  # future stamp: stale/invalid, never "fresh"
+    return age
 
 
 def _loader_event_ids(loader: OddsLoader, sport_key: str) -> tuple[str, ...] | None:
@@ -687,6 +692,34 @@ async def _refresh_kickoffs(deps: "PipelineDeps", event_ids: set[str]) -> None:
         logger.error("kickoff refresh failed: %s", type(exc).__name__)
 
 
+async def _load_kickoffs(deps: "PipelineDeps", event_ids: set[str]) -> dict[str, datetime | None]:
+    """event_id -> best-known kickoff (UTC), PREFERRING the persisted
+    ``events.starts_at`` over the ephemeral in-memory directory.
+
+    Persisted wins because a late-arriving or absent in-memory kickoff (tennis
+    start times land late) would otherwise let an in-play price mint a pre-match
+    pick / stamp a CLV close. Falls back to the directory for any event not yet
+    persisted (or when there is no DB). A DB read failure degrades to the
+    directory alone — kickoff hygiene must never block picking."""
+    kickoffs: dict[str, datetime | None] = {}
+    if deps.session_factory is not None:
+        from app.storage.repositories import load_event_kickoffs
+
+        try:
+            async with deps.session_factory() as session:
+                kickoffs = await load_event_kickoffs(session, event_ids)
+        except Exception as exc:  # kickoff read must never break picking
+            logger.error("kickoff load failed: %s (directory fallback)", type(exc).__name__)
+            kickoffs = {}
+    if deps.directory is not None:
+        for event_id in event_ids:
+            if kickoffs.get(event_id) is None:
+                teams = deps.directory.lookup(event_id)
+                if teams is not None and teams.starts_at is not None:
+                    kickoffs[event_id] = teams.starts_at
+    return kickoffs
+
+
 def pick_tier(edge: float, premium_min_edge: float, volume_min_edge: float) -> str | None:
     """Tier for a candidate edge — pure boundary logic, tested directly.
 
@@ -1176,6 +1209,15 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             sport_key,
             len(demote_events),
         )
+    # POST-KICKOFF DROP (leakage guard): filter IN-PLAY snapshots — captured at
+    # or after their event's kickoff — out of the ANCHORING/pricing set before
+    # grouping. A late-arriving kickoff (tennis) would otherwise let OddsPortal's
+    # in-play page price a pre-match value pick and stamp a fabricated CLV close.
+    # The persisted kickoff is preferred over the ephemeral directory; the raw
+    # ``snapshots`` (persisted/counted below) is left intact — only the pricing
+    # view drops in-play rows.
+    kickoff_by_event = await _load_kickoffs(deps, {s.event_id for s in anchor_snapshots})
+    anchor_snapshots = drop_post_kickoff_snapshots(anchor_snapshots, kickoff_by_event)
     grouped = group_market_prices(anchor_snapshots)
     fair = event_fair_probs(
         grouped,
@@ -1191,12 +1233,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # scrape (multi-minute cycles); OddsPortal then serves IN-PLAY prices.
     # Those must never mint, upgrade, or re-alert picks — the operator
     # cannot take a pre-match price on a started game.
-    started: set[str] = set()
-    if deps.directory is not None:
-        for event_id in {key[0] for key in grouped}:
-            teams = deps.directory.lookup(event_id)
-            if teams is not None and teams.starts_at is not None and teams.starts_at <= now:
-                started.add(event_id)
+    # Persisted-preferred kickoff (see kickoff_by_event above): a late/absent
+    # in-memory kickoff still excludes a started event. The per-snapshot drop
+    # already removed in-play rows; this event-level skip is belt-and-suspenders.
+    started = started_event_ids({key[0] for key in grouped}, kickoff_by_event, now)
 
     # Steam gate trajectories: per-(market) per-(selection, book) recent price
     # history for the line-movement / steam-awareness gate. Built ONLY when the
@@ -2051,6 +2091,45 @@ def group_market_prices(snapshots: Sequence[OddsSnapshotIn]) -> GroupedMarkets:
         prices.setdefault(snap.selection, {})[snap.bookmaker] = snap.decimal_odds
         captured[(snap.selection, snap.bookmaker)] = snap.captured_at
     return out
+
+
+def drop_post_kickoff_snapshots(
+    snapshots: Sequence[OddsSnapshotIn],
+    kickoffs: Mapping[str, datetime | None],
+) -> list[OddsSnapshotIn]:
+    """Drop every snapshot captured AT OR AFTER its event's kickoff — an in-play
+    price must never mint a pre-match value pick nor stamp a CLV close.
+
+    A snapshot whose event has an UNKNOWN kickoff (absent from ``kickoffs`` or
+    mapped to None) is KEPT: a NULL kickoff cannot be proven post-KO (the same
+    rule the started-set and the off-window close guards use). Strictly-pre-
+    kickoff snapshots pass through unchanged, so the surviving 'close' for an
+    event is its last snapshot strictly before kickoff, never an in-play one."""
+    kept: list[OddsSnapshotIn] = []
+    for snap in snapshots:
+        kickoff = kickoffs.get(snap.event_id)
+        if kickoff is not None and snap.captured_at >= kickoff:
+            continue
+        kept.append(snap)
+    return kept
+
+
+def started_event_ids(
+    event_ids: Iterable[str],
+    kickoffs: Mapping[str, datetime | None],
+    now: datetime,
+) -> set[str]:
+    """Events whose kickoff is KNOWN and at/before ``now`` — the in-play set the
+    candidate loop skips wholesale. ``kickoffs`` should already PREFER the
+    persisted ``events.starts_at`` over the ephemeral in-memory directory so a
+    late-arriving or absent in-memory kickoff (tennis start times land late)
+    still excludes a started event. A NULL/absent kickoff is never 'started' — it
+    cannot be proven, so re-pricing continues (same rule as the CLV guards)."""
+    return {
+        event_id
+        for event_id in event_ids
+        if (kickoff := kickoffs.get(event_id)) is not None and kickoff <= now
+    }
 
 
 LiquidityByMarket = dict[tuple[str, Market, str | None], dict[str, dict[str, float]]]

@@ -10,7 +10,7 @@ import contextlib
 import logging
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -26,7 +26,7 @@ from sqlalchemy.orm import aliased
 
 from app.backtesting.clv import mean_significance, wilson_interval
 from app.ingestion.base import EventTeams, prefer_kickoff
-from app.schemas.base import Market
+from app.schemas.base import Market, to_utc
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
 from app.settlement.outcomes import provisional_result
@@ -1088,6 +1088,28 @@ async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, date
     if changed:
         await session.flush()
     return changed
+
+
+async def load_event_kickoffs(
+    session: AsyncSession, external_refs: "Collection[str]"
+) -> dict[str, datetime | None]:
+    """external_ref -> persisted ``Event.starts_at`` (UTC-aware) for each ref that
+    exists in the events table. Absent refs are simply not in the map; a persisted
+    NULL kickoff maps to None.
+
+    The pick/CLV pipelines use this to exclude IN-PLAY (post-kickoff) snapshots.
+    The PERSISTED kickoff is authoritative when the ephemeral in-memory directory
+    copy is late or missing (tennis start times land late) — the leak that let an
+    in-play OddsPortal price mint a pre-match pick / stamp a CLV close."""
+    refs = list(external_refs)
+    if not refs:
+        return {}
+    rows = (
+        await session.execute(
+            select(Event.external_ref, Event.starts_at).where(Event.external_ref.in_(refs))
+        )
+    ).all()
+    return {ref: (to_utc(starts_at) if starts_at is not None else None) for ref, starts_at in rows}
 
 
 # Close anchors that make a close TRUSTABLE for honest CLV — a NAMED sharp book
@@ -2378,7 +2400,7 @@ async def closing_odds_from_snapshots(
     """Per-bookmaker odds AT CLOSE from our own odds_snapshots history.
 
     For every (market, bookmaker, selection) of the event: the LAST row
-    captured at-or-before kickoff, rebuilt as OddsSnapshotIn (keyed by the
+    captured strictly before kickoff, rebuilt as OddsSnapshotIn (keyed by the
     event's external_ref) so the caller can run the exact live grouping +
     devig pipeline over it. Also returns the EVENT's overall last pre-kickoff
     capture time — the scrape-coverage clock.
@@ -2398,7 +2420,9 @@ async def closing_odds_from_snapshots(
                 select(OddsSnapshot)
                 .where(
                     OddsSnapshot.event_id == event_id,
-                    OddsSnapshot.captured_at <= kickoff,
+                    # STRICTLY before kickoff: a row captured AT/after kickoff is
+                    # an in-play price, never a pre-match close.
+                    OddsSnapshot.captured_at < kickoff,
                 )
                 # Postgres DISTINCT ON: first row per (market, bookmaker,
                 # selection) under captured_at-DESC ordering == the close row.
