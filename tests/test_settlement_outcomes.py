@@ -45,6 +45,43 @@ def test_h2h_away_win() -> None:
     assert settle("h2h", AWAY, 3, 1) is Outcome.LOST
 
 
+# --- h2h two-way moneyline tie (NFL) ------------------------------------------
+
+
+def test_two_way_h2h_tie_pushes_for_american_football() -> None:
+    # NFL h2h is a TWO-WAY moneyline (no Draw leg is offered/minted): a tied
+    # final (possible after OT, e.g. 20-20) refunds the stake under standard
+    # book rules — grading BOTH sides LOST records a phantom full-stake loss.
+    assert (
+        settle_selection("h2h", HOME, HOME, AWAY, 20, 20, sport_key="american_football")
+        is Outcome.PUSH
+    )
+    assert (
+        settle_selection("h2h", AWAY, HOME, AWAY, 20, 20, sport_key="american_football")
+        is Outcome.PUSH
+    )
+
+
+def test_two_way_h2h_decisive_final_unchanged_for_american_football() -> None:
+    assert (
+        settle_selection("h2h", HOME, HOME, AWAY, 27, 20, sport_key="american_football")
+        is Outcome.WON
+    )
+    assert (
+        settle_selection("h2h", AWAY, HOME, AWAY, 27, 20, sport_key="american_football")
+        is Outcome.LOST
+    )
+
+
+def test_three_way_h2h_tie_semantics_unchanged() -> None:
+    # Soccer 1X2 keeps its Draw leg: team legs LOSE a draw, the Draw leg WINS —
+    # and the sport-less default (every existing caller) is byte-identical.
+    assert settle_selection("h2h", HOME, HOME, AWAY, 1, 1, sport_key="soccer") is Outcome.LOST
+    assert settle_selection("h2h", "Draw", HOME, AWAY, 1, 1, sport_key="soccer") is Outcome.WON
+    assert settle("h2h", HOME, 1, 1) is Outcome.LOST
+    assert settle("h2h", "Draw", 1, 1) is Outcome.WON
+
+
 # --- totals -------------------------------------------------------------------
 
 

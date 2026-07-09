@@ -11,6 +11,7 @@ Invariants (kestrel-settlement discipline):
 """
 
 import logging
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -24,7 +25,7 @@ from sqlalchemy.orm import aliased
 
 from app.edge.value_policy import ValuePolicy
 from app.probabilities.devig import DevigMethod
-from app.resolution.matching import fixture_pair_key
+from app.resolution.matching import fixture_pair_key, normalize_name, strip_live_status
 from app.schemas.base import Outcome
 from app.settlement.outcomes import (
     TENNIS_SETTLEMENT_CONVENTION,
@@ -243,6 +244,49 @@ async def void_unsettleable_known_kickoff_picks(
     return voided
 
 
+# Trailing signed handicap token of a spreads selection ("Alpha FC -1.5").
+# Mirror of outcomes._SIGNED_LINE_RE (kept here so the dedup key needs no
+# settlement import).
+_SELECTION_LINE_RE = re.compile(r"[+-]\d+(?:\.\d+)?")
+
+
+def _selection_dedup_key(selection: str) -> str:
+    """Spelling-insensitive, LINE-PRESERVING equivalence key for one selection.
+
+    Fixture identity in the dedup guard is normalized (fixture_pair_key), but
+    Pick.selection embeds the SOURCE'S team spelling verbatim ("Arsenal" vs
+    "Arsenal FC", diacritics, a legacy "[In Running]" suffix) — raw string
+    equality is blind exactly where cross-source spellings diverge, so both
+    twins settle and pnl/ROI/CLV double-count. Fold team-named selections with
+    the SAME normalizer the resolution layer uses, while keeping every
+    line/number token VERBATIM (normalize_name strips signs and punctuation,
+    so it must never see a line — merging "+1.5" with "-1.5" would supersede a
+    genuinely distinct bet):
+
+    - "Team -1.5" (spreads): normalized team + the verbatim signed line;
+    - "A or B" / "A or Draw" (double_chance): normalized parts, order-free;
+    - anything else carrying a digit (totals "Over 2.5", EH "Draw (+1)"):
+      kept verbatim — the digits ARE the bet;
+    - plain team/word selections (h2h, dnb, BTTS): normalized.
+
+    A part that normalizes to "" falls back to the raw string — fail toward
+    NOT merging, the same behavior as the old exact comparison.
+    """
+    base = strip_live_status(selection)
+    team, _, raw_line = base.rpartition(" ")
+    if team and _SELECTION_LINE_RE.fullmatch(raw_line):
+        norm = normalize_name(strip_live_status(team))
+        return f"{norm} {raw_line}" if norm else base
+    if " or " in base:
+        parts = [normalize_name(part) for part in base.split(" or ")]
+        if all(parts):
+            return " or ".join(sorted(parts))
+        return base
+    if any(ch.isdigit() for ch in base):
+        return base
+    return normalize_name(base) or base
+
+
 async def _settled_sibling_exists(
     session: AsyncSession,
     *,
@@ -264,15 +308,18 @@ async def _settled_sibling_exists(
     _dedup_tolerance (tennis wider — a 1v1 pair meets once/day; team sports keep
     the tight 2h), and the same UNORDERED fixture_pair_key (which folds a
     ``[In Running]`` live-fork onto its clean twin and preserves women's/youth
-    markers). Only rows that already carry a result_tracking row are considered
-    (the settled sibling). Fail-safe: the same-teams + bounded-time match cannot
-    hit a genuinely distinct fixture, so a match is only ever a cross-source
+    markers). Selections are compared via _selection_dedup_key, NOT raw string
+    equality — a cross-source twin spells the same team differently ("Arsenal"
+    vs "Arsenal FC"), while distinct lines/handicaps stay distinct. Only rows
+    that already carry a result_tracking row are considered (the settled
+    sibling). Fail-safe: the same-teams + bounded-time match cannot hit a
+    genuinely distinct fixture, so a match is only ever a cross-source
     duplicate."""
     tol = _dedup_tolerance(sport_key)
     home_t, away_t = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
-            select(home_t.name, away_t.name)
+            select(Pick.selection, home_t.name, away_t.name)
             .select_from(Pick)
             .join(ResultTracking, ResultTracking.pick_id == Pick.id)
             .join(Event, Pick.event_id == Event.id)
@@ -282,7 +329,6 @@ async def _settled_sibling_exists(
                 Pick.id != pick_id,
                 Pick.event_id != event_id,
                 Pick.market == market,
-                Pick.selection == selection,
                 Pick.model_version_id == model_version_id,
                 Event.sport_id == sport_id,
                 Event.starts_at.is_not(None),
@@ -291,7 +337,11 @@ async def _settled_sibling_exists(
             )
         )
     ).all()
-    return any(fixture_pair_key(h, a) == target_pair for h, a in rows)
+    sel_key = _selection_dedup_key(selection)
+    return any(
+        _selection_dedup_key(sib_sel) == sel_key and fixture_pair_key(h, a) == target_pair
+        for sib_sel, h, a in rows
+    )
 
 
 async def settle_open_picks(
@@ -406,6 +456,7 @@ async def settle_open_picks(
             now,
             completion=score.completion,
             winner_side=score.winner_side,
+            sport_key=sport_key,
         ):
             settled += 1
             # Snapshot close AFTER the status flip, same transaction: the
@@ -456,6 +507,10 @@ async def settle_event_picks(
     (settle_open_picks). Without it the snapshot close is skipped, so a
     manually-settled pick would never enter the sharp-CLV subset (audit #4).
 
+    Applies the SAME settled-sibling dedup guard as the auto path: a pick whose
+    cross-source twin already settled is flipped to 'superseded' (counted into
+    `skipped`), never hand-settled into a second result_tracking row.
+
     Returns (settled, skipped). The caller owns the transaction.
     """
     from app.clv_trueup import finalize_closing_from_snapshots  # lazy: circular
@@ -463,16 +518,71 @@ async def settle_event_picks(
     home, away = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
-            select(Pick, home.name, away.name, Event.external_ref, Event.starts_at)
+            select(
+                Pick,
+                home.name,
+                away.name,
+                Event.external_ref,
+                Event.starts_at,
+                Event.sport_id,
+                Sport.key,
+            )
             .join(Event, Pick.event_id == Event.id)
             .join(home, Event.home_team_id == home.id)
             .join(away, Event.away_team_id == away.id)
+            .join(Sport, Event.sport_id == Sport.id)
             .where(Pick.status == "alerted", Pick.event_id == event_id)
         )
     ).all()
-    settled = skipped = 0
-    for pick, home_name, away_name, external_ref, starts_at in rows:
-        if await _settle_one(session, pick, home_name, away_name, home_score, away_score, now):
+    settled = skipped = superseded = 0
+    for pick, home_name, away_name, external_ref, starts_at, sport_id, sport_key in rows:
+        # DEDUP GUARD — mirror of settle_open_picks: in the pre-supersede window
+        # (full time until the auto pass reaches kickoff+delay) the dashboard
+        # shows BOTH duplicate events as pending, so an operator can hand-settle
+        # the twin of an already-settled pick and double-count one physical bet.
+        # NULL starts_at cannot bound the fixture window -> guard skipped (the
+        # manual path stays available for TBD-kickoff events, as before).
+        pair = fixture_pair_key(home_name, away_name)
+        if (
+            pair is not None
+            and starts_at is not None
+            and await _settled_sibling_exists(
+                session,
+                pick_id=pick.id,
+                event_id=pick.event_id,
+                sport_id=sport_id,
+                starts_at=starts_at,
+                market=pick.market,
+                selection=pick.selection,
+                model_version_id=pick.model_version_id,
+                target_pair=pair,
+                sport_key=sport_key,
+            )
+        ):
+            # Same terminal shape as the auto pass: 'superseded' writes NO
+            # result_tracking row, so it never enters pnl/ROI/CLV.
+            pick.status = "superseded"
+            superseded += 1
+            skipped += 1  # not settled — the caller's (settled, skipped) contract
+            logger.info(
+                "manual settlement: superseded duplicate pick %d (%s %s) — a "
+                "sibling of the same fixture is already settled (cross-source "
+                "event dedup)",
+                pick.id,
+                pick.market,
+                pick.selection,
+            )
+            continue
+        if await _settle_one(
+            session,
+            pick,
+            home_name,
+            away_name,
+            home_score,
+            away_score,
+            now,
+            sport_key=sport_key,
+        ):
             settled += 1
             # Snapshot close AFTER the status flip, same transaction — mirror of
             # the auto path so manual settles also enter the CLV subset (audit #4).
@@ -491,7 +601,7 @@ async def settle_event_picks(
                 )
         else:
             skipped += 1
-    if settled:
+    if settled or superseded:
         await session.flush()
     return settled, skipped
 
@@ -507,6 +617,7 @@ async def _settle_one(
     *,
     completion: Completion = "full",
     winner_side: str | None = None,
+    sport_key: str | None = None,
 ) -> bool:
     """Atomic single-pick settlement: result row + status flip. False = skipped.
 
@@ -515,6 +626,10 @@ async def _settle_one(
     completed set) voids every market; "retired" (>=1 completed set, a player
     advanced) grades h2h to `winner_side` and voids the rest; "full" — the
     only value non-tennis providers emit — is the unchanged score path.
+
+    `sport_key` enables sport-convention grading (a tied final on a 2-way
+    moneyline pushes — see outcomes._TWO_WAY_H2H_SPORTS); None keeps the
+    3-way default.
     """
     try:
         if completion == "void":
@@ -525,7 +640,13 @@ async def _settle_one(
             )
         else:
             outcome = settle_selection(
-                pick.market, pick.selection, home_name, away_name, home_score, away_score
+                pick.market,
+                pick.selection,
+                home_name,
+                away_name,
+                home_score,
+                away_score,
+                sport_key=sport_key,
             )
     except ValueError as exc:
         logger.warning("pick %d not settleable: %s", pick.id, exc)

@@ -324,6 +324,94 @@ async def test_different_selection_not_deduped(session) -> None:  # type: ignore
     assert len(await _result_rows(session, p1.id, p2.id)) == 2
 
 
+# --- selection-spelling equivalence (cross-source dedup blindness fix) --------
+
+
+def test_selection_dedup_key_folds_team_spelling_variants() -> None:
+    """Team-named selections fold with the SAME normalizer fixture identity uses
+    (club-form noise tokens, diacritics, case, a legacy [In Running] suffix) —
+    raw string equality was blind exactly where cross-source spellings diverge."""
+    from app.settlement.engine import _selection_dedup_key
+
+    assert _selection_dedup_key("Arsenal") == _selection_dedup_key("Arsenal FC")
+    assert _selection_dedup_key("Atlético Madrid") == _selection_dedup_key("Atletico Madrid")
+    assert _selection_dedup_key("ALPHA UNITED") == _selection_dedup_key("Alpha United")
+    assert _selection_dedup_key("Alpha [In Running]") == _selection_dedup_key("Alpha")
+    # genuinely different teams stay distinct
+    assert _selection_dedup_key("Arsenal") != _selection_dedup_key("Chelsea")
+
+
+def test_selection_dedup_key_never_merges_different_lines() -> None:
+    """Over-merge guard: line/handicap tokens are compared VERBATIM —
+    normalize_name would erase the sign/decimal point and merge distinct bets."""
+    from app.settlement.engine import _selection_dedup_key
+
+    assert _selection_dedup_key("Over 2.5") != _selection_dedup_key("Over 3.5")
+    assert _selection_dedup_key("Over 2.5") != _selection_dedup_key("Under 2.5")
+    assert _selection_dedup_key("Alpha FC -1.5") != _selection_dedup_key("Alpha FC +1.5")
+    assert _selection_dedup_key("Alpha FC -1.5") != _selection_dedup_key("Alpha FC -0.5")
+    assert _selection_dedup_key("Draw (+1)") != _selection_dedup_key("Draw (+2)")
+    # the SAME line with a different team spelling still folds (spreads dedup)
+    assert _selection_dedup_key("Alpha FC -1.5") == _selection_dedup_key("Alpha -1.5")
+
+
+def test_selection_dedup_key_double_chance_is_order_and_form_free() -> None:
+    from app.settlement.engine import _selection_dedup_key
+
+    assert _selection_dedup_key("Alpha FC or Draw") == _selection_dedup_key("Alpha or Draw")
+    assert _selection_dedup_key("Alpha or Beta") == _selection_dedup_key("Beta or Alpha")
+    assert _selection_dedup_key("Alpha or Draw") != _selection_dedup_key("Beta or Draw")
+
+
+async def test_duplicate_with_different_selection_spelling_is_deduped(session) -> None:  # type: ignore[no-untyped-def]
+    """Cross-source twin whose h2h selection spells the SAME team differently
+    ("Dedup Alpha" vs "Dedup Alpha FC") must still be superseded — the guard
+    compared raw selection strings, so both settled and pnl double-counted."""
+    p1 = await seed_pick(session, "evt-spell-A", market=Market.H2H, selection=HOME)
+    await _mark_settled(session, p1)
+    p2 = await _insert_dup_pick(session, p1, "evt-spell-B", selection=f"{HOME} FC")
+
+    n = await settle_open_picks(session, book_with_score(2, 1), NOW)
+
+    assert n == 0, "the differently-spelled twin must not settle"
+    await session.refresh(p2)
+    assert p2.status == "superseded"
+    assert len(await _result_rows(session, p1.id, p2.id)) == 1
+
+
+# --- manual settlement path (settle_event_picks) dedup guard -------------------
+
+
+async def test_manual_settle_event_picks_supersedes_settled_twin(session) -> None:  # type: ignore[no-untyped-def]
+    """settle_event_picks (the manual /events/{id}/result path) must apply the
+    SAME settled-sibling guard as the auto pass: in the pre-supersede window the
+    dashboard shows BOTH duplicate events pending, so an operator settling each
+    by hand wrote two result_tracking rows for one physical bet."""
+    from app.settlement.engine import settle_event_picks
+
+    p1 = await seed_pick(session, "evt-man-A")
+    await _mark_settled(session, p1)
+    p2 = await _insert_dup_pick(session, p1, "evt-man-B")
+
+    settled, skipped = await settle_event_picks(session, p2.event_id, 2, 1, NOW)
+
+    assert settled == 0, "the twin must be superseded, never settled again"
+    assert skipped == 1
+    await session.refresh(p2)
+    assert p2.status == "superseded"
+    assert len(await _result_rows(session, p1.id, p2.id)) == 1
+
+
+async def test_manual_settle_event_picks_without_settled_twin_still_settles(session) -> None:  # type: ignore[no-untyped-def]
+    """Fail-safe: the manual path still settles a pick with NO settled sibling."""
+    from app.settlement.engine import settle_event_picks
+
+    p1 = await seed_pick(session, "evt-man-solo")
+    settled, skipped = await settle_event_picks(session, p1.event_id, 2, 1, NOW)
+    assert (settled, skipped) == (1, 0)
+    assert len(await _result_rows(session, p1.id)) == 1
+
+
 def test_fixture_pair_key_folds_live_status_fork() -> None:
     from app.resolution.matching import fixture_pair_key
 

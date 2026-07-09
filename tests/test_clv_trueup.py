@@ -479,7 +479,7 @@ async def test_offwindow_open_picks_revalidated_via_match_links(factory) -> None
         assert pick.revalidated_at is not None
 
 
-async def test_scrape_passes_skip_non_oddsportal_loaders() -> None:  # type: ignore[no-untyped-def]
+async def test_scrape_passes_skip_non_oddsportal_loaders():  # type: ignore[no-untyped-def]
     # Regression (dual-provider results-scrape TypeError): a loader that is NOT
     # an OddsPortal-style match-page scraper exposes a same-named but url-based
     # fetch_match_odds (OddsChecker/Betfair) and opts out via
@@ -1559,3 +1559,118 @@ async def test_drift_recording_appends_path_when_enabled(factory) -> None:  # ty
         assert d.fair_probability is not None  # the de-vigged fair at this observation
         assert d.clv_log is not None  # CLV-so-far vs the fill
         assert d.anchor_type == "pinnacle"  # close anchored by Pinnacle
+
+
+# --- line-ambiguity guard over UNANCHORED groups (period-submarket overwrite) --
+
+
+_GroupedEntry = tuple[dict[str, dict[str, float]], dict[tuple[str, str], datetime]]
+_Grouped = dict[tuple[str, "Market", str | None], _GroupedEntry]
+
+
+def _grouped_entry(books: dict[str, float], captured_at: datetime) -> _GroupedEntry:
+    prices = {"Over 2.5": books}
+    captured = {("Over 2.5", book): captured_at for book in books}
+    return prices, captured
+
+
+def test_collect_group_prices_marks_unanchored_period_collision_ambiguous() -> None:
+    """An UNANCHORED period submarket (too thin for a fair) sharing the
+    line-blind (event, market, selection) key must mark the key AMBIGUOUS and
+    never last-write-win over the anchored group's prices — previously it
+    silently overwrote prices_by_key and fed a wrong-line current_odds/edge."""
+    from app.clv_trueup import _collect_group_prices
+
+    full = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    half = datetime(2026, 7, 1, 12, 5, tzinfo=UTC)
+    grouped: _Grouped = {
+        # anchored full-match group (iterates FIRST: the last-write-wins case)
+        ("ev1", Market.TOTALS, None): _grouped_entry({"pinnacle": 1.90, "SoftBook": 1.95}, full),
+        # unanchored 1st-half submarket, same selection string
+        ("ev1", Market.TOTALS, "1st Half"): _grouped_entry({"SoftBook": 2.40}, half),
+    }
+    key = ("ev1", "totals", "Over 2.5")
+    detail_by_key: dict[tuple[str, str, str], str | None] = {key: None}  # anchored detail
+    ambiguous_keys: set[tuple[str, str, str]] = set()
+
+    prices_by_key, captured_by_key = _collect_group_prices(grouped, detail_by_key, ambiguous_keys)
+
+    assert key in ambiguous_keys, "unanchored period collision must be ambiguous"
+    assert prices_by_key[key] == {"pinnacle": 1.90, "SoftBook": 1.95}, (
+        "the anchored group's prices must never be overwritten by the submarket"
+    )
+    assert captured_by_key[key] == {
+        ("Over 2.5", "pinnacle"): full,
+        ("Over 2.5", "SoftBook"): full,
+    }
+
+
+def test_collect_group_prices_single_detail_key_is_unambiguous() -> None:
+    from app.clv_trueup import _collect_group_prices
+
+    at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    grouped: _Grouped = {("ev1", Market.TOTALS, None): _grouped_entry({"pinnacle": 1.90}, at)}
+    key = ("ev1", "totals", "Over 2.5")
+    detail_by_key: dict[tuple[str, str, str], str | None] = {key: None}
+    ambiguous_keys: set[tuple[str, str, str]] = set()
+
+    prices_by_key, _ = _collect_group_prices(grouped, detail_by_key, ambiguous_keys)
+
+    assert ambiguous_keys == set()
+    assert prices_by_key[key] == {"pinnacle": 1.90}
+
+
+def test_collect_group_prices_registers_unanchored_only_keys() -> None:
+    # A key seen ONLY in unanchored groups still collects prices (no fair will
+    # be found downstream — harmless), and two unanchored details collide.
+    from app.clv_trueup import _collect_group_prices
+
+    at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    grouped: _Grouped = {
+        ("ev1", Market.TOTALS, "1st Half"): _grouped_entry({"SoftBook": 2.40}, at),
+        ("ev1", Market.TOTALS, "2nd Half"): _grouped_entry({"SoftBook": 2.60}, at),
+    }
+    detail_by_key: dict[tuple[str, str, str], str | None] = {}
+    ambiguous_keys: set[tuple[str, str, str]] = set()
+
+    prices_by_key, _ = _collect_group_prices(grouped, detail_by_key, ambiguous_keys)
+
+    assert ("ev1", "totals", "Over 2.5") in ambiguous_keys
+
+
+def test_detail_matched_books_skips_unanchored_period_group() -> None:
+    """finalize_closing_from_snapshots used to break on the FIRST grouped entry
+    matching (market, selection) regardless of detail — closing_odds and the
+    close capture time could be stamped from an unanchored period submarket
+    when it iterated before the anchored group."""
+    from app.clv_trueup import _detail_matched_books
+
+    full = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    half = datetime(2026, 7, 1, 12, 5, tzinfo=UTC)
+    grouped: _Grouped = {
+        # unanchored 1st-half submarket iterates FIRST (the break-on-first case);
+        # production vocabulary (market_from_snapshot_key line-qualified detail)
+        ("ev1", Market.TOTALS, "totals_2_5_1st_half"): _grouped_entry({"SoftBook": 2.40}, half),
+        ("ev1", Market.TOTALS, None): _grouped_entry({"pinnacle": 1.90, "SoftBook": 1.95}, full),
+    }
+
+    books, captured = _detail_matched_books(grouped, "totals", "Over 2.5", None)
+
+    # SoftBook 1.95 from the anchored full-match group, never the 1st-half 2.40
+    assert books == {"pinnacle": 1.90, "SoftBook": 1.95}
+    assert captured == {("Over 2.5", "pinnacle"): full, ("Over 2.5", "SoftBook"): full}
+
+
+def test_detail_matched_books_no_match_is_empty() -> None:
+    from app.clv_trueup import _detail_matched_books
+
+    at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    grouped: _Grouped = {
+        # ONLY a period submarket quotes the key (production underscore detail)
+        ("ev1", Market.TOTALS, "totals_2_5_1st_half"): _grouped_entry({"SoftBook": 2.40}, at)
+    }
+
+    books, captured = _detail_matched_books(grouped, "totals", "Over 2.5", None)
+
+    assert books == {}
+    assert captured == {}

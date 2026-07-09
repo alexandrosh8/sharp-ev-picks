@@ -38,7 +38,13 @@ from app.edge.value import (
 )
 from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import EventDirectory, OddsLoader
-from app.pipeline import drop_post_kickoff_snapshots, event_fair_probs, group_market_prices
+from app.pipeline import (
+    GroupedMarkets,
+    _is_settleable_market_detail,
+    drop_post_kickoff_snapshots,
+    event_fair_probs,
+    group_market_prices,
+)
 from app.probabilities.devig import DevigMethod
 from app.resolution.shadow import arcadia_base_sport
 from app.schemas.base import Market
@@ -124,6 +130,76 @@ def _consistent_current_edge(pick: Pick, fair: float) -> Decimal | None:
     return Decimal(f"{fair - 1.0 / eff:.6f}")
 
 
+def _collect_group_prices(
+    grouped: GroupedMarkets,
+    detail_by_key: dict[tuple[str, str, str], str | None],
+    ambiguous_keys: set[tuple[str, str, str]],
+) -> tuple[
+    dict[tuple[str, str, str], dict[str, float]],
+    dict[tuple[str, str, str], Mapping[tuple[str, str], datetime | None]],
+]:
+    """Price/captured maps per line-blind pick key over ALL grouped entries,
+    extending the line-ambiguity guard to UNANCHORED groups.
+
+    The anchored fair loop pre-registers its details in ``detail_by_key``; an
+    UNANCHORED period submarket (too thin for a fair, so invisible to that
+    loop) sharing a key must mark the key ambiguous and be SKIPPED — never
+    silently last-write-win over the anchored group's prices, which fed a
+    wrong-line current_odds/current_edge "still value" verdict. Mutates
+    ``detail_by_key``/``ambiguous_keys`` in place (fail-closed downstream:
+    the per-pick ambiguity skip refuses the whole key).
+    """
+    prices_by_key: dict[tuple[str, str, str], dict[str, float]] = {}
+    captured_by_key: dict[tuple[str, str, str], Mapping[tuple[str, str], datetime | None]] = {}
+    for (event_id, market, _detail), (prices, captured) in grouped.items():
+        for sel, books in prices.items():
+            key = (event_id, str(market), sel)
+            if key in detail_by_key and detail_by_key[key] != _detail:
+                ambiguous_keys.add(key)
+                continue  # never overwrite across submarkets — skip, don't guess
+            detail_by_key[key] = _detail
+            prices_by_key[key] = books
+            captured_by_key[key] = captured
+    return prices_by_key, captured_by_key
+
+
+def _detail_matched_books(
+    grouped: GroupedMarkets,
+    market: str,
+    selection: str,
+    detail: str | None,
+) -> tuple[dict[str, float], Mapping[tuple[str, str], datetime | None]]:
+    """The (books, captured) for (market, selection) across the FULL-MATCH
+    grouped entries, the anchored-fair detail group winning per book.
+
+    Period/corner/card submarket groups (non-settleable details) sharing the
+    line-blind key are excluded outright — the wrong-line trap this helper
+    exists to close: an unanchored '..._1st_half' group must never stamp
+    closing_odds/close capture provenance. Full-match groups under a DIFFERENT
+    label are merged, not dropped: the same line arrives under source-specific
+    vocabularies (a soft '1x2' detail vs a detail-less injected sharp h2h
+    close), and the pick's own soft close must still be found when the anchor
+    lives in the differently-labelled group. Empty maps when nothing full-match
+    quotes the selection (the caller degrades to no soft close price)."""
+    books: dict[str, float] = {}
+    captured: dict[tuple[str, str], datetime | None] = {}
+    exact: tuple[dict[str, float], Mapping[tuple[str, str], datetime | None]] | None = None
+    for (_event, group_market, _detail), (prices, cap) in grouped.items():
+        if str(group_market) != market or selection not in prices:
+            continue
+        if not _is_settleable_market_detail(_detail):
+            continue  # period/corner/card submarket — never a close source
+        if _detail == detail:
+            exact = (prices[selection], cap)
+        else:
+            books.update(prices[selection])
+            captured.update(cap)
+    if exact is not None:
+        books.update(exact[0])
+        captured.update(exact[1])
+    return books, captured
+
+
 async def revalidate_open_picks(
     session_factory: "async_sessionmaker",
     snapshots: Sequence[OddsSnapshotIn],
@@ -193,14 +269,13 @@ async def revalidate_open_picks(
             fair_by_key[key] = p
             anchor_by_key[key] = book
             fell_back_by_key[key] = fb
-    prices_by_key: dict[tuple[str, str, str], dict[str, float]] = {}
     # D3 close provenance: the group's (selection, book) -> captured_at map per
     # pick key, so the close writer can stamp WHEN the anchor rows were captured.
-    captured_by_key: dict[tuple[str, str, str], Mapping[tuple[str, str], datetime | None]] = {}
-    for (event_id, market, _detail), (prices, captured) in grouped.items():
-        for sel, books in prices.items():
-            prices_by_key[(event_id, str(market), sel)] = books
-            captured_by_key[(event_id, str(market), sel)] = captured
+    # Collected over ALL grouped entries with the line-ambiguity guard extended
+    # to UNANCHORED groups (_collect_group_prices): a period submarket too thin
+    # to anchor must mark the key ambiguous, never silently overwrite the
+    # anchored group's prices with a wrong-line price map.
+    prices_by_key, captured_by_key = _collect_group_prices(grouped, detail_by_key, ambiguous_keys)
 
     if not fair_by_key:
         return 0
@@ -1169,15 +1244,16 @@ async def finalize_closing_from_snapshots(
         )
         return False
     clv = clv_log(fill_eff, fair)
-    books: dict[str, float] = {}
     # D3 close provenance: the matched group's (selection, book) -> captured_at
     # map, so the writer below can stamp WHEN the anchor rows were captured.
-    captured_map: Mapping[tuple[str, str], datetime | None] = {}
-    for (_event, market, _detail), (prices, captured) in grouped.items():
-        if str(market) == pick.market and pick.selection in prices:
-            books = prices[pick.selection]
-            captured_map = captured
-            break
+    # Matched by DETAIL, not first-hit: the fair above came from ONE anchored
+    # submarket group, and an UNANCHORED period submarket sharing the line-blind
+    # (market, selection) key (invisible to ambiguous_keys, which only sees
+    # anchored groups) could iterate first and stamp closing_odds/close capture
+    # time from the wrong line.
+    books, captured_map = _detail_matched_books(
+        grouped, pick.market, pick.selection, detail_by_key.get((pick.market, pick.selection))
+    )
     close_odds: float | None
     if pick.bookmaker in books:
         close_odds = books[pick.bookmaker]

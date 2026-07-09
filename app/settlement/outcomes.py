@@ -36,6 +36,15 @@ _TOTALS_RE = re.compile(r"(Over|Under) (\d+(?:\.\d+)?)")
 _EH_DRAW_RE = re.compile(r"Draw \(([+-]?\d+(?:\.\d+)?)\)")
 _SIGNED_LINE_RE = re.compile(r"[+-]\d+(?:\.\d+)?")
 
+# Sports (Sport.key) whose h2h market is TWO-WAY — no Draw leg is offered or
+# minted, so a tied final has no winning leg to absorb it; standard book rules
+# refund a 2-way moneyline on a tie (push), never grade both sides LOST.
+# Keyed by SPORT, not market: NFL h2h is minted from the same "home_away"
+# 2-way key basketball uses, so the market string cannot distinguish them —
+# and only american_football can actually tie (NFL OT rules; basketball/tennis
+# cannot tie, soccer h2h is 3-way with an explicit Draw leg).
+_TWO_WAY_H2H_SPORTS = frozenset({"american_football"})
+
 
 def settle_selection(
     market: str,
@@ -44,8 +53,14 @@ def settle_selection(
     away: str,
     home_score: int,
     away_score: int,
+    *,
+    sport_key: str | None = None,
 ) -> Outcome:
     """Outcome of one selection given the full-time score.
+
+    `sport_key` (optional) enables sport-convention grading: a tied final on a
+    TWO-WAY h2h market (see _TWO_WAY_H2H_SPORTS) pushes instead of losing.
+    Callers without a sport in hand keep the 3-way default unchanged.
 
     Raises ValueError for selections that cannot be mapped — callers must
     skip (and log) rather than guess.
@@ -54,7 +69,14 @@ def settle_selection(
         raise ValueError(f"negative score: {home_score}-{away_score}")
 
     if market == "h2h":
-        return _settle_h2h(selection, home, away, home_score, away_score)
+        return _settle_h2h(
+            selection,
+            home,
+            away,
+            home_score,
+            away_score,
+            tie_pushes=sport_key in _TWO_WAY_H2H_SPORTS,
+        )
     if market == "totals":
         return _settle_totals(selection, home_score + away_score)
     if market == "btts":
@@ -148,7 +170,19 @@ def _won(condition: bool) -> Outcome:  # noqa: FBT001 — internal binary helper
     return Outcome.WON if condition else Outcome.LOST
 
 
-def _settle_h2h(selection: str, home: str, away: str, hs: int, as_: int) -> Outcome:
+def _settle_h2h(
+    selection: str,
+    home: str,
+    away: str,
+    hs: int,
+    as_: int,
+    *,
+    tie_pushes: bool = False,
+) -> Outcome:
+    if tie_pushes and hs == as_ and selection in (home, away):
+        # Two-way moneyline (no Draw leg — see _TWO_WAY_H2H_SPORTS): a tied
+        # final refunds the stake. Only a 3-way market's team legs lose a draw.
+        return Outcome.PUSH
     if selection == home:
         return _won(hs > as_)
     if selection == away:
