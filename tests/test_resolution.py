@@ -14,6 +14,7 @@ from app.resolution.matching import (
     distinguishing_markers,
     marker_safe_slug_names,
     match_event,
+    match_event_hardened,
     normalize_name,
     oddschecker_slug_names,
     oddsportal_slug_names,
@@ -420,3 +421,89 @@ def test_basketball_seed_bridges_real_pinnacle_vs_oddsportal_names() -> None:
         match_event("Barangay Ginebra", "Taipei Fubon Braves", KO, [ginebra], aliases=table)
         is ginebra
     )
+
+
+# --- ambiguity margin vs duplicate captures (hardened matcher) ---------------
+def test_duplicate_capture_does_not_shield_ambiguity_margin() -> None:
+    # Audit 2026-07-09: the margin guard compared the best only against
+    # eligible[1]. When that slot holds a duplicate capture of the best fixture
+    # (same canonical teams, minutes apart — the Pinnacle-archive shape the
+    # duplicate-collapse exists for), a DISTINCT rival at eligible[2] within
+    # _AMBIGUITY_MARGIN was never examined, so the accept/reject decision
+    # flipped on the mere presence of a duplicate. The margin must be measured
+    # against the first DISTINCT fixture wherever it ranks -> REJECT here.
+    cands = [
+        _cand("1", "Manchester United", "Liverpool"),
+        _cand("2", "Manchester United", "Liverpool", KO + timedelta(minutes=5)),
+        _cand("3", "Manchester Unitd", "Liverpool", KO + timedelta(minutes=10)),
+    ]
+    assert (
+        match_event_hardened("Manchester United", "Liverpool", KO, cands, aliases=AliasTable())
+        is None
+    )
+    # Same triple without the duplicate already rejects (the pre-fix behavior
+    # the shield was flipping): the decision must be identical either way.
+    assert (
+        match_event_hardened(
+            "Manchester United", "Liverpool", KO, [cands[0], cands[2]], aliases=AliasTable()
+        )
+        is None
+    )
+
+
+def test_duplicate_capture_without_distinct_rival_still_collapses() -> None:
+    # RECALL guard: duplicate captures of ONE fixture (no distinct rival in the
+    # set) are NOT ambiguous — they still collapse to the nearest-kickoff one.
+    cands = [
+        _cand("1", "Manchester United", "Liverpool"),
+        _cand("2", "Manchester United", "Liverpool", KO + timedelta(minutes=5)),
+    ]
+    m = match_event_hardened("Manchester United", "Liverpool", KO, cands, aliases=AliasTable())
+    assert m is not None and m.ref == "1"
+
+
+# --- alias-conflict quarantine ------------------------------------------------
+def test_alias_claimed_by_two_canonicals_is_quarantined() -> None:
+    # An alias string claimed by two DIFFERENT canonicals is a conflict: silent
+    # last-write-wins could hang a name on the wrong club (wrong-game risk).
+    # The alias must resolve to NEITHER claimant (identity passthrough only)
+    # and the conflict must be observable.
+    table = AliasTable()
+    table.add("Sporting X", "Alpha Town")
+    table.add("Sporting X", "Beta Town")
+    assert table.canonical("Sporting X") == normalize_name("Sporting X")
+    assert table.conflicts == {"sporting x": frozenset({"alpha town", "beta town"})}
+    # The stale reverse entry is dropped too: neither claimant expands to it.
+    assert "sporting x" not in table.aliases_of("Alpha Town")
+    assert "sporting x" not in table.aliases_of("Beta Town")
+
+
+def test_alias_readd_to_same_canonical_is_not_a_conflict() -> None:
+    table = AliasTable()
+    table.add("Man Utd", "Manchester United")
+    table.add("Man Utd", "Manchester United")
+    assert table.canonical("Man Utd") == normalize_name("Manchester United")
+    assert table.conflicts == {}
+
+
+def test_conflicted_alias_never_resolves_again() -> None:
+    # A later re-claim (even repeating an original claimant) must NOT resurrect
+    # a quarantined alias — it stays identity and the claim is recorded.
+    table = AliasTable()
+    table.add("Sporting X", "Club Alpha")
+    table.add("Sporting X", "Club Beta")
+    table.add("Sporting X", "Club Alpha")
+    assert table.canonical("Sporting X") == normalize_name("Sporting X")
+    assert "sporting x" in table.conflicts
+
+
+def test_seed_alias_conflicts_are_exactly_the_known_two() -> None:
+    # Tripwire: any NEW cross-canonical alias claim added to the seed fails
+    # here. The two known conflicts (the América Futebol Clube / America
+    # Mineiro fork and the Drogheda United F.C. / Drogheda United fork) are
+    # quarantined: the alias resolves to its own normalized form, never to
+    # either claimant, instead of the old nondeterministic last-write-wins.
+    table = AliasTable.from_seed()
+    assert set(table.conflicts) == {"america mineiro", "drogheda united"}
+    assert table.canonical("America Mineiro") == "america mineiro"
+    assert table.canonical("Drogheda United") == "drogheda united"

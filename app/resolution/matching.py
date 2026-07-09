@@ -435,11 +435,19 @@ class AliasTable:
     (unknown names pass through normalized); `aliases_of(name)` expands a name to
     its full known alias set (the soccerdata bidirectional pattern). No fuzzy
     lookup — exact normalized keys only.
+
+    CONFLICT QUARANTINE: an alias string claimed by two DIFFERENT canonicals is
+    a conflict — silent last-write-wins would resolve it by load order, hanging
+    the name on whichever club happens to come last (a wrong-game risk, and a
+    coverage hole either way). `add` drops BOTH claims for the alias (it passes
+    through as its own normalized form, never resolving to either claimant) and
+    records the conflict in `conflicts` for review.
     """
 
     def __init__(self, mapping: Mapping[str, str] | None = None) -> None:
         self._alias_to_canon: dict[str, str] = {}
         self._canon_to_aliases: dict[str, set[str]] = {}
+        self._conflicted: dict[str, set[str]] = {}
         for alias, canonical in (mapping or {}).items():
             self.add(alias, canonical)
 
@@ -448,8 +456,26 @@ class AliasTable:
         normalized_canon = normalize_name(canonical)
         if not normalized_alias or not normalized_canon:
             return
+        if normalized_alias in self._conflicted:
+            # Once quarantined, an alias never resolves again — record the claim.
+            self._conflicted[normalized_alias].add(normalized_canon)
+            return
+        existing = self._alias_to_canon.get(normalized_alias)
+        if existing is not None and existing != normalized_canon:
+            # Cross-canonical claim: quarantine. Drop the earlier mapping AND its
+            # reverse entry (no stale expansion), refuse the new one.
+            del self._alias_to_canon[normalized_alias]
+            self._canon_to_aliases.get(existing, set()).discard(normalized_alias)
+            self._conflicted[normalized_alias] = {existing, normalized_canon}
+            return
         self._alias_to_canon[normalized_alias] = normalized_canon
         self._canon_to_aliases.setdefault(normalized_canon, set()).add(normalized_alias)
+
+    @property
+    def conflicts(self) -> dict[str, frozenset[str]]:
+        """Quarantined alias strings -> the set of canonicals that claimed them.
+        A conflicted alias resolves to NEITHER claimant (identity passthrough)."""
+        return {alias: frozenset(canons) for alias, canons in self._conflicted.items()}
 
     def canonical(self, name: str) -> str:
         normalized = normalize_name(name)
@@ -970,14 +996,20 @@ def match_event_hardened_scored(
     eligible.sort(key=lambda s: (-s[0], abs((s[1].kickoff - kickoff).total_seconds()), s[1].ref))
     best_score, best, best_swapped = eligible[0]
     if len(eligible) > 1:
-        runner_score, runner, runner_swapped = eligible[1]
         # Two DISTINCT candidates within the ambiguity margin -> cannot tell which
         # is the real fixture. (Duplicate captures of ONE fixture share canonical
-        # teams and are NOT ambiguous — they collapse to the nearest-kickoff one.)
-        if not _same_fixture(runner, best) and best_score - runner_score < _AMBIGUITY_MARGIN:
-            _reject_review(best, best_swapped, "ambiguity_margin")
-            _reject_review(runner, runner_swapped, "ambiguity_margin")
-            return None
+        # teams and are NOT ambiguous — they collapse to the nearest-kickoff one —
+        # but they must not SHIELD the margin test either: the runner measured here
+        # is the first DISTINCT fixture in score order, wherever it ranks. A dup of
+        # the best sitting at eligible[1] must never mask an ambiguous rival below.)
+        for runner_score, runner, runner_swapped in eligible[1:]:
+            if _same_fixture(runner, best):
+                continue
+            if best_score - runner_score < _AMBIGUITY_MARGIN:
+                _reject_review(best, best_swapped, "ambiguity_margin")
+                _reject_review(runner, runner_swapped, "ambiguity_margin")
+                return None
+            break  # score-sorted: later distinct candidates are further away
         # Two DISTINCT same-teams games BOTH inside the tight accept bound (a true
         # doubleheader / two legs <6h apart) cannot be told apart by name OR by a
         # day-window — REJECT. Only candidates that are within the same-game kickoff
