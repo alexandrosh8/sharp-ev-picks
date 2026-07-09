@@ -681,6 +681,8 @@
       .er-event { grid-column: 1 / -1; font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .er-sel { grid-column: 1; font-size: 11px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .er-tier { grid-column: 2; grid-row: 3; justify-self: end; }
+      /* Audit 2026-07-09: full-width danger strip for structural_sane=false rows */
+      .er-danger { grid-column: 1 / -1; justify-self: start; margin-top: 4px; }
 
       /* detail drawer — right-docked, slides in over the stream */
       .edge-detail {
@@ -780,9 +782,6 @@
         text-transform: uppercase;
         color: var(--text3);
       }
-
-      .stars-row { font-size: 13px; color: var(--warm); letter-spacing: 2px; }
-      .stars-row .empty { color: var(--line2); }
 
       .timeline { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
       .tl-step {
@@ -1735,11 +1734,22 @@
           return Date.now() - new Date(p.revalidated_at).getTime() < verifiedWindowMs(health);
         }
         function dataIsStale(health) {
-          if (!health || health.newest_poll_age_seconds == null) return false;
+          // Audit 2026-07-09: fail CLOSED — when the /health fetch itself
+          // failed, freshness is UNVERIFIABLE and must gate like stale
+          // (isActionable refuses, picks move to the Stale group), never
+          // render as verified. Before the first load (no fetch attempted,
+          // healthErr null) behavior is unchanged.
+          if (!health) return state.healthErr !== null;
+          if (health.newest_poll_age_seconds == null) return false;
           return Number(health.newest_poll_age_seconds) * 1000 > verifiedWindowMs(health);
         }
         function isActionable(p, health) {
-          return tierOf(p) === "premium" && p.status === "alerted" && !hasStarted(p) &&
+          // Audit 2026-07-09: structural_sane === false is the server's
+          // stored-impossible flag (offered below its own min-acceptable, or
+          // an inverted fair/offered pair) — such a row must never render as
+          // a bettable pick, whatever its tier/status/freshness say.
+          return p.structural_sane !== false &&
+            tierOf(p) === "premium" && p.status === "alerted" && !hasStarted(p) &&
             isRevalidationFresh(p, health) && hasValueNow(p) && !dataIsStale(health);
         }
         // Edges grouping: Closed (kicked off / settled / superseded, any tier) >
@@ -1770,8 +1780,19 @@
           return isFinite(c) && c < 0.92;
         }
         const TRUSTED_CLOSE_ANCHORS = ["pinnacle", "sharp"];
+        // Audit 2026-07-09: mirror the backend trusted-subset gate
+        // (_settled_close_is_trusted, app/storage/repositories.py) as far as
+        // the /picks row exposes it: a MEASURED clv_log, a sharp close anchor,
+        // independence exactly true, and no honesty exclusion (tautological/
+        // circular/fabricated). has_snapshot_close and the devig-fallback
+        // flags are NOT serialized on /picks — close_independent_of_fill is
+        // only ever stamped from a genuine snapshot close (its closest exposed
+        // provenance), and the backend treats missing devig provenance as
+        // symmetric, so omitting both here matches its conservative reading.
         function isTrustedClv(p) {
-          return p.close_independent_of_fill === true && TRUSTED_CLOSE_ANCHORS.indexOf(p.closing_anchor_type) !== -1;
+          return p.clv_log != null && p.close_independent_of_fill === true &&
+            TRUSTED_CLOSE_ANCHORS.indexOf(p.closing_anchor_type) !== -1 &&
+            clvExclusionOf(p) === null;
         }
         // Fresh honesty guards over the per-pick close (mirrors the intent of the
         // backend's settled-ledger guards; independently derived here for the
@@ -1779,16 +1800,23 @@
         const CLOSE_IMPLIED_EDGE_CEILING = 0.2;
         const CLV_LOG_CEILING = 0.5;
         const TAUTOLOGY_EPSILON = 1e-3;
+        // Audit 2026-07-09: mirror the backend's fixed _clv_row_is_fabricated
+        // (app/storage/repositories.py) ordering EXACTLY — when BOTH real
+        // inputs (decimal_odds + closing_fair_probability) are present the
+        // close-implied edge is the ONLY fabrication test; a legitimate
+        // plausible-close longshot (modest edge but |clv_log| > 0.5) is NOT
+        // fabricated. The |clv_log| ceiling is a FALLBACK evaluated only when
+        // an input is missing/unusable, where the edge cannot be computed.
         function clvIsFabricated(p) {
           if (p.clv_log == null) return false;
-          const logv = Number(p.clv_log);
-          if (isFinite(logv) && Math.abs(logv) > CLV_LOG_CEILING) return true;
           const d = numOf(p.decimal_odds), cf = numOf(p.closing_fair_probability);
           if (isFinite(d) && d > 0 && isFinite(cf)) {
-            const closeEdge = cf - 1 / d;
-            if (closeEdge > CLOSE_IMPLIED_EDGE_CEILING) return true;
+            // Both real inputs present: judge by the close-implied edge ONLY.
+            return cf - 1 / d > CLOSE_IMPLIED_EDGE_CEILING;
           }
-          return false;
+          // Fallback (odds or fair prob absent/unusable): |clv_log| tripwire.
+          const logv = Number(p.clv_log);
+          return isFinite(logv) && Math.abs(logv) > CLV_LOG_CEILING;
         }
         function clvIsTautological(p) {
           const cf = numOf(p.closing_fair_probability), mf = numOf(p.model_probability);
@@ -1850,10 +1878,25 @@
 
           const picksErr = premiumErr !== null && volumeErr !== null ? premiumErr : null;
           if (picksErr === null) {
+            // Audit 2026-07-09: a ONE-sided tier failure must not silently
+            // render as "that tier has no picks" (e.g. premium timing out
+            // while volume answers read as "Qualified now 0"). Keep the
+            // previously loaded rows for the failed tier, surface a per-tier
+            // banner, and do NOT refresh lastOkAt — a partial load is a
+            // degraded state, not a healthy one.
+            const failedTier = premiumErr !== null ? "premium" : volumeErr !== null ? "volume" : null;
+            if (failedTier === "premium") premiumRows = state.picks.filter((p) => tierOf(p) === "premium");
+            if (failedTier === "volume") volumeRows = state.picks.filter((p) => tierOf(p) === "volume");
             state.picks = (premiumRows || []).concat(volumeRows || []);
             state.picksErr = null;
-            state.lastOkAt = new Date();
-            $("offline-banner").classList.remove("show");
+            const banner = $("offline-banner");
+            if (failedTier === null) {
+              state.lastOkAt = new Date();
+              banner.classList.remove("show");
+            } else {
+              banner.classList.add("show");
+              banner.textContent = "Could not refresh " + failedTier + " picks — showing the last loaded rows for that tier.";
+            }
           } else {
             state.picksErr = picksErr;
             const httpish = typeof picksErr.httpStatus === "number";
@@ -2113,8 +2156,12 @@
           const health = state.health;
           const stale = dataIsStale(health);
           const degraded = state.picksErr !== null || (health && health.status === "degraded");
+          // Audit 2026-07-09: a failed /health fetch must NOT render
+          // "Verified" — surface an explicit unknown state in degraded style.
+          const healthUnknown = state.healthErr !== null && !health;
           const age = health && health.newest_poll_age_seconds != null ? fmtRelAge(new Date(Date.now() - Number(health.newest_poll_age_seconds) * 1000).toISOString()) : "—";
           if (degraded) setPillText("Source Degraded · data age " + age, "degraded");
+          else if (healthUnknown) setPillText("Health unknown · data age —", "degraded");
           else if (stale) setPillText("Stale · data age " + age, "stale");
           else setPillText("Verified · data age " + age, null);
 
@@ -2272,7 +2319,10 @@
               const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
               const s = document.createElement("span"); s.className = "kr-s mono";
               const oc = String(p.outcome == null ? p.provisional_outcome : p.outcome).replace("_", " ");
-              const sel = p.selection ? String(p.selection) : "";
+              // Audit 2026-07-09: route through selLabel like every other
+              // pick render site — a bare BTTS "Yes"/"No" is ambiguous
+              // without its market qualifier.
+              const sel = p.selection ? selLabel(p) : "";
               s.textContent = (sel ? sel + " · " : "") + oc.toUpperCase() + (p.outcome == null ? " (provisional)" : "");
               r.append(t0, e, s); rr.appendChild(r);
             });
@@ -2337,9 +2387,12 @@
             c.append(k, v, s); healthBox.appendChild(c);
           };
           const degradedH = state.picksErr !== null || (health && health.status === "degraded");
+          // Audit 2026-07-09: failed /health fetch => explicit unknown state,
+          // never "Verified" (fail closed alongside dataIsStale).
+          const healthUnknownH = state.healthErr !== null && !health;
           const staleH = dataIsStale(health);
-          mkCell("Data freshness", degradedH ? "bad" : staleH ? "warn" : "ok",
-            degradedH ? "Source degraded" : staleH ? "Stale" : "Verified",
+          mkCell("Data freshness", degradedH || healthUnknownH ? "bad" : staleH ? "warn" : "ok",
+            degradedH ? "Source degraded" : healthUnknownH ? "Health unknown" : staleH ? "Stale" : "Verified",
             "Newest odds " + ageTxt + " · window " + fmtNum(verifiedWindowMs(health) / 60000, 0) + "m");
           const pool = health && health.proxy_pool;
           const pc = classifyProxyPool(pool);
@@ -2362,8 +2415,8 @@
             const b = document.createElement("b"); b.textContent = val;
             t.append(kk, b); tick.appendChild(t);
           };
-          mkTick(degradedH ? "bad" : staleH ? "warn" : "ok", "feed",
-            (degradedH ? "degraded" : staleH ? "stale" : "verified") + " · " + ageTxt);
+          mkTick(degradedH || healthUnknownH ? "bad" : staleH ? "warn" : "ok", "feed",
+            (degradedH ? "degraded" : healthUnknownH ? "health unknown" : staleH ? "stale" : "verified") + " · " + ageTxt);
           mkTick(null, "sources", (state.gamesErr ? "—" : state.games.length) + " fixtures");
           mkTick(pc.level, "proxy", pc.label);
           if (perf) mkTick(perf.sharp_status === "ok" ? "ok" : "warn", "sharp clv", nSharp + "/" + floorN);
@@ -2400,6 +2453,14 @@
           sel.textContent = selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
           const trust = document.createElement("span"); trust.className = "er-trust"; trust.textContent = trustGlyph(p); trust.title = anchorLabel(p);
           row.append(ko, ev, tier, sel, trust);
+          // Audit 2026-07-09: surface the server's stored-impossible flag —
+          // isActionable already refuses these rows; the tag says WHY.
+          if (p.structural_sane === false) {
+            const bad = document.createElement("span");
+            bad.className = "er-danger tag tag-danger tag-dashed";
+            bad.textContent = "Internally inconsistent — do not bet";
+            row.appendChild(bad);
+          }
           row.addEventListener("click", () => selectEdge(p.id));
           return row;
         }
@@ -2422,7 +2483,10 @@
             const cQual = all.filter((p) => isActionable(p, health)).length;
             const cTrack = all.filter((p) => edgeGroupOf(p) === "tracked").length;
             const cClosed = all.filter((p) => edgeGroupOf(p) === "closed").length;
-            const cStale = all.filter((p) => tierOf(p) === "premium" && p.status === "alerted" && !hasStarted(p) && !isRevalidationFresh(p, health)).length;
+            // Audit 2026-07-09: the "stale" chip must count exactly the rows
+            // the "Stale — awaiting re-price" group below it shows — derive
+            // both from the one edgeGroupOf predicate (like cTrack/cClosed).
+            const cStale = all.filter((p) => edgeGroupOf(p) === "stale").length;
             const mkS = (dot, k, v) => {
               const t = document.createElement("div"); t.className = "tk";
               if (dot) { const d = document.createElement("span"); d.className = "tkdot " + dot; t.appendChild(d); }
@@ -2618,6 +2682,16 @@
           tierTag.className = "tag " + (tierOf(p) === "volume" ? "tag-warm" : "tag-cyan");
           tierTag.textContent = tierOf(p) === "volume" ? "Shadow — tracked, informational only" : "Premium";
           body.appendChild(tierTag);
+          // Audit 2026-07-09: the server flags stored-impossible rows
+          // (structural_sane=false) so the dashboard can refuse to present
+          // them as bettable — badge the detail pane in danger style.
+          if (p.structural_sane === false) {
+            const bad = document.createElement("span");
+            bad.className = "tag tag-danger tag-dashed";
+            bad.style.marginLeft = "6px";
+            bad.textContent = "Internally inconsistent — do not bet";
+            body.appendChild(bad);
+          }
           body.appendChild(buildTimeline(p));
 
           const ml = document.createElement("div"); ml.className = "metric-list";
