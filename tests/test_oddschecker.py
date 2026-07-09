@@ -10,6 +10,9 @@ import pytest
 from app.ingestion.base import EventDirectory, ScraperProxy
 from app.ingestion.oddschecker import (
     OddsCheckerChallenge,
+    OddsCheckerError,
+    OddsCheckerFetchResult,
+    OddsCheckerLoader,
     _line_bearing_selection,
     discover_football_daily_match_urls,
     fetch_html,
@@ -349,6 +352,79 @@ def test_parse_market_api_payloads_emits_totals_and_spreads() -> None:
     assert teams.home == "Arizona Cardinals"
     assert teams.away == "Carolina Panthers"
     assert teams.league == "NFL"
+
+
+async def test_fetch_match_odds_markets_override_reaches_api_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller's `markets` override (the shared off-window CLV re-price
+    signature) must drive the market-API payload filtering, not just the
+    market-id collection — a loader scoped to H2H asked for TOTALS must
+    return TOTALS rows, never silently []."""
+    import app.ingestion.oddschecker as oc
+
+    async def fake_payloads(
+        market_ids: object, *, referer: object, session: object = None, proxy: object = None
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "marketId": 30,
+                "subeventId": 101610031,
+                "subeventName": "Arsenal vs Coventry",
+                "subeventStartTime": "2026-08-21T19:00:00Z",
+                "eventName": "English Premier League Matches",
+                "marketTypeName": "Asian Total",
+                "bets": [{"betId": 4, "betName": "Over", "line": "2.5"}],
+                "odds": [
+                    {
+                        "betId": 4,
+                        "bookmakerCode": "WH",
+                        "oddsDecimal": 2.1,
+                        "status": "ACTIVE",
+                        "betFeedTimestamp": "2026-07-05T09:59:00Z",
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fake_payloads)
+    loader = OddsCheckerLoader(EventDirectory(), markets=(Market.H2H,))
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/english/premier-league/arsenal-v-coventry/winner",
+        html=_match_html(),
+        status_code=200,
+    )
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None, markets=(Market.TOTALS,)
+    )
+    assert snapshots, "explicitly requested TOTALS override returned no rows"
+    assert {s.market for s in snapshots} == {Market.TOTALS}
+
+
+async def test_fetch_match_odds_markets_override_reaches_fallback_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the market API down, the parse_match_page fallback must honor the
+    caller's `markets` override too (same H2H-scoped loader, TOTALS request)."""
+    import app.ingestion.oddschecker as oc
+
+    async def boom(
+        market_ids: object, *, referer: object, session: object = None, proxy: object = None
+    ) -> list[dict[str, object]]:
+        raise OddsCheckerError("api down")
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", boom)
+    loader = OddsCheckerLoader(EventDirectory(), markets=(Market.H2H,))
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/english/premier-league/arsenal-v-coventry/winner",
+        html=_match_html(),
+        status_code=200,
+    )
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None, markets=(Market.TOTALS,)
+    )
+    assert snapshots, "explicitly requested TOTALS override returned no rows"
+    assert {s.market for s in snapshots} == {Market.TOTALS}
 
 
 def test_parse_legacy_match_page_reads_old_table_grid() -> None:

@@ -444,6 +444,61 @@ async def test_capture_isolates_a_failing_read() -> None:
     assert await capture.capture_once() == {"soccer": 0}
 
 
+@pytest.mark.asyncio
+async def test_capture_persist_failure_rolls_back_change_gate_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB failure during persist must NOT poison the change-gate (the same
+    unchanged price re-emits and persists next cycle — the change-gated 'latest
+    row IS the exchange close' contract) and must NOT abort the remaining
+    sports of the cycle."""
+    import app.storage.repositories as repositories
+
+    calls: list[tuple[str, int]] = []
+    fail_soccer_once = {"armed": True}
+
+    async def fake_persist(
+        session_factory: Any,
+        fresh: Sequence[OddsSnapshotIn],
+        teams_by_event: Mapping[str, EventTeams],
+        *,
+        sport: str,
+        default_league: str,
+        attach_only_to_existing: bool,
+    ) -> int:
+        calls.append((sport, len(fresh)))
+        if sport == "soccer" and fail_soccer_once["armed"]:
+            fail_soccer_once["armed"] = False
+            raise RuntimeError("db down")
+        return len(fresh)
+
+    monkeypatch.setattr(repositories, "persist_odds_snapshots", fake_persist)
+    loader = _feed_loader(
+        {
+            "soccer": (FeedFeasible("1x2", 0, 0, _soccer_1x2_payload()),),
+            "basketball": (FeedFeasible("home_away", 3, 1, _basketball_ml_payload()),),
+        }
+    )
+    reader = BetfairExchangeReader(min_liquidity=0.0, feed_loader=loader)
+    capture = BetfairExchangeCapture(
+        reader,
+        session_factory=object(),  # type: ignore[arg-type]  # only forwarded to the fake
+        targets_fn=lambda sport: [_target()],
+        sports=("soccer", "basketball"),
+        now_fn=lambda: NOW,
+    )
+    first = await capture.capture_once()
+    # Soccer persist failed -> honest zero; basketball still ran this cycle.
+    assert first == {"soccer": 0, "basketball": 2}
+    # Cycle 2: the SAME unchanged soccer prices must re-emit (gate rolled back),
+    # while basketball's successful persist advanced its gate (nothing fresh).
+    second = await capture.capture_once()
+    assert second == {"soccer": 3, "basketball": 0}
+    assert calls == [("soccer", 3), ("basketball", 2), ("soccer", 3)]
+    # Cycle 3: soccer's successful persist has now advanced the gate too.
+    assert await capture.capture_once() == {"soccer": 0, "basketball": 0}
+
+
 # --------------------------------------------------------------------------- #
 # DB integration: rows attach INLINE onto the canonical event (ADR-0015 v2) as
 # bookmaker "Betfair Exchange" with NUMERIC liquidity. Skipped without Postgres.

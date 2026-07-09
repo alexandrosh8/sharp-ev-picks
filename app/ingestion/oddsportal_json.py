@@ -58,6 +58,7 @@ from urllib.parse import unquote
 
 from app.ingestion.base import EventDirectory, EventTeams
 from app.ingestion.oddsportal import (
+    _carries_et_marker,
     _coerce_finished,
     _line_from_key,
     _market_for_key,
@@ -910,6 +911,13 @@ def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedT
             event.get("home") or "?",
             event.get("away") or "?",
         )
+    et_decided = _carries_et_marker(
+        body.get("eventStageName"),
+        body.get("partialresult"),
+        event.get("partialresult"),
+        event.get("homeResult"),
+        event.get("awayResult"),
+    )
     return FeedToken(
         event_id=event_id,
         sport_id=sport_id,
@@ -923,8 +931,15 @@ def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedT
         league=str(event.get("tournamentName") or ""),
         country=str(event.get("countryName") or ""),
         starts_at=starts_at,
-        home_score=_parse_score(event.get("homeResult")),
-        away_score=_parse_score(event.get("awayResult")),
+        # ET/OT/penalties veto (parity with the Playwright path, oddsportal.py
+        # _convert_match): a knockout game decided after regulation carries an
+        # ET-inclusive homeResult/awayResult — registering it as final would
+        # missettle 90-minute markets. Any marker on the stage / partial-result
+        # / score strings -> NO score (the pick stays pending; manual
+        # settlement / the void path take over). Vetoing only defers, never
+        # corrupts.
+        home_score=None if et_decided else _parse_score(event.get("homeResult")),
+        away_score=None if et_decided else _parse_score(event.get("awayResult")),
         finished=_coerce_finished(
             event.get("isFinished"),
             body.get("eventStageId"),
@@ -1122,10 +1137,12 @@ async def scrape_match_odds(
     try:
         resp = await session.get(match_url, impersonate=_IMPERSONATE)
     except Exception as exc:  # network / TLS / timeout -> scrape gap
+        # Security rule: NEVER log URLs from HTTP-client error paths — the
+        # exception type is the whole diagnostic (uniform with the module's
+        # other logger calls and the non-200 branch below).
         logger.warning(
-            "oddsportal match-page GET failed (%s) — treating as gap: %s",
+            "oddsportal match-page GET failed (%s) — treating as gap",
             type(exc).__name__,
-            normalize_match_link(match_url),
         )
         return []
     if getattr(resp, "status_code", 0) != 200:
@@ -1138,10 +1155,10 @@ async def scrape_match_odds(
     try:
         token = extract_bootstrap_tokens(html, markets=markets)
     except ValueError as exc:  # bootstrap header absent / unparseable -> gap
+        # Type-only, never the URL (see the GET-failure branch above).
         logger.info(
-            "oddsportal bootstrap parse skipped (%s) for %s",
+            "oddsportal bootstrap parse skipped (%s)",
             type(exc).__name__,
-            normalize_match_link(match_url),
         )
         return []
     # Resolve numeric-id -> canonical book NAME (cached on the shared registry).

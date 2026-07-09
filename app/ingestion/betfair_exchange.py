@@ -552,6 +552,13 @@ class BetfairExchangeCapture:
             target_list = self._targets_fn(sport)
             if inspect.isawaitable(target_list):
                 target_list = await target_list
+            # Prior gate values for every key touched this sport, so a persist
+            # failure can ROLL BACK the change-gate: marking a price "seen"
+            # before its row actually lands would permanently suppress it (the
+            # change-gated "latest row IS the exchange close" contract breaks —
+            # a wrong/missing CLV close until the price moves or a restart).
+            # None = the key was absent (prices are always floats).
+            gate_prior: dict[tuple[str, str, str], float | None] = {}
             for target in target_list:
                 targets += 1
                 try:
@@ -572,6 +579,10 @@ class BetfairExchangeCapture:
                 # rows become just another bookmaker on the canonical event — no
                 # cross-source matching needed for any Betfair-priced game.
                 event_ref = target.event_id
+                for snapshot in snapshots:
+                    key = (sport, event_ref, snapshot.selection)
+                    if key not in gate_prior:
+                        gate_prior[key] = self._seen_price.get(key)
                 event_fresh = self._select_fresh(sport, event_ref, snapshots)
                 if event_fresh:
                     fresh.extend(event_fresh)
@@ -599,14 +610,36 @@ class BetfairExchangeCapture:
             # canonical event the main scrape already created and NEVER mint one
             # from Betfair-only data. A fixture whose canonical event has not landed
             # yet is skipped THIS cycle and attaches on a later one.
-            rows = await persist_odds_snapshots(
-                self._session_factory,
-                fresh,
-                teams_by_event,
-                sport=sport,
-                default_league=sport,
-                attach_only_to_existing=True,
-            )
+            try:
+                rows = await persist_odds_snapshots(
+                    self._session_factory,
+                    fresh,
+                    teams_by_event,
+                    sport=sport,
+                    default_league=sport,
+                    attach_only_to_existing=True,
+                )
+            except Exception as exc:
+                # A session-level DB failure (restart/deadlock/connection loss)
+                # loses EVERY row of this sport's batch. Roll the change-gate
+                # back so the unchanged prices re-emit next cycle, and keep
+                # going: one sport's DB failure never aborts the others.
+                # (Per-event SAVEPOINT failures inside persist_odds_snapshots
+                # do NOT raise — their deliberate counted-as-seen semantics for
+                # deterministic failures are untouched by this rollback.)
+                logger.warning(
+                    "betfair exchange: %s persist failed (%s) — change-gate rolled "
+                    "back; prices re-emit next cycle",
+                    sport,
+                    type(exc).__name__,
+                )
+                for key, prior in gate_prior.items():
+                    if prior is None:
+                        self._seen_price.pop(key, None)
+                    else:
+                        self._seen_price[key] = prior
+                written[sport] = 0
+                continue
             written[sport] = rows
             if rows:
                 logger.info(

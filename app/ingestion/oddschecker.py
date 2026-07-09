@@ -1660,7 +1660,7 @@ class OddsCheckerLoader:
                     url=page.url,
                     directory=self._directory,
                     now=now,
-                    markets=self._markets,
+                    markets=eff_markets,
                     capture_other=self._capture_other,
                 )
                 if snapshots:
@@ -1676,13 +1676,14 @@ class OddsCheckerLoader:
                 url=page.url,
                 directory=self._directory,
                 now=now,
-                markets=self._markets,
+                markets=eff_markets,
             )
         except OddsCheckerParseError:
             return await self._parse_legacy_match_with_linked_markets(
                 page,
                 now=now,
                 session=session,
+                markets=eff_markets,
             )
 
     async def _parse_legacy_match_with_linked_markets(
@@ -1691,20 +1692,25 @@ class OddsCheckerLoader:
         *,
         now: datetime | None,
         session: AsyncGetSession | None,
+        markets: Sequence[Market] | None = None,
     ) -> list[OddsSnapshotIn]:
+        # ``markets`` is the caller's effective scope (override or self._markets),
+        # threaded from _parse_modern_or_legacy_match_page so the legacy fallback
+        # honors a fetch_match_odds override too; None falls back to loader scope.
+        eff_markets = markets if markets is not None else self._markets
         snapshots = parse_legacy_match_page(
             page.html,
             url=page.url,
             directory=self._directory,
             now=now,
-            markets=self._markets,
+            markets=eff_markets,
         )
         linked_urls = [
             url
             for url in discover_legacy_market_urls(
                 page.html,
                 base_url=page.url,
-                markets=self._markets,
+                markets=eff_markets,
             )
             if url != page.url
         ]

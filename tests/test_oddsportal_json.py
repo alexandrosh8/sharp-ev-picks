@@ -303,6 +303,72 @@ def test_extract_bootstrap_event_data_start_date_wins_over_body() -> None:
     assert tok.starts_at == datetime(2025, 6, 16, 12, 0, tzinfo=UTC)
 
 
+def test_extract_bootstrap_refuses_et_decided_score() -> None:
+    """ET/OT/penalties veto — parity with the Playwright path (_convert_match):
+    a knockout game decided after regulation carries an ET-inclusive homeResult/
+    awayResult; registering it as the final would missettle 90-minute markets.
+    Any marker on the stage/partial-result strings -> NO score (finished status
+    is kept; the pick stays pending for manual settlement / the void path)."""
+    html = _header_html(
+        {
+            "id": "ET1",
+            "sportId": 1,
+            "home": "A",
+            "away": "B",
+            "homeResult": "2",
+            "awayResult": "1",
+            "isFinished": True,
+        },
+        {"eventStageName": "After Extra Time", "partialresult": "1:1,1:0,0:0"},
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.home_score is None
+    assert tok.away_score is None
+    assert tok.finished is True
+
+
+def test_extract_bootstrap_refuses_penalties_decided_score() -> None:
+    """Same veto for a shootout: the marker may live only in the partial-result
+    string (stage name variants differ), so that field must be checked too."""
+    html = _header_html(
+        {
+            "id": "PEN1",
+            "sportId": 1,
+            "home": "A",
+            "away": "B",
+            "homeResult": "3",
+            "awayResult": "2",
+            "isFinished": True,
+        },
+        {"eventStageName": "Finished", "partialresult": "1:1, 1:1 ET, 3:2 pen."},
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.home_score is None
+    assert tok.away_score is None
+    assert tok.finished is True
+
+
+def test_extract_bootstrap_keeps_regulation_final_score() -> None:
+    """No ET/OT/pen marker anywhere -> the regulation final IS captured (the
+    veto must never eat a normal FT score; 'Finished' carries no marker)."""
+    html = _header_html(
+        {
+            "id": "FT1",
+            "sportId": 1,
+            "home": "A",
+            "away": "B",
+            "homeResult": "2",
+            "awayResult": "1",
+            "isFinished": True,
+        },
+        {"eventStageName": "Finished", "partialresult": "1:0, 1:1"},
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.home_score == 2
+    assert tok.away_score == 1
+    assert tok.finished is True
+
+
 def test_extract_bootstrap_genuinely_missing_kickoff_stays_none() -> None:
     """A truly-TBD fixture (no positive epoch anywhere) yields starts_at=None —
     NEVER an invented time. `endDate: False` and a 0/negative epoch are not a
@@ -729,6 +795,55 @@ async def test_scrape_match_odds_end_to_end_pure_python() -> None:
     # event identity is the navigable match URL; teams registered.
     assert all(s.event_id == EVENT_URL for s in snaps)
     assert directory.lookup(EVENT_URL) is not None
+
+
+async def test_scrape_match_odds_get_failure_logs_type_only_never_url(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """HTTP-client error paths log type(exc).__name__ only — NEVER the match URL
+    (repo secret-hygiene rule; uniform with the module's other 9 logger calls)."""
+    import logging
+
+    class _Sess:
+        async def get(self, url: str, **kwargs: object) -> _FakeResponse:
+            raise TimeoutError("proxy down")
+
+    with caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal_json"):
+        snaps = await scrape_match_odds(
+            EVENT_URL,
+            markets=MARKETS,
+            directory=EventDirectory(),
+            now=NOW,
+            session=_Sess(),
+        )
+    assert snaps == []
+    assert "TimeoutError" in caplog.text  # the exception TYPE is still surfaced
+    assert EVENT_URL not in caplog.text
+    assert "oddsportal.com" not in caplog.text  # no normalized-link form either
+
+
+async def test_scrape_match_odds_bootstrap_parse_skip_logs_type_only_never_url(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bootstrap-parse-skip INFO likewise must not carry the match URL."""
+    import logging
+
+    class _Sess:
+        async def get(self, url: str, **kwargs: object) -> _FakeResponse:
+            return _FakeResponse(status_code=200, text="<html><body>no header</body></html>")
+
+    with caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal_json"):
+        snaps = await scrape_match_odds(
+            EVENT_URL,
+            markets=MARKETS,
+            directory=EventDirectory(),
+            now=NOW,
+            session=_Sess(),
+        )
+    assert snaps == []
+    assert "ValueError" in caplog.text
+    assert EVENT_URL not in caplog.text
+    assert "oddsportal.com" not in caplog.text
 
 
 async def test_scrape_match_odds_non_200_html_is_gap() -> None:
