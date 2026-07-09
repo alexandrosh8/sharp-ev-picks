@@ -936,7 +936,7 @@ async def test_gather_snapshots_retries_once_on_timeout(
             calls["n"] += 1
             if calls["n"] == 1:
                 raise _Timeout("connect timeout")
-            return ["snap"]  # type: ignore[list-item]  # sentinel; _gather only len()s it
+            return ["snap"]  # sentinel; _gather only len()s it
 
     loader = _RetryLoader(
         match_urls=["https://www.oddschecker.com/football/a/1/winner"],

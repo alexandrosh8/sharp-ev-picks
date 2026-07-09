@@ -595,7 +595,7 @@ def anchor_fair_probs(
     sharp_books: Sequence[str] = SHARP_BOOKS,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
     consensus_logit_pool: bool = False,
-    liquidity: Mapping[str, Mapping[str, float]] | None = None,
+    liquidity: Mapping[str, Mapping[str, float | None]] | None = None,
     exchange_min_liquidity: float = 0.0,
     exchange_demoted: bool = False,
 ) -> tuple[str, dict[str, float]] | None:
@@ -633,7 +633,7 @@ def anchor_fair_probs_with_provenance(
     sharp_books: Sequence[str] = SHARP_BOOKS,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
     consensus_logit_pool: bool = False,
-    liquidity: Mapping[str, Mapping[str, float]] | None = None,
+    liquidity: Mapping[str, Mapping[str, float | None]] | None = None,
     exchange_min_liquidity: float = 0.0,
     exchange_demoted: bool = False,
 ) -> tuple[str, dict[str, float], bool] | None:
@@ -690,7 +690,7 @@ def find_value_bets(
     sharp_books: Sequence[str] = SHARP_BOOKS,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
     consensus_logit_pool: bool = False,
-    liquidity: Mapping[str, Mapping[str, float]] | None = None,
+    liquidity: Mapping[str, Mapping[str, float | None]] | None = None,
     exchange_min_liquidity: float = 0.0,
     book_allowlist: frozenset[str] = frozenset(),
 ) -> list[ValueBet]:
@@ -926,7 +926,7 @@ def _named_sharp_anchor(
     sharp_books: Sequence[str],
     commissions: Mapping[str, float],
     max_overround: float,
-    liquidity: Mapping[str, Mapping[str, float]] | None = None,
+    liquidity: Mapping[str, Mapping[str, float | None]] | None = None,
     exchange_min_liquidity: float = 0.0,
     exchange_demoted: bool = False,
 ) -> tuple[str | None, list[float] | None]:
@@ -1022,30 +1022,40 @@ def _consensus_anchor(
     commissions: Mapping[str, float],
     max_overround: float,
 ) -> tuple[str | None, list[float] | None]:
-    """Median effective price per selection across books that price the full
-    market. Outlier-resistant: one bad quote cannot move the median much.
-    Requires >= MIN_CONSENSUS_BOOKS full-market books."""
+    """Median price per selection across books that price the full market.
+    Outlier-resistant: one bad quote cannot move the median much.
+    Requires >= MIN_CONSENSUS_BOOKS full-market books.
+
+    P2-1 uniformity (audit 2026-07-09): the RETURNED median is built from GROSS
+    prices — commission is a payout cost, not a probability signal, exactly as
+    ``_named_sharp_anchor`` already devigs gross. Commission-netted prices stay
+    only in the per-book best-price dedupe ordering and the overround
+    plausibility gate, so consensus MEMBERSHIP is unchanged."""
     books = set.intersection(*[{_norm(b) for b in prices[s]} for s in selections])
     if len(books) < MIN_CONSENSUS_BOOKS:
         return None, None
-    med: list[float] = []
+    med_net: list[float] = []  # commission-netted — overround gate only
+    med_gross: list[float] = []  # returned for the fair-probability devig
     for s in selections:
         # Deduplicate by NORMALIZED book name before the median: two raw keys that
         # normalize to the same book ('Bet365' + 'bet365') must count ONCE, or they
         # skew the median (audit #5). Keep the best (max effective) price per book,
         # matching the normalized intersection above and distinct_book_count.
-        by_norm: dict[str, float] = {}
+        by_norm_net: dict[str, float] = {}
+        by_norm_gross: dict[str, float] = {}
         for b, o in prices[s].items():
             nb = _norm(b)
             if nb not in books:
                 continue
             e = effective_odds(b, o, commissions)
-            if nb not in by_norm or e > by_norm[nb]:
-                by_norm[nb] = e
-        med.append(statistics.median(by_norm.values()))
-    if not 0.0 <= _overround(med) <= max_overround:
+            if nb not in by_norm_net or e > by_norm_net[nb]:
+                by_norm_net[nb] = e
+                by_norm_gross[nb] = o
+        med_net.append(statistics.median(by_norm_net.values()))
+        med_gross.append(statistics.median(by_norm_gross.values()))
+    if not 0.0 <= _overround(med_net) <= max_overround:
         return None, None
-    return CONSENSUS_ANCHOR, med
+    return CONSENSUS_ANCHOR, med_gross
 
 
 def _logit_consensus_anchor(
@@ -1069,18 +1079,23 @@ def _logit_consensus_anchor(
     books = set.intersection(*[{_norm(b) for b in prices[s]} for s in selections])
     if len(books) < MIN_CONSENSUS_BOOKS:
         return None, None
+    # P2-1 uniformity (audit 2026-07-09): each per-book devig input is the
+    # GROSS vector — commission is a payout cost, not a probability signal.
+    # The netted price survives only as the per-book best-price dedupe order.
     book_vec: dict[str, dict[str, float]] = {nb: {} for nb in books}
     for s in selections:
-        by_norm: dict[str, float] = {}
+        by_norm_net: dict[str, float] = {}
+        by_norm_gross: dict[str, float] = {}
         for b, o in prices[s].items():
             nb = _norm(b)
             if nb not in books:
                 continue
             e = effective_odds(b, o, commissions)
-            if nb not in by_norm or e > by_norm[nb]:
-                by_norm[nb] = e
-        for nb, e in by_norm.items():
-            book_vec[nb][s] = e
+            if nb not in by_norm_net or e > by_norm_net[nb]:
+                by_norm_net[nb] = e
+                by_norm_gross[nb] = o
+        for nb, o in by_norm_gross.items():
+            book_vec[nb][s] = o
     logit_sum = {s: 0.0 for s in selections}
     k = 0
     for vec in book_vec.values():
@@ -1146,7 +1161,7 @@ def _best_other_book(
     return best
 
 
-def _lookup(book_odds: Mapping[str, float], norm_book: str) -> float | None:
+def _lookup[T](book_odds: Mapping[str, T], norm_book: str) -> T | None:
     for book, odds in book_odds.items():
         if _norm(book) == norm_book:
             return odds

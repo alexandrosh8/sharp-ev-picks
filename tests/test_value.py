@@ -749,6 +749,47 @@ def test_consensus_anchor_dedups_casing_variant_books() -> None:
     assert med[0] == pytest.approx(2.0)  # deduped, not the double-counted 1.95
 
 
+def test_consensus_anchor_devigs_gross_not_commission_netted_odds() -> None:
+    # P2-1 uniformity (audit 2026-07-09): the consensus median must be built
+    # from GROSS prices — commission is a payout cost, not a probability
+    # signal (same doctrine _named_sharp_anchor already implements). Netted
+    # prices stay only in the overround plausibility gate and per-book dedupe.
+    from app.edge.value import CONSENSUS_ANCHOR, _consensus_anchor
+
+    prices = {
+        "home": {"Matchbook": 2.00, "SoftA": 2.02, "SoftB": 1.98},
+        "away": {"Matchbook": 1.90, "SoftA": 1.88, "SoftB": 1.92},
+    }
+    anchor, med = _consensus_anchor(
+        prices, ["home", "away"], {"matchbook": 0.02}, max_overround=0.2
+    )
+    assert anchor == CONSENSUS_ANCHOR
+    assert med is not None
+    # gross medians (Matchbook supplies both) — NOT the netted 1.98 / 1.8824
+    assert med[0] == pytest.approx(2.00)
+    assert med[1] == pytest.approx(1.90)
+
+
+def test_logit_consensus_anchor_devigs_gross_book_vectors() -> None:
+    # P2-1 uniformity: every per-book devig input is the GROSS vector, so a
+    # commissioned book contributes exactly what a commission-free twin would.
+    from app.edge.value import _logit_consensus_anchor
+    from app.probabilities.devig import DevigMethod
+
+    prices = {
+        "H": {"Matchbook": 1.50, "B2": 1.50, "B3": 1.50},
+        "A": {"Matchbook": 2.60, "B2": 2.60, "B3": 2.60},
+    }
+    with_comm = _logit_consensus_anchor(
+        prices, ["H", "A"], {"matchbook": 0.02}, 0.12, DevigMethod.MULTIPLICATIVE
+    )
+    without = _logit_consensus_anchor(prices, ["H", "A"], {}, 0.12, DevigMethod.MULTIPLICATIVE)
+    assert with_comm[1] is not None
+    assert without[1] is not None
+    for got, ref in zip(with_comm[1], without[1], strict=True):
+        assert got == pytest.approx(ref, abs=1e-12)
+
+
 def test_logit_pool_consensus_matches_standard_on_identical_books() -> None:
     # build #1: zero cross-book spread -> the logit pool collapses to the same fair
     # as the median-of-prices consensus. Proves no regression on the default path.
