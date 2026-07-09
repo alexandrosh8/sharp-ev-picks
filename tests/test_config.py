@@ -89,6 +89,16 @@ def test_policies_built_from_settings() -> None:
     assert stakes.max_stake_fraction == 0.02
 
 
+def test_gate_policy_threads_exchange_commissions() -> None:
+    # Audit 2026-07-09: the model-strategy gate must net exchange commission
+    # exactly like the value strategy — the composition root threads the same
+    # EXCHANGE_COMMISSION table into the frozen GatePolicy.
+    from app.edge.value import EXCHANGE_COMMISSION
+
+    gates = gate_policy(make_settings())
+    assert dict(gates.commission_by_book) == EXCHANGE_COMMISSION
+
+
 def test_steam_policy_default_is_shadow() -> None:
     # Default-OFF: the gate is built (so it RUNS in shadow) but does not enforce.
     s = make_settings()

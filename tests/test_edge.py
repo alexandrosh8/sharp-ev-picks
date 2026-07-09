@@ -110,3 +110,49 @@ def test_multiple_failures_report_all_reasons() -> None:
         "confidence_below_threshold",
         "odds_too_stale",
     }
+
+
+# --- exchange-commission netting (audit 2026-07-09) -------------------------- #
+# EV/Kelly on GROSS exchange odds overstate the payout: the gate must net the
+# commission on winnings exactly like the value strategy (app/edge/value.py
+# effective_odds): d_eff = 1 + (d - 1) * (1 - c).
+
+COMMISSIONED = GatePolicy(
+    min_edge=0.03,
+    min_ev=0.01,
+    min_confidence=0.60,
+    max_odds_age_seconds=300,
+    min_liquidity=0.0,
+    commission_by_book=(("betfair exchange", 0.05), ("smarkets", 0.02)),
+)
+
+
+def test_no_commission_book_effective_odds_equal_gross() -> None:
+    decision = evaluate(candidate(), COMMISSIONED)
+    assert decision.effective_odds == pytest.approx(2.10, abs=1e-12)
+    assert decision.ev == pytest.approx(0.155, abs=1e-12)  # unchanged vs gross
+
+
+def test_exchange_commission_nets_ev_not_edge() -> None:
+    # d=2.10 at 5% commission: d_eff = 1 + 1.10*0.95 = 2.045
+    # EV = 0.55*1.045 - 0.45 = 0.12475 (gross would be 0.155); edge untouched.
+    decision = evaluate(candidate(bookmaker="Betfair Exchange"), COMMISSIONED)
+    assert decision.effective_odds == pytest.approx(2.045, abs=1e-12)
+    assert decision.ev == pytest.approx(0.12475, abs=1e-12)
+    assert decision.edge == pytest.approx(0.05, abs=1e-12)  # commission is payout, not prob
+
+
+def test_commission_lookup_normalizes_book_name() -> None:
+    decision = evaluate(candidate(bookmaker="  BETFAIR Exchange "), COMMISSIONED)
+    assert decision.effective_odds == pytest.approx(2.045, abs=1e-12)
+
+
+def test_commissioned_candidate_rejected_when_net_ev_below_threshold() -> None:
+    # d=1.85, p=0.55: gross EV = 0.55*0.85 - 0.45 = 0.0175 >= 0.01 would pass,
+    # but net of 5% commission d_eff = 1.8075 -> EV = -0.005875: must reject.
+    gross = evaluate(candidate(decimal_odds=1.85), COMMISSIONED)
+    assert gross.accepted is True
+    net = evaluate(candidate(decimal_odds=1.85, bookmaker="betfair exchange"), COMMISSIONED)
+    assert net.accepted is False
+    assert "ev_below_threshold" in net.reasons
+    assert net.ev == pytest.approx(0.55 * 0.8075 - 0.45, abs=1e-12)

@@ -10,9 +10,12 @@ import math
 import pytest
 
 from app.probabilities.devig import (
+    EXPECTED_FALLBACKS,
+    DevigFallbackReason,
     DevigMethod,
     devig,
     devig_fell_back,
+    devig_with_diagnostics,
     devig_with_provenance,
 )
 
@@ -179,34 +182,62 @@ def test_shin_oracle_two_way_matches_additive_equivalence() -> None:
     assert probs == pytest.approx(expected, abs=1e-6)
 
 
-def test_differential_margin_extreme_longshot_falls_back_quietly(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+# --- fallback diagnostics as DATA (pure-math boundary, audit 2026-07-09) ---- #
+# devig.py must not log (no side effects in app/probabilities/): the warning
+# condition is returned as a DevigFallbackReason and the IO layer decides how
+# to log it (EXPECTED_FALLBACKS -> debug doctrine, everything else -> warning).
+
+
+def test_devig_module_has_no_logging_side_effect(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    import app.probabilities.devig as devig_module
+
+    assert not hasattr(devig_module, "logging")
+    assert not hasattr(devig_module, "logger")
+    with caplog.at_level(logging.DEBUG):
+        devig([1.02, 8.0, 81.0], method=DevigMethod.DIFFERENTIAL_MARGIN)  # falls back
+        devig([2.6, 3.9, 3.4], method=DevigMethod.SHIN)  # underround, falls back
+        devig(ADDITIVE_FALLBACK, method=DevigMethod.ADDITIVE)  # warning-grade fallback
+    assert not [r for r in caplog.records if r.name.startswith("app.probabilities")]
+
+
+def test_differential_margin_extreme_longshot_fallback_is_expected_data() -> None:
     # Longshot odds with a fat margin make Buchdahl's denominator
     # n - margin*odds_i non-positive: the multiplicative fallback IS the
-    # design (same doctrine as Shin's underround fallback above) — debug,
-    # not a warning per market per cycle.
-    import logging
-
+    # design (same doctrine as Shin's underround fallback) — reported as an
+    # EXPECTED reason (debug doctrine), not a warning per market per cycle.
     odds = [1.02, 8.0, 81.0]  # margin*81 >> n=3
-    with caplog.at_level(logging.DEBUG, logger="app.probabilities.devig"):
-        probs = devig(odds, method=DevigMethod.DIFFERENTIAL_MARGIN)
+    probs, reason = devig_with_diagnostics(odds, method=DevigMethod.DIFFERENTIAL_MARGIN)
     assert math.isclose(sum(probs), 1.0, abs_tol=1e-9)
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("denominator" in r.message for r in caplog.records)  # visible at debug
+    assert reason is DevigFallbackReason.DIFFERENTIAL_MARGIN_NON_POSITIVE
+    assert reason in EXPECTED_FALLBACKS
 
 
-def test_shin_underround_falls_back_quietly(caplog: pytest.LogCaptureFixture) -> None:
+def test_shin_underround_fallback_is_expected_data() -> None:
     # Max-of-books composite odds are routinely underround; Shin's fallback
-    # there is documented-expected and must NOT warn (a backtest produced
-    # 154k warning lines before this was demoted to debug).
-    import logging
-
-    with caplog.at_level(logging.DEBUG, logger="app.probabilities.devig"):
-        probs = devig([2.6, 3.9, 3.4], method=DevigMethod.SHIN)  # booksum ~0.94
+    # there is documented-expected and must NOT be warning-grade (a backtest
+    # produced 154k warning lines before this was demoted).
+    probs, reason = devig_with_diagnostics([2.6, 3.9, 3.4], method=DevigMethod.SHIN)
     assert math.isclose(sum(probs), 1.0, abs_tol=1e-9)
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("underround" in r.message for r in caplog.records)  # still visible at debug
+    assert reason is DevigFallbackReason.SHIN_UNDERROUND
+    assert reason in EXPECTED_FALLBACKS
+
+
+def test_additive_fallback_reason_is_warning_grade() -> None:
+    probs, reason = devig_with_diagnostics(ADDITIVE_FALLBACK, method=DevigMethod.ADDITIVE)
+    assert math.isclose(sum(probs), 1.0, abs_tol=1e-9)
+    assert reason is DevigFallbackReason.ADDITIVE_NON_POSITIVE
+    assert reason not in EXPECTED_FALLBACKS  # anomaly: IO layer should warn
+
+
+def test_diagnostics_reason_consistent_with_provenance_flag() -> None:
+    for odds in (THREE_WAY, LONGSHOT_BOOK, UNDERROUND_TWO_WAY, ADDITIVE_FALLBACK):
+        for method in ALL_METHODS:
+            probs, reason = devig_with_diagnostics(odds, method=method)
+            legacy_probs, fell = devig_with_provenance(odds, method=method)
+            assert (reason is not None) is fell
+            assert probs == pytest.approx(legacy_probs, abs=1e-15)
 
 
 def test_odds_ratio_and_logarithmic_are_equivalent_methods() -> None:

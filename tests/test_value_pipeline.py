@@ -1889,3 +1889,99 @@ async def test_anchor_match_provenance_per_path() -> None:
     assert picks4 and all(p.anchor_type == "sharp" for p in picks4)
     assert all(p.anchor_match_confidence is None for p in picks4)
     assert all(p.anchor_match_method == "inline_or_promoted_unattributed" for p in picks4)
+
+
+async def test_kickoff_moved_earlier_is_guarded_in_the_same_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persisted kickoff goes STALE when the match is rescheduled EARLIER: the
+    fresh scrape (directory) carries the corrected time, but _load_kickoffs
+    prefers the persisted ``events.starts_at``. The kickoff REFRESH must
+    therefore run BEFORE the post-kickoff guard loads kickoffs — with the old
+    refresh-after-guard ordering, the cycle that first saw the corrected time
+    still priced the started match from in-play odds (one-cycle mint window)."""
+    import app.storage.repositories as repos
+
+    patch_persist_recording(monkeypatch, ["inserted"])
+    now = datetime.now(tz=UTC)
+    # The DB still holds the ORIGINAL (stale, future) kickoff.
+    db_kickoffs: dict[str, datetime | None] = {"evt-1": now + timedelta(hours=2)}
+
+    async def fake_load_event_kickoffs(session, event_ids):  # type: ignore[no-untyped-def]
+        return {event_id: db_kickoffs.get(event_id) for event_id in event_ids}
+
+    async def fake_refresh_event_kickoffs(session, kickoffs):  # type: ignore[no-untyped-def]
+        # Real->real refresh is accepted (prefer_kickoff same-quality update).
+        changed = 0
+        for event_id, starts_at in kickoffs.items():
+            if db_kickoffs.get(event_id) != starts_at:
+                db_kickoffs[event_id] = starts_at
+                changed += 1
+        return changed
+
+    monkeypatch.setattr(repos, "load_event_kickoffs", fake_load_event_kickoffs)
+    monkeypatch.setattr(repos, "refresh_event_kickoffs", fake_refresh_event_kickoffs)
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    assert deps.directory is not None
+    # The fresh scrape knows the match was moved earlier and already kicked off.
+    deps.directory.register(
+        "evt-1",
+        EventTeams(home="Home FC", away="Away FC", starts_at=now - timedelta(minutes=10)),
+    )
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert picks == []  # in-play prices on a started match must never mint
+    assert sink.sent == []
+
+
+async def test_cycle_cancellation_never_leaks_persisted_unreserved_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watchdog-cancellation safety (2026-07-08 audit): a premium pick's DB
+    persist and its daily-exposure reservation must land as ONE unit. Cancel the
+    cycle while the FIRST premium persist is in flight: the shielded pair must
+    still run to completion (row persisted AND stake on the ledger), and the
+    not-yet-started candidate must not have been persisted at all — never a
+    persisted full-stake row the daily/per-event caps don't count."""
+    import asyncio
+
+    import app.storage.repositories as repos
+
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+    persisted: list[str] = []
+
+    async def blocking_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        persisted.append(pick.event_id)
+        if len(persisted) == 1:
+            persist_started.set()
+            await release_persist.wait()  # the watchdog fires mid-persist
+        return "inserted"
+
+    monkeypatch.setattr(repos, "persist_pick", blocking_persist_pick)
+
+    sink = RecordingSink()
+    deps = make_deps_two_events(sink, FakeLoader(two_event_snapshots(3.20, 4.00)), max_daily=0.05)
+    day = datetime.now(tz=UTC).date()
+
+    task = asyncio.create_task(run_value_pipeline(deps, "soccer"))
+    await asyncio.wait_for(persist_started.wait(), timeout=5.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Let the shielded persist+reserve pair run to completion in the background.
+    release_persist.set()
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    # Only the in-flight (highest-raw_kelly: evt-B) persist ran; the deferred
+    # evt-A candidate was cancelled BEFORE its persist -> nothing to orphan.
+    assert persisted == ["evt-B"]
+    # ...and the persisted pick's stake IS reserved on the ledger (no leak).
+    assert deps.ledger.used(day) == pytest.approx(0.02)
+    assert sink.sent == []  # cancelled before dispatch; next cycle re-alerts

@@ -1514,12 +1514,19 @@ class Settings(BaseSettings):
 
 
 def gate_policy(settings: Settings) -> GatePolicy:
+    # Model-strategy EV/Kelly must be net of exchange commission exactly like
+    # the value strategy (audit 2026-07-09): thread the same EXCHANGE_COMMISSION
+    # table into the frozen policy here, at the composition root — the pure
+    # gates module never reads env/config itself.
+    from app.edge.value import EXCHANGE_COMMISSION
+
     return GatePolicy(
         min_edge=settings.min_edge,
         min_ev=settings.min_ev,
         min_confidence=settings.min_confidence,
         max_odds_age_seconds=settings.max_odds_age_seconds,
         min_liquidity=settings.min_liquidity,
+        commission_by_book=tuple(sorted(EXCHANGE_COMMISSION.items())),
     )
 
 

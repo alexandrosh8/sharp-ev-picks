@@ -121,6 +121,50 @@ async def test_pipeline_produces_pick_and_alert() -> None:
     assert "you place any bet" not in sink.sent[0].body  # footer removed per operator request
 
 
+async def test_model_pipeline_nets_exchange_commission_for_ev_and_stake() -> None:
+    """Exchange-priced picks must gate EV and size Kelly on commission-netted
+    odds (audit 2026-07-09), mirroring the value strategy's effective_odds."""
+    from app.risk.staking import kelly_fraction
+
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    deps.gate_policy = GatePolicy(
+        min_edge=0.03,
+        min_ev=0.01,
+        min_confidence=0.60,
+        max_odds_age_seconds=300,
+        min_liquidity=0.0,
+        commission_by_book=(("betfair exchange", 0.05),),
+    )
+    for snap in deps.loader.snapshots:  # type: ignore[attr-defined]
+        object.__setattr__(snap, "bookmaker", "Betfair Exchange")
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(picks) == 1
+    pick = picks[0]
+    # d=2.10 at 5% commission -> d_eff = 2.045; EV = 0.58*1.045 - 0.42 = 0.1861
+    assert pick.decimal_odds == pytest.approx(2.10)  # displayed price stays gross
+    assert pick.ev == pytest.approx(0.58 * 1.045 - 0.42, abs=1e-12)
+    assert pick.stake_breakdown is not None
+    assert pick.stake_breakdown.raw_kelly == pytest.approx(kelly_fraction(0.58, 2.045), abs=1e-12)
+
+
+async def test_model_pipeline_drops_future_captured_at() -> None:
+    # ``now`` is taken AFTER the fetch, so a snapshot stamped in the FUTURE is a
+    # clock/data error (provider clock skew), never a fresh price. The odds-age
+    # gate must DROP it (age +inf, fail closed — mirroring the value path's
+    # _candidate_age_seconds), not let the raw negative age sail through.
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    future = datetime.now(tz=UTC) + timedelta(seconds=90)
+    deps.loader.snapshots = [  # type: ignore[attr-defined]
+        s.model_copy(update={"captured_at": future})
+        for s in deps.loader.snapshots  # type: ignore[attr-defined]
+    ]
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+    assert picks == []
+    assert sink.sent == []
+
+
 async def test_model_pipeline_alert_key_includes_strategy_identity() -> None:
     sink = RecordingSink()
     deps = make_deps(sink)

@@ -5,6 +5,7 @@ wires it to IO (loader, dispatcher). Persistence of picks/edges to Postgres
 joins in roadmap phase 2 alongside event/entity resolution.
 """
 
+import asyncio
 import logging
 import math
 import re
@@ -41,7 +42,11 @@ from app.models.base import ProbabilityModel
 from app.models.value_filter import ValueFilterModel, live_features
 from app.notifications.base import build_pick_alert
 from app.notifications.dispatcher import AlertDispatcher
-from app.probabilities.devig import DevigMethod, devig
+from app.probabilities.devig import (
+    EXPECTED_FALLBACKS,
+    DevigMethod,
+    devig_with_diagnostics,
+)
 from app.risk.exposure import DailyExposureLedger
 from app.risk.staking import StakeBreakdown, StakePolicy, recommended_stake, stake_amount
 from app.schemas.base import Market
@@ -575,15 +580,25 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 model_probability=prediction.probability,
                 fair_probability=fair_p,
                 confidence=prediction.confidence,
-                odds_age_seconds=snap.age_seconds(now),
+                # Fail-closed freshness age (same handling as the value path's
+                # _candidate_age_seconds): a captured_at in the FUTURE relative
+                # to now — taken AFTER the fetch — is provider clock skew, not
+                # a fresh price. The raw signed age_seconds() let the negative
+                # age sail through the odds-age gate; +inf always drops it.
+                odds_age_seconds=_candidate_age_seconds(now, snap.captured_at),
                 liquidity=snap.liquidity or 0.0,
+                bookmaker=snap.bookmaker,
             )
             decision = evaluate(candidate, deps.gate_policy)
             if not decision.accepted:
                 continue
 
+            # Kelly on the COMMISSION-NETTED price (decision.effective_odds),
+            # never the gross exchange odds — same netting the value strategy
+            # applies via best_odds_effective (audit 2026-07-09). Non-exchange
+            # books have effective_odds == decimal_odds (bit-identical).
             breakdown = recommended_stake(
-                prediction.probability, snap.decimal_odds, deps.stake_policy
+                prediction.probability, decision.effective_odds, deps.stake_policy
             )
 
             event_label = snap.event_id
@@ -639,8 +654,11 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             # duplicate/unpersisted pick never silently exhausts the daily cap
             # (kr-1 / kelly-risk-r2-1); and (b) never lets an exhausted cap
             # (granted<=0) skip the re-dispatch of an ALREADY-persisted pick.
-            outcome = await _maybe_persist(deps, pick, snap.event_id)
-            staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, snap.event_id, now)
+            # SHIELDED: the watchdog must never cancel between the persist and
+            # its reservation (see _persist_and_reserve).
+            outcome, staked = await asyncio.shield(
+                _persist_and_reserve(deps, pick, breakdown, snap.event_id, now)
+            )
             if staked is None:
                 # brand-new pick with no remaining daily/event capacity: skip it
                 logger.info("daily exposure cap reached; skipping %s", snap.selection)
@@ -1045,6 +1063,30 @@ async def _reserve_for_outcome(
     return pick
 
 
+async def _persist_and_reserve(
+    deps: "PipelineDeps",
+    pick: PickOut,
+    breakdown: StakeBreakdown,
+    event_id: str,
+    now: datetime,
+) -> tuple[PersistOutcome, PickOut | None]:
+    """Persist + daily-exposure reserve as ONE unit, run under ``asyncio.shield``.
+
+    The scheduler watchdog (asyncio.wait_for) can cancel a cycle at ANY await;
+    a cancellation landing between a pick's DB persist and its ledger
+    reservation left a full-stake premium row the daily/per-event caps never
+    counted (until a restart re-ran seed_exposure_ledger) — the next cycle's
+    re-detected 'duplicate' deliberately reserves nothing, and its alert still
+    dispatched (2026-07-08 audit). Shielding this pair lets an in-flight
+    persist run on to its reservation while the cycle itself still cancels
+    promptly; the alert dispatch stays OUTSIDE the shield, so a cancelled
+    cycle's alert is simply lost and the next cycle's duplicate re-dispatches
+    it — with the exposure already accounted."""
+    outcome = await _maybe_persist(deps, pick, event_id)
+    staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
+    return outcome, staked
+
+
 # Schema tag for the policy fingerprint encoding — bump if the field set or the
 # format ever changes so a stored string is never ambiguous about its scheme.
 POLICY_FINGERPRINT_SCHEMA = "p1"
@@ -1229,7 +1271,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # in-play page price a pre-match value pick and stamp a fabricated CLV close.
     # The persisted kickoff is preferred over the ephemeral directory; the raw
     # ``snapshots`` (persisted/counted below) is left intact — only the pricing
-    # view drops in-play rows.
+    # view drops in-play rows. The kickoff REFRESH runs FIRST: a match moved
+    # EARLIER arrives via the fresh scrape (directory), and because
+    # _load_kickoffs prefers the persisted time, refreshing AFTER the guard
+    # (the old ordering) let the stale persisted kickoff price the started
+    # match from in-play odds for one whole cycle (2026-07-08 audit).
+    await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
     kickoff_by_event = await _load_kickoffs(deps, {s.event_id for s in anchor_snapshots})
     anchor_snapshots = drop_post_kickoff_snapshots(anchor_snapshots, kickoff_by_event)
     grouped = group_market_prices(anchor_snapshots)
@@ -1240,7 +1287,6 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         liquidity_by_market=group_market_liquidity(anchor_snapshots),
         exchange_demoted_events=enforced_demotions,
     )
-    await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
 
     # In-play gate: a listed match can kick off between page listing and its
@@ -1273,14 +1319,18 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         )
 
     picks: list[PickOut] = []
-    # PREMIUM reserve+alert is DEFERRED out of the candidate loop into this
-    # per-cycle list of (pick, breakdown, outcome, event_id). Reserving inline
+    # PREMIUM persist+reserve+alert is DEFERRED out of the candidate loop into
+    # this per-cycle list of (pick, breakdown, event_id). Reserving inline
     # binds the daily-exposure cap in ITERATION order, so on a busy slate a
     # high-growth pick iterated late loses the budget to a low-growth pick
-    # iterated early. Collected here, then reserved AFTER the loop edge-ranked by
-    # raw_kelly so the highest-growth picks fund first (intra-cycle ordering only;
-    # raw_kelly uses already-computed fair/price — no leakage).
-    premium_candidates: list[tuple[PickOut, StakeBreakdown, PersistOutcome, str]] = []
+    # iterated early. Collected here, then persisted+reserved AFTER the loop
+    # edge-ranked by raw_kelly so the highest-growth picks fund first
+    # (intra-cycle ordering only; raw_kelly uses already-computed fair/price —
+    # no leakage). Deferring the PERSIST too keeps it adjacent to its reserve:
+    # the pair runs as one shielded unit (see _persist_and_reserve), so a
+    # watchdog cancellation anywhere in the cycle can never leave a persisted
+    # full-stake row the ledger doesn't count (2026-07-08 audit).
+    premium_candidates: list[tuple[PickOut, StakeBreakdown, str]] = []
     n_volume = 0
     n_stale = 0
     # Denominator for the stale-drop RATIO: candidates reaching the freshness
@@ -1764,14 +1814,18 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 policy_fingerprint=fingerprint,
                 created_at=now,
             )
-            # Persist FIRST (kr-1 ordering), then reserve only on a genuinely
-            # new premium detection. A re-detected 'duplicate' (already in the
-            # DB) and an 'unpersisted' pick (DB state unknown) reserve NOTHING —
-            # so a sustained duplicate/unpersisted pick never accumulates
-            # standing exposure that would silently exhaust the daily cap
-            # (kr-1 / kelly-risk-r2-1) — and an exhausted cap never skips the
+            # Persist-before-reserve (kr-1 ordering) is preserved, but a
+            # PREMIUM candidate's persist is DEFERRED to the reserve loop below
+            # so the persist + ledger-reserve pair runs back-to-back under a
+            # cancellation shield — the watchdog can no longer land between a
+            # persisted full-stake row and its reservation, which leaked
+            # uncounted daily exposure until restart (2026-07-08 audit). A
+            # re-detected 'duplicate' (already in the DB) and an 'unpersisted'
+            # pick (DB state unknown) still reserve NOTHING — so a sustained
+            # duplicate/unpersisted pick never accumulates standing exposure
+            # that would silently exhaust the daily cap (kr-1 /
+            # kelly-risk-r2-1) — and an exhausted cap never skips the
             # re-dispatch of an already-persisted pick.
-            outcome = await _maybe_persist(deps, pick, event_id)
             # Candidate/rejection audit trail (external-audit #3, fill #2): record
             # EVERY evaluated candidate — premium kept (empty reasons) AND every
             # tier demotion — with its tier + demotion reason slug(s) + anchor/fill
@@ -1802,35 +1856,45 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 deps, pick, detail or "", tuple(audit_reasons), steam_anchor_age_seconds, now
             )
             if tier == "volume":
-                # Shadow tier: persisted + CLV-tracked but NOT alerted and NEVER
-                # on the exposure ledger. (Volume alerting was trialed 2026-06-23
+                # Shadow tier: persisted INLINE (it never reserves exposure, so
+                # the persist->reserve cancellation window does not exist here)
+                # + CLV-tracked but NOT alerted and NEVER on the exposure
+                # ledger. (Volume alerting was trialed 2026-06-23
                 # then reverted: live CLV ~0% (-0.3% over n=21) showed no edge vs
                 # premium's +11.9% — premium-only alerts. The build_pick_alert
                 # 🔵 VOLUME tag + tier-keyed dedupe stay in place, so re-enabling
                 # is a one-line `await deps.dispatcher.dispatch(...)` here.) Its
                 # picks ride the same event pages as premium ones, so the CLV
                 # revalidation below re-prices them for free — the tier's purpose.
+                outcome = await _maybe_persist(deps, pick, event_id)
                 if outcome == "inserted":
                     picks.append(pick)
                     n_volume += 1
                 continue
-            # DEFER the reserve + alert: the daily-exposure cap must fund the
-            # highest-growth picks first, not whichever happened to iterate first.
-            # Persistence above stayed inline (order unchanged); only the ledger
-            # reservation and the alert dispatch move below the loop.
-            premium_candidates.append((pick, breakdown, outcome, event_id))
+            # DEFER the persist + reserve + alert: the daily-exposure cap must
+            # fund the highest-growth picks first, not whichever happened to
+            # iterate first — and the persist must sit ADJACENT to its reserve
+            # (one shielded unit) so a watchdog cancellation between them can
+            # never orphan a persisted full-stake row off the ledger.
+            premium_candidates.append((pick, breakdown, event_id))
 
-    # Reserve the deferred premium candidates edge-ranked by raw_kelly (DESC) so
-    # that when the daily-exposure cap binds the highest-growth picks fund first.
-    # The sort is STABLE, so equal-raw_kelly candidates keep their deterministic
-    # iteration order. Per-candidate logic is the EXACT prior inline path (reserve
-    # -> skip-on-None -> append-on-new-outcome -> dispatch); only the order moved.
+    # Persist + reserve the deferred premium candidates edge-ranked by raw_kelly
+    # (DESC) so that when the daily-exposure cap binds the highest-growth picks
+    # fund first. The sort is STABLE, so equal-raw_kelly candidates keep their
+    # deterministic iteration order. Per-candidate logic is the prior inline path
+    # (persist -> reserve -> skip-on-None -> append-on-new-outcome -> dispatch).
     # raw_kelly derives only from already-computed fair/price (no leakage) and the
     # ledger.reserve math / kr-1 ordering inside _reserve_for_outcome are unchanged.
     premium_candidates.sort(key=lambda c: c[1].raw_kelly, reverse=True)
     n_unpersisted_withheld = 0
-    for pick, breakdown, outcome, event_id in premium_candidates:
-        staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
+    for pick, breakdown, event_id in premium_candidates:
+        # SHIELDED: a watchdog cancellation mid-pair lets the in-flight persist
+        # run on to its ledger reservation (never a persisted full-stake row
+        # the caps don't count); the dispatch below stays cancellable — a lost
+        # alert re-dispatches next cycle as a 'duplicate'.
+        outcome, staked = await asyncio.shield(
+            _persist_and_reserve(deps, pick, breakdown, event_id, now)
+        )
         if staked is None:
             # brand-new premium pick with no remaining daily/event capacity
             # (or a 'duplicate_denied' cap-denial marker — never re-dispatched)
@@ -2291,7 +2355,21 @@ def _fair_probabilities(
     for (event_id, bookmaker, market, _detail), legs in books.items():
         if len(legs) < 2:
             continue  # cannot devig a one-sided book
-        probs = devig([leg.decimal_odds for leg in legs], method=method)
+        probs, fallback = devig_with_diagnostics([leg.decimal_odds for leg in legs], method=method)
+        if fallback is not None:
+            # The pure devig module returns the fallback condition as DATA
+            # (no logging inside app/probabilities/ — audit 2026-07-09); THIS
+            # io layer decides: documented-expected fallbacks follow the debug
+            # doctrine (e.g. Shin on underround books), the rest are anomalous.
+            log = logger.debug if fallback in EXPECTED_FALLBACKS else logger.warning
+            log(
+                "%s devig fell back to multiplicative (%s) for %s %s/%s",
+                method,
+                fallback,
+                event_id,
+                bookmaker,
+                market,
+            )
         for leg, p in zip(legs, probs, strict=True):
             fair[(event_id, bookmaker, market, leg.selection)] = p
     return fair
