@@ -1574,11 +1574,12 @@ def _grouped_entry(books: dict[str, float], captured_at: datetime) -> _GroupedEn
     return prices, captured
 
 
-def test_collect_group_prices_marks_unanchored_period_collision_ambiguous() -> None:
-    """An UNANCHORED period submarket (too thin for a fair) sharing the
-    line-blind (event, market, selection) key must mark the key AMBIGUOUS and
-    never last-write-win over the anchored group's prices — previously it
-    silently overwrote prices_by_key and fed a wrong-line current_odds/edge."""
+def test_collect_group_prices_anchored_line_wins_over_derived_submarket() -> None:
+    """An UNANCHORED submarket sharing the line-blind key with an ANCHORED
+    group is a derived capture (half/team/prop) that cannot be the pick's
+    line — it is dropped silently and the anchored group's prices stand.
+    Live regression 2026-07-09: these collisions were skipping EVERY CLV
+    write on btts/totals picks (team_totals_2_5 etc.)."""
     from app.clv_trueup import _collect_group_prices
 
     full = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
@@ -1586,16 +1587,19 @@ def test_collect_group_prices_marks_unanchored_period_collision_ambiguous() -> N
     grouped: _Grouped = {
         # anchored full-match group (iterates FIRST: the last-write-wins case)
         ("ev1", Market.TOTALS, None): _grouped_entry({"pinnacle": 1.90, "SoftBook": 1.95}, full),
-        # unanchored 1st-half submarket, same selection string
-        ("ev1", Market.TOTALS, "1st Half"): _grouped_entry({"SoftBook": 2.40}, half),
+        # unanchored derived submarkets, same selection string (live vocabulary)
+        ("ev1", Market.TOTALS, "totals_1st_half_2_5"): _grouped_entry({"SoftBook": 2.40}, half),
+        ("ev1", Market.TOTALS, "team_totals_2_5"): _grouped_entry({"SoftBook": 3.10}, half),
     }
     key = ("ev1", "totals", "Over 2.5")
     detail_by_key: dict[tuple[str, str, str], str | None] = {key: None}  # anchored detail
     ambiguous_keys: set[tuple[str, str, str]] = set()
 
-    prices_by_key, captured_by_key = _collect_group_prices(grouped, detail_by_key, ambiguous_keys)
+    prices_by_key, captured_by_key = _collect_group_prices(
+        grouped, detail_by_key, ambiguous_keys, anchored_keys=frozenset(detail_by_key)
+    )
 
-    assert key in ambiguous_keys, "unanchored period collision must be ambiguous"
+    assert key not in ambiguous_keys, "anchored key must NOT be poisoned by derived captures"
     assert prices_by_key[key] == {"pinnacle": 1.90, "SoftBook": 1.95}, (
         "the anchored group's prices must never be overwritten by the submarket"
     )

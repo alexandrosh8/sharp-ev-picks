@@ -134,6 +134,7 @@ def _collect_group_prices(
     grouped: GroupedMarkets,
     detail_by_key: dict[tuple[str, str, str], str | None],
     ambiguous_keys: set[tuple[str, str, str]],
+    anchored_keys: frozenset[tuple[str, str, str]] = frozenset(),
 ) -> tuple[
     dict[tuple[str, str, str], dict[str, float]],
     dict[tuple[str, str, str], Mapping[tuple[str, str], datetime | None]],
@@ -141,13 +142,17 @@ def _collect_group_prices(
     """Price/captured maps per line-blind pick key over ALL grouped entries,
     extending the line-ambiguity guard to UNANCHORED groups.
 
-    The anchored fair loop pre-registers its details in ``detail_by_key``; an
-    UNANCHORED period submarket (too thin for a fair, so invisible to that
-    loop) sharing a key must mark the key ambiguous and be SKIPPED — never
-    silently last-write-win over the anchored group's prices, which fed a
-    wrong-line current_odds/current_edge "still value" verdict. Mutates
-    ``detail_by_key``/``ambiguous_keys`` in place (fail-closed downstream:
-    the per-pick ambiguity skip refuses the whole key).
+    The anchored fair loop pre-registers its details in ``detail_by_key``
+    (``anchored_keys`` = that pre-seeded key set). A different-detail group
+    colliding with an ANCHORED key is a derived-capture submarket that cannot
+    be the pick's line — the anchored group is (live evidence 2026-07-09:
+    ``team_totals_2_5`` / ``totals_1st_half_2_5`` / ``oc_both_teams_to_score_
+    in_2nd_half`` rows sharing "Over 2.5"/"Yes" keys were skipping every CLV
+    write) — so it is dropped SILENTLY and the anchored group's prices stand.
+    A collision with no anchor to disambiguate (unanchored vs unanchored)
+    stays fail-closed: the key is marked ambiguous, never guessed. Mutates
+    ``detail_by_key``/``ambiguous_keys`` in place (the per-pick ambiguity
+    skip downstream refuses the whole key).
     """
     prices_by_key: dict[tuple[str, str, str], dict[str, float]] = {}
     captured_by_key: dict[tuple[str, str, str], Mapping[tuple[str, str], datetime | None]] = {}
@@ -155,8 +160,10 @@ def _collect_group_prices(
         for sel, books in prices.items():
             key = (event_id, str(market), sel)
             if key in detail_by_key and detail_by_key[key] != _detail:
+                if key in anchored_keys:
+                    continue  # anchored line wins; derived capture dropped
                 ambiguous_keys.add(key)
-                continue  # never overwrite across submarkets — skip, don't guess
+                continue  # no anchor to disambiguate — skip, don't guess
             detail_by_key[key] = _detail
             prices_by_key[key] = books
             captured_by_key[key] = captured
@@ -272,10 +279,13 @@ async def revalidate_open_picks(
     # D3 close provenance: the group's (selection, book) -> captured_at map per
     # pick key, so the close writer can stamp WHEN the anchor rows were captured.
     # Collected over ALL grouped entries with the line-ambiguity guard extended
-    # to UNANCHORED groups (_collect_group_prices): a period submarket too thin
-    # to anchor must mark the key ambiguous, never silently overwrite the
-    # anchored group's prices with a wrong-line price map.
-    prices_by_key, captured_by_key = _collect_group_prices(grouped, detail_by_key, ambiguous_keys)
+    # to UNANCHORED groups (_collect_group_prices): an ANCHORED key's line wins
+    # over derived-capture submarkets sharing the line-blind key (team totals /
+    # half markets / oc_* props); collisions with no anchor stay ambiguous
+    # (fail-closed), never guessed.
+    prices_by_key, captured_by_key = _collect_group_prices(
+        grouped, detail_by_key, ambiguous_keys, anchored_keys=frozenset(detail_by_key)
+    )
 
     if not fair_by_key:
         return 0
