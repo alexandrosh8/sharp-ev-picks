@@ -1198,6 +1198,7 @@ _MATCH_RATE_CACHE_TTL_S = 60.0
 
 @router.get("/resolution/match-rate", dependencies=[Depends(require_dashboard_auth)])
 async def resolution_match_rate(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     days: Annotated[int | None, Query(ge=1, le=365)] = None,
 ) -> dict[str, Any]:
@@ -1214,12 +1215,52 @@ async def resolution_match_rate(
     if cached is not None and time.monotonic() - cached[0] < _MATCH_RATE_CACHE_TTL_S:
         return cached[1]
     since = datetime.now(tz=UTC) - timedelta(days=days) if days is not None else None
-    outcomes = await shadow_match_rate_outcomes(session, since=since)
+    from app.config import get_settings as _get_settings
+
+    _s = _get_settings()
+    _staleness_ttl = float(_s.value_betfair_staleness_verdict_ttl_seconds)
+    # Audit 2026-07-09: the 7 report queries are independent — run them
+    # CONCURRENTLY, each on its own session (one AsyncSession cannot multiplex
+    # statements), so a cold compute costs the slowest query, not the serial
+    # sum (~12-20s). Without a session factory (router-only test apps, no
+    # lifespan) fall back to the original sequential path on the injected
+    # session.
+    factory = getattr(request.app.state, "session_factory", None)
+
+    async def _own_session(fn: Any, /, **kwargs: Any) -> Any:
+        async with factory() as own:  # type: ignore[misc]
+            return await fn(own, **kwargs)
+
+    if factory is not None:
+        (
+            outcomes,
+            pinnacle_capture,
+            betfair_inline_capture,
+            betfair_archive_capture,
+            link_metrics,
+            close_density,
+            staleness_metrics,
+        ) = await asyncio.gather(
+            _own_session(shadow_match_rate_outcomes, since=since),
+            _own_session(pinnacle_archive_capture_by_sport),
+            _own_session(betfair_inline_capture_by_sport),
+            _own_session(betfair_archive_capture_by_sport),
+            _own_session(source_link_metrics),
+            _own_session(sharp_close_capture_density),
+            _own_session(betfair_staleness_metrics, ttl_seconds=_staleness_ttl),
+        )
+    else:
+        outcomes = await shadow_match_rate_outcomes(session, since=since)
+        pinnacle_capture = await pinnacle_archive_capture_by_sport(session)
+        betfair_inline_capture = await betfair_inline_capture_by_sport(session)
+        betfair_archive_capture = await betfair_archive_capture_by_sport(session)
+        link_metrics = await source_link_metrics(session)
+        close_density = await sharp_close_capture_density(session)
+        staleness_metrics = await betfair_staleness_metrics(session, ttl_seconds=_staleness_ttl)
     report = summarize_match_rate(outcomes).as_dict()
     # Per-sport upcoming capture for ALL arcadia sports (tennis + american_football
     # included), so the panel shows the archive captures every sport, not just the
     # pick sports that appear in the match rate above.
-    pinnacle_capture = await pinnacle_archive_capture_by_sport(session)
     report["archive_capture"] = pinnacle_capture
     # Betfair Exchange coverage alongside Pinnacle. The INLINE (canonical-event)
     # reading is CANONICAL: of our scraped fixtures with soft odds, the share also
@@ -1231,10 +1272,9 @@ async def resolution_match_rate(
     # BETFAIR_EXCHANGE_ENABLED (default OFF) and near-zero since the inline-bind
     # (commit 882bb42) — is kept ONLY as a SEPARATE diagnostic (``betfair_archive_capture``),
     # never the panel source.
-    betfair_inline_capture = await betfair_inline_capture_by_sport(session)
     report["betfair_capture"] = betfair_inline_capture
     report["betfair_inline_capture"] = betfair_inline_capture
-    report["betfair_archive_capture"] = await betfair_archive_capture_by_sport(session)
+    report["betfair_archive_capture"] = betfair_archive_capture
     # Scraped-weighted "Betfair X% · Pinnacle Y%" headline — the always-populated
     # summary the dashboard's coverage-panel HEADER shows up front (replaces the
     # bare "—"). Betfair uses the INLINE coverage (the real pick-feeding anchor),
@@ -1246,24 +1286,19 @@ async def resolution_match_rate(
     # Cross-source LINK observability (event_source_links + match_review_queue):
     # auto-linked count, per-source averages, weak links (<0.95 confidence), and
     # the review-queue depth. Null-safe — empty tables yield zeros/empty maps.
-    report["links"] = await source_link_metrics(session)
+    report["links"] = link_metrics
     # D4 capture-density panel: final-hour sharp rows per source on recently
     # kicked-off events — whether the D1 close-boost band is actually producing
     # a fresh (non-echo) sharp close. Read-only; settled-close QUALITY lives on
     # /performance ("clv_quality"), not here.
-    report["close_capture_density"] = await sharp_close_capture_density(session)
+    report["close_capture_density"] = close_density
     # Betfair STALENESS-GUARD diagnostics (P3): write-time decision counts
     # (pass/demote/no_api_match/no_api_price), the fresh-vs-stale split at the
     # read TTL, median tick distance and median inline->API freshness gap —
     # the demote-rate instrument to review BEFORE flipping
     # VALUE_BETFAIR_STALENESS_SHADOW off. Null-safe: an empty (or not yet
     # migrated) verdict table yields zeros/None, never a 500.
-    from app.config import get_settings as _get_settings
-
-    report["betfair_staleness"] = await betfair_staleness_metrics(
-        session,
-        ttl_seconds=float(_get_settings().value_betfair_staleness_verdict_ttl_seconds),
-    )
+    report["betfair_staleness"] = staleness_metrics
     # Proxy-pool health (audit 2026-07-03 §5): the shared quarantine registry,
     # REDACTED — pool indices, counters, and exception class names only; never
     # a proxy URL/IP/credential. Auth-gated with the rest of this endpoint.
@@ -1271,7 +1306,6 @@ async def resolution_match_rate(
     # stale candidates — the payload's fixed wording says exactly that.
     from app.ingestion.proxy_health import get_registry as _get_proxy_registry
 
-    _s = _get_settings()
     # Headroom is measured against the ACTIVE source's parallelism: OddsChecker
     # fetches with oddschecker_max_clients, OddsPortal with oddsportal_concurrency.
     # Using the wrong knob mislabels the "no spare proxies" headroom warning.
@@ -1415,9 +1449,27 @@ async def record_result(
     payload: ResultIn,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, str]:
+    # Audit 2026-07-09: the body's pick_id used to be silently ignored — two
+    # sources of truth. The path is canonical; a mismatching body is a 422.
+    try:
+        body_pick_id = int(payload.pick_id)
+    except ValueError:
+        body_pick_id = None
+    if body_pick_id != pick_id:
+        raise HTTPException(status_code=422, detail="body pick_id does not match the path pick_id")
     pick = await session.get(Pick, pick_id)
     if pick is None:
         raise HTTPException(status_code=404, detail="pick not found")
+    # Audit 2026-07-09: a superseded pick is a duplicate twin parked by the
+    # settlement dedup guard so it never gains a ResultTracking row — the
+    # /performance join counts every ResultTracking row, so settling one here
+    # would double-count the bet. First settles ('alerted') and corrections
+    # ('settled') stay allowed.
+    if pick.status == "superseded":
+        raise HTTPException(
+            status_code=409,
+            detail="pick is superseded (duplicate twin); settle the canonical pick instead",
+        )
 
     pnl: Decimal | None = None
     roi: Decimal | None = None
@@ -1464,6 +1516,11 @@ async def record_result(
             "pnl": result_stmt.excluded.pnl,
             "roi": result_stmt.excluded.roi,
             "settled_at": result_stmt.excluded.settled_at,
+            # Audit 2026-07-09: the manual path never carries scores, so a
+            # correction over an engine-settled row must CLEAR the previous
+            # settlement's scores, not leave them beside the corrected outcome.
+            "home_score": None,
+            "away_score": None,
         },
     )
     await session.execute(result_stmt)
