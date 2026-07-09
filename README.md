@@ -102,7 +102,7 @@ uv run uvicorn app.main:app --reload         # http://localhost:8000/
 Prefer not to install the databases? `docker compose up -d postgres redis` and keep the app native. First-time commands live in [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). Dev tasks:
 
 ```bash
-uv run pytest -q                          # 2,400+ tests (no network)
+uv run pytest -q                          # 3,200+ tests (no network)
 uvx ruff check .                          # lint
 uvx ruff format --check app tests scripts # formatting (CI-gated separately)
 uv run mypy app tests                     # types
@@ -185,6 +185,8 @@ Proven open-source engines bound into one pipeline:
 ## Status — monitor-and-accrue
 
 The project is in **monitor-and-accrue** mode: production is monitored, the validation machinery is signed and armed, and evidence is accruing. Clean monitoring rounds with no changes are the expected outcome. No user-side action is needed unless operational capture capacity changes.
+
+**Latest hardening pass (2026-07-09, adversarially-verified audit):** settlement dedup now folds cross-source selection-spelling variants (line-preserving); CLV close provenance gained line-ambiguity and period-submarket guards; pick persist + daily-exposure reserve is cancellation-atomic; model-strategy EV/Kelly nets exchange commission; the dashboard fails closed on health/tier-fetch failures and refuses structurally-inconsistent rows; cross-source matching measures ambiguity against the first distinct rival and quarantines conflicting alias claims. All shipped test-first with the safety audit and the locked parse-replay scorer green.
 
 **Current limitations (honest):** trusted-CLV samples are still accruing everywhere and are not yet conclusive for any sport, including the live football pipeline; basketball is the closest shadow candidate but not promotable; NFL lacks volume; tennis settlement is fixed but capture evidence is thin; Betfair staleness stays monitor-only; the H2 validation waits for future BSP data and a preflight PASS; heavy slates can exceed capture capacity, in which case freshness gates fail closed.
 
