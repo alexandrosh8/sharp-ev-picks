@@ -46,7 +46,7 @@ def test_migration_chains_off_prior_head_single_head() -> None:
     assert callable(mod.downgrade)
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["d1e2f3a4b5c6"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["a2f7d4c9e1b8"]
 
 
 def test_documented_reason_vocabulary_covers_pipeline_gates() -> None:

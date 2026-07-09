@@ -3838,7 +3838,10 @@ async def persist_pick(
     `tier` alone scopes alerting, exposure, and reporting.
     """
     sport_id = await _get_or_create_sport(session, pick.sport, pick.sport.title())
-    league_id = await _get_or_create_league(session, sport_id, pick.league)
+    # country is part of league IDENTITY — pass the loader's country through so
+    # the pick path resolves the SAME (sport, key, country) row the snapshot
+    # path minted, instead of forking a ''-country twin per league key.
+    league_id = await _get_or_create_league(session, sport_id, pick.league, teams.country)
     home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
     away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)
     event_id = await _get_or_create_event(
@@ -4001,6 +4004,11 @@ async def persist_pick(
         # row now describes the premium alert the operator acts on, so its CLV must
         # attribute to the policy that promoted it (H3).
         existing.policy_fingerprint = pick.policy_fingerprint
+        # P2-2: likewise the promoting detection's mint-side devig-fallback flag —
+        # the row's fair/model numbers are now the premium detection's, so a stale
+        # volume-mint flag would feed _devig_fallback_asymmetric the WRONG mint
+        # side and corrupt the trusted-CLV admission verdict at settlement.
+        existing.mint_devig_fell_back = pick.mint_devig_fell_back
         # created_at advances to the upgrade moment: it is when the pick
         # became an actionable premium alert AND when its exposure was
         # reserved — seed_exposure_ledger (premium-scoped, created_at within
@@ -4024,6 +4032,13 @@ async def persist_pick(
         # A4: the exclusion reason described the OLD fill's close — clear it
         # with the boolean it annotates.
         existing.close_exclusion_reason = None
+        # P2-2: the close-side devig flag, anchor book, and capture time were
+        # stamped against the OLD fill (revalidation cycles write them on open
+        # picks) — clear them with the rest of the close provenance; the next
+        # revalidation / close true-up re-stamps the promoted row from scratch.
+        existing.close_devig_fell_back = None
+        existing.close_anchor_book = None
+        existing.close_snapshot_captured_at = None
         existing.current_odds = None
         existing.current_edge = None
         existing.current_bookmaker = None
@@ -4063,7 +4078,8 @@ async def update_pick_stake(
     informational/recommended only.
     """
     sport_id = await _get_or_create_sport(session, pick.sport, pick.sport.title())
-    league_id = await _get_or_create_league(session, sport_id, pick.league)
+    # same (sport, key, country) league identity as persist_pick — never a ''-twin
+    league_id = await _get_or_create_league(session, sport_id, pick.league, teams.country)
     home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
     away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)
     event_id = await _get_or_create_event(

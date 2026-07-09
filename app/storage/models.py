@@ -563,6 +563,11 @@ class EventSourceLink(Base):
             name="uq_event_source_links_source_event",
         ),
         Index("idx_event_source_links_canonical", "canonical_event_id"),
+        # _get_or_create_event's Stage-0b redirect and Stage-1 link fast-path
+        # filter on source_event_id ALONE (per event, per persist cycle); the
+        # composite unique key leads on `source`, so without this dedicated
+        # index every event upsert seq-scans a monotonically growing table.
+        Index("idx_event_source_links_source_event_id", "source_event_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)

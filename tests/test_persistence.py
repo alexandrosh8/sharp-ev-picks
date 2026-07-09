@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -32,6 +33,7 @@ def make_pick(
     decimal_odds: float = 2.10,
     edge: float = 0.05,
     league: str = "test-league-persist",
+    mint_devig_fell_back: bool | None = None,
 ) -> PickOut:
     return PickOut(
         pick_id="p-1",
@@ -55,6 +57,8 @@ def make_pick(
         liquidity=None,
         reason_summary="persistence test",
         tier=tier,
+        # P2-2 mint-side devig-fallback provenance — upgrade-refresh coverage
+        mint_devig_fell_back=mint_devig_fell_back,
         # A5 steam shadow verdict (observability only) — roundtrip coverage
         steam_tripped=True,
         steam_reasons="soft_toward_anchor,stale_anchor",
@@ -370,6 +374,112 @@ async def test_volume_to_premium_upgrade_promotes_row_in_place(session) -> None:
     assert row.clv_log is None
     assert row.current_odds is None
     assert row.revalidated_at is None
+
+
+async def test_upgrade_refreshes_mint_devig_flag_and_clears_close_provenance(session) -> None:  # type: ignore[no-untyped-def]
+    # The upgraded row must carry the PROMOTING detection's devig provenance:
+    # its fair/model numbers are the premium detection's, so a stale volume-mint
+    # flag would feed _devig_fallback_asymmetric the wrong mint side. Likewise
+    # the close-side provenance trio (flag, book, capture time) described the
+    # OLD fill and must be cleared with the rest of the close reset.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    assert (
+        await persist_pick(
+            session,
+            make_pick("evt-tier-devig", tier="volume", edge=0.02, mint_devig_fell_back=True),
+            teams,
+            "value-sharp-vs-soft",
+            "tier-t9",
+        )
+        == "inserted"
+    )
+    # simulate a revalidation cycle stamping close provenance on the open volume row
+    await session.execute(
+        sa_update(Pick)
+        .where(Pick.bookmaker == "testbook")
+        .values(
+            close_devig_fell_back=False,
+            close_anchor_book="pinnacle",
+            close_snapshot_captured_at=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+            has_snapshot_close=True,
+        )
+    )
+    outcome = await persist_pick(
+        session,
+        make_pick("evt-tier-devig", tier="premium", edge=0.05, mint_devig_fell_back=False),
+        teams,
+        "value-sharp-vs-soft",
+        "tier-t9",
+    )
+    assert outcome == "upgraded"
+    row = await session.scalar(select(Pick).where(Pick.bookmaker == "testbook"))
+    assert row is not None
+    # the promoting detection's mint flag replaces the shadow mint's
+    assert row.mint_devig_fell_back is False
+    # the OLD fill's close provenance is gone with the rest of the close reset
+    assert row.close_devig_fell_back is None
+    assert row.close_anchor_book is None
+    assert row.close_snapshot_captured_at is None
+    assert row.has_snapshot_close is None
+
+
+async def test_pick_path_resolves_league_on_snapshot_path_country_key(session) -> None:  # type: ignore[no-untyped-def]
+    # League identity is (sport, key, country). The snapshot path resolves with
+    # teams.country — the pick path must hit the SAME row, never fork a
+    # ''-country twin ("Ethiopia — Premier League" class).
+    from app.storage.models import League
+    from app.storage.repositories import (
+        _get_or_create_league,
+        _get_or_create_sport,
+        update_pick_stake,
+    )
+
+    teams = EventTeams(
+        home="Alpha FC", away="Beta United", league="test-league-country", country="Ethiopia"
+    )
+    sport_id = await _get_or_create_sport(session, "soccer", "Soccer")
+    # the snapshot path minted the league first, keyed with the real country
+    snapshot_league_id = await _get_or_create_league(
+        session, sport_id, "test-league-country", "Ethiopia"
+    )
+    await persist_pick(
+        session,
+        make_pick("evt-league-country", league="test-league-country"),
+        teams,
+        "value-sharp-vs-soft",
+        "lc-1",
+    )
+    # the stake correction resolves the same natural key — same league row too
+    assert (
+        await update_pick_stake(
+            session,
+            make_pick("evt-league-country", league="test-league-country"),
+            teams,
+            "value-sharp-vs-soft",
+            "lc-1",
+        )
+        is True
+    )
+    rows = (
+        (await session.execute(select(League).where(League.key == "test-league-country")))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1  # no ''-country twin forked by the pick path
+    assert rows[0].id == snapshot_league_id
+    assert rows[0].country == "Ethiopia"
+
+
+def test_event_source_links_has_source_event_id_index() -> None:
+    # Stage-0b / Stage-1 in _get_or_create_event filter on source_event_id
+    # alone; the composite unique key leads on `source`, so a dedicated index
+    # must exist or every event upsert seq-scans a monotonically growing table.
+    from app.storage.models import EventSourceLink
+
+    table = EventSourceLink.__table__
+    assert isinstance(table, sa.Table)
+    names = {ix.name for ix in table.indexes}
+    assert "idx_event_source_links_source_event_id" in names
 
 
 async def test_settled_volume_row_is_not_upgraded(session) -> None:  # type: ignore[no-untyped-def]
@@ -946,6 +1056,133 @@ async def test_record_result_repost_is_idempotent(committing_session) -> None:  
     )
     assert len(rows) == 1  # ONE result row, updated (no duplicate, no crash)
     assert rows[0].outcome == "lost"
+
+
+async def test_record_result_rejects_superseded_pick(committing_session) -> None:  # type: ignore[no-untyped-def]
+    # Audit 2026-07-09: a superseded pick (duplicate twin parked by the dedup
+    # guard) must NOT be resurrectable to 'settled' via the manual endpoint —
+    # its ResultTracking row would double-count the bet in /performance.
+    from fastapi import HTTPException
+
+    from app.api.routes import record_result
+    from app.schemas.base import Outcome
+    from app.schemas.events import ResultIn
+    from app.storage.models import ResultTracking
+
+    session = committing_session
+    teams = EventTeams(home="Super Home", away="Super Away", league="test-superseded")
+    await persist_pick(
+        session,
+        make_pick("evt-superseded", league="test-superseded"),
+        teams,
+        "value-sharp-vs-soft",
+        "t-sup",
+    )
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == "evt-superseded")
+    )
+    assert pick is not None
+    pick.status = "superseded"
+    await session.flush()
+
+    with pytest.raises(HTTPException) as exc:
+        await record_result(
+            pick.id,
+            ResultIn(pick_id=str(pick.id), outcome=Outcome.WON, settled_at=datetime.now(tz=UTC)),
+            session,
+        )
+    assert exc.value.status_code == 409
+    rows = (
+        (await session.execute(select(ResultTracking).where(ResultTracking.pick_id == pick.id)))
+        .scalars()
+        .all()
+    )
+    assert rows == []  # no result row minted for the superseded twin
+    assert pick.status == "superseded"  # status not resurrected
+
+
+async def test_record_result_rejects_mismatched_body_pick_id(committing_session) -> None:  # type: ignore[no-untyped-def]
+    # Audit 2026-07-09: ResultIn.pick_id used to be silently ignored in favor of
+    # the path parameter — two sources of truth. A mismatch is now a 422.
+    from fastapi import HTTPException
+
+    from app.api.routes import record_result
+    from app.schemas.base import Outcome
+    from app.schemas.events import ResultIn
+
+    session = committing_session
+    teams = EventTeams(home="Mismatch Home", away="Mismatch Away", league="test-mismatch")
+    await persist_pick(
+        session,
+        make_pick("evt-mismatch", league="test-mismatch"),
+        teams,
+        "value-sharp-vs-soft",
+        "t-mm",
+    )
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == "evt-mismatch")
+    )
+    assert pick is not None
+    for bad_body_id in (str(pick.id + 1), "abc"):
+        with pytest.raises(HTTPException) as exc:
+            await record_result(
+                pick.id,
+                ResultIn(pick_id=bad_body_id, outcome=Outcome.WON, settled_at=datetime.now(tz=UTC)),
+                session,
+            )
+        assert exc.value.status_code == 422
+
+
+async def test_record_result_correction_clears_engine_scores(committing_session) -> None:  # type: ignore[no-untyped-def]
+    # Audit 2026-07-09: the manual upsert never writes home_score/away_score, so
+    # a correction re-post used to leave the PREVIOUS settlement's scores beside
+    # the corrected outcome — a contradictory pair. The correction now clears them.
+    from app.api.routes import record_result
+    from app.schemas.base import Outcome
+    from app.schemas.events import ResultIn
+    from app.storage.models import ResultTracking
+
+    session = committing_session
+    teams = EventTeams(home="Scores Home", away="Scores Away", league="test-scores")
+    await persist_pick(
+        session,
+        make_pick("evt-scores", league="test-scores"),
+        teams,
+        "value-sharp-vs-soft",
+        "t-sc",
+    )
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == "evt-scores")
+    )
+    assert pick is not None
+    # Simulate an engine-settled row that stored the final score.
+    session.add(
+        ResultTracking(
+            pick_id=pick.id,
+            outcome="won",
+            home_score=2,
+            away_score=1,
+            settled_at=datetime.now(tz=UTC),
+        )
+    )
+    await session.flush()
+
+    await record_result(
+        pick.id,
+        ResultIn(pick_id=str(pick.id), outcome=Outcome.VOID, settled_at=datetime.now(tz=UTC)),
+        session,
+    )
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "void"
+    assert row.home_score is None  # stale score cleared with the correction
+    assert row.away_score is None
 
 
 async def test_available_games_fallback_includes_tennis_with_unvalidated_flag(session) -> None:  # type: ignore[no-untyped-def]
