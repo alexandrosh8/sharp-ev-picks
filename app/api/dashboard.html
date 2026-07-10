@@ -1934,7 +1934,12 @@
           // stored-impossible flag (offered below its own min-acceptable, or
           // an inverted fair/offered pair) — such a row must never render as
           // a bettable pick, whatever its tier/status/freshness say.
-          return p.structural_sane !== false &&
+          // Audit 2026-07-10: qualification shares the banner's PRICING
+          // trust bar — no sharp anchor or no anchor-match record means
+          // the card renders 'untrusted', so it must never qualify either.
+          const sharpAnchored = p.anchor_type === "pinnacle" || p.anchor_type === "sharp";
+          const matchPresent = isFinite(numOf(p.anchor_match_confidence)) && !!p.anchor_match_method;
+          return p.structural_sane !== false && sharpAnchored && matchPresent &&
             tierOf(p) === "premium" && p.status === "alerted" && !hasStarted(p) &&
             isRevalidationFresh(p, health) && hasValueNow(p) && !dataIsStale(health);
         }
@@ -3005,7 +3010,12 @@
           const lacksSharpAnchor = !(p.anchor_type === "pinnacle" || p.anchor_type === "sharp");
           const amcVal = numOf(p.anchor_match_confidence);
           const matchMissing = !isFinite(amcVal) || !p.anchor_match_method;
-          const untrustedClose = p.clv_log != null && !isTrustedClv(p);
+          // Audit 2026-07-10 (operator report: Partick Over 4.5 banner):
+          // close-trust applies only once the pick has STARTED — an open
+          // pick's clv_log is a PROVISIONAL revalidation stamp with no
+          // close to trust yet, so testing it here false-fired the
+          // untrusted banner on fresh, sharp-anchored qualifying picks.
+          const untrustedClose = hasStarted(p) && p.clv_log != null && !isTrustedClv(p);
           const untrusted = staleNow || lacksSharpAnchor || matchMissing || untrustedClose ||
             p.structural_sane === false || dataIsStale(state.health);
           if (untrusted) {
