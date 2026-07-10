@@ -1,8 +1,11 @@
 # ADR-0021 — Pre-registration of the goto_conversion devig hypothesis (DRAFT)
 
-- **Status:** DRAFT — AWAITING OPERATOR SIGNATURE. Nothing in this ADR is in
-  force until the operator signs; the method ships REGISTERED-ONLY (selectable,
-  never a default) in the meantime.
+- **Status:** ACCEPTED — signed 2026-07-10 on the operator's explicit
+  delegated instruction ("review it because i cant read it first and then
+  sign if needed", session 2026-07-10), after a two-pass review that froze
+  every previously-open evaluation parameter (bands, families, pick rule,
+  CI construction, fallback and insufficiency handling). In force from this
+  date; the decisive run remains blocked until the fresh 2026 BSP tar exists.
 - **Relates to:** ADR-0006 (devig method policy), ADR-0019 (sharp-vs-soft
   pre-registration — same hypothesis family and the same single-shot
   discipline), ADR-0017 (CLV close-anchor provenance). Operationalizes idea #1
@@ -125,5 +128,6 @@ RPS noise; the default expectation is rejection).
 
 ---
 
-*Drafted 2026-07-10 by the implementing agent. DRAFT — AWAITING OPERATOR
-SIGNATURE; deliberately not self-signed.*
+*Drafted 2026-07-10 by the implementing agent; amended (frozen evaluation
+parameters) and SIGNED 2026-07-10 under the operator's delegated review
+instruction. The single-shot protocol of ADR-0019 governs execution.*
