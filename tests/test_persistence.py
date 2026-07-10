@@ -153,6 +153,25 @@ async def test_persist_pick_cap_denied_row_returns_duplicate_denied(session) -> 
     assert again == "duplicate_denied"
 
 
+async def test_persist_pick_stake_zero_volume_row_is_repromotable(session) -> None:  # type: ignore[no-untyped-def]
+    # Task 1 permanence fix (2026-07-10 plan): a cap-denied row DEMOTED to the
+    # volume tier (stake 0 + tier 'volume') must NOT be a permanent
+    # 'duplicate_denied' — a later premium re-detection takes the volume->premium
+    # UPGRADE path, so the pick can re-alert once daily capacity frees up.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+
+    inserted = await persist_pick(session, make_pick("evt-stake0-volume"), teams, "value", "test-1")
+    assert inserted == "inserted"
+    await session.execute(
+        sa_update(Pick)
+        .where(Pick.bookmaker == "testbook")
+        .values(recommended_stake_fraction=Decimal("0"), tier="volume")
+    )
+
+    again = await persist_pick(session, make_pick("evt-stake0-volume"), teams, "value", "test-1")
+    assert again == "upgraded"
+
+
 async def test_persisted_pick_roundtrips_fields(session) -> None:  # type: ignore[no-untyped-def]
     teams = EventTeams(home="Alpha FC", away="Beta United")
     await persist_pick(session, make_pick("evt-roundtrip"), teams, "dixon-coles", "test-2")

@@ -837,7 +837,9 @@ async def test_cap_denied_inserted_premium_zeroes_stake_and_never_alerts(
     patch_persist_recording(monkeypatch, ["inserted", "duplicate_denied"])
     rewrites: list[float] = []
 
-    async def spy_update_pick_stake(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+    async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
+        session, pick, teams, model_name, model_version, *, persist_tier=False
+    ):
         rewrites.append(pick.recommended_stake_fraction)
         return True
 
@@ -858,6 +860,82 @@ async def test_cap_denied_inserted_premium_zeroes_stake_and_never_alerts(
     assert second == []
     assert sink.sent == []  # the duplicate must NOT late-fire the alert
     assert rewrites == [pytest.approx(0.0)]  # ... and nothing was rewritten again
+
+
+def spy_stake_rewrites(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, float, str, bool]]:
+    """Record every update_pick_stake call as (tier, stake_fraction,
+    reason_summary, persist_tier) so tests can assert the demotion contract."""
+    import app.storage.repositories as repos
+
+    rewrites: list[tuple[str, float, str, bool]] = []
+
+    async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
+        session, pick, teams, model_name, model_version, *, persist_tier=False
+    ):
+        rewrites.append(
+            (pick.tier, pick.recommended_stake_fraction, pick.reason_summary, persist_tier)
+        )
+        return True
+
+    monkeypatch.setattr(repos, "update_pick_stake", spy_update_pick_stake)
+    return rewrites
+
+
+async def test_cap_denied_inserted_premium_is_demoted_to_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 1 (2026-07-10 plan): a zero-grant INSERTED premium pick must not
+    linger as a premium-tier stake-0 marker — the persisted row is DEMOTED to
+    the volume tier (CLV-tracked, re-promotable when capacity frees) with the
+    'stake_zero' demotion note, and nothing is alerted."""
+    patch_persist_recording(monkeypatch, ["inserted"])
+    rewrites = spy_stake_rewrites(monkeypatch)
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    day = datetime.now(tz=UTC).date()
+    deps.ledger.reserve(day, deps.ledger.remaining(day))  # cap fully exhausted
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []  # cap-denied: not a pick this cycle
+    assert sink.sent == []  # ... and no alert
+    assert len(rewrites) == 1
+    tier, stake, reason, persist_tier = rewrites[0]
+    assert tier == "volume"  # demoted, not a premium stake-0 marker
+    assert stake == pytest.approx(0.0)
+    assert "stake_zero" in reason
+    assert persist_tier is True  # the row's tier is rewritten too
+
+
+async def test_cap_denied_upgraded_premium_demotes_and_never_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pick 2332's actual path: a volume->premium UPGRADE whose exposure grant
+    is 0 used to fire the premium alert at stake 0 (operator noise that
+    mis-states the strategy). It must instead demote the row back to the
+    volume tier with the 'stake_zero' note and stay silent — the next cycle's
+    re-detection retries the upgrade when capacity frees."""
+    patch_persist_recording(monkeypatch, ["upgraded"])
+    rewrites = spy_stake_rewrites(monkeypatch)
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    day = datetime.now(tz=UTC).date()
+    deps.ledger.reserve(day, deps.ledger.remaining(day))  # cap fully exhausted
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []  # never a stake-0 premium pick
+    assert sink.sent == []  # the defect: this used to alert at stake 0
+    assert len(rewrites) == 1
+    tier, stake, reason, persist_tier = rewrites[0]
+    assert tier == "volume"
+    assert stake == pytest.approx(0.0)
+    assert "stake_zero" in reason
+    assert persist_tier is True
 
 
 async def test_unpersisted_premium_with_persistence_configured_withholds_alert(

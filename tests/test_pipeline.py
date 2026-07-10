@@ -447,7 +447,9 @@ async def test_daily_clip_persists_clipped_stake(monkeypatch: pytest.MonkeyPatch
 
     persisted_clips: list[float] = []
 
-    async def spy_update_pick_stake(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+    async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
+        session, pick, teams, model_name, model_version, *, persist_tier=False
+    ):
         persisted_clips.append(pick.recommended_stake_fraction)
         return True
 
@@ -489,7 +491,9 @@ async def test_uncapped_pick_does_not_rewrite_persisted_stake(
 
     update_calls: list[float] = []
 
-    async def spy_update_pick_stake(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+    async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
+        session, pick, teams, model_name, model_version, *, persist_tier=False
+    ):
         update_calls.append(pick.recommended_stake_fraction)
         return True
 
@@ -521,7 +525,9 @@ async def test_cap_denied_inserted_pick_zeroes_stake_and_never_alerts(
 
     rewrites: list[float] = []
 
-    async def spy_update_pick_stake(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+    async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
+        session, pick, teams, model_name, model_version, *, persist_tier=False
+    ):
         rewrites.append(pick.recommended_stake_fraction)
         return True
 

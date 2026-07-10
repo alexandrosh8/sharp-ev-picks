@@ -4081,6 +4081,8 @@ async def update_pick_stake(
     teams: EventTeams,
     model_name: str,
     model_version: str,
+    *,
+    persist_tier: bool = False,
 ) -> bool:
     """Overwrite an already-persisted pick's recommended stake with the value
     actually reserved by the daily-exposure ledger.
@@ -4095,6 +4097,15 @@ async def update_pick_stake(
     are idempotent: the row already exists). Returns True when a row was
     updated, False when none matched (nothing to correct). Stakes remain
     informational/recommended only.
+
+    With ``persist_tier=True`` the row's ``tier`` and ``reason_summary`` are
+    ALSO rewritten from the pick — the stake-zero demotion path (Task 1,
+    2026-07-10): a premium candidate the daily-exposure ledger granted 0 is
+    demoted to the volume tier (CLV-tracked, never alerted) instead of
+    lingering as a premium stake-0 marker. Because the demoted row is
+    ``tier='volume'`` + ``status='alerted'``, a later premium re-detection
+    takes the volume->premium UPGRADE path in ``persist_pick`` — the denial
+    is no longer permanent once daily capacity frees up.
     """
     sport_id = await _get_or_create_sport(session, pick.sport, pick.sport.title())
     # same (sport, key, country) league identity as persist_pick — never a ''-twin
@@ -4120,6 +4131,9 @@ async def update_pick_stake(
     existing.recommended_stake_fraction = Decimal(str(pick.recommended_stake_fraction))
     existing.recommended_stake_amount = pick.recommended_stake_amount
     existing.stake_breakdown = pick.stake_breakdown.model_dump()
+    if persist_tier:
+        existing.tier = pick.tier
+        existing.reason_summary = pick.reason_summary
     await session.flush()
     return True
 

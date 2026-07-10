@@ -951,7 +951,9 @@ async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> 
         return "unpersisted"
 
 
-async def _persist_stake_clip(deps: "PipelineDeps", pick: PickOut, event_id: str) -> None:
+async def _persist_stake_clip(
+    deps: "PipelineDeps", pick: PickOut, event_id: str, *, persist_tier: bool = False
+) -> None:
     """Rewrite the persisted row's stake to the daily-clipped amount (BUG 2).
 
     The row was persisted with the pre-clip (per-bet-capped) stake BEFORE the
@@ -960,7 +962,10 @@ async def _persist_stake_clip(deps: "PipelineDeps", pick: PickOut, event_id: str
     reserved, or the persisted stake escapes the daily cap. Best-effort, with
     the SAME guards as `_maybe_persist`: without a session factory, directory,
     or resolvable teams there is no row to correct, and a failure here must
-    never break alerting (the in-memory pick already carries the clip)."""
+    never break alerting (the in-memory pick already carries the clip).
+
+    ``persist_tier=True`` (the stake-zero demotion) additionally rewrites the
+    row's tier + reason_summary from the pick — see update_pick_stake."""
     if deps.session_factory is None or deps.directory is None:
         return
     teams = deps.directory.lookup(event_id)
@@ -971,7 +976,12 @@ async def _persist_stake_clip(deps: "PipelineDeps", pick: PickOut, event_id: str
     try:
         async with deps.session_factory() as session:
             await repositories.update_pick_stake(
-                session, pick, teams, deps.model_name, deps.model_version
+                session,
+                pick,
+                teams,
+                deps.model_name,
+                deps.model_version,
+                persist_tier=persist_tier,
             )
             await session.commit()
     except Exception as exc:  # persistence must never break alerting
@@ -1069,13 +1079,14 @@ async def _reserve_for_outcome(
     - inserted/upgraded: reserve breakdown.final, bounded by the daily AND the
       optional per-event cap. A clip below breakdown.final rebuilds the pick
       with the daily-clipped stake AND rewrites the persisted row to match (the
-      row was stored pre-clip — BUG 2). A brand-new INSERTED pick with a zero
-      grant returns None (no capacity -> skip) AND rewrites its row — persisted
-      at FULL stake before the reservation ran — to stake 0, the cap-denial
-      marker (WP2: without it the next cycle's 'duplicate' re-dispatched the
-      alert at full stake with zero ledger accounting); an already-persisted
-      UPGRADED pick is never skipped on a zero grant — its alert moment must
-      still fire.
+      row was stored pre-clip — BUG 2). A ZERO grant (cap exhausted) returns
+      None (never a stake-0 alert — pick 2332 mis-stated the strategy) AND
+      DEMOTES the persisted row — stored at FULL stake before the reservation
+      ran — to the volume tier at stake 0 with the 'stake_zero' note (Task 1,
+      2026-07-10). The demoted row stays CLV-tracked and, because it is
+      tier='volume', a later premium re-detection takes persist_pick's
+      volume->premium UPGRADE path — the denial lifts once daily capacity
+      frees (the old premium stake-0 'duplicate_denied' marker was permanent).
     - duplicate: already persisted AND dispatch-eligible at insert (stake > 0);
       reserve NOTHING (a re-detection is not new exposure — its budget was
       consumed on its creation day, which is exactly what seed_exposure_ledger
@@ -1091,20 +1102,26 @@ async def _reserve_for_outcome(
     if outcome in ("duplicate", "unpersisted"):
         return pick
     granted = deps.ledger.reserve(now.date(), breakdown.final, event_id)
-    if granted <= 0.0 and outcome == "inserted":
-        # WP2: the row was already persisted at full stake — zero it so the
-        # restart seeder and every later re-detection ('duplicate_denied')
-        # see a pick that reserved nothing and was never alerted.
-        denied = pick.model_copy(
+    if granted <= 0.0 and outcome in ("inserted", "upgraded"):
+        # WP2 + Task 1 (stake_zero): the row was already persisted at full
+        # stake — a zero grant must NEVER alert (an 'upgraded' zero grant used
+        # to fire the premium alert at stake 0: pick 2332). Demote the row to
+        # the volume tier at stake 0 with the stake_zero note: still
+        # CLV-tracked, reserving nothing, and re-promotable via persist_pick's
+        # volume->premium upgrade path once daily capacity frees.
+        demoted = pick.model_copy(
             update={
+                "tier": "volume",
                 "recommended_stake_fraction": 0.0,
                 "recommended_stake_amount": stake_amount(0.0, deps.bankroll),
                 "stake_breakdown": pick.stake_breakdown.model_copy(
                     update={"final": 0.0, "daily_clipped": True}
                 ),
+                "reason_summary": pick.reason_summary
+                + " | stake_zero: daily exposure cap granted 0 — demoted to volume",
             }
         )
-        await _persist_stake_clip(deps, denied, event_id)
+        await _persist_stake_clip(deps, demoted, event_id, persist_tier=True)
         return None
     if granted < breakdown.final:
         clipped = pick.model_copy(
