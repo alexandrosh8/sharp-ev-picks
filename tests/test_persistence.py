@@ -921,6 +921,9 @@ async def test_live_evidence_rows_reduce_settled_picks_to_floats(session) -> Non
             closing_anchor_type="pinnacle",
             closing_odds=Decimal("2.1000"),  # snapshot-close marker
             has_snapshot_close=True,  # the DEDICATED trusted-close column (headline parity)
+            # 2026-07-10 alignment: sharp_close requires independence EXACTLY
+            # True (NULL is no longer trusted) — matching _settled_close_is_trusted.
+            close_independent_of_fill=True,
         )
     )
     await session.execute(
