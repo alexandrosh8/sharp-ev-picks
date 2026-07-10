@@ -62,14 +62,43 @@ policy) ONLY if, on the single-shot fresh slate:
 
 1. **CLV delta vs the POWER devig baseline** (mean trusted sharp-close
    `clv_log`, identical pick set and anchors, only the devig method varied) has
-   a **95% CI excluding 0** in goto's favour on the pre-specified longshot
-   band, AND
+   a **95% CI excluding 0** in goto's favour on the longshot band, AND
 2. pooled CLV is **not degraded** (goto − power pooled delta CI does not
    exclude 0 on the negative side), AND
 3. **no degradation of the H2H odds-ceiling band metrics** (ADR-0019 H1 must
    still hold with goto), AND
-4. n is sufficient per market (>= 150, per the ADR-0019 criterion), with the
-   goto fallback rate on the evaluated books reported alongside.
+4. n is sufficient per market family (>= 150, per the ADR-0019 criterion),
+   with the goto fallback rate on the evaluated books reported alongside.
+
+**Frozen evaluation parameters (operator-review amendment 2026-07-10 —
+pinned here so no evaluation-time choice remains):**
+
+- **Longshot band:** fill-side decimal odds in **[3.25, 4.0]** for 1X2/h2h
+  (the CLV-negative tail identified in the 2026-07-07 selection analysis,
+  bounded above by the shipped VALUE_MONEYLINE_MAX_ODDS=4.0 ceiling so the
+  band exists inside the live-representative pick set); for OU/totals the
+  band is fill odds **>= 2.20** (the away-from-even tail; OU has no shipped
+  ceiling). Bands are judged separately per family; neither may be moved,
+  split, or pooled after the tar is opened.
+- **Market families in scope:** 1X2 (h2h) and OU 2.5 (totals) ONLY — the two
+  families with n >= 150 plausibly reachable on one slate. Other families are
+  observational-only in the report.
+- **Pick-set rule (identical in both arms):** the frozen selection rule of
+  `scripts/research/ah_anchor_backtest.py` — edge >= 3%, fill odds
+  [1.6, 4.0] (1X2) / no ceiling (OU), one pick per market, selection computed
+  under the POWER fair in BOTH arms so the pick set is identical; only the
+  fair used for CLV scoring varies (power vs goto).
+- **Statistics:** mean `clv_log` deltas with **ddof=1 SEs, 95% t-based CIs,
+  clustered by match-day** (the repo's standard, per the 2026-06-30 SE
+  correction); no other CI construction may be substituted.
+- **Fallback handling:** rows where goto falls back (GOTO_NON_POSITIVE)
+  score under the fallback (multiplicative) fair in the goto arm — that IS
+  the method as shipped; the fallback share per family is reported and, if it
+  exceeds 20% in a family, that family's verdict is INSUFFICIENT rather than
+  pass/fail.
+- **Insufficient-n rule:** n < 150 in a family after the single shot →
+  verdict INSUFFICIENT for that family (not reject, not retry on the same
+  tar); the hypothesis may be re-registered for the following slate.
 
 Anything less → record the result and reject (prior devig deltas were ~0.0002
 RPS noise; the default expectation is rejection).
