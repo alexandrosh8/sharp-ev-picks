@@ -19,12 +19,30 @@ workflow verify re-run w6rhdnzib in flight for independent confirmation of the r
 | L-dash-2430 | Today "Qualified now" KPI counted AFTER .slice(0,5) — could never exceed 5 | count full qualified set before slicing |
 | L-dash-2476 | Top-tracked-edges + Next-kickoffs counts included status='superseded' dedup twins (double-count) | isRankable excludes superseded |
 
+## ROUND 2 — post-verify-rerun fixes (independent 50-agent verify pass, all done)
+
+| # | Finding | Fix |
+|---|---|---|
+| M-arcadia-870 (ARC-2, UPGRADED from deferred) | cycle-start `now` reused after slow retried fetches → events kicking off mid-cycle passed the started filter and archived IN-PLAY prices with pre-kickoff captured_at (qualify as the sharp close — verify pass traced the full path incl. live matchups in the feed) | per-sport POST-fetch clock for parse filter + captured_at (conservative direction for the close cutoff); test: test_capture_once_stamps_post_fetch_clock_per_sport |
+| M-session-231 | documented R2 transient-status retry was DEAD CODE (retried coroutine returns a list, never a response → retry_if_result can never fire; transient 429/5xx became permanent one-cycle gaps) | TransientHTTPStatusError raised from both non-200 branches for TRANSIENT_HTTP_STATUSES; _is_transient_exception recognizes it; permanent 4xx unchanged (gap); 2 new tests + old gap test re-pinned to the new contract |
+
+Verify-rerun reconciliation: all 10 round-1 fixes independently CONFIRMED (several
+verify verdicts read post-10625e8 code and note 'fully remediated'). M349
+(one-sided fabricated-close guard) RECLASSIFIED refuted→DEFERRED-with-design:
+the verifier is right that mis-oriented closes bias trusted CLV down, but a
+symmetric bound silently EXCLUDES unflattering evidence — correct design =
+symmetric exclusion + separately-reported implausible-negative counter; joins
+the CLV close-provenance shadow-first work package (with M-clv-1338/1297 and
+read-side repositories.py:1256 raw-vs-effective mismatch). arcadia:772
+(delayed guest feed reports) CONFIRMED medium → action = MEASURE anchor
+freshness vs Betfair moves (plan follow-up, not a code change).
+
 ## REFUTED / no-change (inline verification)
 
 | # | Finding | Why |
 |---|---|---|
 | H2 | oddsportal_json swallows all transport failures | Designed scrape-gap policy: every catch logs type-name, gaps expected per CLAUDE.md, dead-man's-switch covers feed death, downstream freshness fails closed |
-| M349 | value.py fabricated-close guard one-sided | Deliberate, documented in code: the magnitude fallback firing with both inputs present dropped legitimate longshots; negative-implied-edge closes are natural (team news) |
+| M349 | value.py fabricated-close guard one-sided | RECLASSIFIED after verify re-run → DEFERRED-with-design (see Round 2 note): symmetric exclusion + implausible-negative counter, in the CLV work package |
 | M-odds_api-152 | "no half-line guard" | Resolved by H3: integer + quarter lines are now correctly settleable; a guard would reject valid markets |
 
 ## DEFERRED (real, needs its own scoped work — recorded, not dropped)
@@ -34,7 +52,6 @@ workflow verify re-run w6rhdnzib in flight for independent confirmation of the r
 | M-clv-1338 | finalize_closing_from_snapshots has no per-source freshness gate on injected sharp-archive close rows (stale sharp outranks fresh consensus; Betfair-anchored closes median ~4-5h old) | KNOWN (documented in clv-evidence-reviewer skill). Changes CLV semantics → needs shadow-first design + pre-registered review; folded into the strategy-revision plan follow-ups |
 | M-clv-1297 | soft_fresh coverage verdict computed from event-wide last capture (includes dedicated Betfair rows) → can overstate soft freshness | Same work package as M-clv-1338 (close-provenance freshness pass) |
 | M-repo-4063 + M-pipe-1107 | stake-0 cap-denial marker permanent ('duplicate_denied' forever) + zero-grant persist-fail hole | Same area as strategy-revision plan Task 1 (stake-0 demotion) — execute together |
-| M-arcadia-870 | shared `now` across per-sport fetches skews captured_at by retry time | Low real impact (seconds-scale); fix opportunistically with next arcadia change |
 | L-routes-1447 | manual POST /result lacks settled-sibling dedup guard | Manual endpoint, operator-only; add guard with next routes change |
 | L-oddschecker-969 | correct_score capture collapses distinct scorelines onto 'Draw' selection | Archive-only market (not minted); fix with next oddschecker change; flagged to keep out of any future devig group |
 | L-scheduler-1067 | dedicated liquidity-gated Betfair capture inert since 2026-07-05 (gate requires odds_source!=oddschecker) | CONFIG decision for operator: dedicated capture carried only ~5% of Betfair coverage (main scrape has 95%); surface in report |

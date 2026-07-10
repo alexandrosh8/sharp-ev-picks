@@ -68,6 +68,10 @@ from app.ingestion.oddsportal import (
     _selections,
     normalize_match_link,
 )
+from app.ingestion.oddsportal_json_session import (
+    TRANSIENT_HTTP_STATUSES,
+    TransientHTTPStatusError,
+)
 from app.schemas.odds import OddsSnapshotIn
 
 logger = logging.getLogger(__name__)
@@ -1038,11 +1042,12 @@ async def fetch_match_feed(
             )
             continue
         if getattr(resp, "status_code", 0) != 200:
-            logger.info(
-                "oddsportal feed for market(s) %s returned status %s — gap",
-                label,
-                getattr(resp, "status_code", "?"),
-            )
+            status = getattr(resp, "status_code", 0)
+            if status in TRANSIENT_HTTP_STATUSES:
+                # R2 (audit 2026-07-10): see the match-page branch — transient
+                # statuses raise so the whole-match tenacity retry fires.
+                raise TransientHTTPStatusError(int(status))
+            logger.info("oddsportal feed for market(s) %s returned status %s — gap", label, status)
             continue
         try:
             payload = decrypt_feed_body(resp.text)
@@ -1146,10 +1151,13 @@ async def scrape_match_odds(
         )
         return []
     if getattr(resp, "status_code", 0) != 200:
-        logger.info(
-            "oddsportal match page returned status %s — gap",
-            getattr(resp, "status_code", "?"),
-        )
+        status = getattr(resp, "status_code", 0)
+        if status in TRANSIENT_HTTP_STATUSES:
+            # R2 (audit 2026-07-10): a transient 429/5xx must reach tenacity as
+            # an exception so the per-match retry actually fires — returning a
+            # gap here made the documented retry_if_result predicate dead code.
+            raise TransientHTTPStatusError(int(status))
+        logger.info("oddsportal match page returned status %s — gap", status)
         return []
     html = resp.text
     try:

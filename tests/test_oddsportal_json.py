@@ -481,7 +481,12 @@ async def test_fetch_match_feed_treats_off_window_envelope_as_no_odds() -> None:
 
 
 async def test_fetch_match_feed_handles_non_200_gracefully() -> None:
-    """A non-200 feed response is a scrape gap, not a crash: no snapshots."""
+    """Audit 2026-07-10 (R2): a TRANSIENT non-200 (503/429) now RAISES
+    TransientHTTPStatusError so the per-match tenacity retry actually fires
+    (the old return-a-gap behaviour made the documented retry dead code).
+    A PERMANENT non-200 (404) stays a graceful scrape gap: no snapshots."""
+    from app.ingestion.oddsportal_json_session import TransientHTTPStatusError
+
     token = FeedToken(
         event_id="KhgvzGjJ",
         sport_id=1,
@@ -492,13 +497,25 @@ async def test_fetch_match_feed_handles_non_200_gracefully() -> None:
         starts_at=NOW,
     )
     session = _FakeSession({"match-event/": _FakeResponse(status_code=503, text="")})
+    with pytest.raises(TransientHTTPStatusError):
+        await fetch_match_feed(
+            EVENT_URL,
+            token=token,
+            markets=("1x2",),
+            directory=EventDirectory(),
+            now=NOW,
+            session=session,
+            bookmakers=REGISTRY,
+        )
+
+    session_404 = _FakeSession({"match-event/": _FakeResponse(status_code=404, text="")})
     snaps = await fetch_match_feed(
         EVENT_URL,
         token=token,
         markets=("1x2",),
         directory=EventDirectory(),
         now=NOW,
-        session=session,
+        session=session_404,
         bookmakers=REGISTRY,
     )
     assert snaps == []

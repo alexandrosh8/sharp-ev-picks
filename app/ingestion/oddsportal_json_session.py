@@ -93,6 +93,21 @@ PERMANENT_CURL_CODES: frozenset[int] = frozenset({6, 60, 77, 3, 1, 5})
 TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 
+class TransientHTTPStatusError(Exception):
+    """A GET returned a transient HTTP status (TRANSIENT_HTTP_STATUSES).
+
+    Audit 2026-07-10: the documented R2 retry (``retry_if_result``) was dead
+    code — the retried coroutine returns a snapshot LIST, never a response, so
+    a transient 429/5xx was converted to a permanent scrape gap upstream and
+    the predicate could never fire. The scrape layer now RAISES this for
+    transient statuses so tenacity's exception path retries them.
+    """
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"transient HTTP status {status}")
+        self.status = status
+
+
 def _curl_error_code(exc: BaseException) -> int | None:
     """The libcurl integer code carried by a curl_cffi error, or None.
 
@@ -132,6 +147,8 @@ def _is_transient_exception(exc: BaseException) -> bool:
     Permanent and unknown codes are NOT retried (an unknown code is surfaced once
     as a gap, not hammered). Non-curl exceptions (a bug in our own parse) are not
     retried either — they are real errors, not network blips."""
+    if isinstance(exc, TransientHTTPStatusError):
+        return True  # R2: transient HTTP status raised by the scrape layer
     return classify_curl_error(exc) == "transient"
 
 

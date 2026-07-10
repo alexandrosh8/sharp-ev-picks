@@ -1242,3 +1242,38 @@ async def test_capture_once_persist_failure_rolls_back_change_gate(
     written2 = await cap.capture_once()
     assert written2 == {"tennis": 2, "soccer": 2}
     assert persisted == [2, 2]
+
+
+async def test_capture_once_stamps_post_fetch_clock_per_sport() -> None:
+    """ARC-2 (audit 2026-07-10): captured_at and the started-event filter must
+    use a clock taken AFTER the sport's fetches return — a cycle-start `now`
+    reused after slow retries archived in-play prices with a pre-kickoff
+    captured_at (they then qualify as the sharp close). With a post-fetch
+    clock, an event that kicked off during the slow fetch is FILTERED."""
+    kickoff = NOW + timedelta(minutes=2)
+    matchups = [_tennis_matchup(mid=901, start=kickoff.strftime("%Y-%m-%dT%H:%M:%SZ"))]
+    markets = [
+        _ml_market(
+            901,
+            [
+                {"designation": "home", "price": -1500},
+                {"designation": "away", "price": 700},
+            ],
+            version=3,
+        )
+    ]
+    stub = _StubClient(matchups, markets)
+
+    # now_fn: first call (post-fetch stamp) is already PAST the kickoff — the
+    # fetches were slow. The event must be filtered as started; nothing fresh.
+    clock = iter([NOW + timedelta(minutes=5)] * 10)
+    cap = PinnacleArcadiaCapture(
+        client=stub,
+        session_factory=None,
+        sports=("tennis",),
+        horizon=timedelta(days=365),
+        now_fn=lambda: next(clock),
+    )
+    written = await cap.capture_once()
+    assert written == {"tennis": 0}
+    assert cap._seen_version == {}  # the in-play event never entered the gate

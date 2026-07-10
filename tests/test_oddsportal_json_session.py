@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from app.ingestion.oddsportal_json_session import (
     DEFAULT_CONCURRENCY,
@@ -305,3 +305,49 @@ def test_status_of_reads_status_code() -> None:
 
     assert status_of(R()) == 503
     assert status_of(object()) is None
+
+
+async def test_transient_http_status_actually_retries() -> None:
+    """Audit 2026-07-10: the documented R2 retry was dead code — the retried
+    coroutine returns a snapshot list, never a response, so retry_if_result
+    could never fire and a transient 429 became a permanent one-cycle gap.
+    The scrape layer now raises TransientHTTPStatusError and tenacity retries."""
+    import asyncio
+
+    from app.ingestion.oddsportal_json_session import (
+        TransientHTTPStatusError,
+        _scrape_one_with_retry,
+    )
+
+    calls = {"n": 0}
+
+    async def flaky_scrape(url: str) -> list[str]:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TransientHTTPStatusError(429)
+        return ["row"]
+
+    out = await _scrape_one_with_retry(
+        "https://example.test/m", cast("Any", flaky_scrape), asyncio.Semaphore(1)
+    )
+    assert out == ["row"]
+    assert calls["n"] == 3
+
+
+async def test_permanent_status_still_a_gap_not_retried() -> None:
+    """A permanent 4xx stays a single-attempt gap (no hammering)."""
+    import asyncio
+
+    from app.ingestion.oddsportal_json_session import _scrape_one_with_retry
+
+    calls = {"n": 0}
+
+    async def gap_scrape(url: str) -> list[str]:
+        calls["n"] += 1
+        return []  # permanent 404 path: scrape returns a gap, never raises
+
+    out = await _scrape_one_with_retry(
+        "https://example.test/m", cast("Any", gap_scrape), asyncio.Semaphore(1)
+    )
+    assert out == []
+    assert calls["n"] == 1

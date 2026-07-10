@@ -867,8 +867,6 @@ class PinnacleArcadiaCapture:
         # None = discovery unavailable -> capture every configured sport (today).
         live_ids = await self._live_sport_ids()
 
-        now = self._now_fn()
-        horizon_end = now + self._horizon
         written: dict[str, int] = {}
         for sport in self._sports:
             sport_id = SPORT_IDS.get(sport)
@@ -899,6 +897,15 @@ class PinnacleArcadiaCapture:
                 )
                 continue
             self._fetch_warned.discard(sport)  # fetch recovered -> allow re-warn later
+            # ARC-2 (audit 2026-07-10): stamp with a POST-fetch clock, per sport.
+            # A single cycle-start `now` reused after slow fetches (6 retries x
+            # 20s + backoff under 403 spikes) let events that kicked off
+            # MID-CYCLE pass the started-event filter and archived their by-then
+            # IN-PLAY prices with a pre-kickoff captured_at — which the
+            # captured_at < kickoff close queries then serve as the sharp close.
+            # Post-fetch stamping is conservative in the safe direction.
+            now = self._now_fn()
+            horizon_end = now + self._horizon
             matchups = parse_matchups(raw_matchups, now=now, horizon_end=horizon_end)
             quotes = extract_market_quotes(matchups, raw_markets, now=now, sport=sport)
             # Snapshot the change-gate state for every key this sport's quotes can
