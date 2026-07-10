@@ -58,3 +58,17 @@ fallback.
 
 Operator: ______________  Date: __________
 (Until signed: Step A may run; Steps B/C may not.)
+
+## Step A result (executed 2026-07-10, odds-only, pre-registered criterion)
+
+2024-25 E0, 380 matches / 1,140 outcome legs, power devig both sides, BFE
+commission-netted at 5%:
+
+- mean |Δfair| = **0.0044** (criterion ≤ 0.01) — PASS
+- p90 |Δfair| = 0.0091
+- band bias (BFE−PS): favourites(<2) +0.0004, mid(2−4) +0.0001,
+  longshots(≥4) −0.0004 (criterion |bias| ≤ 0.02) — PASS, no FLB-band skew
+
+**Verdict: the commission-netted Betfair Exchange devigged close is a
+faithful anchor substitute for the Pinnacle close on football 1X2.**
+Steps B/C remain gated on the operator signature and the 2026-27 data.
