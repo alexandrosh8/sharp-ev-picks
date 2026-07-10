@@ -456,6 +456,18 @@
         margin-bottom: 22px;
       }
       .today-board { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); }
+      /* Fix 2026-07-10 #26: the two Today columns flow independently — the
+         board's own hairline chrome moves onto each column so a shorter
+         column never leaves a dead slab where grid rows used to height-match. */
+      .today-board { gap: 14px; background: none; border: none; align-items: start; }
+      .today-col {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        background: var(--line);
+        border: 1px solid var(--line);
+        min-width: 0;
+      }
       .panel { background: var(--panel); min-width: 0; display: flex; flex-direction: column; }
       .panel.solo { border: 1px solid var(--line); margin-bottom: 22px; }
       .panel-h {
@@ -527,7 +539,9 @@
       .kickoff-row:hover { background: var(--hair); }
       .kickoff-row .tag { justify-self: start; align-self: center; }
       .kr-t { font-family: var(--font-mono); font-size: 11.5px; color: var(--cyan); white-space: nowrap; }
-      .kr-e { font-size: 13px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      /* Fix 2026-07-10 #26: event names wrap (max two-ish lines) instead of
+         truncating — "Marta Kostyuk vs Linda Nos…" loses data. */
+      .kr-e { font-size: 13px; font-weight: 500; color: var(--text); white-space: normal; overflow-wrap: anywhere; min-width: 0; }
       .kr-s { font-family: var(--font-mono); font-size: 11px; color: var(--text2); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
       .edge-more { display: block; width: 100%; margin: 8px 0 2px; padding: 8px; background: var(--panel2); color: var(--text2); border: 1px solid var(--line); border-radius: 6px; font-family: var(--font-mono); font-size: 11px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
       .edge-more:hover { color: var(--text); border-color: var(--line2); }
@@ -549,25 +563,7 @@
       .rr-n, .rr-t, .rr-lg { font-family: var(--font-mono); color: var(--text2); }
 
       /* ============ EDGE DEPTH CHART ============ */
-      .edgechart {
-        display: flex;
-        align-items: flex-end;
-        gap: 5px;
-        height: 56px;
-        margin-bottom: 12px;
-        padding-bottom: 6px;
-        border-bottom: 1px solid var(--hair);
-      }
-      .edgechart.empty, .edgechart.err { display: none; }
-      .bar {
-        flex: 1;
-        border-radius: 2px 2px 0 0;
-        transition: transform 0.15s ease-out, opacity 0.15s ease-out;
-        opacity: 0.85;
-      }
-      .bar:hover { transform: scaleY(1.06); transform-origin: bottom; opacity: 1; }
-      .bar.premium { background: linear-gradient(180deg, var(--cyan), rgba(16, 185, 129, 0.35)); }
-      .bar.shadow { background: linear-gradient(180deg, var(--warm), rgba(245, 158, 11, 0.3)); }
+      /* Fix 2026-07-10 #25: edge-magnitude bar chart removed (operator). */
 
       /* ============ SYSTEM HEALTH STRIP ============ */
       .health-strip {
@@ -668,6 +664,17 @@
         grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
         gap: 10px;
         margin-bottom: 10px;
+      }
+      /* Fix 2026-07-10 #28: per-sport subheader inside each state group. */
+      .edge-sport-h {
+        grid-column: 1 / -1;
+        padding: 6px 2px 0;
+        font-family: var(--font-mono);
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: var(--text3);
       }
       .edge-row {
         display: grid;
@@ -1353,34 +1360,39 @@
               <div class="desk-ticker" id="desk-ticker" role="status" aria-live="polite" aria-label="Desk vitals"></div>
             </div>
             <div class="signal-board" id="today-stats" data-testid="today-kpi-board"></div>
+            <!-- Fix 2026-07-10 #26: two INDEPENDENT columns — each panel
+                 sizes to its own content; no cross-column row height coupling. -->
             <div class="board today-board">
-              <section class="panel" aria-labelledby="actionable-h" data-testid="panel-qualified-now">
-                <div class="panel-h"><h3 id="actionable-h">Qualified now</h3><span class="tag tag-cyan" id="actionable-count">—</span></div>
-                <div class="panel-b" id="actionable-now"></div>
-              </section>
-              <section class="panel" aria-labelledby="attn-h" data-testid="panel-needs-attention">
-                <div class="panel-h"><h3 id="attn-h">Needs attention</h3></div>
-                <div class="panel-b" id="needs-attention"></div>
-              </section>
-              <section class="panel" aria-labelledby="topedge-h" data-testid="panel-top-edges">
-                <div class="panel-h"><h3 id="topedge-h">Top tracked edges</h3><span class="panel-cap">edge magnitude</span></div>
-                <div class="panel-b">
-                  <div class="edgechart empty" id="edge-chart" aria-hidden="true"></div>
-                  <div id="top-edges"></div>
-                </div>
-              </section>
-              <section class="panel" aria-labelledby="next-h" data-testid="panel-next-kickoffs">
-                <div class="panel-h"><h3 id="next-h">Next kickoffs</h3></div>
-                <div class="panel-b" id="next-kickoffs"></div>
-              </section>
-              <section class="panel" aria-labelledby="evpos-h" data-testid="panel-evidence-position">
-                <div class="panel-h"><h3 id="evpos-h">Evidence position</h3></div>
-                <div class="panel-b"><div class="muted" id="evidence-position">—</div></div>
-              </section>
-              <section class="panel" aria-labelledby="recent-h" data-testid="panel-recent-results">
-                <div class="panel-h"><h3 id="recent-h">Recent results</h3></div>
-                <div class="panel-b" id="recent-results"></div>
-              </section>
+              <div class="today-col">
+                <section class="panel" aria-labelledby="actionable-h" data-testid="panel-qualified-now">
+                  <div class="panel-h"><h3 id="actionable-h">Qualified now</h3><span class="tag tag-cyan" id="actionable-count">—</span></div>
+                  <div class="panel-b" id="actionable-now"></div>
+                </section>
+                <section class="panel" aria-labelledby="topedge-h" data-testid="panel-top-edges">
+                  <div class="panel-h"><h3 id="topedge-h">Top tracked edges</h3></div>
+                  <div class="panel-b">
+                    <div id="top-edges"></div>
+                  </div>
+                </section>
+                <section class="panel" aria-labelledby="evpos-h" data-testid="panel-evidence-position">
+                  <div class="panel-h"><h3 id="evpos-h">Evidence position</h3></div>
+                  <div class="panel-b"><div class="muted" id="evidence-position">—</div></div>
+                </section>
+              </div>
+              <div class="today-col">
+                <section class="panel" aria-labelledby="attn-h" data-testid="panel-needs-attention">
+                  <div class="panel-h"><h3 id="attn-h">Needs attention</h3></div>
+                  <div class="panel-b" id="needs-attention"></div>
+                </section>
+                <section class="panel" aria-labelledby="next-h" data-testid="panel-next-kickoffs">
+                  <div class="panel-h"><h3 id="next-h">Next kickoffs</h3></div>
+                  <div class="panel-b" id="next-kickoffs"></div>
+                </section>
+                <section class="panel" aria-labelledby="recent-h" data-testid="panel-recent-results">
+                  <div class="panel-h"><h3 id="recent-h">Recent results</h3></div>
+                  <div class="panel-b" id="recent-results"></div>
+                </section>
+              </div>
             </div>
             <section class="panel solo" aria-labelledby="syshealth-h" data-testid="panel-system-health">
               <div class="panel-h"><h3 id="syshealth-h">System health</h3></div>
@@ -2481,28 +2493,9 @@
             });
           }
 
-          // edge depth board — bars scaled to each top edge's magnitude so the
-          // strongest tracked signals read at a glance (cyan premium / warm shadow)
-          const ecBox = $("edge-chart"); ecBox.replaceChildren();
-          if (topEdges.length >= 2) {
-            const mags = topEdges.map((p) => numOf(p.current_edge == null ? p.edge : p.current_edge));
-            // Fix 2026-07-10 #12: scale bar heights to the visible min→max
-            // range so clustered values still differentiate; the all-equal
-            // case renders equal mid-length bars (never a divide-by-zero).
-            const mx = Math.max.apply(null, mags);
-            const mn = Math.min.apply(null, mags);
-            const span = mx - mn;
-            ecBox.classList.remove("empty");
-            topEdges.forEach((p, i) => {
-              const b = document.createElement("div");
-              b.className = "bar " + (tierOf(p) === "premium" ? "premium" : "shadow");
-              b.style.height = (span > 0 ? 8 + Math.round(((mags[i] - mn) / span) * 38) : 27) + "px";
-              b.title = eventLabel(p.event) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
-              ecBox.appendChild(b);
-            });
-          } else {
-            ecBox.classList.add("empty");
-          }
+          // Fix 2026-07-10 #25: the edge-magnitude bar chart was removed at
+          // the operator's request — the ranked numeric list above carries
+          // the same information.
 
           // next kickoffs (any status, pre-kickoff, both tiers, soonest first).
           // Audit 2026-07-10: one row per EVENT, not per pick — an event with 5
@@ -2789,7 +2782,22 @@
             }
             const cap = edgeCaps[key] || EDGE_CHUNK;
             const grid = document.createElement("div"); grid.className = "edge-grid";
-            list.slice(0, cap).forEach((p) => grid.appendChild(edgeRowEl(p, health)));
+            // Fix 2026-07-10 #28: the #17 sport ordering must be LEGIBLE —
+            // a small mono subheader precedes each sport's rows (serialized
+            // sport_label vocabulary: Football/Basketball/Tennis/NFL). The
+            // list is already sportRank-sorted, so labels change in order;
+            // sports with no rows never render a header.
+            let lastSportLbl = null;
+            list.slice(0, cap).forEach((p) => {
+              const sportLbl = String(p.sport_label || p.sport || "").replace(/_/g, " ");
+              if (sportLbl && sportLbl !== lastSportLbl) {
+                const sh = document.createElement("div"); sh.className = "edge-sport-h mono";
+                sh.textContent = sportLbl.toUpperCase();
+                grid.appendChild(sh);
+                lastSportLbl = sportLbl;
+              }
+              grid.appendChild(edgeRowEl(p, health));
+            });
             box.appendChild(grid);
             if (list.length > cap) {
               const remaining = list.length - cap;

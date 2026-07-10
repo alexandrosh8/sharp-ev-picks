@@ -183,6 +183,27 @@ def test_independent_counts_never_joined_with_slash() -> None:
     assert '"snapshot " + (q.n_snapshot_close || 0) + " · fallback "' in text
 
 
+def test_today_layout_and_edges_sport_subheaders() -> None:
+    """Fixes 2026-07-10 #25/#26/#27/#28: the edge-magnitude bar chart is gone
+    (ranked list stays), Today flows as two INDEPENDENT columns so panels size
+    to content (Evidence Position compact), event names wrap instead of
+    truncating, and the Edges sport ordering is legible via per-sport mono
+    subheaders using the serialized sport_label vocabulary."""
+    text = _text()
+    # 25 — bar chart fully removed
+    assert 'id="edge-chart"' not in text
+    assert "edgechart" not in text
+    assert "edge magnitude" not in text
+    assert 'id="top-edges"' in text  # ranked numeric list preserved
+    # 26/27 — independent columns; panels no longer row-height-locked
+    assert text.count('class="today-col"') == 2
+    assert 'data-testid="panel-evidence-position"' in text
+    # 28 — visible per-sport subheaders driven by the serialized label
+    assert "edge-sport-h" in text
+    assert "p.sport_label" in text
+    assert "function sportRank" in text
+
+
 def test_trusted_clv_rule_pins() -> None:
     text = _text()
     assert "close_independent_of_fill === false" in text
