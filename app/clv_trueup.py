@@ -18,7 +18,6 @@ only trusted while it stays positive (docs/backtesting/value-findings.md).
 import asyncio
 import contextlib
 import logging
-import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -42,6 +41,7 @@ from app.ingestion.base import EventDirectory, OddsLoader
 from app.pipeline import (
     GroupedMarkets,
     _is_settleable_market_detail,
+    canonical_market_detail,
     drop_post_kickoff_snapshots,
     event_fair_probs,
     group_market_prices,
@@ -131,30 +131,16 @@ def _consistent_current_edge(pick: Pick, fair: float) -> Decimal | None:
     return Decimal(f"{fair - 1.0 / eff:.6f}")
 
 
-# Cross-provider vocabulary equivalences for the SAME full-match line
-# (instrumented live evidence 2026-07-10: 'h2h'/None, 'btts'/None,
-# 'over_under_2_5'/'totals_2_5' collisions were skipping every CLV write on
-# the affected picks). ONLY provably line-identical classes are merged:
-# h2h/1x2/btts have no full-match line variants, and over_under_X_Y carries
-# the identical line encoding as totals_X_Y. Asian-handicap vs spreads_minus
-# is deliberately NOT merged — the key sign conventions differ and a
-# European-handicap collision would mix 3-way with 2-way products; that
-# class stays fail-closed until audited.
-_LINELESS_DETAILS = frozenset({"h2h", "1x2", "btts"})
-_OU_DETAIL_RE = re.compile(r"^over_under_(\d+(?:_\d+)?)$")
-
-
-def _canonical_group_detail(detail: str | None) -> str | None:
-    """Canonical detail label for one full-match devig group (see above)."""
-    if detail is None:
-        return None
-    d = detail.lower()
-    if d in _LINELESS_DETAILS:
-        return None
-    m = _OU_DETAIL_RE.match(d)
-    if m:
-        return f"totals_{m.group(1)}"
-    return detail
+# Cross-provider vocabulary equivalences for the SAME full-match line moved
+# to app/pipeline.py::canonical_market_detail (this module already imports
+# pipeline; pipeline must never import back) so the SAME canonicalization is
+# stamped on PickOut.market_detail at mint. Asian-handicap vs spreads_minus
+# stays deliberately UN-merged — audited UNSAFE 2026-07-10 (EH product inside
+# the spreads_* key space on identical selection strings; producer-dependent
+# key signs; +L/-L books coexist per event):
+# docs/research/2026-07-10-ah-spreads-vocabulary-audit.md. That class stays
+# fail-closed; stamped picks bypass it via the exact-detail match instead.
+_canonical_group_detail = canonical_market_detail
 
 
 def _merge_vocabulary_groups(grouped: GroupedMarkets) -> GroupedMarkets:
@@ -282,6 +268,27 @@ def _detail_matched_books(
     return books, captured
 
 
+def _exact_group_books(
+    grouped: GroupedMarkets,
+    market: str,
+    selection: str,
+    detail: str,
+) -> tuple[dict[str, float], Mapping[tuple[str, str], datetime | None]]:
+    """(books, captured) STRICTLY from the pick's own (market, canonical
+    detail) group — the mint-stamped path's twin of ``_detail_matched_books``.
+
+    A stamped pick knows its exact devig group, so a same-selection group
+    under a DIFFERENT detail (the AH-vs-spreads / EH-in-spreads collision
+    class, audited 2026-07-10) must never contribute a close price or capture
+    provenance to it — fail-closed, never merged. Legacy NULL picks keep the
+    merging ``_detail_matched_books`` behavior. Empty maps when the exact
+    group is absent or unpriced for the selection."""
+    for (_event, group_market, _detail), (prices, cap) in grouped.items():
+        if str(group_market) == market and _detail == detail and selection in prices:
+            return prices[selection], cap
+    return {}, {}
+
+
 async def revalidate_open_picks(
     session_factory: "async_sessionmaker",
     snapshots: Sequence[OddsSnapshotIn],
@@ -346,12 +353,26 @@ async def revalidate_open_picks(
     # Observability (2026-07-10): record WHICH details collide per key so the
     # per-pick skip warning is diagnosable straight from production logs.
     collision_details: dict[tuple[str, str, str], set[str]] = {}
+    # EXACT-DETAIL maps (mint-stamped picks): keyed by the CANONICAL group
+    # detail too (grouped details are canonical post-merge), so a pick that
+    # persisted its mint-time market_detail is matched on ITS OWN group and
+    # the line-blind ambiguity guard below never applies to it. Lineless
+    # groups (detail None) are excluded — their picks carry NULL and follow
+    # the legacy path, which the vocabulary merge already de-collided.
+    fair_by_exact: dict[tuple[str, str, str, str], float] = {}
+    anchor_by_exact: dict[tuple[str, str, str, str], str] = {}
+    fell_back_by_exact: dict[tuple[str, str, str, str], bool] = {}
     for (event_id, market, _detail), (book, fair) in event_fair_probs(
         grouped, devig_method, value_policy, fell_back_out=fell_back_by_market
     ).items():
         fb = fell_back_by_market.get((event_id, market, _detail), False)
         for sel, p in fair.items():
             key = (event_id, str(market), sel)
+            if _detail is not None:
+                exact_key = (event_id, str(market), sel, _detail)
+                fair_by_exact[exact_key] = p
+                anchor_by_exact[exact_key] = book
+                fell_back_by_exact[exact_key] = fb
             if key in detail_by_key and detail_by_key[key] != _detail:
                 ambiguous_keys.add(key)
                 collision_details.setdefault(key, set()).update(
@@ -375,6 +396,19 @@ async def revalidate_open_picks(
         anchored_keys=frozenset(detail_by_key),
         collision_details=collision_details,
     )
+    # EXACT-DETAIL price/captured maps (mint-stamped picks): STRICTLY the
+    # pick's own canonical group — a colliding same-selection group must
+    # never contribute a current price or capture provenance to it.
+    prices_by_exact: dict[tuple[str, str, str, str], dict[str, float]] = {}
+    captured_by_exact: dict[
+        tuple[str, str, str, str], Mapping[tuple[str, str], datetime | None]
+    ] = {}
+    for (event_id, market, _detail), (prices, captured) in grouped.items():
+        if _detail is None:
+            continue
+        for sel, books_by_sel in prices.items():
+            prices_by_exact[(event_id, str(market), sel, _detail)] = books_by_sel
+            captured_by_exact[(event_id, str(market), sel, _detail)] = captured
 
     if not fair_by_key:
         return 0
@@ -400,17 +434,39 @@ async def revalidate_open_picks(
         ).all()
         for pick, external_ref in rows:
             key = (external_ref, pick.market, pick.selection)
-            if key in ambiguous_keys:
-                logger.warning(
-                    "pick %d: %s/%s maps to >1 market line this cycle "
-                    "(line-ambiguous key; details=%s) — skipping CLV write",
-                    pick.id,
-                    pick.market,
-                    pick.selection,
-                    sorted(collision_details.get(key, set())),
+            if pick.market_detail is not None:
+                # MINT-STAMPED pick: match STRICTLY on its own canonical group
+                # (exact detail) — no ambiguity is possible for it, so the
+                # line-blind guard is bypassed. Group absent this cycle -> no
+                # write (fail-closed; never re-priced from a colliding
+                # same-selection vocabulary).
+                exact_key = (external_ref, pick.market, pick.selection, pick.market_detail)
+                closing_fair = fair_by_exact.get(exact_key)
+                close_anchor = anchor_by_exact.get(exact_key)
+                close_fell_back = fell_back_by_exact.get(exact_key)
+                books = prices_by_exact.get(exact_key) or {}
+                captured_for_key: Mapping[tuple[str, str], datetime | None] = captured_by_exact.get(
+                    exact_key, {}
                 )
-                continue
-            closing_fair = fair_by_key.get(key)
+            else:
+                # LEGACY (NULL market_detail) pick: today's line-blind
+                # behavior, unchanged — including the fail-closed ambiguity
+                # skip.
+                if key in ambiguous_keys:
+                    logger.warning(
+                        "pick %d: %s/%s maps to >1 market line this cycle "
+                        "(line-ambiguous key; details=%s) — skipping CLV write",
+                        pick.id,
+                        pick.market,
+                        pick.selection,
+                        sorted(collision_details.get(key, set())),
+                    )
+                    continue
+                closing_fair = fair_by_key.get(key)
+                close_anchor = anchor_by_key.get(key)
+                close_fell_back = fell_back_by_key.get(key)
+                books = prices_by_key.get(key) or {}
+                captured_for_key = captured_by_key.get(key, {})
             if closing_fair is None or not 0.0 < closing_fair < 1.0:
                 continue
             # EFFECTIVE fill vs net-anchored close — see docstring convention.
@@ -433,8 +489,7 @@ async def revalidate_open_picks(
             # P2-2: record whether the CLOSE devig fell back to multiplicative, so a
             # close devigged by a different effective method than the mint (asymmetric)
             # is dropped from the trusted CLV subset.
-            pick.close_devig_fell_back = fell_back_by_key.get(key)
-            close_anchor = anchor_by_key.get(key)
+            pick.close_devig_fell_back = close_fell_back
             if close_anchor:
                 # CLOSE-side provenance: the anchor that priced this re-scrape
                 # close. This path never writes closing_odds, so the close is a
@@ -448,7 +503,7 @@ async def revalidate_open_picks(
                 # (captured_at <= created_at) from a fresh-but-unmoved line.
                 pick.close_anchor_book = close_anchor[:64]
                 pick.close_snapshot_captured_at = _anchor_capture_time(
-                    captured_by_key.get(key, {}), close_anchor
+                    captured_for_key, close_anchor
                 )
                 # Stamp independence here too (audit #4): this path previously left
                 # close_independent_of_fill NULL, which the trusted-CLV gate admitted as
@@ -496,7 +551,6 @@ async def revalidate_open_picks(
                     mint_anchor_book=pick.anchor_book,
                     mint_anchor_type=pick.anchor_type,
                 )
-            books = prices_by_key.get(key) or {}
             # The pick's own book is the actionable price; if it dropped the
             # market, the best remaining price is what a bettor could take —
             # "best" by EFFECTIVE odds, so selection agrees with the
@@ -1305,34 +1359,71 @@ async def finalize_closing_from_snapshots(
     # rather than finalizing a close stamped from the wrong line.
     detail_by_key: dict[tuple[str, str], str | None] = {}
     ambiguous_keys: set[tuple[str, str]] = set()
+    # EXACT-DETAIL maps (mint-stamped picks): keyed by the canonical group
+    # detail too, so a pick that persisted its mint-time market_detail is
+    # matched on ITS OWN group — the line-blind guard below never applies.
+    fair_by_exact: dict[tuple[str, str, str], float] = {}
+    anchor_by_exact: dict[tuple[str, str, str], str] = {}
+    fell_back_by_exact: dict[tuple[str, str, str], bool] = {}
     for (_event, market, _detail), (anchor, fair_by_sel) in event_fair_probs(
         grouped, devig_method, value_policy, fell_back_out=fell_back_by_market
     ).items():
         fb = fell_back_by_market.get((_event, market, _detail), False)
         for sel, p in fair_by_sel.items():
             key = (str(market), sel)
+            if _detail is not None:
+                exact_key = (str(market), sel, _detail)
+                fair_by_exact[exact_key] = p
+                anchor_by_exact[exact_key] = anchor
+                fell_back_by_exact[exact_key] = fb
             if key in detail_by_key and detail_by_key[key] != _detail:
                 ambiguous_keys.add(key)
             detail_by_key[key] = _detail
             fair_by_key[key] = p
             anchor_by_key[key] = anchor
             fell_back_by_key[key] = fb
-    if (pick.market, pick.selection) in ambiguous_keys:
-        logger.info(
-            "pick %d: snapshot close key %s/%s maps to >1 market line — keeping revalidation close",
-            pick.id,
-            pick.market,
-            pick.selection,
-        )
-        return False
-    fair = fair_by_key.get((pick.market, pick.selection))
-    if fair is None or not 0.0 < fair < 1.0:
-        logger.info(
-            "pick %d: snapshot close has no anchored fair for its market/selection "
-            "— keeping revalidation close",
-            pick.id,
-        )
-        return False
+    fair: float | None
+    close_anchor: str | None
+    close_fell_back: bool | None
+    if pick.market_detail is not None:
+        # MINT-STAMPED pick: exact canonical-group match only — no ambiguity
+        # is possible for it, so a colliding same-selection group can neither
+        # refuse (line-blind skip) nor pollute this close. Group absent ->
+        # keep the revalidation close (fail-closed, never guessed).
+        stamped_key = (pick.market, pick.selection, pick.market_detail)
+        fair = fair_by_exact.get(stamped_key)
+        close_anchor = anchor_by_exact.get(stamped_key)
+        close_fell_back = fell_back_by_exact.get(stamped_key)
+        if fair is None or not 0.0 < fair < 1.0:
+            logger.info(
+                "pick %d: snapshot close has no anchored fair for its exact "
+                "market_detail %r — keeping revalidation close",
+                pick.id,
+                pick.market_detail,
+            )
+            return False
+    else:
+        # LEGACY (NULL market_detail) pick: today's line-blind behavior,
+        # unchanged — including the fail-closed ambiguity refusal.
+        if (pick.market, pick.selection) in ambiguous_keys:
+            logger.info(
+                "pick %d: snapshot close key %s/%s maps to >1 market line — "
+                "keeping revalidation close",
+                pick.id,
+                pick.market,
+                pick.selection,
+            )
+            return False
+        fair = fair_by_key.get((pick.market, pick.selection))
+        close_anchor = anchor_by_key.get((pick.market, pick.selection))
+        close_fell_back = fell_back_by_key.get((pick.market, pick.selection))
+        if fair is None or not 0.0 < fair < 1.0:
+            logger.info(
+                "pick %d: snapshot close has no anchored fair for its market/selection "
+                "— keeping revalidation close",
+                pick.id,
+            )
+            return False
     # EFFECTIVE fill vs net-anchored close — same symmetry as the live path.
     fill_eff = effective_odds(pick.bookmaker, float(pick.decimal_odds))
     # CLV-2: refuse to finalize a physically-implausible snapshot close (see constant).
@@ -1354,9 +1445,17 @@ async def finalize_closing_from_snapshots(
     # (market, selection) key (invisible to ambiguous_keys, which only sees
     # anchored groups) could iterate first and stamp closing_odds/close capture
     # time from the wrong line.
-    books, captured_map = _detail_matched_books(
-        grouped, pick.market, pick.selection, detail_by_key.get((pick.market, pick.selection))
-    )
+    if pick.market_detail is not None:
+        # Stamped pick: close price/capture provenance STRICTLY from its own
+        # canonical group (see _exact_group_books) — never merged across
+        # same-selection vocabularies.
+        books, captured_map = _exact_group_books(
+            grouped, pick.market, pick.selection, pick.market_detail
+        )
+    else:
+        books, captured_map = _detail_matched_books(
+            grouped, pick.market, pick.selection, detail_by_key.get((pick.market, pick.selection))
+        )
     close_odds: float | None
     if pick.bookmaker in books:
         close_odds = books[pick.bookmaker]
@@ -1368,7 +1467,7 @@ async def finalize_closing_from_snapshots(
     pick.clv_log = Decimal(f"{clv:.6f}")
     pick.beat_close = clv > 0
     # P2-2: snapshot-close devig-fallback flag (the close half of the symmetry test).
-    pick.close_devig_fell_back = fell_back_by_key.get((pick.market, pick.selection))
+    pick.close_devig_fell_back = close_fell_back
     # clv-1: a fair was ANCHORED from our own odds_snapshots history — this IS a
     # genuine snapshot close, regardless of whether a soft book also quoted it
     # (close_odds may be None when only sharp books priced the selection). Mark it
@@ -1378,7 +1477,6 @@ async def finalize_closing_from_snapshots(
     # Keep current_edge consistent with the refreshed close fair (audit 2026-06-26):
     # finalize rewrites the fair, so a stale current_edge would contradict it.
     pick.current_edge = _consistent_current_edge(pick, fair)
-    close_anchor = anchor_by_key.get((pick.market, pick.selection))
     if close_anchor:
         # CLOSE-side provenance from the SNAPSHOT close (pinnacle/sharp/
         # consensus). Together with closing_odds (written just below as the

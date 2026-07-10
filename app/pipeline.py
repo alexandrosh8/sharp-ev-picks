@@ -619,6 +619,10 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 event_id=snap.event_id,
                 market=snap.market,
                 selection=snap.selection,
+                # Mint-time CANONICAL devig-group detail: the CLV true-up
+                # matches this pick's close on the EXACT group, bypassing the
+                # line-blind ambiguity guard. None for lineless markets.
+                market_detail=canonical_market_detail(snap.market_detail),
                 bookmaker=snap.bookmaker,
                 decimal_odds=snap.decimal_odds,
                 model_probability=prediction.probability,
@@ -785,6 +789,43 @@ def _is_settleable_market_detail(detail: str | None) -> bool:
     if not detail:
         return True
     return _NON_SETTLEABLE_DETAIL_RE.search(detail.lower()) is None
+
+
+# Cross-provider vocabulary equivalences for the SAME full-match line
+# (instrumented live evidence 2026-07-10: 'h2h'/None, 'btts'/None,
+# 'over_under_2_5'/'totals_2_5' collisions were skipping every CLV write on
+# the affected picks). ONLY provably line-identical classes are folded:
+# h2h/1x2/btts have no full-match line variants, and over_under_X_Y carries
+# the identical line encoding as totals_X_Y. Asian-handicap vs spreads_minus
+# is deliberately NOT folded — audited UNSAFE 2026-07-10 (the OddsChecker
+# spreads_* key space mixes 2-way AH and 3-way EH products on identical
+# selection strings, key sign conventions are producer-dependent, and +L/-L
+# books coexist per event, so no selection-independent canonical form keeps
+# different books apart) — see
+# docs/research/2026-07-10-ah-spreads-vocabulary-audit.md. That class stays
+# fail-closed; stamped picks bypass it via the exact-detail match instead.
+_LINELESS_DETAILS = frozenset({"h2h", "1x2", "btts"})
+_OU_DETAIL_RE = re.compile(r"^over_under_(\d+(?:_\d+)?)$")
+
+
+def canonical_market_detail(detail: str | None) -> str | None:
+    """Canonical detail label for one full-match devig group (see above).
+
+    Pure (str/re only). Used BOTH by the CLV true-up's vocabulary merge and
+    as the mint-time ``PickOut.market_detail`` stamp, so a pick minted from
+    one provider's vocabulary matches the close group of another. NOTE: the
+    lineless classes canonicalize to None — such picks persist a NULL
+    market_detail and follow the legacy line-blind path (already collision-
+    free for them after the vocabulary merge)."""
+    if detail is None:
+        return None
+    d = detail.lower()
+    if d in _LINELESS_DETAILS:
+        return None
+    m = _OU_DETAIL_RE.match(d)
+    if m:
+        return f"totals_{m.group(1)}"
+    return detail
 
 
 def _is_asian_handicap(market_detail: str | None) -> bool:
@@ -1742,6 +1783,11 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 event_id=event_id,
                 market=market,
                 selection=v.selection,
+                # Mint-time CANONICAL devig-group detail (this candidate's
+                # group `detail` canonicalized): the CLV true-up matches the
+                # close on the EXACT group, bypassing the line-blind
+                # ambiguity guard. None for lineless markets (h2h/1x2/btts).
+                market_detail=canonical_market_detail(detail),
                 bookmaker=v.best_book,
                 decimal_odds=v.best_odds,
                 model_probability=v.sharp_fair_prob,

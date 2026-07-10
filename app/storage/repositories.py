@@ -3867,6 +3867,9 @@ async def persist_pick(
             model_version_id=model_version_id,
             market=str(pick.market),
             selection=pick.selection,
+            # Mint-time CANONICAL devig-group detail (exact CLV close matching;
+            # NULL = lineless market or pre-column mint path).
+            market_detail=pick.market_detail,
             bookmaker=pick.bookmaker,
             decimal_odds=Decimal(str(pick.decimal_odds)),
             model_probability=Decimal(str(pick.model_probability)),

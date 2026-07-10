@@ -36,6 +36,13 @@ class PickOut(InternalModel):
     event_id: str
     market: Market
     selection: str
+    # CANONICAL devig-group detail at mint (app/pipeline.py::
+    # canonical_market_detail — e.g. "totals_2_5", "asian_handicap_-1_0").
+    # Persisted so the CLV true-up matches the close on the EXACT group,
+    # bypassing the line-blind (event, market, selection) ambiguity guard.
+    # None = lineless market (h2h/1x2/btts canonicalize to None) or a
+    # pre-column row — those follow the legacy line-blind path.
+    market_detail: str | None = None
     bookmaker: str
     decimal_odds: float = Field(gt=1.0)
     model_probability: float = Field(ge=0.0, le=1.0)

@@ -245,6 +245,13 @@ class Pick(Base):
     detected_edge_id: Mapped[int | None] = mapped_column(ForeignKey("detected_edges.id"))
     market: Mapped[str] = mapped_column(String(32))
     selection: Mapped[str] = mapped_column(String(64))
+    # CANONICAL devig-group detail at mint (app/pipeline.py::
+    # canonical_market_detail, e.g. "totals_2_5", "asian_handicap_-1_0"): the
+    # CLV true-up matches the close on this EXACT group, bypassing the
+    # line-blind (event, market, selection) ambiguity guard. NULL = lineless
+    # market (h2h/1x2/btts canonicalize to None) or a pre-column row — those
+    # keep the legacy fail-closed line-blind behavior.
+    market_detail: Mapped[str | None] = mapped_column(Text)
     bookmaker: Mapped[str] = mapped_column(String(64))
     decimal_odds: Mapped[Decimal] = mapped_column(ODDS)
     model_probability: Mapped[Decimal] = mapped_column(PROB)
