@@ -194,6 +194,8 @@ def provisional_result(
     away_score: int | None,
     stake: Decimal | None = None,
     decimal_odds: Decimal | None = None,
+    *,
+    sport_key: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Best-effort (market, selection, scraped final score) -> (outcome, pnl)
     for a kicked-off-but-unsettled pick, so the CLOSED tab can show how the
@@ -202,13 +204,24 @@ def provisional_result(
     authoritative, persisted outcome + P&L still come from settlement (the
     SETTLED tab); this is a read-time convenience only. outcome is an Outcome
     value string ("won"/"lost"/...); pnl is a 2dp string, or None when stake or
-    odds is absent."""
+    odds is absent. ``sport_key`` threads the same sport-aware refusals the
+    settler applies (tennis game-line-vs-set-score, 2-way tie push) into the
+    display grade — a tennis "Over 22.5" against a 2-1 SET score must show no
+    provisional outcome, not a wrong one (operator report 2026-07-10)."""
     if home_score is None or away_score is None:
         return None, None
     try:
-        outcome = settle_selection(market, selection, home, away, int(home_score), int(away_score))
+        outcome = settle_selection(
+            market,
+            selection,
+            home,
+            away,
+            int(home_score),
+            int(away_score),
+            sport_key=sport_key,
+        )
     except (ValueError, TypeError):
-        return None, None  # unmappable selection -> no guess
+        return None, None  # unmappable / sport-ungradeable selection -> no guess
     pnl: str | None = None
     if stake is not None and decimal_odds is not None:
         pnl = str(pick_pnl(outcome, Decimal(str(stake)), Decimal(str(decimal_odds))))

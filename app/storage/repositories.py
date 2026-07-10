@@ -617,7 +617,12 @@ async def _get_or_create_model_version(
 
 
 def _provisional_result_fields(
-    pick: Pick, home: str, away: str, shs: int | None, saws: int | None
+    pick: Pick,
+    home: str,
+    away: str,
+    shs: int | None,
+    saws: int | None,
+    sport_key: str | None = None,
 ) -> dict[str, str | None]:
     """CLOSED-tab read-time RESULT: how the value bet landed from the scraped
     final score, BEFORE formal settlement. provisional_* are null until a final
@@ -631,6 +636,9 @@ def _provisional_result_fields(
     # counted as settled/landed (the P&L ledger already excludes them).
     if pick.status == "superseded":
         return {"provisional_outcome": None, "provisional_pnl": None}
+    # Sport-aware: the same refusals the settler applies (tennis game-line
+    # vs set-score, 2-way tie push) hold for the DISPLAY grade too — a wrong
+    # provisional tag was the residual of the 2026-07-10 operator report.
     outcome, pnl = provisional_result(
         pick.market,
         pick.selection,
@@ -640,6 +648,7 @@ def _provisional_result_fields(
         saws,
         pick.recommended_stake_amount,
         pick.decimal_odds,
+        sport_key=sport_key,
     )
     return {"provisional_outcome": outcome, "provisional_pnl": pnl}
 
@@ -873,7 +882,7 @@ async def latest_picks_with_events(
             # CLOSED-tab read-time RESULT: how the value bet landed from the
             # scraped final score, BEFORE formal settlement (null until a score
             # exists / if ungradeable). SETTLED uses the authoritative outcome.
-            **_provisional_result_fields(p, home_name, away_name, shs, saws),
+            **_provisional_result_fields(p, home_name, away_name, shs, saws, sport_key),
         }
         for (
             p,

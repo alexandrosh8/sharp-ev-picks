@@ -572,3 +572,48 @@ def test_tennis_game_line_grades_when_score_is_game_sized() -> None:
         settle_selection("totals", "Over 22.5", HOME, AWAY, 12, 10, sport_key="tennis")
         is Outcome.LOST
     )
+
+
+def test_provisional_result_refuses_tennis_game_line_on_set_score() -> None:
+    # Operator report 2026-07-10 residual: the CLOSED-tab display grade must
+    # apply the same sport-aware refusal as the settler — a tennis game line
+    # against a 2-1 SET score shows NO provisional outcome, never a wrong one.
+    from app.settlement.outcomes import provisional_result
+
+    for sel in ("Over 22.5", "Over 21.5", "Under 19.5"):
+        outcome, pnl = provisional_result(
+            "totals", sel, "Karolina Muchova", "Coco Gauff", 2, 1, sport_key="tennis"
+        )
+        assert outcome is None and pnl is None
+    outcome, _ = provisional_result(
+        "spreads",
+        "Karolina Muchova -4.5",
+        "Karolina Muchova",
+        "Coco Gauff",
+        2,
+        1,
+        sport_key="tennis",
+    )
+    assert outcome is None
+    # set-sized lines still display-grade from a set score
+    outcome, _ = provisional_result(
+        "totals", "Over 2.5", "Karolina Muchova", "Coco Gauff", 2, 1, sport_key="tennis"
+    )
+    assert outcome == "won"
+
+
+def test_provisional_result_two_way_tie_pushes_with_sport_key() -> None:
+    # The same threading fixes the deferred display-side NFL tie grade: a
+    # 2-way h2h tie provisionally PUSHES (refund), never shows lost.
+    from app.settlement.outcomes import provisional_result
+
+    outcome, _ = provisional_result(
+        "h2h",
+        "Home Team",
+        "Home Team",
+        "Away Team",
+        21,
+        21,
+        sport_key="american_football",
+    )
+    assert outcome == "push"
