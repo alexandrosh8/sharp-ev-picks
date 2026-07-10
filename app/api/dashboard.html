@@ -2287,19 +2287,31 @@
             ecBox.classList.add("empty");
           }
 
-          // next kickoffs (any status, pre-kickoff, both tiers, soonest first)
-          const upcoming = state.picks.filter((p) => !hasStarted(p) && p.starts_at != null)
-            .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at)).slice(0, 6);
+          // next kickoffs (any status, pre-kickoff, both tiers, soonest first).
+          // Audit 2026-07-10: one row per EVENT, not per pick — an event with 5
+          // open picks rendered as 5 identical lines. Premium wins the tier tag
+          // when the event carries both tiers; a >1 pick count is shown.
+          const upcomingPicks = state.picks.filter((p) => !hasStarted(p) && p.starts_at != null);
+          const byEvent = new Map();
+          upcomingPicks.forEach((p) => {
+            const k = `${p.event}|${p.starts_at}`;
+            const cur = byEvent.get(k);
+            if (!cur) byEvent.set(k, { pick: p, n: 1, premium: tierOf(p) !== "volume" });
+            else { cur.n += 1; cur.premium = cur.premium || tierOf(p) !== "volume"; }
+          });
+          const upcoming = [...byEvent.values()]
+            .sort((a, b) => new Date(a.pick.starts_at) - new Date(b.pick.starts_at)).slice(0, 6);
           const nk = $("next-kickoffs"); nk.replaceChildren();
           if (upcoming.length === 0) {
             const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "No upcoming kickoffs.";
             nk.appendChild(p0);
           } else {
-            upcoming.forEach((p) => {
+            upcoming.forEach(({ pick: p, n, premium }) => {
               const r = document.createElement("div"); r.className = "kickoff-row";
               const t = document.createElement("span"); t.className = "kr-t mono"; t.textContent = fmtCountdown(p.starts_at);
-              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
-              const s = document.createElement("span"); s.className = "kr-s"; s.textContent = tierOf(p) === "volume" ? "Shadow" : "Premium";
+              const e = document.createElement("span"); e.className = "kr-e";
+              e.textContent = fmt(p.event) + (n > 1 ? ` · ${n} picks` : "");
+              const s = document.createElement("span"); s.className = "kr-s"; s.textContent = premium ? "Premium" : "Shadow";
               r.append(t, e, s); nk.appendChild(r);
             });
           }
