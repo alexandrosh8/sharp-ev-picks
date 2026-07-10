@@ -147,6 +147,7 @@ def _collect_group_prices(
     detail_by_key: dict[tuple[str, str, str], str | None],
     ambiguous_keys: set[tuple[str, str, str]],
     anchored_keys: frozenset[tuple[str, str, str]] = frozenset(),
+    collision_details: dict[tuple[str, str, str], set[str]] | None = None,
 ) -> tuple[
     dict[tuple[str, str, str], dict[str, float]],
     dict[tuple[str, str, str], Mapping[tuple[str, str], datetime | None]],
@@ -175,6 +176,12 @@ def _collect_group_prices(
                 if key in anchored_keys:
                     continue  # anchored line wins; derived capture dropped
                 ambiguous_keys.add(key)
+                if collision_details is not None:
+                    # Observability: name BOTH colliding details so the
+                    # pick-level skip warning is diagnosable from logs.
+                    collision_details.setdefault(key, set()).update(
+                        (repr(detail_by_key[key]), repr(_detail))
+                    )
                 continue  # no anchor to disambiguate — skip, don't guess
             detail_by_key[key] = _detail
             prices_by_key[key] = books
@@ -280,6 +287,9 @@ async def revalidate_open_picks(
     # the dict — the OddsChecker key-collapse failure mode, belt-and-suspenders.
     detail_by_key: dict[tuple[str, str, str], str | None] = {}
     ambiguous_keys: set[tuple[str, str, str]] = set()
+    # Observability (2026-07-10): record WHICH details collide per key so the
+    # per-pick skip warning is diagnosable straight from production logs.
+    collision_details: dict[tuple[str, str, str], set[str]] = {}
     for (event_id, market, _detail), (book, fair) in event_fair_probs(
         grouped, devig_method, value_policy, fell_back_out=fell_back_by_market
     ).items():
@@ -288,6 +298,9 @@ async def revalidate_open_picks(
             key = (event_id, str(market), sel)
             if key in detail_by_key and detail_by_key[key] != _detail:
                 ambiguous_keys.add(key)
+                collision_details.setdefault(key, set()).update(
+                    (repr(detail_by_key[key]), repr(_detail))
+                )
             detail_by_key[key] = _detail
             fair_by_key[key] = p
             anchor_by_key[key] = book
@@ -300,7 +313,11 @@ async def revalidate_open_picks(
     # half markets / oc_* props); collisions with no anchor stay ambiguous
     # (fail-closed), never guessed.
     prices_by_key, captured_by_key = _collect_group_prices(
-        grouped, detail_by_key, ambiguous_keys, anchored_keys=frozenset(detail_by_key)
+        grouped,
+        detail_by_key,
+        ambiguous_keys,
+        anchored_keys=frozenset(detail_by_key),
+        collision_details=collision_details,
     )
 
     if not fair_by_key:
@@ -330,10 +347,11 @@ async def revalidate_open_picks(
             if key in ambiguous_keys:
                 logger.warning(
                     "pick %d: %s/%s maps to >1 market line this cycle "
-                    "(line-ambiguous key) — skipping CLV write",
+                    "(line-ambiguous key; details=%s) — skipping CLV write",
                     pick.id,
                     pick.market,
                     pick.selection,
+                    sorted(collision_details.get(key, set())),
                 )
                 continue
             closing_fair = fair_by_key.get(key)
