@@ -130,6 +130,18 @@ def _consistent_current_edge(pick: Pick, fair: float) -> Decimal | None:
     return Decimal(f"{fair - 1.0 / eff:.6f}")
 
 
+def _settleable_groups(grouped: GroupedMarkets) -> GroupedMarkets:
+    """Drop period/corner/card submarket groups from the revalidation set.
+
+    A pick can never be on a period line (the candidate gate refuses them), so
+    a '..._1st_half' group can only ever collide with the pick's line-blind
+    key — and because the sharp capture prices halves too, BOTH groups anchor
+    and the anchored-loop ambiguity skip refused every CLV write on the main
+    line (live evidence 2026-07-09/10: totals/btts picks skipped each cycle).
+    Same rule finalize's ``_detail_matched_books`` applies to the close side."""
+    return {k: v for k, v in grouped.items() if _is_settleable_market_detail(k[2])}
+
+
 def _collect_group_prices(
     grouped: GroupedMarkets,
     detail_by_key: dict[tuple[str, str, str], str | None],
@@ -248,7 +260,11 @@ async def revalidate_open_picks(
     # so live CLV is comparable to the backtest's CLV columns. Keyed by
     # SELECTION: line-bearing selections ("Over 215.5", "Alpha FC -1.5")
     # disambiguate submarkets that share one Market enum value.
-    grouped = group_market_prices(snapshots)
+    # Period/corner/card groups are excluded BEFORE fair computation: no open
+    # pick can be on one (candidate gate), and a sharp-priced half submarket
+    # otherwise anchors alongside the main line and poisons the line-blind
+    # key as ambiguous — skipping the main line's CLV write every cycle.
+    grouped = _settleable_groups(group_market_prices(snapshots))
     fair_by_key: dict[tuple[str, str, str], float] = {}
     anchor_by_key: dict[tuple[str, str, str], str] = {}
     # P2-2: the close-side devig-fallback flag per market, carried to each pick so
@@ -1199,7 +1215,10 @@ async def finalize_closing_from_snapshots(
             len(sharp_snaps),
             sharp_fresh,
         )
-    grouped = group_market_prices(snaps)
+    # Same period-group exclusion as revalidation: a sharp-priced half
+    # submarket must not anchor beside the main line and mark the pick's
+    # line-blind key ambiguous (which refused the snapshot close).
+    grouped = _settleable_groups(group_market_prices(snaps))
     fair_by_key: dict[tuple[str, str], float] = {}
     anchor_by_key: dict[tuple[str, str], str] = {}
     # P2-2: per-market close devig-fallback flag, carried to the pick's

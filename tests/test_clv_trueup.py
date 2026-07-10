@@ -1574,6 +1574,27 @@ def _grouped_entry(books: dict[str, float], captured_at: datetime) -> _GroupedEn
     return prices, captured
 
 
+def test_settleable_groups_drops_sharp_priced_period_submarkets() -> None:
+    """Live regression 2026-07-10: Betfair prices half-lines too, so BOTH the
+    main totals group and 'totals_1st_half_2_5' ANCHOR — the anchored-loop
+    collision marked the line-blind key ambiguous and every CLV write on the
+    MAIN line was skipped. Period groups can never be a pick's line (candidate
+    gate) and are excluded from revalidation/finalize grouping outright."""
+    from app.clv_trueup import _settleable_groups
+
+    at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    grouped: _Grouped = {
+        ("ev1", Market.TOTALS, "totals_2_5"): _grouped_entry({"pinnacle": 1.90}, at),
+        ("ev1", Market.TOTALS, "totals_1st_half_2_5"): _grouped_entry({"pinnacle": 2.60}, at),
+        ("ev1", Market.TOTALS, "totals_2nd_half_2_5"): _grouped_entry({"pinnacle": 2.70}, at),
+    }
+    kept = _settleable_groups(grouped)
+    assert set(kept) == {("ev1", Market.TOTALS, "totals_2_5")}
+    # full-match / detail-less groups always survive
+    grouped2: _Grouped = {("ev1", Market.BTTS, None): _grouped_entry({"pinnacle": 1.80}, at)}
+    assert _settleable_groups(grouped2) == grouped2
+
+
 def test_collect_group_prices_anchored_line_wins_over_derived_submarket() -> None:
     """An UNANCHORED submarket sharing the line-blind key with an ANCHORED
     group is a derived capture (half/team/prop) that cannot be the pick's
