@@ -635,9 +635,11 @@ def test_clv_yield_ratio_nulled_below_floor_or_near_zero_clv() -> None:
     assert yr["trusted_clv"] is None
     assert yr["flat_yield"] is None
     assert yr["n_clv"] == 3
-    # |trusted CLV| < 1e-6: the ratio is nulled (divide-by-zero guard) even
+    # |trusted CLV| < CLV_YIELD_MIN_ABS_CLV (0.005): the ratio is nulled (a
+    # near-zero denominator amplifies noise without bound — live 2026-07-10
+    # example: fractional-mean CLV +0.0016 rendered a meaningless -59.8x) even
     # though both sides cleared the floor
-    zero = [trusted_row(1e-9, pnl=0.5) for _ in range(6)]
+    zero = [trusted_row(1e-3, pnl=0.5) for _ in range(6)]
     yr0 = live_evidence_report(zero, ml_threshold=None, min_n=5)["clv_yield_ratio"]
     assert yr0["trusted_clv"] is not None
     assert yr0["flat_yield"] is not None

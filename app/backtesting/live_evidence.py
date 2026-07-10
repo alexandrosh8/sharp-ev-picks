@@ -80,8 +80,11 @@ CLV_YIELD_BENCHMARK_SOURCE = (
 )
 
 #: A trusted CLV this close to zero cannot anchor a yield ratio — the division
-#: would amplify noise without bound (and divide by ~0). The ratio is nulled.
-CLV_YIELD_MIN_ABS_CLV = 1e-6
+#: amplifies noise without bound (live example, 2026-07-10: fractional-mean
+#: trusted CLV +0.0016 vs flat yield −0.094 rendered a meaningless −59.8x).
+#: Below half the benchmark's reference CLV scale (~1%) the ratio is noise,
+#: so it is nulled and the dashboard shows its not-computable state.
+CLV_YIELD_MIN_ABS_CLV = 0.005
 
 
 @dataclass(frozen=True)
