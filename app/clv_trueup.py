@@ -18,6 +18,7 @@ only trusted while it stays positive (docs/backtesting/value-findings.md).
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -128,6 +129,61 @@ def _consistent_current_edge(pick: Pick, fair: float) -> Decimal | None:
         return None
     eff = effective_odds(pick.current_bookmaker or pick.bookmaker, float(pick.current_odds))
     return Decimal(f"{fair - 1.0 / eff:.6f}")
+
+
+# Cross-provider vocabulary equivalences for the SAME full-match line
+# (instrumented live evidence 2026-07-10: 'h2h'/None, 'btts'/None,
+# 'over_under_2_5'/'totals_2_5' collisions were skipping every CLV write on
+# the affected picks). ONLY provably line-identical classes are merged:
+# h2h/1x2/btts have no full-match line variants, and over_under_X_Y carries
+# the identical line encoding as totals_X_Y. Asian-handicap vs spreads_minus
+# is deliberately NOT merged — the key sign conventions differ and a
+# European-handicap collision would mix 3-way with 2-way products; that
+# class stays fail-closed until audited.
+_LINELESS_DETAILS = frozenset({"h2h", "1x2", "btts"})
+_OU_DETAIL_RE = re.compile(r"^over_under_(\d+(?:_\d+)?)$")
+
+
+def _canonical_group_detail(detail: str | None) -> str | None:
+    """Canonical detail label for one full-match devig group (see above)."""
+    if detail is None:
+        return None
+    d = detail.lower()
+    if d in _LINELESS_DETAILS:
+        return None
+    m = _OU_DETAIL_RE.match(d)
+    if m:
+        return f"totals_{m.group(1)}"
+    return detail
+
+
+def _merge_vocabulary_groups(grouped: GroupedMarkets) -> GroupedMarkets:
+    """Merge groups whose details canonicalize to the same full-match line.
+
+    The same line arriving under two provider vocabularies used to devig as
+    two thin groups, double-anchor, and trip the line-ambiguity guard. Books
+    union per selection; on a same-(selection, book) conflict the LATER
+    captured_at wins (freshest observation), unknown timestamps lose to
+    known ones. Input maps are never mutated."""
+    out: GroupedMarkets = {}
+    for (event_id, market, detail), (prices, captured) in grouped.items():
+        key = (event_id, market, _canonical_group_detail(detail))
+        if key not in out:
+            out[key] = ({s: dict(b) for s, b in prices.items()}, dict(captured))
+            continue
+        dst_prices, dst_captured = out[key]
+        for sel, books in prices.items():
+            dst = dst_prices.setdefault(sel, {})
+            for book, odds in books.items():
+                prev_t = dst_captured.get((sel, book))
+                new_t = captured.get((sel, book))
+                if book not in dst or (new_t is not None and (prev_t is None or new_t >= prev_t)):
+                    dst[book] = odds
+        for cap_key, t in captured.items():
+            prev = dst_captured.get(cap_key)
+            if prev is None or (t is not None and t >= prev):
+                dst_captured[cap_key] = t
+    return out
 
 
 def _settleable_groups(grouped: GroupedMarkets) -> GroupedMarkets:
@@ -271,7 +327,7 @@ async def revalidate_open_picks(
     # pick can be on one (candidate gate), and a sharp-priced half submarket
     # otherwise anchors alongside the main line and poisons the line-blind
     # key as ambiguous — skipping the main line's CLV write every cycle.
-    grouped = _settleable_groups(group_market_prices(snapshots))
+    grouped = _merge_vocabulary_groups(_settleable_groups(group_market_prices(snapshots)))
     fair_by_key: dict[tuple[str, str, str], float] = {}
     anchor_by_key: dict[tuple[str, str, str], str] = {}
     # P2-2: the close-side devig-fallback flag per market, carried to each pick so
@@ -1236,7 +1292,7 @@ async def finalize_closing_from_snapshots(
     # Same period-group exclusion as revalidation: a sharp-priced half
     # submarket must not anchor beside the main line and mark the pick's
     # line-blind key ambiguous (which refused the snapshot close).
-    grouped = _settleable_groups(group_market_prices(snaps))
+    grouped = _merge_vocabulary_groups(_settleable_groups(group_market_prices(snaps)))
     fair_by_key: dict[tuple[str, str], float] = {}
     anchor_by_key: dict[tuple[str, str], str] = {}
     # P2-2: per-market close devig-fallback flag, carried to the pick's

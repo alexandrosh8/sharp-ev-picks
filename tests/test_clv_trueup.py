@@ -1574,6 +1574,64 @@ def _grouped_entry(books: dict[str, float], captured_at: datetime) -> _GroupedEn
     return prices, captured
 
 
+def test_merge_vocabulary_groups_folds_equivalent_full_match_details() -> None:
+    """Live evidence 2026-07-10: the SAME line arrives under two provider
+    vocabularies ('h2h'/None, 'btts'/None, 'over_under_2_5'/'totals_2_5'),
+    devigs as two thin groups, double-anchors, and trips the ambiguity skip.
+    Equivalent full-match details merge into ONE group (books union)."""
+    from app.clv_trueup import _merge_vocabulary_groups
+
+    t1 = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    t2 = datetime(2026, 7, 1, 12, 5, tzinfo=UTC)
+    grouped: _Grouped = {
+        ("ev1", Market.H2H, "h2h"): ({"Home": {"BookA": 2.0}}, {("Home", "BookA"): t1}),
+        ("ev1", Market.H2H, None): ({"Home": {"BookB": 2.1}}, {("Home", "BookB"): t1}),
+        ("ev1", Market.TOTALS, "over_under_2_5"): (
+            {"Over 2.5": {"BookA": 1.9}},
+            {("Over 2.5", "BookA"): t1},
+        ),
+        ("ev1", Market.TOTALS, "totals_2_5"): (
+            # same book seen later under the other vocabulary -> freshest wins
+            {"Over 2.5": {"BookA": 1.95, "BookC": 2.0}},
+            {("Over 2.5", "BookA"): t2, ("Over 2.5", "BookC"): t2},
+        ),
+        ("ev1", Market.BTTS, "btts"): ({"Yes": {"BookA": 1.8}}, {("Yes", "BookA"): t1}),
+    }
+    merged = _merge_vocabulary_groups(grouped)
+    assert set(merged) == {
+        ("ev1", Market.H2H, None),
+        ("ev1", Market.TOTALS, "totals_2_5"),
+        ("ev1", Market.BTTS, None),
+    }
+    h2h_prices, _ = merged[("ev1", Market.H2H, None)]
+    assert h2h_prices["Home"] == {"BookA": 2.0, "BookB": 2.1}  # books union
+    ou_prices, ou_cap = merged[("ev1", Market.TOTALS, "totals_2_5")]
+    assert ou_prices["Over 2.5"]["BookA"] == 1.95  # later capture wins
+    assert ou_cap[("Over 2.5", "BookA")] == t2
+    assert ou_prices["Over 2.5"]["BookC"] == 2.0
+
+
+def test_merge_vocabulary_groups_never_merges_handicap_vocabularies() -> None:
+    """AH-vs-spreads key sign conventions differ and a European-handicap
+    collision would mix 3-way with 2-way products — those groups stay
+    distinct (the ambiguity guard keeps failing closed for them)."""
+    from app.clv_trueup import _merge_vocabulary_groups
+
+    at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    grouped: _Grouped = {
+        ("ev1", Market.SPREADS, "asian_handicap_-1_0"): (
+            {"Spain -1": {"BookA": 1.9}},
+            {("Spain -1", "BookA"): at},
+        ),
+        ("ev1", Market.SPREADS, "spreads_minus_1"): (
+            {"Spain -1": {"BookB": 1.95}},
+            {("Spain -1", "BookB"): at},
+        ),
+    }
+    merged = _merge_vocabulary_groups(grouped)
+    assert len(merged) == 2  # NOT folded — fail-closed ambiguity stands
+
+
 def test_settleable_groups_drops_sharp_priced_period_submarkets() -> None:
     """Live regression 2026-07-10: Betfair prices half-lines too, so BOTH the
     main totals group and 'totals_1st_half_2_5' ANCHOR — the anchored-loop
