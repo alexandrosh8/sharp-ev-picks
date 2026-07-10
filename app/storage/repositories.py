@@ -2458,8 +2458,14 @@ async def closing_odds_from_snapshots(
     )
     # The event-wide last pre-kickoff row is the last row of its own group,
     # so the max over group winners IS the event's last-capture time. Taken
-    # over ALL rows (even unmappable legacy keys): any row proves coverage.
-    last_capture = max((row.captured_at for row in rows), default=None)
+    # over all MAIN-SCRAPE rows (even unmappable legacy keys): any row from the
+    # scrape proves coverage. DEDICATED-capture rows (liquidity set — the
+    # separate 120s Betfair job) are EXCLUDED from the clock (audit 2026-07-10
+    # M-clv-1297): they update independently of the soft scrape, so an event
+    # that fell OUT of the scrape days ago could otherwise look "fresh" and
+    # pass the snapshot-close coverage gate on a sharp row alone — the sharp
+    # path has its own freshness check in finalize_closing_from_snapshots.
+    last_capture = max((row.captured_at for row in rows if row.liquidity is None), default=None)
     snaps: list[OddsSnapshotIn] = []
     for row in rows:
         mapped = market_from_snapshot_key(row.market)

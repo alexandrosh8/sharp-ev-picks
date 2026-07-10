@@ -80,6 +80,17 @@ class MatchRow:
     pinnacle_closing_home: float | None
     pinnacle_closing_draw: float | None
     pinnacle_closing_away: float | None
+    # Betfair Exchange 1X2 OPEN + CLOSE (BFEH.. / BFECH..): verified populated
+    # ~94% on 2025-26 files with open != close on 93% of rows (audit
+    # 2026-07-10). With the Pinnacle columns dead since ~2026-01-15 this pair
+    # is the FREE sharp anchor+close for the football backtest spine
+    # (exchange prices are gross — net commission on the EV side, not here).
+    betfair_exchange_open_home: float | None = None
+    betfair_exchange_open_draw: float | None = None
+    betfair_exchange_open_away: float | None = None
+    betfair_exchange_closing_home: float | None = None
+    betfair_exchange_closing_draw: float | None = None
+    betfair_exchange_closing_away: float | None = None
 
 
 def season_url(league_code: str, season: str) -> str:
@@ -126,6 +137,12 @@ def parse_season_csv(text: str) -> list[MatchRow]:
                     pinnacle_closing_home=_opt_float(raw.get("PSCH")),
                     pinnacle_closing_draw=_opt_float(raw.get("PSCD")),
                     pinnacle_closing_away=_opt_float(raw.get("PSCA")),
+                    betfair_exchange_open_home=_opt_float(raw.get("BFEH")),
+                    betfair_exchange_open_draw=_opt_float(raw.get("BFED")),
+                    betfair_exchange_open_away=_opt_float(raw.get("BFEA")),
+                    betfair_exchange_closing_home=_opt_float(raw.get("BFECH")),
+                    betfair_exchange_closing_draw=_opt_float(raw.get("BFECD")),
+                    betfair_exchange_closing_away=_opt_float(raw.get("BFECA")),
                 )
             )
         except (KeyError, ValueError) as exc:

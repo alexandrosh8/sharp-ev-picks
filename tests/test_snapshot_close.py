@@ -553,3 +553,35 @@ async def test_closing_odds_from_snapshots_last_row_per_book(session) -> None:  
     assert by_sel[HOME].market is Market.H2H  # "1x2" mapped back
     assert by_sel[HOME].market_detail == "1x2"
     assert by_sel[HOME].event_id == ref
+
+
+async def test_coverage_clock_excludes_dedicated_capture_rows(session) -> None:  # type: ignore[no-untyped-def]
+    """Audit 2026-07-10 (M-clv-1297): the event-wide last-capture clock feeds
+    the soft_fresh coverage verdict — DEDICATED-capture rows (liquidity set,
+    the separate 120s Betfair job) update independently of the soft scrape, so
+    counting them let an event that fell OUT of the scrape look fresh. The
+    clock must be the last MAIN-SCRAPE (liquidity IS NULL) row."""
+    pick = await seed_pick(session, "evt-snapclose-dedicated-clock")
+    soft_time = KICKOFF - timedelta(hours=6)
+    await seed_1x2_snaps(session, pick.event_id, "bet365", (2.20, 3.40, 3.30), soft_time)
+    # dedicated Betfair capture row 5 minutes before kickoff (liquidity SET)
+    session.add(
+        OddsSnapshot(
+            event_id=pick.event_id,
+            bookmaker="Betfair Exchange",
+            market="1x2",
+            selection=HOME,
+            decimal_odds=Decimal("2.30"),
+            liquidity=Decimal("512.00"),
+            captured_at=KICKOFF - timedelta(minutes=5),
+            ingested_at=KICKOFF - timedelta(minutes=5),
+        )
+    )
+    await session.flush()
+    ref = await event_ref_of(session, pick)
+
+    snaps, last_capture = await closing_odds_from_snapshots(session, pick.event_id, ref, KICKOFF)
+    # the clock reflects the SOFT scrape (6h stale), not the dedicated row
+    assert last_capture == soft_time
+    # the dedicated row itself still participates as a close-row candidate
+    assert any(s.bookmaker == "Betfair Exchange" for s in snaps)

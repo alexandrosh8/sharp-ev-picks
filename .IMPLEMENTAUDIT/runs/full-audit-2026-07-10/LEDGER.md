@@ -72,3 +72,30 @@ freshness vs Betfair moves (plan follow-up, not a code change).
 
 - Smoke A: pytest exit 0 (green), mypy clean, format clean, safety PASSED, 1 pre-existing alembic I001 (out of CI scope).
 - Smoke B: see SMOKE_B.txt (in flight at ledger write).
+
+## DATA-INTEL VERIFICATION (2026-07-10 evening, operator-requested)
+
+- **football-data.co.uk Betfair Exchange columns: VERIFIED REAL.** 2025-26 E0:
+  BFEH/BFED/BFEA (open) + BFECH/BFECD/BFECA (close) populated 358-360/380;
+  also OU2.5 open+close (BFE>2.5/BFEC>2.5) and AH open+close (BFEAHH/BFECAHH).
+  open≠close on 93.3% (true pair). PSH/PSCH populated only 210/380 (dead since
+  ~Jan). → Football backtest spine re-cleared via EXCHANGE anchor+close
+  (commission-net in EV; exchange = sharp per doctrine).
+- **api.bettingiscool.com: VERIFIED REAL, PAID.** Swagger + public /api/stats:
+  2.3B+ odds rows, 2.7M fixtures, 44 sports since 2021, pre-game AND in-play,
+  devigged todds included, results included. Coverage (public): Soccer 1.37B,
+  Basketball 523M, Tennis 159M rows. €49/€149/€249 per month (Stripe/crypto).
+  → NBA/tennis data-gate breaker IF operator approves budget (free-first
+  policy = operator decision; starter-tier request caps unverified).
+- **Arcadia freshness first-pass (own DB, 7d, 3,191 events):** last pre-kickoff
+  pinnacle capture median 13.2 min before KO (p90 55 min) — capture cadence is
+  healthy; the public "delayed feed" concern is about PRICE lag inside that
+  window and needs a tick-level comparison (Betfair stream or BettingIsCool
+  data) to settle. Not alarming today.
+- **CLV close staleness QUANTIFIED (the real CLV problem):** settled picks'
+  close snapshots run median 139-196 MINUTES before kickoff (sharp 139.6,
+  consensus 173.3, pinnacle 196.4) — the platform's "close" is mostly a T-3h
+  price, while the arcadia archive holds T-13min rows. This is the
+  quantified case for the close-freshness work package.
+- **M349 impact today: 1 trusted-gate row** with close-implied edge < −0.20
+  (clv −1.358) — design stands, low urgency confirmed.
