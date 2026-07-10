@@ -218,8 +218,9 @@ def _validate_markets(markets: Sequence[str]) -> None:
             raise ValueError(f"cannot parse handicap line from: {m}")
 
 
-# Leagues OddsPortal carries but OddsHarvester 0.3.0's registry omits —
-# standard URL pattern, each verified live (HTTP 200) on 2026-06-11.
+# Leagues OddsPortal carries but OddsHarvester's registry omits (0.3.0;
+# sport_league_constants.py is byte-identical in 0.4.0) — standard URL pattern,
+# each verified live (HTTP 200) on 2026-06-11.
 # (turkey-super-lig and greece-super-league ARE upstream keys already.)
 _EXTRA_LEAGUES: dict[str, dict[str, str]] = {
     "football": {
@@ -228,7 +229,7 @@ _EXTRA_LEAGUES: dict[str, dict[str, str]] = {
             "https://www.oddsportal.com/football/belgium/jupiler-pro-league"
         ),
     },
-    # OddsHarvester 0.3.0 ships only nfl/ncaa for american football; CFL
+    # OddsHarvester (0.3.0/0.4.0) ships only nfl/ncaa for american football; CFL
     # (active Jun-Nov) and UFL (spring) are the other live AF leagues
     # OddsPortal lists. Visibility-only — they mint no picks, like nfl/ncaa.
     "american-football": {
@@ -253,19 +254,25 @@ def register_extra_leagues() -> None:
 
 
 # ---------------------------------------------------------------------------
-# oddsharvester 0.3.0 quirk patches — applied in place at runtime (same
+# oddsharvester 0.4.0 quirk patches — applied in place at runtime (same
 # pattern as register_extra_leagues; a fork would have to track upstream for
-# two ~20-line methods). Root causes from live poll logs, 2026-06-11:
+# two ~20-line methods). Root causes from live poll logs, 2026-06-11;
+# every patch target re-verified against the 0.4.0 source diff, 2026-07-09:
 #
 # 1. OddsPortal keeps the OneTrust consent dialog in the DOM (hidden) after
 #    dismissal. The generic tab selectors (li[class*='tab'], nav li) match
 #    its ot-* nodes, so wait_for_selector burns its full timeout waiting for
 #    hidden elements; worse, the 'More'-button substring search ("more" in
 #    text) clicked the consent dialog — its blurb contains "more relevant".
+#    (0.4.0 keeps the generic selectors and the text search unchanged; it
+#    only PREPENDS a data-testid MORE_BUTTON_SELECTORS entry, which our
+#    visible-only 'More' scan iterates automatically.)
 # 2. NavigationManager.wait_for_market_switch checks only the FIRST element
 #    matching stale `.active` selectors, so verification never passes on the
 #    current DOM: one warning per market per match page plus 3 x 3s of dead
-#    waiting — minutes of wasted wall-clock per cycle.
+#    waiting — minutes of wasted wall-clock per cycle. (0.4.0 adds a URL-
+#    fragment market-code fast path — ported below — but STILL checks only
+#    the first `.active` element and has no page-content fallback.)
 # 3. Exchange rows (back/lay layout) are structurally short of the parser's
 #    fixed column count; skipping them is by design, not a WARNING-worthy
 #    defect — the multi-book consensus proceeds without the exchange price.
@@ -293,16 +300,29 @@ def _patched_tab_selectors(selectors: list[str]) -> list[str]:
 async def _patched_wait_for_market_switch(
     self: Any, page: Any, market_name: str, max_attempts: int = 3
 ) -> bool:
-    """Drop-in for NavigationManager.wait_for_market_switch: scan ALL
-    active-tab candidates, then fall back to a page-content check — the same
-    confirmation MarketTabNavigator._verify_tab_is_active already accepts."""
+    """Drop-in for NavigationManager.wait_for_market_switch: 0.4.0's new
+    URL-fragment market-code fast path first (ported — language-independent,
+    cheapest), then scan ALL active-tab candidates and fall back to a
+    page-content check — upstream 0.4.0 still reads only the FIRST `.active`
+    element and has no content fallback, so the original quirk stands."""
+    from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
     from oddsharvester.utils.constants import MARKET_SWITCH_WAIT_TIME_MS
 
     self.logger.info("Waiting for market switch to complete for: %s", market_name)
+    # 0.4.0 upstream addition, ported: the '#<id>:<code>;<scope>' URL fragment
+    # names the active market. getattr keeps duck-typed pages (tests) working.
+    target_code = OddsPortalSelectors.MARKET_TAB_CODES.get(market_name)
     needle = market_name.lower()
     for attempt in range(max_attempts):
         try:
             await page.wait_for_timeout(MARKET_SWITCH_WAIT_TIME_MS)
+            if (
+                target_code
+                and OddsPortalSelectors.market_code_from_url(getattr(page, "url", ""))
+                == target_code
+            ):
+                self.logger.info("Market switch confirmed via URL code: %s is active", market_name)
+                return True
             for element in await page.query_selector_all("li.active, li[class*='active'], .active"):
                 text = await element.text_content()
                 if text and needle in text.lower():
@@ -457,27 +477,39 @@ def _patched_extract_bookmaker_name(self: Any, block: Any) -> Any:
 _SUBMARKET_SELECT_TIMEOUT_S = 4
 
 
-async def _patched_select_specific_market(self: Any, page: Any, specific_market: str) -> bool:
+async def _patched_select_specific_market(
+    self: Any, page: Any, specific_market: str, main_market: str | None = None
+) -> bool:
     """Drop-in for NavigationManager.select_specific_market: a missing sub-line
-    fails fast (bounded scroll-and-click) instead of burning the upstream 20s."""
+    fails fast (bounded scroll-and-click) instead of burning the upstream 20s —
+    0.4.0 still passes no timeout, so the wedge fix stands. Ported to the 0.4.0
+    signature: the new `main_market` feeds `submarket_match_text`, which strips
+    the translated prefix so the match works on localized mirrors too."""
+    from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
+
     return bool(
         await self.scroller.scroll_until_visible_and_click_parent(
             page=page,
-            selector="div.flex.w-full.items-center.justify-start.pl-3.font-bold p",
-            text=specific_market,
+            selector=OddsPortalSelectors.SUB_MARKET_SELECTOR,
+            text=OddsPortalSelectors.submarket_match_text(specific_market, main_market),
             timeout=_SUBMARKET_SELECT_TIMEOUT_S,
         )
     )
 
 
-async def _patched_close_specific_market(self: Any, page: Any, specific_market: str) -> bool:
-    """Drop-in for NavigationManager.close_specific_market — bounded the same way."""
+async def _patched_close_specific_market(
+    self: Any, page: Any, specific_market: str, main_market: str | None = None
+) -> bool:
+    """Drop-in for NavigationManager.close_specific_market — bounded the same
+    way (0.4.0 signature ported, see _patched_select_specific_market)."""
+    from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
+
     self.logger.info("Closing sub-market: %s", specific_market)
     return bool(
         await self.scroller.scroll_until_visible_and_click_parent(
             page=page,
-            selector="div.flex.w-full.items-center.justify-start.pl-3.font-bold p",
-            text=specific_market,
+            selector=OddsPortalSelectors.SUB_MARKET_SELECTOR,
+            text=OddsPortalSelectors.submarket_match_text(specific_market, main_market),
             timeout=_SUBMARKET_SELECT_TIMEOUT_S,
         )
     )
@@ -498,9 +530,10 @@ async def _patched_get_current_value(self: Any, page: Any, strategy: Any) -> str
     """Drop-in for SelectionManager._get_current_value: wait for the active
     element to (re)attach after a market-tab switch, THEN read it — so
     ensure_selected's already-selected short-circuit fires instead of a needless
-    click and a benign ERROR. The read below mirrors upstream 0.3.0 exactly;
-    only the wait is new. Graceful: on timeout/missing it returns None just as
-    upstream does (secret-safe logs: exception TYPE only, at debug)."""
+    click and a benign ERROR. The read below mirrors upstream exactly
+    (_get_current_value is byte-identical 0.3.0 -> 0.4.0); only the wait is
+    new. Graceful: on timeout/missing it returns None just as upstream does
+    (secret-safe logs: exception TYPE only, at debug)."""
     active_selector = f"{strategy.container_selector} .{strategy.active_class}"
     try:
         await page.wait_for_selector(active_selector, state="attached", timeout=_ACTIVE_SETTLE_MS)
@@ -568,7 +601,7 @@ _upstream_patched = False
 # The ONLY oddsharvester version the runtime patches below were verified
 # against (pyproject pins it exactly). A version bump must re-verify every
 # patch target — see .claude/memory/pitfalls.md.
-_PATCHED_UPSTREAM_VERSION = "0.3.0"
+_PATCHED_UPSTREAM_VERSION = "0.4.0"
 
 
 def _patch_upstream_quirks() -> None:
@@ -624,8 +657,9 @@ def _patch_upstream_quirks() -> None:
     _upstream_patched = True
 
 
-# OddsHarvester 0.3.0 hardcodes the match-page Page.goto timeout as the module
-# constant NAVIGATION_TIMEOUT_MS (15000ms) in oddsharvester/utils/constants.py;
+# OddsHarvester hardcodes the match-page Page.goto timeout as the module
+# constant NAVIGATION_TIMEOUT_MS (15000ms, unchanged 0.3.0 -> 0.4.0) in
+# oddsharvester/utils/constants.py;
 # base_scraper.py imports it BY NAME, so scrape_match()'s goto reads
 # base_scraper.NAVIGATION_TIMEOUT_MS. 15s is too tight for OddsPortal's heavy
 # match pages, so one slow page raises "Timeout 15000ms exceeded" and that match
@@ -769,11 +803,13 @@ async def _default_listing_scrape(
     links: list[str] = []
     seen: set[str] = set()
     try:
+        # 0.4.0 renamed start_playwright's `proxy=` to `proxy_manager=` (the
+        # manager now owns rotation/failover; single-proxy behaviour unchanged).
         await scraper.start_playwright(
             headless=headless,
             browser_locale_timezone=browser_locale_timezone,
             browser_timezone_id=browser_timezone_id,
-            proxy=proxy_manager.get_current_proxy(),
+            proxy_manager=proxy_manager,
         )
         page = playwright_manager.page
         if page is None:  # pragma: no cover - start_playwright raises on failure

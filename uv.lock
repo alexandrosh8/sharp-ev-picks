@@ -294,7 +294,7 @@ requires-dist = [
     { name = "nba-api", marker = "extra == 'nba'", specifier = ">=1.4" },
     { name = "nflreadpy", marker = "extra == 'nfl'", specifier = ">=0.1" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "oddsharvester", marker = "extra == 'backfill'", specifier = "==0.3.0" },
+    { name = "oddsharvester", marker = "extra == 'backfill'", specifier = "==0.4.0" },
     { name = "openpyxl", marker = "extra == 'backtest'", specifier = ">=3.1" },
     { name = "pandas", marker = "extra == 'backtest'", specifier = ">=2.2" },
     { name = "pandas", marker = "extra == 'ml'", specifier = ">=2.2" },
@@ -1712,7 +1712,7 @@ wheels = [
 
 [[package]]
 name = "oddsharvester"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -1721,10 +1721,11 @@ dependencies = [
     { name = "lxml" },
     { name = "playwright" },
     { name = "pytz" },
+    { name = "tzdata" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a6/ff/5dfd61f9792252ad33e7ad38d27ba45f172953991a78ed96614cd280d96a/oddsharvester-0.3.0.tar.gz", hash = "sha256:89636106e3cebc2c150b8b890d457165d63ba34878abe79e45c53d48984841cc", size = 86442, upload-time = "2026-05-20T15:26:16.706Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/d3/c63b3261b89daec9f69d85b3eee449bd5e64ce55d9d638c78caab3fef5d7/oddsharvester-0.4.0.tar.gz", hash = "sha256:3450f7b901822feb60567d5975e31fe775870715ae377bebdb10f8e4c7b07887", size = 93763, upload-time = "2026-07-06T09:18:05.417Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ce/c0/895fb81b9344b66e2aabdbc51103219e1fdb87cb3f3941dc893ec0dfae8b/oddsharvester-0.3.0-py3-none-any.whl", hash = "sha256:e3b95d589cac3f72aadd5c8fd5b1ef0fcfa6b4bcc44bd00e2a7397190b1706ac", size = 94092, upload-time = "2026-05-20T15:26:15.035Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/d1/59667ce38dcfb3ab2ed3d6cb589184f30559fa9c48fbddb143c8d384ed16/oddsharvester-0.4.0-py3-none-any.whl", hash = "sha256:49a15e5a246954609430e603a52c2f8c4f037dfa424ff4e2fb771b68317285c1", size = 101368, upload-time = "2026-07-06T09:18:04.026Z" },
 ]
 
 [[package]]

@@ -33,9 +33,9 @@ nba = ["nba_api>=1.4"]
 # pyarrow transitively; loaded in a worker thread, GET-only, never an order venue.
 nfl = ["nflreadpy>=0.1"]
 models = ["lightgbm>=4.3", "xgboost>=2.0"]
-# EXACT pin: app/ingestion/oddsportal.py patches six 0.3.0 internals at
+# EXACT pin: app/ingestion/oddsportal.py patches six 0.4.0 internals at
 # runtime; _patch_upstream_quirks hard-fails on any other version.
-backfill = ["oddsharvester==0.3.0"]
+backfill = ["oddsharvester==0.4.0"]
 # Rust-backed Betfair historical STREAM parser (tarb/betfair_data, MIT, abi3
 # wheels — installs on 3.12+ with no Rust toolchain). ~10x faster than the
 # pure-Python tar scan for re-ingesting the growing BSP archive. OPTIONAL +

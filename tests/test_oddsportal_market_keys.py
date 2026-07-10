@@ -1,5 +1,5 @@
 """Every configured oddsportal market key verified against the INSTALLED
-oddsharvester 0.3.0 — its sport_market_constants.py is the documentation of
+oddsharvester 0.4.0 — its sport_market_constants.py is the documentation of
 record (ADR-0012).
 
 Three guarantees per configured key, parametrized over the exact config

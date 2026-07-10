@@ -1,4 +1,4 @@
-"""Upstream-quirk patches for oddsharvester 0.3.0 (app/ingestion/oddsportal.py).
+"""Upstream-quirk patches for oddsharvester 0.4.0 (app/ingestion/oddsportal.py).
 
 Covers the 2026-06-11 live-log findings:
 - OneTrust consent DOM (hidden, `ot-*` classes) matched generic tab selectors
@@ -107,9 +107,10 @@ class _FakeElement:
 class _FakePage:
     """Duck-typed Playwright Page for the verification path."""
 
-    def __init__(self, content: str, active_texts: tuple[str, ...] = ()) -> None:
+    def __init__(self, content: str, active_texts: tuple[str, ...] = (), url: str = "") -> None:
         self._content = content
         self._active_texts = active_texts
+        self.url = url
         self.waits = 0
 
     async def wait_for_timeout(self, _ms: int) -> None:
@@ -131,6 +132,17 @@ async def test_market_switch_confirms_via_any_active_element() -> None:
     page = _FakePage(content="", active_texts=("Asian Handicap", "Over/Under"))
     assert await _patched_wait_for_market_switch(_nav_self(), page, "Over/Under")
     assert page.waits == 1  # single animation wait, not 3
+
+
+@pytest.mark.asyncio
+async def test_market_switch_confirms_via_url_market_code() -> None:
+    """0.4.0's ported fast path: the '#<id>:<code>;<scope>' URL fragment names
+    the active market language-independently — no active-tab or content scan."""
+    page = _FakePage(
+        content="", active_texts=(), url="https://www.oddsportal.com/x/y/#1234:over-under;2"
+    )
+    assert await _patched_wait_for_market_switch(_nav_self(), page, "Over/Under")
+    assert page.waits == 1  # confirmed on the first attempt
 
 
 @pytest.mark.asyncio
@@ -466,7 +478,9 @@ def test_scrape_gap_filter_downgrades_expected_misses_to_info() -> None:
         logging.ERROR,
         __file__,
         0,
-        "Failed to find or click the Home/Away tab (searched visible tabs and 'More' dropdown).",
+        # 0.4.0 wording (adds the market-code fallback to the message tail).
+        "Failed to find or click the Home/Away tab (searched visible tabs, 'More' dropdown, "
+        "and market-code fallback).",
         None,
         None,
     )
@@ -526,13 +540,13 @@ def test_scrape_gap_filter_downgrades_expected_misses_to_info() -> None:
 def test_patch_guard_rejects_unverified_upstream_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The runtime patches replace 0.3.0 PRIVATE internals; any other
+    """The runtime patches replace 0.4.0 PRIVATE internals; any other
     installed version must hard-fail loudly instead of silently corrupting
     scraping (in-repo memory pitfall: re-verify patches on version bumps)."""
     import importlib.metadata
 
-    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.4.0")
-    with pytest.raises(RuntimeError, match=r"oddsharvester 0\.4\.0 != 0\.3\.0"):
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.5.0")
+    with pytest.raises(RuntimeError, match=r"oddsharvester 0\.5\.0 != 0\.4\.0"):
         _patch_upstream_quirks()
 
 
@@ -546,7 +560,7 @@ def test_apply_nav_timeout_override_raises_the_15s_match_page_timeout() -> None:
 
     original_base = base_scraper.NAVIGATION_TIMEOUT_MS
     original_const = constants.NAVIGATION_TIMEOUT_MS
-    assert original_base == 15000  # upstream's too-tight default (pinned 0.3.0)
+    assert original_base == 15000  # upstream's too-tight default (pinned 0.4.0)
     try:
         _apply_nav_timeout_override(30000)
         # base_scraper.scrape_match() reads its OWN module global at goto time —
