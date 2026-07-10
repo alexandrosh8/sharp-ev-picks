@@ -676,7 +676,7 @@ async def _settle_one(
         return False
 
     stake, odds = await _stake_and_odds(session, pick)
-    pnl = pick_pnl(outcome, stake, odds)
+    pnl = pick_pnl(outcome, stake, odds, bookmaker=pick.bookmaker)
     inserted = await session.execute(
         pg_insert(ResultTracking)
         .values(

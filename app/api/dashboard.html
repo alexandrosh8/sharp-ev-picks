@@ -1942,7 +1942,11 @@
         // (structural_sane === false) and negative-edge picks stay VISIBLE in
         // the lists (quarantined styling) but never enter "top edges" rankings.
         function isRankable(p) {
-          return p.structural_sane !== false &&
+          // Audit 2026-07-10: superseded rows are dedup twins of a live pick —
+          // ranking them double-counts the same edge in Top tracked edges and
+          // the Next-kickoffs per-event counts.
+          return p.status !== "superseded" &&
+            p.structural_sane !== false &&
             numOf(p.current_edge == null ? p.edge : p.current_edge) > 0;
         }
         // Fix 2026-07-10 #17: sport precedence inside each Edges group —
@@ -2425,10 +2429,13 @@
         function renderToday() {
           const health = state.health;
           const premium = state.picks.filter((p) => tierOf(p) === "premium");
-          const actionable = premium.filter((p) => isActionable(p, health))
+          // Audit 2026-07-10: count the FULL qualified set before slicing the
+          // display list to 5 — the KPI tile could never show more than 5.
+          const qualified = premium.filter((p) => isActionable(p, health));
+          const actionable = qualified
             .sort((a, b) => (numOf(b.current_edge == null ? b.edge : b.current_edge) - numOf(a.current_edge == null ? a.edge : a.current_edge)))
             .slice(0, 5);
-          $("actionable-count").textContent = String(actionable.length);
+          $("actionable-count").textContent = String(qualified.length);
           const box = $("actionable-now"); box.replaceChildren();
           if (state.picksErr !== null) {
             const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "Could not load picks.";

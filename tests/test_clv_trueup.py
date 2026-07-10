@@ -1505,6 +1505,26 @@ def test_is_implausible_final_rejects_tied_or_lowscore_basketball() -> None:
     assert _is_implausible_final("soccer", 0, 0) is False
 
 
+def test_is_implausible_final_rejects_tennis_game_scores() -> None:
+    # Audit 2026-07-10: 3 live tennis events carried scraped "finals" like 4-6 /
+    # 7-6 / 6-3 — GAME scores of a single set, impossible as SET scores (the
+    # recorded convention; a set-score component never exceeds 3). They settled
+    # h2h picks (one internally contradictory: home "won" at 4-6). Reject any
+    # tennis final with a component > 3 so garbage can never be recorded.
+    from app.clv_trueup import _is_implausible_final
+
+    assert _is_implausible_final("tennis", 4, 6) is True  # live garbage
+    assert _is_implausible_final("tennis", 7, 6) is True  # live garbage (tiebreak games)
+    assert _is_implausible_final("tennis", 6, 3) is True  # live garbage
+    # Legitimate set scores — best-of-3, best-of-5, and retirement partials —
+    # must pass (retirement conventions are the settlement engine's job).
+    assert _is_implausible_final("tennis", 2, 0) is False
+    assert _is_implausible_final("tennis", 2, 1) is False
+    assert _is_implausible_final("tennis", 3, 2) is False
+    assert _is_implausible_final("tennis", 1, 0) is False  # retirement partial
+    assert _is_implausible_final("tennis", 1, 1) is False  # retirement partial
+
+
 def test_consistent_current_edge_tracks_fresh_fair_or_nulls() -> None:
     # Audit 2026-06-26: current_edge must equal fair - 1/effective(current_odds) so the
     # dashboard Edge can never contradict the fresh fair; None when there is no price.

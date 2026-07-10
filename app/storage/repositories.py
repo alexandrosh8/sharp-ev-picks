@@ -649,6 +649,7 @@ def _provisional_result_fields(
         pick.recommended_stake_amount,
         pick.decimal_odds,
         sport_key=sport_key,
+        bookmaker=pick.bookmaker,
     )
     return {"provisional_outcome": outcome, "provisional_pnl": pnl}
 

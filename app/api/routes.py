@@ -986,19 +986,37 @@ def _row_structural_sane(row: dict[str, Any]) -> bool:
     render star-rated on the dashboard even if it slipped past the mint gate.
 
     Impossible (returns False) when EITHER:
-      * the offered ``decimal_odds`` sits BELOW the row's own
-        ``min_acceptable_odds`` floor (the pick fails its own qualifying
-        minimum — the reported "MIN ACCEPTABLE 2.06 > OFFERED 1.67" symptom); or
+      * the offered ``decimal_odds`` (the ENTRY price) sits below the floor
+        recomputed from the row's OWN entry fair (``model_probability``) and its
+        tier ``edge_floor`` (the "MIN ACCEPTABLE 2.06 > OFFERED 1.67" symptom).
+        The row's ``min_acceptable_odds`` field is deliberately NOT used here:
+        it reasons against the LIVE fair (closing_fair_probability once a
+        re-price exists), so comparing the ENTRY price against it falsely
+        flagged exactly the picks the market moved TOWARD — positive-CLV picks
+        lost their rating (audit 2026-07-10). Structural sanity must compare
+        like-for-like: entry price vs entry-fair floor; or
       * the fair odds (1 / ``model_probability`` — the sharp fair on value picks)
         are at or above the offered price while a POSITIVE edge is claimed (an
         inverted fair/offered pair — no real edge).
     Missing/degenerate fields => sane (True): absence is never a violation."""
+    from app.edge.value import min_acceptable_odds
+
     offered = _coerce_float(row.get("decimal_odds"))
     if offered is None or offered <= 1.0:
         return True
-    min_acc = _coerce_float(row.get("min_acceptable_odds"))
-    if min_acc is not None and offered < min_acc:
-        return False
+    entry_fair = _coerce_float(row.get("model_probability"))
+    floor_edge = _coerce_float(row.get("edge_floor"))
+    if entry_fair is not None and 0.0 < entry_fair < 1.0 and floor_edge is not None:
+        try:
+            entry_floor = min_acceptable_odds(
+                entry_fair, floor_edge, book=str(row.get("bookmaker") or "")
+            )
+        except ValueError:
+            entry_floor = None
+        # epsilon absorbs float noise at the exact mint boundary (a pick minted
+        # AT the floor is sane, not impossible).
+        if entry_floor is not None and offered < entry_floor - 1e-9:
+            return False
     edge = _coerce_float(row.get("current_edge"))
     if edge is None:
         edge = _coerce_float(row.get("edge")) or 0.0

@@ -617,3 +617,108 @@ def test_provisional_result_two_way_tie_pushes_with_sport_key() -> None:
         sport_key="american_football",
     )
     assert outcome == "push"
+
+
+class TestTotalsQuarterLines:
+    """Audit 2026-07-10 (H3): Asian QUARTER totals lines (x.25/x.75) are two
+    half-stakes on the adjacent half-lines — previously graded as one line,
+    paying full WON/LOST where the correct grade is HALF_WON/HALF_LOST."""
+
+    def test_over_quarter_low_side_half_lost(self) -> None:
+        # Over 2.25 with 2 goals = Over 2.0 (push) + Over 2.5 (lost) -> HALF_LOST
+        assert settle_selection("totals", "Over 2.25", "H", "A", 1, 1) is Outcome.HALF_LOST
+
+    def test_under_quarter_low_side_half_won(self) -> None:
+        assert settle_selection("totals", "Under 2.25", "H", "A", 1, 1) is Outcome.HALF_WON
+
+    def test_over_quarter_high_side_half_won(self) -> None:
+        # Over 2.75 with 3 goals = Over 2.5 (won) + Over 3.0 (push) -> HALF_WON
+        assert settle_selection("totals", "Over 2.75", "H", "A", 2, 1) is Outcome.HALF_WON
+
+    def test_under_quarter_high_side_half_lost(self) -> None:
+        assert settle_selection("totals", "Under 2.75", "H", "A", 2, 1) is Outcome.HALF_LOST
+
+    def test_quarter_clear_both_sides(self) -> None:
+        assert settle_selection("totals", "Over 2.25", "H", "A", 2, 1) is Outcome.WON
+        assert settle_selection("totals", "Under 2.25", "H", "A", 1, 0) is Outcome.WON
+        assert settle_selection("totals", "Over 2.75", "H", "A", 1, 0) is Outcome.LOST
+
+    def test_half_and_integer_lines_unchanged(self) -> None:
+        assert settle_selection("totals", "Over 2.5", "H", "A", 1, 1) is Outcome.LOST
+        assert settle_selection("totals", "Over 3", "H", "A", 2, 1) is Outcome.PUSH
+        assert settle_selection("totals", "Under 3", "H", "A", 1, 1) is Outcome.WON
+
+
+class TestIntegerSpreadTwoWaySports:
+    """Audit 2026-07-10 (M360): on 2-way-handicap sports (basketball/tennis/NFL)
+    an integer-line spread's adjusted tie PUSHES (Asian/US convention); the
+    previous grade was LOST (European handicap semantics — correct only for
+    soccer, where a whole-line 3-way European handicap team leg loses the
+    adjusted draw)."""
+
+    def test_basketball_integer_tie_pushes(self) -> None:
+        # Lakers -3 with 100-97: adjusted margin 0 -> PUSH (was LOST)
+        assert (
+            settle_selection(
+                "spreads", "Lakers -3", "Lakers", "Bulls", 100, 97, sport_key="basketball"
+            )
+            is Outcome.PUSH
+        )
+
+    def test_tennis_integer_tie_pushes(self) -> None:
+        assert (
+            settle_selection("spreads", "Alpha +2", "Beta", "Alpha", 12, 10, sport_key="tennis")
+            is Outcome.PUSH
+        )
+
+    def test_soccer_integer_tie_still_loses(self) -> None:
+        # European handicap semantics unchanged for soccer (3-way market).
+        assert (
+            settle_selection("spreads", "Home -1", "Home", "Away", 2, 1, sport_key="soccer")
+            is Outcome.LOST
+        )
+        # and with no sport in hand the 3-way default stands
+        assert settle_selection("spreads", "Home -1", "Home", "Away", 2, 1) is Outcome.LOST
+
+    def test_two_way_sport_clear_results_unchanged(self) -> None:
+        assert (
+            settle_selection(
+                "spreads", "Lakers -3", "Lakers", "Bulls", 100, 96, sport_key="basketball"
+            )
+            is Outcome.WON
+        )
+        assert (
+            settle_selection(
+                "spreads", "Lakers -3", "Lakers", "Bulls", 100, 98, sport_key="basketball"
+            )
+            is Outcome.LOST
+        )
+
+
+class TestPickPnlExchangeCommission:
+    """Audit 2026-07-10 (M171): settled P&L on exchange-book fills must net the
+    exchange commission (EV/Kelly already do at mint; 3 live Matchbook fills
+    were credited gross). bookmaker=None keeps the gross legacy behaviour."""
+
+    def test_matchbook_win_netted(self) -> None:
+        assert pick_pnl(
+            Outcome.WON, Decimal("10"), Decimal("3.0"), bookmaker="Matchbook"
+        ) == Decimal("19.60")  # eff 2.96 at 2% commission, not 20.00 gross
+
+    def test_matchbook_half_won_netted(self) -> None:
+        assert pick_pnl(
+            Outcome.HALF_WON, Decimal("10"), Decimal("3.0"), bookmaker="Matchbook"
+        ) == Decimal("9.80")
+
+    def test_sportsbook_win_unchanged(self) -> None:
+        assert pick_pnl(
+            Outcome.WON, Decimal("10"), Decimal("3.0"), bookmaker="Betfair Sportsbook"
+        ) == Decimal("20.00")
+
+    def test_loss_never_commissioned(self) -> None:
+        assert pick_pnl(
+            Outcome.LOST, Decimal("10"), Decimal("3.0"), bookmaker="Matchbook"
+        ) == Decimal("-10.00")
+
+    def test_no_bookmaker_is_gross(self) -> None:
+        assert pick_pnl(Outcome.WON, Decimal("10"), Decimal("3.0")) == Decimal("20.00")

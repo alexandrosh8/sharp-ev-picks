@@ -85,6 +85,13 @@ def tennis_set_score_ungradeable(
 # cannot tie, soccer h2h is 3-way with an explicit Draw leg).
 _TWO_WAY_H2H_SPORTS = frozenset({"american_football"})
 
+#: Sports whose spreads are TWO-WAY handicap markets (no Draw leg): an
+#: integer-line adjusted tie PUSHES (Asian/US convention). Soccer stays
+#: European-handicap semantics (adjusted draw loses the team leg) — see the
+#: module docstring. Audit 2026-07-10 (M360): 2 live tennis integer-line
+#: spreads existed; basketball is the shadow tier's biggest CLV cell.
+_TWO_WAY_HANDICAP_SPORTS = frozenset({"basketball", "tennis", "american_football"})
+
 
 def settle_selection(
     market: str,
@@ -135,7 +142,14 @@ def settle_selection(
     if market == "double_chance":
         return _settle_double_chance(selection, home, away, home_score, away_score)
     if market == "spreads":
-        return _settle_spreads(selection, home, away, home_score, away_score)
+        return _settle_spreads(
+            selection,
+            home,
+            away,
+            home_score,
+            away_score,
+            integer_tie_pushes=sport_key in _TWO_WAY_HANDICAP_SPORTS,
+        )
     raise ValueError(f"market {market!r} is not settleable")
 
 
@@ -164,9 +178,25 @@ def settle_selection_retired(
     return Outcome.VOID  # totals/other markets: undefined on retirement -> stake returned
 
 
-def pick_pnl(outcome: Outcome, stake: Decimal, decimal_odds: Decimal) -> Decimal:
+def pick_pnl(
+    outcome: Outcome,
+    stake: Decimal,
+    decimal_odds: Decimal,
+    *,
+    bookmaker: str | None = None,
+) -> Decimal:
     """Profit/loss of a stake at decimal odds. Push/void return the stake;
-    half outcomes (Asian quarter lines) settle half the stake, return half."""
+    half outcomes (Asian quarter lines) settle half the stake, return half.
+
+    When ``bookmaker`` names an exchange, WINNINGS are netted through the
+    same commission table EV/Kelly use at mint (audit 2026-07-10 M171: live
+    Matchbook fills were credited gross). Losses are never commissioned.
+    ``bookmaker=None`` keeps the gross behaviour for callers without a book.
+    """
+    if bookmaker is not None and outcome in (Outcome.WON, Outcome.HALF_WON):
+        from app.edge.value import effective_odds  # lazy: keep module deps flat
+
+        decimal_odds = Decimal(str(effective_odds(bookmaker, float(decimal_odds))))
     if outcome is Outcome.WON:
         return (stake * (decimal_odds - 1)).quantize(Decimal("0.01"))
     if outcome is Outcome.LOST:
@@ -196,6 +226,7 @@ def provisional_result(
     decimal_odds: Decimal | None = None,
     *,
     sport_key: str | None = None,
+    bookmaker: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Best-effort (market, selection, scraped final score) -> (outcome, pnl)
     for a kicked-off-but-unsettled pick, so the CLOSED tab can show how the
@@ -224,7 +255,9 @@ def provisional_result(
         return None, None  # unmappable / sport-ungradeable selection -> no guess
     pnl: str | None = None
     if stake is not None and decimal_odds is not None:
-        pnl = str(pick_pnl(outcome, Decimal(str(stake)), Decimal(str(decimal_odds))))
+        pnl = str(
+            pick_pnl(outcome, Decimal(str(stake)), Decimal(str(decimal_odds)), bookmaker=bookmaker)
+        )
     return outcome.value, pnl
 
 
@@ -260,10 +293,26 @@ def _settle_totals(selection: str, total: int) -> Outcome:
         raise ValueError(f"totals selection {selection!r} unparseable")
     direction, raw_line = match.groups()
     line = float(raw_line)
+    if not (line * 2).is_integer():
+        # Asian QUARTER totals line (x.25/x.75): two half-stakes on the
+        # adjacent half-lines, each graded with Asian push-on-tie semantics
+        # (audit 2026-07-10 — previously graded as one line, paying full
+        # WON/LOST where the correct grade is HALF_WON/HALF_LOST).
+        components = {
+            _totals_component(direction, total, line - 0.25),
+            _totals_component(direction, total, line + 0.25),
+        }
+        return _combine_quarter(components, selection)
     if total == line:
         return Outcome.PUSH
     over = total > line
     return _won(over if direction == "Over" else not over)
+
+
+def _totals_component(direction: str, total: int, comp_line: float) -> Outcome:
+    """One half-stake of an Asian quarter total: margin sign decides, tie pushes."""
+    margin = float(total) - comp_line if direction == "Over" else comp_line - float(total)
+    return _ah_component(margin)
 
 
 def _settle_btts(selection: str, hs: int, as_: int) -> Outcome:
@@ -324,7 +373,15 @@ def _dc_side(team: str, home: str, away: str) -> str | None:
     return None
 
 
-def _settle_spreads(selection: str, home: str, away: str, hs: int, as_: int) -> Outcome:
+def _settle_spreads(
+    selection: str,
+    home: str,
+    away: str,
+    hs: int,
+    as_: int,
+    *,
+    integer_tie_pushes: bool = False,
+) -> Outcome:
     eh_draw = _EH_DRAW_RE.fullmatch(selection)
     if eh_draw is not None:
         # European handicap draw leg: home + line must equal away exactly.
@@ -347,22 +404,31 @@ def _settle_spreads(selection: str, home: str, away: str, hs: int, as_: int) -> 
         # adjusted tie here (Asian), unlike standalone integer-line
         # selections which are European handicap (see below).
         components = {_ah_component(base + line - 0.25), _ah_component(base + line + 0.25)}
-        if components == {Outcome.WON}:
-            return Outcome.WON
-        if components == {Outcome.LOST}:
-            return Outcome.LOST
-        if components == {Outcome.WON, Outcome.PUSH}:
-            return Outcome.HALF_WON
-        if components == {Outcome.LOST, Outcome.PUSH}:
-            return Outcome.HALF_LOST
-        raise ValueError(f"impossible quarter-line split for {selection!r}")  # defensive
+        return _combine_quarter(components, selection)
 
     margin = base + line
     if margin > 0:
         return Outcome.WON
-    # margin == 0 only on whole lines = European handicap team leg -> LOST
-    # (see module docstring; Asian push lines are rejected upstream).
+    if margin == 0:
+        # Whole-line adjusted tie. TWO-WAY handicap sports (basketball/tennis/
+        # NFL — no Draw leg) PUSH per Asian/US convention (audit 2026-07-10);
+        # soccer keeps European handicap semantics: the team leg LOSES the
+        # adjusted draw (see module docstring).
+        return Outcome.PUSH if integer_tie_pushes else Outcome.LOST
     return Outcome.LOST
+
+
+def _combine_quarter(components: set[Outcome], selection: str) -> Outcome:
+    """Combine the two half-stake outcomes of an Asian quarter line."""
+    if components == {Outcome.WON}:
+        return Outcome.WON
+    if components == {Outcome.LOST}:
+        return Outcome.LOST
+    if components == {Outcome.WON, Outcome.PUSH}:
+        return Outcome.HALF_WON
+    if components == {Outcome.LOST, Outcome.PUSH}:
+        return Outcome.HALF_LOST
+    raise ValueError(f"impossible quarter-line split for {selection!r}")  # defensive
 
 
 def _ah_component(margin: float) -> Outcome:

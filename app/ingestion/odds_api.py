@@ -133,7 +133,16 @@ class OddsApiClient:
                         point = outcome.get("point")
                         if not isinstance(price, int | float) or price <= 1.0:
                             continue
-                        selection = f"{name} {point}" if point is not None else name
+                        # M136 (audit 2026-07-10): spreads selections must carry an
+                        # EXPLICIT sign — settlement's _SIGNED_LINE_RE rejects an
+                        # unsigned positive line ("Patriots 3.5"), leaving the pick
+                        # permanently unsettleable. Totals stay unsigned ("Over 2.5").
+                        if point is None:
+                            selection = name
+                        elif mapped is Market.SPREADS:
+                            selection = f"{name} {float(point):+g}"
+                        else:
+                            selection = f"{name} {point}"
                         # Line-qualified devig group (audit #1): without a per-line
                         # market_detail, distinct totals/spreads lines (Over 2.5 vs
                         # Over 3.5) collapse into ONE devig group and corrupt the

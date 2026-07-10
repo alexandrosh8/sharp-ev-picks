@@ -12,6 +12,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -1185,3 +1186,59 @@ async def test_capture_once_uses_pinnacle_bookmaker(factory) -> None:  # type: i
             .all()
         )
     assert set(books) == {BOOKMAKER}
+
+
+async def test_capture_once_persist_failure_rolls_back_change_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session-level persist failure must (a) roll the version change-gate back
+    so the same rows re-emit next cycle (no silent archive loss), and (b) never
+    abort the remaining sports in the cycle (mirrors the Betfair gate fix)."""
+    matchups = [_tennis_matchup(mid=555, start="2026-06-17T07:00:00Z")]
+    markets = [
+        _ml_market(
+            555,
+            [
+                {"designation": "home", "price": -1500},
+                {"designation": "away", "price": 700},
+            ],
+            version=7,
+        )
+    ]
+    stub = _StubClient(matchups, markets)
+    cap = PinnacleArcadiaCapture(
+        client=stub,
+        session_factory=cast("async_sessionmaker[Any]", object()),  # patched persist raises
+        sports=("tennis", "soccer"),
+        horizon=timedelta(days=365),
+        now_fn=lambda: NOW,
+    )
+
+    calls = {"n": 0}
+
+    async def _boom(*args: object, **kwargs: object) -> int:
+        calls["n"] += 1
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("app.storage.repositories.persist_odds_snapshots", _boom)
+
+    written = await cap.capture_once()
+
+    # Both sports were attempted (persist failure on tennis never aborts soccer;
+    # the stub serves the same matchup for every sport, so both hit persist).
+    assert calls["n"] == 2
+    assert written == {"tennis": 0, "soccer": 0}
+    # Change-gate rolled back: the failed rows' versions must NOT be marked seen.
+    assert cap._seen_version == {}
+
+    # Recovery: with persistence healthy again, the SAME versions re-emit.
+    persisted: list[int] = []
+
+    async def _ok(_factory: object, fresh: list, *args: object, **kwargs: object) -> int:
+        persisted.append(len(fresh))
+        return len(fresh)
+
+    monkeypatch.setattr("app.storage.repositories.persist_odds_snapshots", _ok)
+    written2 = await cap.capture_once()
+    assert written2 == {"tennis": 2, "soccer": 2}
+    assert persisted == [2, 2]

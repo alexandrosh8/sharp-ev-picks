@@ -949,3 +949,25 @@ async def test_gather_snapshots_retries_once_on_timeout(
     )
     assert calls["n"] == 2  # timed out once, retried once
     assert len(snaps) == 1  # the retry recovered the page
+
+
+def test_bookmaker_name_disambiguates_bare_betfair_by_code() -> None:
+    """Audit 2026-07-10 (M863): the feed's entity display name for code BF is
+    sometimes the bare 'Betfair', persisting the SAME sportsbook under two
+    names (2,241 live rows) — and effective_odds maps bare 'betfair' to 5%
+    exchange commission, mispricing those rows. The ambiguous display name
+    must resolve through the code's canonical fallback; unambiguous names and
+    unknown codes pass through unchanged."""
+    from app.ingestion.oddschecker import _bookmaker_name
+
+    assert _bookmaker_name("BF", {"BF": {"bookmakerName": "Betfair"}}) == "Betfair Sportsbook"
+    assert _bookmaker_name("OE", {"OE": {"bookmakerName": "Betfair"}}) == "Betfair Exchange"
+    # unambiguous display names pass through
+    assert (
+        _bookmaker_name("BF", {"BF": {"bookmakerName": "Betfair Sportsbook"}})
+        == "Betfair Sportsbook"
+    )
+    # unknown code with the ambiguous name: no canonical mapping exists -> unchanged
+    assert _bookmaker_name("ZZ", {"ZZ": {"bookmakerName": "Betfair"}}) == "Betfair"
+    # fallback path (no entity) unchanged
+    assert _bookmaker_name("BF", {}) == "Betfair Sportsbook"

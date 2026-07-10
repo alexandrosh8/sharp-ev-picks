@@ -865,7 +865,17 @@ def _bookmaker_name(code: str, bookmaker_entities: Mapping[str, Any]) -> str:
     if isinstance(raw, Mapping):
         name = raw.get("bookmakerName") or raw.get("name")
         if isinstance(name, str) and name.strip():
-            return name.strip()
+            cleaned = name.strip()
+            # M863 (audit 2026-07-10): the feed sometimes labels code BF with the
+            # bare display name "Betfair", persisting the SAME sportsbook under
+            # two bookmaker names — and edge/EV maps bare "betfair" to 5%
+            # EXCHANGE commission, mispricing those rows. The ambiguous bare
+            # name resolves through the code's canonical fallback (BF ->
+            # "Betfair Sportsbook", OE -> "Betfair Exchange"); every other
+            # display name passes through unchanged.
+            if cleaned.lower() == "betfair" and code in _BOOKMAKER_FALLBACKS:
+                return _BOOKMAKER_FALLBACKS[code]
+            return cleaned
     return _BOOKMAKER_FALLBACKS.get(code, code)
 
 

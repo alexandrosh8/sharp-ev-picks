@@ -851,12 +851,32 @@ def test_picks_serializer_stamps_structural_sane(monkeypatch) -> None:  # type: 
     from app.api import routes
 
     rows = [
-        # offered 1.67 BELOW its own min-acceptable 2.06 (the reported totals row)
-        _pick_row(decimal_odds="1.67", min_acceptable_odds="2.06", edge="0.50"),
+        # offered 1.67 BELOW the floor recomputed from its OWN entry fair
+        # (0.60 @ edge_floor 0.03 -> 1/(0.60-0.03) = 1.754): the reported
+        # "MIN ACCEPTABLE > OFFERED" totals row, judged entry-vs-entry.
+        _pick_row(decimal_odds="1.67", model_probability="0.60", edge_floor="0.03", edge="0.50"),
         # inverted pair: fair (1/0.60 = 1.667) at/above offered 1.60, edge>0
         _pick_row(decimal_odds="1.60", model_probability="0.60", edge="0.05"),
-        # normal self-consistent premium row
-        _pick_row(decimal_odds="2.00", model_probability="0.55", min_acceptable_odds="1.74"),
+        # normal self-consistent premium row (entry floor 1/(0.55-0.03) = 1.923 <= 2.00)
+        _pick_row(
+            decimal_odds="2.00",
+            model_probability="0.55",
+            edge_floor="0.03",
+            min_acceptable_odds="1.74",
+        ),
+        # AUDIT 2026-07-10 regression: the market moved TOWARD the pick, so the
+        # LIVE-fair min_acceptable_odds (2.20) now exceeds the ENTRY price
+        # (2.00). That is a GOOD (positive-CLV) pick, not a structural
+        # impossibility — the live floor must NOT be compared to the entry
+        # price. Entry basis is self-consistent (floor 1.923 <= 2.00).
+        _pick_row(
+            decimal_odds="2.00",
+            model_probability="0.55",
+            edge_floor="0.03",
+            min_acceptable_odds="2.20",
+            current_odds="1.80",
+            current_edge="0.02",
+        ),
     ]
 
     async def fake_rows(session, limit, tier=None, min_edge=0.0, volume_min_edge=0.0):  # type: ignore[no-untyped-def]
@@ -865,9 +885,10 @@ def test_picks_serializer_stamps_structural_sane(monkeypatch) -> None:  # type: 
     monkeypatch.setattr(routes, "latest_picks_with_events", fake_rows)
     body = TestClient(make_app()).get("/picks").json()
 
-    assert body[0]["structural_sane"] is False  # offered < min-acceptable
+    assert body[0]["structural_sane"] is False  # entry price < entry-fair floor
     assert body[1]["structural_sane"] is False  # inverted fair/offered pair
     assert body[2]["structural_sane"] is True  # self-consistent
+    assert body[3]["structural_sane"] is True  # market moved toward pick: sane
 
 
 def test_picks_serializer_attaches_confidence_rating(monkeypatch) -> None:  # type: ignore[no-untyped-def]

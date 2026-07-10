@@ -129,7 +129,7 @@ async def test_parse_line_qualifies_totals_and_spreads_market_detail() -> None:
     assert detail["Over 2.5"] == detail["Under 2.5"]  # one line -> one group
     assert detail["Over 3.5"] == detail["Under 3.5"]
     assert detail["Over 2.5"] != detail["Over 3.5"]  # distinct lines -> distinct groups
-    assert detail["Alpha -1.5"] == detail["Beta 1.5"]  # ±1.5 are one spread line
+    assert detail["Alpha -1.5"] == detail["Beta +1.5"]  # ±1.5 are one spread line
 
 
 async def test_regions_param_is_configurable() -> None:

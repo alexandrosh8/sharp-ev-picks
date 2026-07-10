@@ -91,8 +91,17 @@ def _is_implausible_final(sport_key: str, home_score: int, away_score: int) -> b
     (audit 2026-06-26). Basketball cannot end tied (no regulation/OT tie) and a real
     final totals well over 100 points; a tied/low capture (e.g. 24-24) is a
     mis-scrape, not a result. Other sports carry no plausibility constraint here."""
-    if "basketball" in (sport_key or "").lower():
+    key = (sport_key or "").lower()
+    if "basketball" in key:
         return home_score == away_score or (home_score + away_score) < 100
+    if "tennis" in key:
+        # Tennis finals are recorded in SETS (see the settlement engine's tennis
+        # conventions): no component can exceed 3. A 4-6 / 7-6 / 6-3 capture is
+        # the GAMES score of one set — a mis-scrape that settled 3 live h2h picks
+        # (audit 2026-07-10, one internally contradictory). Ties and 1-0 partials
+        # stay accepted: retirements legitimately produce them and the engine's
+        # convention layer grades or voids those.
+        return max(home_score, away_score) > 3
     return False
 
 

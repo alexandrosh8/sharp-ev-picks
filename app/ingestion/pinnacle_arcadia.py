@@ -901,18 +901,50 @@ class PinnacleArcadiaCapture:
             self._fetch_warned.discard(sport)  # fetch recovered -> allow re-warn later
             matchups = parse_matchups(raw_matchups, now=now, horizon_end=horizon_end)
             quotes = extract_market_quotes(matchups, raw_markets, now=now, sport=sport)
+            # Snapshot the change-gate state for every key this sport's quotes can
+            # touch BEFORE _select_fresh advances it, so a persist failure below can
+            # roll the gate back (else the failed rows are marked seen and silently
+            # vanish from the archive until the version next changes upstream —
+            # same class as the Betfair gate-rollback fix, 2026-07-09).
+            gate_prior: dict[tuple[str, str, str], int | None] = {
+                (sport, quote.event_id, quote.market_key): self._seen_version.get(
+                    (sport, quote.event_id, quote.market_key)
+                )
+                for quote in quotes
+            }
             fresh, teams = self._select_fresh(quotes, matchups, sport)
             if not fresh or self._session_factory is None:
                 written[sport] = 0
                 continue
             namespace = f"pinnacle_{sport}"
-            rows = await persist_odds_snapshots(
-                self._session_factory,
-                fresh,
-                teams,
-                sport=namespace,
-                default_league=namespace,
-            )
+            try:
+                rows = await persist_odds_snapshots(
+                    self._session_factory,
+                    fresh,
+                    teams,
+                    sport=namespace,
+                    default_league=namespace,
+                )
+            except Exception as exc:
+                # A session-level DB failure loses EVERY row of this sport's
+                # batch. Roll the change-gate back so the unchanged versions
+                # re-emit next cycle, and keep going: one sport's DB failure
+                # never aborts the other sports. (Type name only — never the
+                # URL/key. Per-event SAVEPOINT failures inside
+                # persist_odds_snapshots do not raise and are untouched.)
+                logger.warning(
+                    "pinnacle arcadia: %s persist failed (%s) — change-gate rolled "
+                    "back; rows re-emit next cycle",
+                    sport,
+                    type(exc).__name__,
+                )
+                for key, prior in gate_prior.items():
+                    if prior is None:
+                        self._seen_version.pop(key, None)
+                    else:
+                        self._seen_version[key] = prior
+                written[sport] = 0
+                continue
             written[sport] = rows
             if rows:
                 logger.info(
