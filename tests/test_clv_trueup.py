@@ -120,10 +120,16 @@ def totals_line_snapshots(event_id: str) -> list[OddsSnapshotIn]:
 
 
 def make_totals_pick(
-    event_id: str, selection: str, decimal_odds: float, pick_id: str, reason: str
+    event_id: str,
+    selection: str,
+    decimal_odds: float,
+    pick_id: str,
+    reason: str,
+    market_detail: str | None = None,
 ) -> PickOut:
     return PickOut(
         pick_id=pick_id,
+        market_detail=market_detail,
         sport="soccer",
         league="test-league-totals",
         event="Home FC vs Away FC",
@@ -1757,3 +1763,113 @@ def test_detail_matched_books_no_match_is_empty() -> None:
 
     assert books == {}
     assert captured == {}
+
+
+# --- mint-time market_detail: exact-detail CLV matching (2026-07-10) ----------
+
+
+def colliding_totals_snapshots(event_id: str) -> list[OddsSnapshotIn]:
+    """TWO settleable full-match TOTALS groups sharing 'Over 2.5'/'Under 2.5'
+    under DIFFERENT details — both Pinnacle-anchored, so the line-blind
+    (event, market, selection) key is AMBIGUOUS this cycle (fail-closed skip
+    for legacy picks). A mint-stamped pick must still match its own canonical
+    group ('over_under_2_5' canonicalizes to 'totals_2_5')."""
+    rows: list[OddsSnapshotIn] = []
+    groups = {
+        "over_under_2_5": {"Over 2.5": 1.90, "Under 2.5": 1.90},  # fair(Over) = 0.5
+        "totals_alt_axis_2_5": {"Over 2.5": 3.00, "Under 2.5": 1.40},  # fair(Over) ~ 0.32
+    }
+    for detail, sels in groups.items():
+        for book in ("Pinnacle", "SoftBook"):
+            for sel, odds in sels.items():
+                rows.append(
+                    OddsSnapshotIn(
+                        event_id=event_id,
+                        bookmaker=book,
+                        market=Market.TOTALS,
+                        selection=sel,
+                        decimal_odds=odds,
+                        captured_at=NOW,
+                        ingested_at=NOW,
+                        market_detail=detail,
+                    )
+                )
+    return rows
+
+
+async def test_stamped_market_detail_bypasses_line_ambiguity(factory) -> None:  # type: ignore[no-untyped-def]
+    """A mint-stamped pick is NOT skipped when a colliding same-selection
+    group exists: its CLV comes from its OWN canonical group's fair."""
+    from app.clv_trueup import revalidate_open_picks
+    from app.probabilities.devig import DevigMethod
+
+    event_id = "evt-md-exact"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_totals_pick(
+                event_id,
+                "Over 2.5",
+                2.10,
+                "p-md-exact",
+                "md exact test",
+                market_detail="totals_2_5",
+            ),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+    # persist_pick stored the mint stamp
+    async with factory() as session:
+        row = await session.scalar(select(Pick).where(Pick.reason_summary == "md exact test"))
+        assert row is not None
+        assert row.market_detail == "totals_2_5"
+
+    updated = await revalidate_open_picks(
+        factory, colliding_totals_snapshots(event_id), DevigMethod.SHIN
+    )
+    assert updated == 1  # NOT refused by the line-ambiguity guard
+
+    async with factory() as session:
+        row = await session.scalar(select(Pick).where(Pick.reason_summary == "md exact test"))
+        assert row is not None
+        assert row.clv_log is not None
+        # the fair of ITS OWN group (1.90/1.90 -> 0.5), never the alt group's ~0.32
+        assert float(row.closing_fair_probability) == pytest.approx(0.5, abs=0.01)
+
+
+async def test_legacy_null_market_detail_keeps_fail_closed_skip(factory) -> None:  # type: ignore[no-untyped-def]
+    """Legacy (NULL market_detail) picks keep today's behavior unchanged:
+    the ambiguous line-blind key refuses the CLV write."""
+    from app.clv_trueup import revalidate_open_picks
+    from app.probabilities.devig import DevigMethod
+
+    event_id = "evt-md-legacy"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_totals_pick(
+                event_id,
+                "Over 2.5",
+                2.10,
+                "p-md-legacy",
+                "md legacy test",
+                market_detail=None,
+            ),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    updated = await revalidate_open_picks(
+        factory, colliding_totals_snapshots(event_id), DevigMethod.SHIN
+    )
+    assert updated == 0  # fail-closed ambiguity skip, unchanged
+
+    async with factory() as session:
+        row = await session.scalar(select(Pick).where(Pick.reason_summary == "md legacy test"))
+        assert row is not None
+        assert row.market_detail is None
+        assert row.clv_log is None
