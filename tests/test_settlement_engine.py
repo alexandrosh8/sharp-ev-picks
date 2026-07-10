@@ -1010,6 +1010,44 @@ async def test_tennis_walkover_voids_all_markets_and_leaves_event_unfinished(ses
     assert ev.status == "scheduled"
 
 
+async def test_tennis_game_line_pick_left_unsettled_from_set_score(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # Reported + DB-confirmed 2026-07-10: game-line tennis totals/spreads picks
+    # ("Over 22.5", "-4.5") were graded against the SET score (2-1 read as
+    # "3 total, margin 1") — 106 mis-graded settled picks. The guard leaves
+    # them OPEN for manual entry (never void, never guessed); set-plausible
+    # lines on the same event still settle normally.
+    home, away = "Guard Golf", "Guard Hotel"
+    p_games = await seed_tennis_pick(
+        session, "evt-ten-gameline", home, away, Market.TOTALS, "Over 22.5"
+    )
+    p_spread = await seed_tennis_pick(
+        session, "evt-ten-gameline", home, away, Market.SPREADS, f"{home} -4.5"
+    )
+    p_sets = await seed_tennis_pick(
+        session, "evt-ten-gameline", home, away, Market.TOTALS, "Over 2.5"
+    )
+    book = ScoreBook([FinalScore(home, away, TENNIS_KICKOFF.date(), 2, 1)])
+    with caplog.at_level("INFO"):
+        assert await settle_open_picks(session, book, NOW) == 1  # only the sets total
+    await session.refresh(p_games)
+    await session.refresh(p_spread)
+    await session.refresh(p_sets)
+    assert p_games.status == "alerted"  # left open — manual settlement only
+    assert p_spread.status == "alerted"
+    assert p_sets.status == "settled"
+    for unsettled in (p_games, p_spread):
+        row = await session.scalar(
+            select(ResultTracking).where(ResultTracking.pick_id == unsettled.id)
+        )
+        assert row is None  # never a guessed (or void) result row
+    sets_row = await session.scalar(
+        select(ResultTracking).where(ResultTracking.pick_id == p_sets.id)
+    )
+    assert sets_row is not None
+    assert sets_row.outcome == "won"  # 2+1 = 3 sets > 2.5
+    assert any("set score" in r.message for r in caplog.records)
+
+
 async def test_soccer_settlement_regression_unchanged_by_completion_fields(session) -> None:  # type: ignore[no-untyped-def]
     # Byte-identical regression: a provider that never sets the new fields
     # (all CSV/scraped/team-sport paths) settles exactly as before —

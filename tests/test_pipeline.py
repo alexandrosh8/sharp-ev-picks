@@ -107,6 +107,29 @@ def test_non_settleable_market_details_are_filtered() -> None:
     assert _is_settleable_market_detail("oc_cards_over_3_5") is False
 
 
+def test_tennis_game_line_groups_are_filtered() -> None:
+    """Our tennis results feed carries SET scores only, so a totals/spreads
+    candidate on a GAME-sized line (totals > 4.5, |spread| > 2.5) can never be
+    auto-settled honestly — the candidate gate must drop it while keeping
+    set-plausible tennis lines and every non-tennis sport untouched."""
+    from app.pipeline import _is_tennis_game_line_group
+    from app.schemas.base import Market
+
+    games_total = {"Over 22.5": {"b": 1.9}, "Under 22.5": {"b": 1.9}}
+    sets_total = {"Over 2.5": {"b": 1.9}, "Under 2.5": {"b": 1.9}}
+    games_spread = {"Karolina Muchova -4.5": {"b": 1.9}}
+    sets_spread = {"Karolina Muchova -1.5": {"b": 1.9}}
+    assert _is_tennis_game_line_group("tennis", Market.TOTALS, games_total) is True
+    assert _is_tennis_game_line_group("tennis", Market.TOTALS, sets_total) is False
+    assert _is_tennis_game_line_group("tennis", Market.SPREADS, games_spread) is True
+    assert _is_tennis_game_line_group("tennis", Market.SPREADS, sets_spread) is False
+    # Non-tennis sports and non-line markets are never dropped by this gate
+    # (soccer corner totals are already handled by the detail gate above).
+    assert _is_tennis_game_line_group("soccer", Market.TOTALS, games_total) is False
+    assert _is_tennis_game_line_group("basketball", Market.TOTALS, games_total) is False
+    assert _is_tennis_game_line_group("tennis", Market.H2H, {"A": {"b": 2.0}}) is False
+
+
 async def test_pipeline_produces_pick_and_alert() -> None:
     sink = RecordingSink()
     picks = await run_pick_pipeline(make_deps(sink), "soccer_epl")

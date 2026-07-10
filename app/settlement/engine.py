@@ -33,6 +33,7 @@ from app.settlement.outcomes import (
     pick_roi,
     settle_selection,
     settle_selection_retired,
+    tennis_set_score_ungradeable,
 )
 from app.settlement.results import Completion, FinalScore, ScoreBook, load_scores
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking, Sport, Team
@@ -631,6 +632,28 @@ async def _settle_one(
     moneyline pushes — see outcomes._TWO_WAY_H2H_SPORTS); None keeps the
     3-way default.
     """
+    if (
+        completion == "full"
+        and sport_key == "tennis"
+        and tennis_set_score_ungradeable(pick.market, pick.selection, home_score, away_score)
+    ):
+        # SET-SCORE GUARD (2026-07-10, 106 mis-graded picks): scraped tennis
+        # results are SET scores, so a GAME-line totals/spreads pick ("Over
+        # 22.5", "-4.5") must never be graded from one (2-1 would read as
+        # "3 total, margin 1"). Mirror the unclassifiable-selection skip:
+        # leave the pick OPEN for manual result entry — never void, never
+        # guess. (The retirement/walkover paths above are untouched: those
+        # VOID by book convention regardless of line.)
+        logger.info(
+            "pick %d not settled: tennis %s %r is a game line but %d-%d is a set "
+            "score — left open for manual settlement",
+            pick.id,
+            pick.market,
+            pick.selection,
+            home_score,
+            away_score,
+        )
+        return False
     try:
         if completion == "void":
             outcome = Outcome.VOID

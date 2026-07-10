@@ -52,6 +52,7 @@ from app.risk.staking import StakeBreakdown, StakePolicy, recommended_stake, sta
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
+from app.settlement.outcomes import is_tennis_game_line
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -791,6 +792,24 @@ def _is_settleable_market_detail(detail: str | None) -> bool:
     return _NON_SETTLEABLE_DETAIL_RE.search(detail.lower()) is None
 
 
+def _is_tennis_game_line_group(
+    sport_key: str,
+    market: Market,
+    prices: Mapping[str, Mapping[str, float]],
+) -> bool:
+    """True for a tennis totals/spreads candidate group priced on a GAME line
+    (totals line > 4.5 or |spread| > 2.5, parsed from the selection tails via
+    the settler's own line parser). Our tennis results feed carries SET scores
+    only, so a game-line pick can never be auto-settled honestly — the
+    settlement set-score guard would hold it for manual entry forever. Dropped
+    at the candidate boundary, same mechanism as the period/corner/card
+    sub-market drop above. Set-plausible tennis lines (sets total 2.5, set
+    spread 1.5) and every other sport pass through untouched."""
+    if sport_key != "tennis" or market not in (Market.TOTALS, Market.SPREADS):
+        return False
+    return any(is_tennis_game_line(str(market), sel) for sel in prices)
+
+
 # Cross-provider vocabulary equivalences for the SAME full-match line
 # (instrumented live evidence 2026-07-10: 'h2h'/None, 'btts'/None,
 # 'over_under_2_5'/'totals_2_5' collisions were skipping every CLV write on
@@ -1386,6 +1405,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_off_band = 0
     n_thin_books = 0
     n_non_settleable = 0
+    n_tennis_game_line = 0
     n_visibility_capped = 0
     n_ah_rejected = 0
     n_sanity_dropped = 0
@@ -1436,6 +1456,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         # group at the candidate boundary — never mint a pick that cannot grade.
         if not _is_settleable_market_detail(detail):
             n_non_settleable += 1
+            continue
+        # TENNIS GAME-LINE drop: our tennis results feed carries SET scores
+        # only, so a totals/spreads candidate on a GAME-sized line ("Over
+        # 22.5", "Muchova -4.5") can never be auto-settled honestly — the
+        # settlement set-score guard would hold such a pick for manual entry
+        # forever. Same mechanism as the non-settleable sub-market drop above.
+        if _is_tennis_game_line_group(sport_key, market, prices):
+            n_tennis_game_line += 1
             continue
         # Per-market book-count floor (default 0 = off): a market quoted by
         # too few books is skipped wholesale — scaffolding for new lines/
@@ -2143,6 +2171,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "(period/corner/card — no results-feed score, would only ever void)",
             sport_key,
             n_non_settleable,
+        )
+    if n_tennis_game_line:
+        logger.info(
+            "value pipeline %s: %d tennis game-line market group(s) dropped "
+            "(results feed carries set scores only — a game-line pick can never "
+            "auto-settle honestly)",
+            sport_key,
+            n_tennis_game_line,
         )
     if n_thin_books:
         logger.info(

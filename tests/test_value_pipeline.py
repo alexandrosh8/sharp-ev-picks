@@ -605,6 +605,61 @@ async def test_value_pipeline_produces_pick_and_alert() -> None:
     assert "value: Pinnacle fair" in pick.reason_summary
 
 
+def totals_snap(book: str, sel: str, odds: float, detail: str | None = None) -> OddsSnapshotIn:
+    now = datetime.now(tz=UTC)
+    return OddsSnapshotIn(
+        event_id="evt-1",
+        bookmaker=book,
+        market=Market.TOTALS,
+        market_detail=detail,
+        selection=sel,
+        decimal_odds=odds,
+        captured_at=now - timedelta(seconds=30),
+        ingested_at=now,
+    )
+
+
+def totals_market_snapshots(over: str, under: str) -> list[OddsSnapshotIn]:
+    # Pinnacle tight; SoftBook generous on the Over -> a mintable value edge.
+    return [
+        totals_snap("Pinnacle", over, 1.90),
+        totals_snap("Pinnacle", under, 1.90),
+        totals_snap("SoftBook", over, 2.20),
+        totals_snap("SoftBook", under, 1.75),
+    ]
+
+
+async def test_tennis_game_line_totals_candidate_dropped() -> None:
+    # Our tennis results feed carries SET scores only — a GAME-line totals
+    # candidate ("Over 22.5") can never be auto-settled honestly, so the
+    # candidate gate must drop it before any pick is minted.
+    sink = RecordingSink()
+    loader = FakeLoader(totals_market_snapshots("Over 22.5", "Under 22.5"))
+    picks = await run_value_pipeline(make_deps(sink, loader), "tennis")
+    assert picks == []
+    assert sink.sent == []
+
+
+async def test_tennis_set_line_totals_candidate_kept() -> None:
+    # The set-plausible sets-total line (Over/Under 2.5) stays mintable.
+    sink = RecordingSink()
+    loader = FakeLoader(totals_market_snapshots("Over 2.5", "Under 2.5"))
+    picks = await run_value_pipeline(make_deps(sink, loader), "tennis")
+    assert len(picks) == 1
+    assert picks[0].selection == "Over 2.5"
+
+
+async def test_soccer_big_line_totals_unaffected_by_tennis_gate() -> None:
+    # The game-line drop is tennis-scoped: an identical big-line totals group
+    # for another sport still mints (corner totals are handled separately by
+    # the market_detail gate, which this test does not touch).
+    sink = RecordingSink()
+    loader = FakeLoader(totals_market_snapshots("Over 22.5", "Under 22.5"))
+    picks = await run_value_pipeline(make_deps(sink, loader), "soccer")
+    assert len(picks) == 1
+    assert picks[0].selection == "Over 22.5"
+
+
 async def test_value_pipeline_alert_key_includes_strategy_identity() -> None:
     sink = RecordingSink()
     deps = make_deps(sink, FakeLoader(market_snapshots()))
@@ -1173,6 +1228,9 @@ async def test_value_pipeline_prices_half_line_handicap_directly() -> None:
     assert picks[0].selection == "Home FC -1.5"
     assert picks[0].market == Market.SPREADS
     assert picks[0].bookmaker == "SoftBook"
+    # mint-time CANONICAL group detail stamped on the pick (exact CLV matching;
+    # AH details canonicalize to themselves — the spreads merge is audited OFF)
+    assert picks[0].market_detail == "asian_handicap_-1_5"
 
 
 async def test_value_pipeline_no_anchor_no_picks() -> None:

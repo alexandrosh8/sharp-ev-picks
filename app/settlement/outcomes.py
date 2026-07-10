@@ -36,6 +36,46 @@ _TOTALS_RE = re.compile(r"(Over|Under) (\d+(?:\.\d+)?)")
 _EH_DRAW_RE = re.compile(r"Draw \(([+-]?\d+(?:\.\d+)?)\)")
 _SIGNED_LINE_RE = re.compile(r"[+-]\d+(?:\.\d+)?")
 
+# Tennis SET-SCORE guard (settlement bug 2026-07-10, 106 mis-graded picks):
+# the scraped tennis result is a SET score (best-of-5 -> home+away <= 5), but
+# some captured totals/spreads lines are GAME lines ("Over 22.5",
+# "Karolina Muchova -4.5"). Grading a game line against a set score reads
+# 2-1 as "3 total, margin 1" — provably wrong. A line beyond the set range
+# (totals > 4.5, |spread| > 2.5) is game-based by construction; set-plausible
+# lines (total sets over/under 2.5, set spread -1.5) stay gradeable.
+TENNIS_MAX_SET_SUM = 5
+_TENNIS_MAX_SET_TOTAL_LINE = 4.5
+_TENNIS_MAX_SET_SPREAD_LINE = 2.5
+
+
+def is_tennis_game_line(market: str, selection: str) -> bool:
+    """True when a tennis totals/spreads selection carries a GAME-sized line:
+    totals line > 4.5 or spread |line| > 2.5 (parsed from the selection tail,
+    same forms _settle_totals/_settle_spreads accept). Unparseable selections
+    return False — the ordinary settle path raises its own loud error."""
+    if market == "totals":
+        match = _TOTALS_RE.fullmatch(selection)
+        return match is not None and float(match.group(2)) > _TENNIS_MAX_SET_TOTAL_LINE
+    if market == "spreads":
+        team, _, raw_line = selection.rpartition(" ")
+        if not team or _SIGNED_LINE_RE.fullmatch(raw_line) is None:
+            return False
+        return abs(float(raw_line)) > _TENNIS_MAX_SET_SPREAD_LINE
+    return False
+
+
+def tennis_set_score_ungradeable(
+    market: str, selection: str, home_score: int, away_score: int
+) -> bool:
+    """True when a tennis pick must NOT be graded from this score: the
+    selection carries a GAME-sized line while the final is SET-sized
+    (home+away <= TENNIS_MAX_SET_SUM). Doctrine: leave the pick unsettled for
+    manual result entry — never void, never guess."""
+    if home_score + away_score > TENNIS_MAX_SET_SUM:
+        return False
+    return is_tennis_game_line(market, selection)
+
+
 # Sports (Sport.key) whose h2h market is TWO-WAY — no Draw leg is offered or
 # minted, so a tied final has no winning leg to absorb it; standard book rules
 # refund a 2-way moneyline on a tie (push), never grade both sides LOST.
@@ -67,6 +107,15 @@ def settle_selection(
     """
     if home_score < 0 or away_score < 0:
         raise ValueError(f"negative score: {home_score}-{away_score}")
+
+    if sport_key == "tennis" and tennis_set_score_ungradeable(
+        market, selection, home_score, away_score
+    ):
+        raise ValueError(
+            f"tennis {market} selection {selection!r} carries a game-sized line but "
+            f"the final {home_score}-{away_score} is a set score — left for manual "
+            "settlement, never graded from set counts"
+        )
 
     if market == "h2h":
         return _settle_h2h(

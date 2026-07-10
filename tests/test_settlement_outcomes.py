@@ -509,3 +509,66 @@ def test_retired_refuses_unknown_winner_or_selection() -> None:
         settle_selection_retired("h2h", HOME, HOME, AWAY, "either")
     with pytest.raises(ValueError, match="neither player"):
         settle_selection_retired("h2h", "Somebody Else", HOME, AWAY, "home")
+
+
+# --- tennis set-score guard: GAME lines never grade from a SET score ----------
+# Reported + DB-confirmed 2026-07-10: 106 settled picks graded a GAME-based
+# tennis line ("Over 22.5", "Muchova -4.5") against the scraped SET score
+# (2-1 read as "3 total, margin 1"). Doctrine: unclassifiable -> left for
+# manual entry, never guessed, never voided.
+
+
+def test_tennis_game_line_totals_not_graded_from_set_score() -> None:
+    # The exact reported case: best-of-3 set score 2-1, games-total pick.
+    for sel in ("Over 21.5", "Over 22.5"):
+        with pytest.raises(ValueError, match="set score"):
+            settle_selection("totals", sel, HOME, AWAY, 2, 1, sport_key="tennis")
+    # An Under games line would WIN wrongly (2 < 19.5) — must also refuse.
+    with pytest.raises(ValueError, match="set score"):
+        settle_selection("totals", "Under 19.5", HOME, AWAY, 2, 0, sport_key="tennis")
+
+
+def test_tennis_game_line_spread_not_graded_from_set_score() -> None:
+    with pytest.raises(ValueError, match="set score"):
+        settle_selection("spreads", f"{HOME} -4.5", HOME, AWAY, 2, 1, sport_key="tennis")
+    with pytest.raises(ValueError, match="set score"):
+        settle_selection("spreads", f"{AWAY} +3.5", HOME, AWAY, 2, 0, sport_key="tennis")
+
+
+def test_tennis_set_plausible_lines_still_grade_from_set_score() -> None:
+    # Sets-total and set-spread lines remain gradeable from set scores.
+    assert (
+        settle_selection("totals", "Over 2.5", HOME, AWAY, 2, 1, sport_key="tennis") is Outcome.WON
+    )
+    assert (
+        settle_selection("totals", "Under 2.5", HOME, AWAY, 2, 0, sport_key="tennis") is Outcome.WON
+    )
+    assert (
+        settle_selection("spreads", f"{HOME} -1.5", HOME, AWAY, 2, 0, sport_key="tennis")
+        is Outcome.WON
+    )
+    # h2h is untouched by the guard.
+    assert settle_selection("h2h", HOME, HOME, AWAY, 2, 1, sport_key="tennis") is Outcome.WON
+
+
+def test_non_tennis_sports_unaffected_by_set_score_guard() -> None:
+    # Soccer Over 2.5 with a 2-1 final still grades (byte-identical path),
+    # both without a sport_key and with an explicit non-tennis one.
+    assert settle("totals", "Over 2.5", 2, 1) is Outcome.WON
+    assert (
+        settle_selection("totals", "Over 2.5", HOME, AWAY, 2, 1, sport_key="soccer") is Outcome.WON
+    )
+    # Even a big line with a small score grades for non-tennis sports.
+    assert (
+        settle_selection("totals", "Over 22.5", HOME, AWAY, 2, 1, sport_key="soccer")
+        is Outcome.LOST
+    )
+
+
+def test_tennis_game_line_grades_when_score_is_game_sized() -> None:
+    # A games-sized final (sum > 5) is NOT a set score — the guard stands
+    # aside and the ordinary totals path grades (12+10=22 < 22.5 -> Under wins).
+    assert (
+        settle_selection("totals", "Over 22.5", HOME, AWAY, 12, 10, sport_key="tennis")
+        is Outcome.LOST
+    )
