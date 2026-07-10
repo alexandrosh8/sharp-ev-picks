@@ -1484,7 +1484,10 @@
                 <div class="panel-b">
                   <div id="closeq-sport"></div>
                   <p class="muted">Per-sport counts of the persisted close-exclusion reason.
-                    An excluded close is unusable evidence, not a loss.</p>
+                    An excluded close is unusable evidence, not a loss. "no guard tripped"
+                    counts the close-write stamp only (no exclusion guard tripped when the
+                    close was written) — a looser read than, and not the trusted-sharp subset
+                    behind, the SLA and evidence-distance panels.</p>
                 </div>
               </section>
               <section class="panel" aria-labelledby="closesla-h" data-testid="panel-close-sla">
@@ -1529,6 +1532,11 @@
                       <tbody id="tier-rows"></tbody>
                     </table>
                   </div>
+                  <div id="tier-scorecard"></div>
+                  <p class="muted">The trusted-CLV rows above lead the read: per-tier trusted
+                    sharp-close CLV with its 95% CI and n, the realized flat-stake yield ÷ trusted
+                    CLV calibration ratio against the RebelBetting public benchmark 0.8×, and the
+                    evidence verdict. Small-sample ROI is context, never the verdict.</p>
                 </div>
               </section>
               <section class="panel pa-ready" aria-labelledby="sportready-h" data-testid="panel-sport-readiness">
@@ -3335,7 +3343,11 @@
             const s = document.createElement("span"); s.className = "kr-s mono";
             s.textContent = Object.keys(r0.reasons)
               .sort((a, b) => Number(r0.reasons[b]) - Number(r0.reasons[a]))
-              .map((k) => k.replace(/_/g, " ") + " " + r0.reasons[k]).join(" · ") || "—";
+              // Fix 2026-07-10 (Task 4, 2b): the persisted "trusted" stamp only
+              // means no exclusion guard tripped at close-write — a looser read
+              // than the trusted-sharp subset. Relabel so it cannot be misread
+              // against the SLA / evidence-distance trusted counts.
+              .map((k) => (k === "trusted" ? "no guard tripped" : k.replace(/_/g, " ")) + " " + r0.reasons[k]).join(" · ") || "—";
             row.append(nm, kn, s); box.appendChild(row);
           });
         }
@@ -3555,6 +3567,47 @@
               const c3 = document.createElement("td"); c3.className = "r pending"; c3.textContent = agg.roi_status === "ok" ? fmtPct(agg.roi) : "insufficient sample"; tr.appendChild(c3);
               tb.appendChild(tr);
             });
+          }
+
+          // Task 4 (2026-07-10): trusted-CLV-first scorecard — per-tier trusted
+          // CLV with 95% CI + n, the CLV→yield calibration ratio vs the
+          // RebelBetting public 0.8× benchmark, and the plain-language evidence
+          // verdict. Reads straight from /performance (live_evidence.trusted_clv_ci
+          // / clv_yield_ratio / evidence_verdict); estimates arrive nulled at the
+          // source below the honesty floor, so the render only mirrors the state.
+          const scv = $("tier-scorecard"); scv.replaceChildren();
+          const le = perf && perf.live_evidence;
+          if (!le || !le.trusted_clv_ci) {
+            const p0 = document.createElement("p"); p0.className = "muted";
+            p0.textContent = "Trusted-CLV scorecard not yet reported.";
+            scv.appendChild(p0);
+          } else {
+            const ml = document.createElement("div"); ml.className = "metric-list"; ml.style.marginTop = "8px";
+            const tierName = { premium: "Premium", volume: "Shadow" };
+            const tiers = le.trusted_clv_ci.by_tier || {};
+            const tierKeys = Object.keys(tiers).sort();
+            if (tierKeys.length === 0) {
+              ml.appendChild(metricEl("Trusted CLV", "n=0 — insufficient"));
+            }
+            tierKeys.forEach((k) => {
+              const e = tiers[k] || {};
+              const v = e.mean_clv_log != null && e.ci_low != null && e.ci_high != null
+                ? fmtSignedPct(clvPctFromLog(e.mean_clv_log) / 100)
+                  + " (95% CI " + fmtSignedPct(clvPctFromLog(e.ci_low) / 100)
+                  + " … " + fmtSignedPct(clvPctFromLog(e.ci_high) / 100)
+                  + ", n=" + (Number(e.n) || 0) + ")"
+                : "n=" + (Number(e.n) || 0) + " — insufficient";
+              ml.appendChild(metricEl("Trusted CLV — " + (tierName[k] || k), v));
+            });
+            const yr = le.clv_yield_ratio;
+            const rv = yr && yr.ratio != null
+              ? fmtNum(yr.ratio, 2) + "× (benchmark 0.8×)"
+              : "not computable — below floor or trusted CLV ≈ 0";
+            ml.appendChild(metricEl("CLV→yield ratio", rv));
+            scv.appendChild(ml);
+            const verdict = document.createElement("p"); verdict.className = "muted"; verdict.style.marginTop = "8px";
+            verdict.textContent = "Verdict: " + fmt(le.evidence_verdict);
+            scv.appendChild(verdict);
           }
 
           renderCloseQualityBySport();

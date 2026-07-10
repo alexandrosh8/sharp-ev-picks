@@ -353,14 +353,19 @@ def test_tautology_guard_needs_both_fairs_present() -> None:
     assert sc["n"] == 1
 
 
-def test_sharp_close_independence_unknown_does_not_exclude() -> None:
-    """Feature-detection contract: a pre-column row carries
-    close_independent_of_fill=None (unknown). Unknown is NOT treated as
-    circular — only a definite False (proven circular) excludes — so historical
-    sharp snapshot closes keep their existing trusted status."""
-    rows = [row(clv=0.03, closing_anchor="sharp", has_snapshot=True, close_independent=None)]
-    sc = live_evidence_report(rows, ml_threshold=None, min_n=1)["sharp_close"]
-    assert sc["n"] == 1
+def test_null_independence_row_is_not_sharp_close() -> None:
+    """Alignment pin (2026-07-10): the TRUSTED sharp subset requires
+    close_independent_of_fill EXACTLY True — a NULL (unknown) independence row
+    is NOT sharp_close, exactly like the headline predicate
+    app.storage.repositories._settled_close_is_trusted (``is True``), so the
+    two trusted-n figures can never drift. The per-stratum CLV samples keep
+    their looser only-a-proven-False-excludes contract (unchanged)."""
+    unknown = row(clv=0.03, closing_anchor="sharp", has_snapshot=True, close_independent=None)
+    assert unknown.sharp_close is False
+    rep = live_evidence_report([unknown], ml_threshold=None, min_n=1)
+    assert rep["sharp_close"]["n"] == 0
+    # per-stratum CLV sample (NOT the trusted subset): unknown still admitted.
+    assert rep["by_close_anchor"]["sharp"]["n_clv"] == 1
 
 
 def test_by_close_anchor_groups_on_the_close_anchor_not_creation() -> None:
@@ -554,3 +559,124 @@ def test_meta_model_calibration_insufficient_below_min_n() -> None:
     rep = meta_model_calibration([row(score=0.6, beat=True)], min_n=50)
     assert rep.insufficient is True
     assert rep.ece is None
+
+
+# ===== Task 4 (2026-07-10): trusted-CLV-first operator report ==================
+
+
+def trusted_row(
+    clv: float,
+    tier: str = "premium",
+    pnl: float | None = 1.0,
+    stake: float = 10.0,
+    beat: bool | None = True,
+) -> SettledPickRow:
+    """A row that passes every trusted sharp-close guard."""
+    return row(
+        tier=tier,
+        clv=clv,
+        beat=beat,
+        stake=stake,
+        pnl=pnl,
+        closing_anchor="pinnacle",
+        has_snapshot=True,
+        close_independent=True,
+    )
+
+
+def test_trusted_clv_ci_reports_per_tier_headline_with_ci_and_n() -> None:
+    rows = [trusted_row(0.02 + 0.001 * i) for i in range(10)] + [trusted_row(-0.01, tier="volume")]
+    tc = live_evidence_report(rows, ml_threshold=None, min_n=5)["trusted_clv_ci"]
+    assert tc["overall"]["n"] == 11
+    prem = tc["by_tier"]["premium"]
+    assert prem["n"] == 10
+    assert prem["sufficient"] is True
+    expected_mean = sum(0.02 + 0.001 * i for i in range(10)) / 10
+    assert prem["mean_clv_log"] == pytest.approx(expected_mean)
+    assert prem["ci_low"] is not None and prem["ci_high"] is not None
+    assert prem["ci_low"] < expected_mean < prem["ci_high"]
+    # the thin tier is nulled at the source, exactly like every other stratum
+    vol = tc["by_tier"]["volume"]
+    assert vol["n"] == 1
+    assert vol["sufficient"] is False
+    assert vol["mean_clv_log"] is None
+    assert vol["ci_low"] is None and vol["ci_high"] is None
+
+
+def test_trusted_clv_ci_counts_only_trusted_rows() -> None:
+    # a consensus close and a NULL-independence close never enter the headline
+    rows = [trusted_row(0.03) for _ in range(3)] + [
+        row(clv=0.9, closing_anchor="consensus", has_snapshot=True),
+        row(clv=0.9, closing_anchor="pinnacle", has_snapshot=True, close_independent=None),
+    ]
+    tc = live_evidence_report(rows, ml_threshold=None, min_n=3)["trusted_clv_ci"]
+    assert tc["overall"]["n"] == 3
+
+
+def test_clv_yield_ratio_on_the_same_trusted_subset() -> None:
+    # trusted CLV 5% (fractional, expm1 of the log), flat-stake yield 4% ->
+    # ratio 0.8x, exactly the RebelBetting public benchmark.
+    rows = [trusted_row(math.log(1.05), pnl=0.4, stake=10.0) for _ in range(10)]
+    yr = live_evidence_report(rows, ml_threshold=None, min_n=5)["clv_yield_ratio"]
+    assert yr["n_clv"] == 10
+    assert yr["n_yield"] == 10
+    assert yr["trusted_clv"] == pytest.approx(0.05)
+    assert yr["flat_yield"] == pytest.approx(0.04)
+    assert yr["ratio"] == pytest.approx(0.8)
+    assert yr["benchmark"] == pytest.approx(0.8)
+    assert "2026-07-10-whole-internet-research" in yr["benchmark_source"]
+
+
+def test_clv_yield_ratio_nulled_below_floor_or_near_zero_clv() -> None:
+    # below the floor: BOTH sides and the ratio are nulled at the source
+    thin = [trusted_row(0.05) for _ in range(3)]
+    yr = live_evidence_report(thin, ml_threshold=None, min_n=5)["clv_yield_ratio"]
+    assert yr["ratio"] is None
+    assert yr["trusted_clv"] is None
+    assert yr["flat_yield"] is None
+    assert yr["n_clv"] == 3
+    # |trusted CLV| < 1e-6: the ratio is nulled (divide-by-zero guard) even
+    # though both sides cleared the floor
+    zero = [trusted_row(1e-9, pnl=0.5) for _ in range(6)]
+    yr0 = live_evidence_report(zero, ml_threshold=None, min_n=5)["clv_yield_ratio"]
+    assert yr0["trusted_clv"] is not None
+    assert yr0["flat_yield"] is not None
+    assert yr0["ratio"] is None
+    # pnl side below the floor (no realized P&L): ratio nulled
+    no_pnl = [trusted_row(0.05, pnl=None) for _ in range(6)]
+    yrp = live_evidence_report(no_pnl, ml_threshold=None, min_n=5)["clv_yield_ratio"]
+    assert yrp["trusted_clv"] is not None
+    assert yrp["flat_yield"] is None
+    assert yrp["ratio"] is None
+
+
+def test_evidence_verdict_driven_by_existing_significance_gates() -> None:
+    # 60 trusted rows, clearly positive varied CLV -> t-CI excludes 0 (and the
+    # Wilson lower bound clears 0.5): sufficient.
+    strong = [trusted_row(0.03 + 0.001 * (i % 5)) for i in range(60)]
+    verdict = live_evidence_report(strong, ml_threshold=None)["evidence_verdict"]
+    assert verdict.startswith("evidence sufficient to judge profitability at current n")
+    # below the floor -> insufficient, with the honest denominators in the text
+    thin = live_evidence_report(strong[:10], ml_threshold=None)["evidence_verdict"]
+    assert thin.startswith("evidence insufficient to judge profitability at current n")
+    # above the floor but the CI straddles 0 and beat-close is a coin flip ->
+    # neither gate establishes anything: insufficient.
+    mixed = [trusted_row(0.05 if i % 2 == 0 else -0.05, beat=i % 2 == 0) for i in range(60)]
+    straddle = live_evidence_report(mixed, ml_threshold=None)["evidence_verdict"]
+    assert straddle.startswith("evidence insufficient to judge profitability at current n")
+
+
+def test_new_report_keys_present_and_nulled_on_empty_report() -> None:
+    rep = live_evidence_report([], ml_threshold=None)
+    tc = rep["trusted_clv_ci"]
+    assert tc["overall"]["n"] == 0
+    assert tc["overall"]["sufficient"] is False
+    assert tc["overall"]["mean_clv_log"] is None
+    assert tc["by_tier"] == {}
+    yr = rep["clv_yield_ratio"]
+    assert yr["ratio"] is None
+    assert yr["trusted_clv"] is None
+    assert yr["flat_yield"] is None
+    assert rep["evidence_verdict"].startswith(
+        "evidence insufficient to judge profitability at current n"
+    )

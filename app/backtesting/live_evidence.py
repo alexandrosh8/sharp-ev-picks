@@ -23,8 +23,9 @@ Honesty rules (binding, mirrored by the dashboard panel):
     eyeball n_roi before leaning on a stratum's ROI;
   - aggregates are evidence, never a profit promise.
 
-Pure: stdlib/math only — DB reads live in app/storage/repositories.py and
-the composition happens in the route (app/api/routes.py).
+Pure: stdlib/math plus the pure numeric helpers in app/backtesting/clv.py
+(numpy/scipy) — DB reads live in app/storage/repositories.py and the
+composition happens in the route (app/api/routes.py).
 """
 
 import math
@@ -37,6 +38,7 @@ from app.backtesting.calibration import (
     CalibrationReport,
     calibration_report,
 )
+from app.backtesting.clv import mean_significance, wilson_interval
 
 #: Below this many CLV observations a stratum is "insufficient" — the
 #: dashboard shows the state instead of point estimates.
@@ -65,6 +67,21 @@ CLV_TAUTOLOGY_EPS = 1e-3
 #: fabricated close cannot leak into the live_evidence panel or the trusted subset.
 CLV_IMPLAUSIBLE_CLOSE_EDGE = 0.20
 CLV_IMPLAUSIBLE_LOG = 0.5
+
+#: CLV->yield calibration: the public large-sample benchmark for how much of a
+#: measured CLV edge survives as realized flat-stake yield. RebelBetting's
+#: 373,654-bet month showed realized yield ~= 0.8 x measured CLV (+3.3% CLV ->
+#: +2.7% yield) — docs/research/2026-07-10-whole-internet-research.md
+#: (commercial lane). A benchmark for CONTEXT, never a profit promise.
+CLV_YIELD_BENCHMARK = 0.8
+CLV_YIELD_BENCHMARK_SOURCE = (
+    "RebelBetting public benchmark ~0.8x realized yield per unit CLV "
+    "(docs/research/2026-07-10-whole-internet-research.md, commercial lane)"
+)
+
+#: A trusted CLV this close to zero cannot anchor a yield ratio — the division
+#: would amplify noise without bound (and divide by ~0). The ratio is nulled.
+CLV_YIELD_MIN_ABS_CLV = 1e-6
 
 
 @dataclass(frozen=True)
@@ -173,15 +190,17 @@ class SettledPickRow:
         is NOT the pick's own fill book (a circular self-priced close is fake
         CLV, |clv_log|~0, and is what masked the -EV) — AND non-tautological:
         the close fair MOVED from the pick-time fair (an identical archived line
-        re-encodes the pick-time edge — fake CLV #137). `close_independent_of_fill
-        is False` and a proven tautology each EXCLUDE; None / unknowable-fair
-        (pre-column) is treated as not-proven-circular and not-proven-tautological
-        so historical sharp closes are unchanged. These are the closes whose CLV
-        the platform can stand behind."""
+        re-encodes the pick-time edge — fake CLV #137). Independence must be
+        EXACTLY True (2026-07-10 alignment): a NULL (unknown, pre-column) flag is
+        NOT trusted here, mirroring the headline predicate app.storage.
+        repositories._settled_close_is_trusted (``is True``) so the two
+        trusted-n figures can never drift. A proven tautology also EXCLUDES;
+        an unknowable fair (pre-column) stays not-proven-tautological. These
+        are the closes whose CLV the platform can stand behind."""
         return (
             self.has_snapshot_close
             and self.closing_anchor_type in _SHARP_CLOSE_ANCHORS
-            and self.close_independent_of_fill is not False
+            and self.close_independent_of_fill is True
             and not self.is_tautological_close
             # P2-2: an asymmetric mint/close devig fallback is a method artifact.
             and not self.devig_fallback_asymmetric
@@ -332,6 +351,107 @@ def meta_model_calibration_by_close_anchor(
     }
 
 
+def _trusted_clv_ci_entry(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]:
+    """Trusted-CLV headline for one (sub)set of TRUSTED rows: mean clv_log with
+    its 95% t-CI and n. Same honesty floor as every stratum: below ``min_n`` the
+    point estimates are nulled at the source; only n and the flag survive.
+    Statistics reuse the existing headline machinery (mean_significance) — no
+    new estimators are invented here."""
+    clv_vals = [r.clv_log for r in rows if r.clv_log is not None]
+    entry: dict[str, Any] = {
+        "n": len(clv_vals),
+        "mean_clv_log": None,
+        "ci_low": None,
+        "ci_high": None,
+        "significant": False,
+        "sufficient": len(clv_vals) >= min_n,
+    }
+    if not entry["sufficient"]:
+        return entry
+    sig = mean_significance(clv_vals)
+    if sig is not None:
+        entry["mean_clv_log"] = sig.mean
+        entry["ci_low"] = sig.ci_low
+        entry["ci_high"] = sig.ci_high
+        entry["significant"] = sig.significant
+    return entry
+
+
+def _clv_yield_ratio(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]:
+    """CLV->yield calibration on the SAME trusted subset: realized flat-stake
+    yield divided by the mean fractional trusted CLV, displayed against the
+    RebelBetting public 0.8x benchmark (CLV_YIELD_BENCHMARK_SOURCE).
+
+    Units are aligned on the fractional scale: each clv_log becomes expm1(clv_log)
+    (the same log->percent conversion the dashboard uses) and the yield is
+    flat-stake (each pick weighted equally: mean of pnl/stake). Null semantics:
+    either side below the ``min_n`` floor nulls that side AND the ratio; a
+    trusted CLV within CLV_YIELD_MIN_ABS_CLV of zero nulls the ratio (a ~0
+    denominator would amplify noise without bound). Denominators always survive.
+    """
+    clv_vals = [r.clv_log for r in rows if r.clv_log is not None]
+    yield_vals = [r.pnl / r.stake for r in rows if r.pnl is not None and r.stake > 0.0]
+    trusted_clv: float | None = None
+    if len(clv_vals) >= min_n:
+        trusted_clv = sum(math.expm1(v) for v in clv_vals) / len(clv_vals)
+    flat_yield: float | None = None
+    if len(yield_vals) >= min_n:
+        flat_yield = sum(yield_vals) / len(yield_vals)
+    ratio: float | None = None
+    if (
+        trusted_clv is not None
+        and flat_yield is not None
+        and abs(trusted_clv) >= CLV_YIELD_MIN_ABS_CLV
+    ):
+        ratio = flat_yield / trusted_clv
+    return {
+        "ratio": ratio,
+        "flat_yield": flat_yield,
+        "trusted_clv": trusted_clv,
+        "n_clv": len(clv_vals),
+        "n_yield": len(yield_vals),
+        "benchmark": CLV_YIELD_BENCHMARK,
+        "benchmark_source": CLV_YIELD_BENCHMARK_SOURCE,
+    }
+
+
+def _evidence_verdict(rows: Sequence[SettledPickRow], min_n: int) -> str:
+    """Plain-language verdict on the trusted subset, driven ONLY by the two
+    EXISTING significance gates: the t-CI on mean clv_log excluding 0 (either
+    side — a reliably negative CLV also judges), and the Wilson 95% lower
+    bound on the beat-close rate clearing 0.5. No new statistics are invented;
+    below the floor the verdict is honestly insufficient."""
+    clv_vals = [r.clv_log for r in rows if r.clv_log is not None]
+    n = len(clv_vals)
+    if n < min_n:
+        return (
+            "evidence insufficient to judge profitability at current n "
+            f"(n_trusted={n} below the {min_n} floor)"
+        )
+    sig = mean_significance(clv_vals)
+    ci_excludes_zero = sig is not None and sig.std > 0.0 and (sig.ci_low > 0.0 or sig.ci_high < 0.0)
+    beat_known = [r.beat_close for r in rows if r.beat_close is not None]
+    wilson = (
+        wilson_interval(sum(1 for b in beat_known if b), len(beat_known)) if beat_known else None
+    )
+    wilson_clears = wilson is not None and wilson[0] > 0.5
+    if ci_excludes_zero or wilson_clears:
+        gates = []
+        if ci_excludes_zero:
+            gates.append("trusted-CLV 95% CI excludes 0")
+        if wilson_clears:
+            gates.append("beat-close Wilson lower bound > 0.5")
+        return (
+            "evidence sufficient to judge profitability at current n "
+            f"(n_trusted={n}; {'; '.join(gates)})"
+        )
+    return (
+        "evidence insufficient to judge profitability at current n "
+        f"(n_trusted={n}; trusted-CLV 95% CI straddles 0 and the beat-close "
+        "Wilson lower bound does not clear 0.5)"
+    )
+
+
 def live_evidence_report(
     rows: Sequence[SettledPickRow],
     *,
@@ -367,6 +487,9 @@ def live_evidence_report(
     # (a genuine sharp snapshot close, not a consensus median or a poll-time
     # revalidation fallback). Always reported — n=0 honestly says "none yet".
     sharp_rows = [r for r in rows if r.sharp_close]
+    trusted_by_tier: dict[str, list[SettledPickRow]] = {}
+    for r in sharp_rows:
+        trusted_by_tier.setdefault(r.tier, []).append(r)
 
     cal = meta_model_calibration(rows, min_n=min_n)
     return {
@@ -411,6 +534,17 @@ def live_evidence_report(
             {k: _stratum_stats(v, min_n) for k, v in sorted(by_sport.items())} if by_sport else None
         ),
         "sharp_close": _stratum_stats(sharp_rows, min_n),
+        # Task 4 (2026-07-10) — trusted-CLV-first operator report. All three
+        # ride the SAME trusted subset (sharp_rows) and the SAME min_n floor;
+        # estimates are nulled at the source below it, like every stratum.
+        "trusted_clv_ci": {
+            "overall": _trusted_clv_ci_entry(sharp_rows, min_n),
+            "by_tier": {
+                k: _trusted_clv_ci_entry(v, min_n) for k, v in sorted(trusted_by_tier.items())
+            },
+        },
+        "clv_yield_ratio": _clv_yield_ratio(sharp_rows, min_n),
+        "evidence_verdict": _evidence_verdict(sharp_rows, min_n),
     }
 
 

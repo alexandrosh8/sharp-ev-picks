@@ -323,6 +323,41 @@ def test_close_quality_by_sport_renders_from_performance_payload() -> None:
     assert "Could not load performance data." in text
 
 
+def test_close_quality_by_sport_trusted_stamp_relabelled() -> None:
+    """Task 4 2b (2026-07-10): the persisted close_exclusion_reason 'trusted'
+    stamp has LOOSER semantics (no exclusion guard tripped at close-write, small
+    recent-rows denominator) than the trusted-sharp subset behind the SLA and
+    evidence-distance panels. The panel token is relabelled 'no guard tripped'
+    and a footnote distinguishes the two, so the counts cannot be misread."""
+    text = _text()
+    assert '"no guard tripped"' in text
+    assert 'k === "trusted" ? "no guard tripped"' in text
+    # the footnote drawing the distinction
+    assert "not the trusted-sharp subset" in text
+
+
+def test_tier_scorecard_trusted_clv_first_rows() -> None:
+    """Task 4 step 3 (2026-07-10): the Premium-vs-Shadow scorecard leads with
+    the decision instrument — per-tier trusted CLV with 95% CI and n, the
+    CLV→yield calibration ratio against the RebelBetting public 0.8× benchmark,
+    and the plain-language evidence verdict — all read from the /performance
+    live_evidence payload (trusted_clv_ci / clv_yield_ratio / evidence_verdict,
+    already nulled at the source below the honesty floor)."""
+    text = _text()
+    assert 'id="tier-scorecard"' in text
+    assert "trusted_clv_ci" in text
+    assert "clv_yield_ratio" in text
+    assert "evidence_verdict" in text
+    assert "Trusted CLV — " in text
+    assert "CLV→yield ratio" in text
+    assert "benchmark 0.8×" in text
+    assert "Verdict: " in text
+    # honest states: pre-payload and sub-floor renders
+    assert "Trusted-CLV scorecard not yet reported." in text
+    assert "not computable — below floor or trusted CLV ≈ 0" in text
+    assert '" — insufficient"' in text
+
+
 def test_close_coverage_sla_renders_from_performance_payload() -> None:
     """Audit #8: the per sport-market CLOSE/FRESHNESS SLA panel renders straight
     from the existing /performance payload (close_coverage_sla) — no new fetch —
