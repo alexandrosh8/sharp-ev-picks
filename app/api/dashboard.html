@@ -282,6 +282,16 @@
         max-width: 60vw;
         overflow: hidden;
         text-overflow: ellipsis;
+        /* Fix 2026-07-10 #6: the pill must SHRINK (and ellipsize its text)
+           on narrow screens — never overlap or slide under the logout button. */
+        min-width: 0;
+        flex: 0 1 auto;
+      }
+      .system-pill #pill-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .system-pill:hover { border-color: var(--line2); color: var(--text); }
       .pill-dot {
@@ -303,6 +313,7 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        flex: none; /* fix 2026-07-10 #6: logout never collapses/overlaps */
         width: 34px;
         height: 34px;
         background: none;
@@ -644,7 +655,8 @@
       .egt::before { content: "▸ "; color: var(--cyan); }
       .egn { font-family: var(--font-mono); font-size: 10.5px; color: var(--text3); }
       .edge-group-empty {
-        padding: 14px 16px;
+        /* fix 2026-07-10 #14: single-line empty groups size to content */
+        padding: 10px 16px;
         border: 1px dashed var(--line2);
         color: var(--text3);
         font-family: var(--font-mono);
@@ -683,6 +695,14 @@
       .er-tier { grid-column: 2; grid-row: 3; justify-self: end; }
       /* Audit 2026-07-09: full-width danger strip for structural_sane=false rows */
       .er-danger { grid-column: 1 / -1; justify-self: start; margin-top: 4px; }
+      /* Fix 2026-07-10 #3 — QUARANTINE styling: still visible, never normal.
+         Structurally-inconsistent rows grey out hard; negative-edge Closed
+         rows get a distinct muted treatment; a negative edge value always
+         renders in danger colour, never like a positive edge. */
+      .edge-row.is-quarantined { opacity: 0.5; }
+      .edge-row.is-quarantined .er-event, .edge-row.is-quarantined .er-sel { color: var(--text3); }
+      .edge-row.is-neg-closed { opacity: 0.62; }
+      .er-edge.neg { color: var(--danger); }
 
       /* detail drawer — right-docked, slides in over the stream */
       .edge-detail {
@@ -771,7 +791,60 @@
       }
       .metric:last-child, .metric-row:last-child { border-bottom: none; }
       .mk { color: var(--text3); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; }
-      .mv { font-family: var(--font-mono); color: var(--text); text-align: right; }
+      /* Fix 2026-07-10 #5: long values (reasons, refs) must wrap, never force
+         a horizontal scrollbar in the detail panel. */
+      .mv { font-family: var(--font-mono); color: var(--text); text-align: right; min-width: 0; overflow-wrap: anywhere; }
+      .metric .mk { flex: none; }
+      /* Fix 2026-07-10 #5: the expanded raw-reason <pre> wraps in place. */
+      .raw-reason pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; color: var(--text2); }
+      .edge-detail-grid > section { min-width: 0; }
+      /* Fix 2026-07-10 #9/#13 — interactive rows share ONE affordance. */
+      .row-link { cursor: pointer; }
+      .kickoff-row.row-link:hover, .radar-row.row-link:hover { background: var(--cyan-dim); }
+      .row-link:focus-visible { outline: 1px solid var(--cyan); outline-offset: -1px; }
+      /* Fix 2026-07-10 #11/#14 — n-of-floor mini progress bar. */
+      .mini-progress { margin-top: 10px; height: 4px; background: var(--line); overflow: hidden; }
+      .mini-progress-fill { display: block; height: 100%; background: var(--cyan); }
+      .ev-pos-text { display: block; }
+      /* Fix 2026-07-10 #16 — console-styled skeleton shimmer. */
+      .skeleton-line {
+        display: block;
+        height: 12px;
+        margin: 4px 0;
+        background: linear-gradient(90deg, var(--hair) 25%, var(--line2) 50%, var(--hair) 75%);
+        background-size: 200% 100%;
+        animation: skeleton-slide 1.4s ease-in-out infinite;
+      }
+      .skeleton-line.short { width: 55%; }
+      @keyframes skeleton-slide {
+        0% { background-position: 200% 0; }
+        100% { background-position: -200% 0; }
+      }
+      /* Fix 2026-07-10 #19-#24 — trade-ticket detail layout. */
+      .ticket-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 4px; }
+      .ticket-sel { flex: 1 1 100%; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); overflow-wrap: anywhere; }
+      .ticket-sec { margin: 16px 0 2px; padding-top: 10px; border-top: 1px solid var(--hair); }
+      .trust-banner {
+        margin: 10px 0;
+        padding: 9px 12px;
+        border: 1px solid var(--warm-line);
+        background: var(--warm-dim);
+        color: var(--warm);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: 0.03em;
+      }
+      .ticket-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 10px 0 4px; }
+      .tkpi { background: var(--bg2); padding: 10px 12px; min-width: 0; }
+      .tkpi-v { font-size: 17px; font-weight: 500; letter-spacing: -0.02em; color: var(--text); }
+      .tkpi-k { margin-top: 3px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text3); }
+      .tkpi-sub { margin-top: 4px; font-family: var(--font-mono); font-size: 9px; color: var(--warm); }
+      /* #22: implausible / untrusted figures never get confident styling. */
+      .ticket-kpis.indicative .tkpi-v { color: var(--text3); }
+      /* #23: gated stake reads informational, never actionable. */
+      .tkpi.gated .tkpi-v { color: var(--text3); font-size: 13px; }
+      /* #24: subtle not-available treatment. */
+      .na { color: var(--text3); font-size: 11px; font-style: italic; cursor: help; }
       .metric-row b { font-family: var(--font-mono); font-weight: 500; color: var(--text); }
       .ops-list .mv { font-size: 11.5px; }
       .ops-cap {
@@ -887,7 +960,9 @@
         transition: background-color 0.15s ease-out;
       }
       .radar-row:last-child { border-bottom: none; }
-      .radar-row:hover { background: var(--hair); }
+      /* Fix 2026-07-10 #13: hover affordance ONLY on rows that open a pick
+         detail (.row-link) — fixtures without a pick stay inert. */
+      .radar-row.row-link:hover { background: var(--hair); }
 
       /* ============ LAB ============ */
       .lab-board { grid-template-columns: repeat(12, minmax(0, 1fr)); }
@@ -1057,7 +1132,58 @@
         .kickoff-row { grid-template-columns: max-content minmax(0, 1fr); }
         .kickoff-row .kr-s { grid-column: 1 / -1; }
         .kr-e { white-space: normal; }
+        /* Fix 2026-07-10 #8: mono sub-rows (Close Quality by Sport,
+           Per-Market Top 5, …) WRAP on mobile — no data lost to truncation. */
+        .kickoff-row .kr-s {
+          white-space: normal;
+          overflow: visible;
+          text-overflow: clip;
+          overflow-wrap: anywhere;
+        }
         .edge-detail-grid { padding-bottom: 90px; }
+        /* Fix 2026-07-10 #7: the Source Matrix becomes stacked cards — every
+           field visible (Notes included), labels from the column headers, no
+           stretched empty cells. */
+        .source-matrix table, .source-matrix tbody, .source-matrix tr, .source-matrix td { display: block; }
+        .source-matrix thead {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          margin: -1px;
+          padding: 0;
+          overflow: hidden;
+          clip: rect(0 0 0 0);
+          white-space: nowrap;
+        }
+        .source-matrix tr {
+          border: 1px solid var(--line);
+          background: var(--bg2);
+          margin-bottom: 10px;
+          padding: 4px 12px;
+        }
+        .source-matrix td {
+          display: flex;
+          gap: 12px;
+          align-items: baseline;
+          padding: 7px 0;
+          border-bottom: 1px solid var(--hair);
+          white-space: normal;
+          overflow-wrap: anywhere;
+          min-width: 0;
+        }
+        .source-matrix td:last-child { border-bottom: none; }
+        .source-matrix td::before {
+          content: attr(data-label);
+          flex: none;
+          min-width: 78px;
+          font-family: var(--font-mono);
+          font-size: 9px;
+          font-weight: 600;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          color: var(--text3);
+        }
+        .source-matrix tr:hover td { background: none; }
       }
       @media (min-width: 1081px) {
         /* desktop: the drawer never needs the dock offset */
@@ -1071,6 +1197,7 @@
           transition-duration: 0.01ms !important;
         }
         .pill-dot { animation: none; }
+        .skeleton-line { animation: none; }
         .view { animation: none; }
       }
     </style>
@@ -1248,7 +1375,7 @@
               </section>
               <section class="panel" aria-labelledby="evpos-h" data-testid="panel-evidence-position">
                 <div class="panel-h"><h3 id="evpos-h">Evidence position</h3></div>
-                <div class="panel-b"><p class="muted" id="evidence-position">—</p></div>
+                <div class="panel-b"><div class="muted" id="evidence-position">—</div></div>
               </section>
               <section class="panel" aria-labelledby="recent-h" data-testid="panel-recent-results">
                 <div class="panel-h"><h3 id="recent-h">Recent results</h3></div>
@@ -1411,7 +1538,7 @@
               <div class="view-h"><h2>Sources</h2><span class="eyebrow">operations &amp; health</span></div>
               <div class="desk-ticker" id="sources-summary" role="status" aria-live="polite" aria-label="Operations vitals"></div>
             </div>
-            <section class="panel solo" aria-labelledby="matrix-h" data-testid="panel-source-matrix">
+            <section class="panel solo source-matrix" aria-labelledby="matrix-h" data-testid="panel-source-matrix">
               <div class="panel-h"><h3 id="matrix-h">Source matrix</h3></div>
               <div class="panel-b">
                 <div class="tscroll">
@@ -1628,11 +1755,58 @@
           const sel = fmt(p && p.selection);
           const raw = String((p && p.selection) || "").trim().toLowerCase();
           if (raw === "yes" || raw === "no") {
-            const m = String((p && p.market) || "").toLowerCase();
-            const mk = m === "btts" ? "BTTS" : (m ? m.replace(/_/g, " ").toUpperCase() : "");
-            return mk ? mk + " " + sel : sel;
+            // Fix 2026-07-10 #2: route through the ONE shared market
+            // formatter so the same market never renders two different ways.
+            const mk = marketLabel((p && p.market) || "");
+            return mk !== "—" ? mk + " " + sel : sel;
           }
           return sel;
+        }
+        // Fix 2026-07-10 #2 — ONE shared human label for raw market/bet-type
+        // keys (h2h, double_chance, oc_half_time_full_time, spreads_minus_1_5,
+        // …). Explicit map for known keys, generic decoding for the rest.
+        const MARKET_LABELS = {
+          h2h: "Moneyline / H2H",
+          moneyline: "Moneyline / H2H",
+          double_chance: "Double Chance",
+          half_time_full_time: "Half Time / Full Time",
+          correct_score: "Correct Score",
+          btts: "Both Teams To Score",
+          totals: "Totals (O/U)",
+          spreads: "Spread / Handicap",
+          dnb: "Draw No Bet",
+          team_totals: "Team Totals",
+        };
+        function marketLabel(key) {
+          if (key === null || key === undefined || String(key).trim() === "") return "—";
+          let k = String(key).trim().toLowerCase();
+          if (k.indexOf("oc_") === 0) k = k.slice(3);
+          if (MARKET_LABELS[k]) return MARKET_LABELS[k];
+          let m = k.match(/^spreads_(minus|plus)_(\d+)_(\d+)$/);
+          if (m) return "Spread " + (m[1] === "minus" ? "−" : "+") + m[2] + "." + m[3];
+          m = k.match(/^totals_(\d+)_(\d+)$/);
+          if (m) return "Totals " + m[1] + "." + m[2];
+          // NminusM score patterns: set_betting_3minus_0 -> "Set Betting 3−0"
+          k = k.replace(/(\d+)minus_?(\d+)/g, "$1−$2");
+          return k.split("_").filter(Boolean)
+            .map((w) => (/\d/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+            .join(" ");
+        }
+        // Fix 2026-07-10 #4 — DISPLAY-ONLY typo corrections for event/team
+        // names. This never touches matching/resolution/alias code (wrong-game
+        // risk lives there); it only fixes how an upstream misspelling renders.
+        const TEAM_TYPO_FIXES = {
+          "Abroath": "Arbroath",
+          "Ferrovario": "Ferroviario",
+        };
+        function eventLabel(v) {
+          const s = fmt(v);
+          if (s === "—") return s;
+          let out = String(s);
+          Object.keys(TEAM_TYPO_FIXES).forEach((bad) => {
+            out = out.split(bad).join(TEAM_TYPO_FIXES[bad]);
+          });
+          return out;
         }
         function fmtNum(v, digits) {
           const n = Number(v);
@@ -1751,6 +1925,24 @@
           return p.structural_sane !== false &&
             tierOf(p) === "premium" && p.status === "alerted" && !hasStarted(p) &&
             isRevalidationFresh(p, health) && hasValueNow(p) && !dataIsStale(health);
+        }
+        // Fix 2026-07-10 #3: ranking exclusion — structurally inconsistent
+        // (structural_sane === false) and negative-edge picks stay VISIBLE in
+        // the lists (quarantined styling) but never enter "top edges" rankings.
+        function isRankable(p) {
+          return p.structural_sane !== false &&
+            numOf(p.current_edge == null ? p.edge : p.current_edge) > 0;
+        }
+        // Fix 2026-07-10 #17: sport precedence inside each Edges group —
+        // football/soccer → basketball → tennis → american football; sports
+        // outside the list sort last. Ordering WITHIN a sport is unchanged.
+        const SPORT_ORDER = ["soccer", "basketball", "tennis", "american_football"];
+        function sportRank(p) {
+          const s = String((p && p.sport) || "").toLowerCase();
+          for (let i = 0; i < SPORT_ORDER.length; i++) {
+            if (s === SPORT_ORDER[i] || s.indexOf(SPORT_ORDER[i] + "_") === 0) return i;
+          }
+          return SPORT_ORDER.length;
         }
         // Edges grouping: Closed (kicked off / settled / superseded, any tier) >
         // Tracked (shadow / volume tier, never actionable) > Actionable (premium,
@@ -1957,7 +2149,7 @@
             const conf = r.confidence != null ? fmtNum(r.confidence, 4) : null;
             const st = r.review_status === "pending" && r.reviewed_at == null ? r.review_status
               : fmt(r.review_status) + (r.reviewed_at != null ? " @ " + r.reviewed_at : "");
-            [r.event, r.candidate, r.kickoff_utc, r.source, conf, r.reason, st, r.created_at].forEach((v) => {
+            [eventLabel(r.event), eventLabel(r.candidate), r.kickoff_utc, r.source, conf, r.reason, st, r.created_at].forEach((v) => {
               const td = document.createElement("td");
               td.textContent = String(fmt(v));
               tr.appendChild(td);
@@ -1999,7 +2191,7 @@
           cells.slice(0, 12).forEach((c) => {
             const r = document.createElement("div"); r.className = "kickoff-row";
             const nm = document.createElement("span"); nm.className = "kr-t mono";
-            nm.textContent = String(fmt(c.sport)).replace(/_/g, " ") + " · " + fmt(c.market);
+            nm.textContent = String(fmt(c.sport)).replace(/_/g, " ") + " · " + marketLabel(c.market);
             const prog = document.createElement("span"); prog.className = "kr-s mono";
             prog.textContent = fmt(c.n_trusted) + " / " + okN + " trusted closes";
             const s = document.createElement("span"); s.className = "kr-s";
@@ -2198,6 +2390,25 @@
           $("stale-banner").classList.toggle("show", dataIsStale(state.health));
         }
 
+        // Fix 2026-07-10 #9/#13 — ONE shared row-open mechanism: navigating to
+        // #/edges/<id> drives the existing hash router (setView("edges") +
+        // select + the SAME detail drawer the Edges tab opens). A row without
+        // a resolvable pick record stays NON-interactive (no cursor, no hover,
+        // no tabindex — never an empty panel).
+        function makeRowOpenPick(row, pick) {
+          if (!pick || pick.id == null) return;
+          row.classList.add("row-link");
+          row.tabIndex = 0;
+          row.setAttribute("role", "button");
+          const open = () => { location.hash = "#/edges/" + String(pick.id); };
+          row.addEventListener("click", open);
+          row.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") {
+              ev.preventDefault(); open();
+            }
+          });
+        }
+
         // ===== TODAY ===========================================================
         function renderToday() {
           const health = state.health;
@@ -2217,7 +2428,7 @@
             actionable.forEach((p) => {
               const r = document.createElement("div"); r.className = "kickoff-row";
               const t = document.createElement("span"); t.className = "kr-t mono"; t.textContent = fmtCountdown(p.starts_at);
-              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
+              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = eventLabel(p.event);
               const s = document.createElement("span"); s.className = "kr-s"; s.textContent = selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
               r.append(t, e, s); box.appendChild(r);
             });
@@ -2231,11 +2442,12 @@
           if (health && health.status === "degraded") attn.push("Source Degraded — ingestion health degraded.");
           if (dataIsStale(health)) attn.push("Source Degraded — odds data is stale.");
           if (health && health.proxy_pool && health.proxy_pool.verdict === "Proxy pool degraded") attn.push("Source Degraded — proxy pool degraded.");
-          if (actionable.length === 0 && state.picksErr === null) attn.push("Low Evidence — no premium pick currently qualifies.");
-          if (state.perf && state.perf.sharp_status === "insufficient") attn.push("Low Evidence — sharp evidence insufficient.");
+          // Fix 2026-07-10 #10: the two "Low Evidence" lines merely restated
+          // the Qualified Now empty state / evidence-position panel — this
+          // queue is reserved for real actionable alerts.
           const attnBox = $("needs-attention"); attnBox.replaceChildren();
           if (attn.length === 0) {
-            const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "Nothing needs attention.";
+            const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "Nothing needs attention right now.";
             attnBox.appendChild(p0);
           } else {
             attn.forEach((line) => {
@@ -2249,7 +2461,7 @@
           // fills the Today view with the strongest live edges even when nothing
           // clears the premium gate (most are shadow / tracked-informational).
           const topEdges = state.picks
-            .filter((p) => !hasStarted(p) && numOf(p.current_edge == null ? p.edge : p.current_edge) > 0)
+            .filter((p) => !hasStarted(p) && isRankable(p))
             .sort((a, b) => numOf(b.current_edge == null ? b.edge : b.current_edge) - numOf(a.current_edge == null ? a.edge : a.current_edge))
             .slice(0, 8);
           const teBox = $("top-edges"); teBox.replaceChildren();
@@ -2262,10 +2474,10 @@
               const r = document.createElement("div"); r.className = "kickoff-row";
               const t = document.createElement("span"); t.className = "kr-t mono";
               t.textContent = fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
-              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
+              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = eventLabel(p.event);
               const s = document.createElement("span"); s.className = "kr-s";
               s.textContent = selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · " + (tierOf(p) === "premium" ? "Premium" : "Shadow");
-              r.append(t, e, s); teBox.appendChild(r);
+              r.append(t, e, s); makeRowOpenPick(r, p); teBox.appendChild(r);
             });
           }
 
@@ -2274,13 +2486,18 @@
           const ecBox = $("edge-chart"); ecBox.replaceChildren();
           if (topEdges.length >= 2) {
             const mags = topEdges.map((p) => numOf(p.current_edge == null ? p.edge : p.current_edge));
-            const mx = Math.max.apply(null, mags) || 1;
+            // Fix 2026-07-10 #12: scale bar heights to the visible min→max
+            // range so clustered values still differentiate; the all-equal
+            // case renders equal mid-length bars (never a divide-by-zero).
+            const mx = Math.max.apply(null, mags);
+            const mn = Math.min.apply(null, mags);
+            const span = mx - mn;
             ecBox.classList.remove("empty");
             topEdges.forEach((p, i) => {
               const b = document.createElement("div");
               b.className = "bar " + (tierOf(p) === "premium" ? "premium" : "shadow");
-              b.style.height = Math.max(4, Math.round((mags[i] / mx) * 46)) + "px";
-              b.title = fmt(p.event) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
+              b.style.height = (span > 0 ? 8 + Math.round(((mags[i] - mn) / span) * 38) : 27) + "px";
+              b.title = eventLabel(p.event) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
               ecBox.appendChild(b);
             });
           } else {
@@ -2310,9 +2527,12 @@
               const r = document.createElement("div"); r.className = "kickoff-row";
               const t = document.createElement("span"); t.className = "kr-t mono"; t.textContent = fmtCountdown(p.starts_at);
               const e = document.createElement("span"); e.className = "kr-e";
-              e.textContent = fmt(p.event) + (n > 1 ? ` · ${n} picks` : "");
+              e.textContent = eventLabel(p.event) + (n > 1 ? ` · ${n} picks` : "");
               const s = document.createElement("span"); s.className = "kr-s"; s.textContent = premium ? "Premium" : "Shadow";
-              r.append(t, e, s); nk.appendChild(r);
+              // per-EVENT aggregate: open the first pick of the event (the
+              // detail drawer is per-pick; the event's other picks sit beside
+              // it in the Edges list).
+              r.append(t, e, s); makeRowOpenPick(r, p); nk.appendChild(r);
             });
           }
 
@@ -2328,7 +2548,7 @@
               const r = document.createElement("div"); r.className = "kickoff-row";
               const t0 = document.createElement("span"); t0.className = "kr-t mono";
               t0.textContent = fmt(p.score == null ? p.scraped_score : p.score);
-              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = fmt(p.event);
+              const e = document.createElement("span"); e.className = "kr-e"; e.textContent = eventLabel(p.event);
               const s = document.createElement("span"); s.className = "kr-s mono";
               const oc = String(p.outcome == null ? p.provisional_outcome : p.outcome).replace("_", " ");
               // Audit 2026-07-09: route through selLabel like every other
@@ -2336,20 +2556,26 @@
               // without its market qualifier.
               const sel = p.selection ? selLabel(p) : "";
               s.textContent = (sel ? sel + " · " : "") + oc.toUpperCase() + (p.outcome == null ? " (provisional)" : "");
-              r.append(t0, e, s); rr.appendChild(r);
+              r.append(t0, e, s); makeRowOpenPick(r, p); rr.appendChild(r);
             });
           }
 
           // evidence position statement
           const perf = state.perf;
           const evEl = $("evidence-position");
+          evEl.replaceChildren();
           if (!perf) {
             evEl.textContent = "Could not load performance data.";
           } else {
             const n = Number(perf.n_sharp_close) || 0, floor = Number(perf.min_headline_n) || 50;
-            evEl.textContent = perf.sharp_status === "ok"
+            const evTxt = document.createElement("span"); evTxt.className = "ev-pos-text";
+            evTxt.textContent = perf.sharp_status === "ok"
               ? n + " of " + floor + " trusted sharp closes settled — evidence threshold met."
               : n + " of " + floor + " trusted sharp closes settled — Low Evidence, still accruing.";
+            evEl.appendChild(evTxt);
+            // Fix 2026-07-10 #11: earn the panel height — an n-of-floor
+            // progress bar built from the SAME fields as the sentence above.
+            evEl.appendChild(progressBarEl(n, floor, "Trusted sharp closes"));
           }
 
           // ---- at-a-glance KPI strip (all live, no fabricated metrics) ----
@@ -2458,20 +2684,33 @@
           const stale = tierOf(p) === "premium" && !isRevalidationFresh(p, health) && p.status === "alerted" && !hasStarted(p);
           if (stale || dataIsStale(health)) row.classList.add("is-stale");
           const ko = document.createElement("span"); ko.className = "er-ko mono"; ko.textContent = hasStarted(p) ? "started" : fmtCountdown(p.starts_at);
-          const ev = document.createElement("span"); ev.className = "er-event"; ev.textContent = fmt(p.event);
+          const ev = document.createElement("span"); ev.className = "er-event"; ev.textContent = eventLabel(p.event);
           const tier = document.createElement("span"); tier.className = "er-tier tag " + (tierOf(p) === "volume" ? "tag-warm" : "tag-cyan");
           tier.textContent = tierOf(p) === "volume" ? "Shadow" : "Premium";
           const sel = document.createElement("span"); sel.className = "er-sel mono";
-          sel.textContent = selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · " + fmtSignedPct(p.current_edge == null ? p.edge : p.current_edge);
+          const eff = numOf(p.current_edge == null ? p.edge : p.current_edge);
+          sel.appendChild(document.createTextNode(selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · "));
+          // Fix 2026-07-10 #3: a negative edge keeps its minus sign and is
+          // styled as negative — never rendered like a normal positive edge.
+          const effEl = document.createElement("span");
+          effEl.className = "er-edge" + (isFinite(eff) && eff < 0 ? " neg" : "");
+          effEl.textContent = fmtSignedPct(eff);
+          sel.appendChild(effEl);
           const trust = document.createElement("span"); trust.className = "er-trust"; trust.textContent = trustGlyph(p); trust.title = anchorLabel(p);
           row.append(ko, ev, tier, sel, trust);
           // Audit 2026-07-09: surface the server's stored-impossible flag —
           // isActionable already refuses these rows; the tag says WHY.
+          // Fix 2026-07-10 #3 — QUARANTINE, never hide: structurally
+          // inconsistent rows grey out with an explicit excluded badge, and
+          // negative-edge Closed rows get their own muted treatment.
           if (p.structural_sane === false) {
+            row.classList.add("is-quarantined");
             const bad = document.createElement("span");
             bad.className = "er-danger tag tag-danger tag-dashed";
-            bad.textContent = "Internally inconsistent — do not bet";
+            bad.textContent = "Internally inconsistent — excluded, do not bet";
             row.appendChild(bad);
+          } else if (edgeGroupOf(p) === "closed" && isFinite(eff) && eff < 0) {
+            row.classList.add("is-neg-closed");
           }
           row.addEventListener("click", () => selectEdge(p.id));
           return row;
@@ -2530,10 +2769,13 @@
           const sortMode = ($("eq-sort") && $("eq-sort").value) || "edge";
           const edgeVal = (p) => { const v = numOf(p.current_edge == null ? p.edge : p.current_edge); return Number.isFinite(v) ? v : -1e9; };
           const koVal = (p) => new Date(p.starts_at || 8e15).getTime();
+          // Fix 2026-07-10 #17: sport precedence first, then the selected
+          // comparator within each sport.
           const sortList = (arr) => arr.slice().sort((a, b) =>
-            sortMode === "kickoff" ? koVal(a) - koVal(b)
+            (sportRank(a) - sportRank(b)) ||
+            (sortMode === "kickoff" ? koVal(a) - koVal(b)
             : sortMode === "odds" ? (numOf(b.decimal_odds) || 0) - (numOf(a.decimal_odds) || 0)
-            : edgeVal(b) - edgeVal(a));
+            : edgeVal(b) - edgeVal(a)));
           groups.forEach(([key, label]) => {
             const list = sortList(rows.filter((p) => edgeGroupOf(p) === key));
             const h = document.createElement("div"); h.className = "edge-group-h";
@@ -2622,8 +2864,36 @@
         function metricEl(label, value) {
           const d = document.createElement("div"); d.className = "metric";
           const k = document.createElement("span"); k.className = "mk"; k.textContent = label;
-          const v = document.createElement("span"); v.className = "mv"; v.textContent = value;
+          const v = document.createElement("span"); v.className = "mv";
+          if (value instanceof Node) v.appendChild(value); else v.textContent = value;
           d.append(k, v); return d;
+        }
+        // Fix 2026-07-10 #24 — subtle "not available" for empty ticket fields,
+        // with a short title tooltip where the reason is knowable.
+        function naEl(title) {
+          const s = document.createElement("span"); s.className = "na";
+          s.textContent = "not available";
+          if (title) s.title = title;
+          return s;
+        }
+        // Fix 2026-07-10 #19 — labelled ticket section header (mono eyebrow).
+        function ticketSec(label) {
+          const h = document.createElement("div"); h.className = "eyebrow ticket-sec"; h.textContent = label;
+          return h;
+        }
+        // Fix 2026-07-10 #11/#14 — shared n-of-floor progress bar built from
+        // values ALREADY rendered beside it (never new data).
+        function progressBarEl(n, floor, label) {
+          const bar = document.createElement("div"); bar.className = "mini-progress";
+          bar.setAttribute("role", "progressbar");
+          bar.setAttribute("aria-valuemin", "0");
+          bar.setAttribute("aria-valuemax", String(floor));
+          bar.setAttribute("aria-valuenow", String(Math.min(n, floor)));
+          bar.setAttribute("aria-label", label + " " + n + " of " + floor);
+          const fill = document.createElement("span"); fill.className = "mini-progress-fill";
+          fill.style.width = (floor > 0 ? Math.min(100, Math.round((n / floor) * 100)) : 0) + "%";
+          bar.appendChild(fill);
+          return bar;
         }
 
         function buildTimeline(p) {
@@ -2687,25 +2957,86 @@
           const detail = $("edge-detail");
           if (!p) { detail.classList.remove("visible"); return; }
           detail.classList.add("visible");
-          $("edge-detail-title").textContent = fmt(p.event);
+          $("edge-detail-title").textContent = eventLabel(p.event);
 
           const body = $("edge-detail-body"); body.replaceChildren();
+
+          // ==== trade-ticket header (fix 2026-07-10 #19): selection + price
+          // emphasized, tier badge alongside; the event name is the drawer
+          // title above this block. ====
+          const head = document.createElement("div"); head.className = "ticket-head";
+          const selLine = document.createElement("div"); selLine.className = "ticket-sel mono";
+          selLine.textContent = selLabel(p) + " @ " + fmtOdds(p.decimal_odds);
+          head.appendChild(selLine);
           const tierTag = document.createElement("span");
           tierTag.className = "tag " + (tierOf(p) === "volume" ? "tag-warm" : "tag-cyan");
           tierTag.textContent = tierOf(p) === "volume" ? "Shadow — tracked, informational only" : "Premium";
-          body.appendChild(tierTag);
+          head.appendChild(tierTag);
           // Audit 2026-07-09: the server flags stored-impossible rows
           // (structural_sane=false) so the dashboard can refuse to present
           // them as bettable — badge the detail pane in danger style.
           if (p.structural_sane === false) {
             const bad = document.createElement("span");
             bad.className = "tag tag-danger tag-dashed";
-            bad.style.marginLeft = "6px";
-            bad.textContent = "Internally inconsistent — do not bet";
-            body.appendChild(bad);
+            bad.textContent = "Internally inconsistent — excluded, do not bet";
+            head.appendChild(bad);
           }
+          body.appendChild(head);
           body.appendChild(buildTimeline(p));
 
+          // ==== trust state (fix 2026-07-10 #21) — strictly the OR of states
+          // the code already computes elsewhere; no new trust logic. ====
+          const staleNow = p.status === "alerted" && !hasStarted(p) && !isRevalidationFresh(p, state.health);
+          const lacksSharpAnchor = !(p.anchor_type === "pinnacle" || p.anchor_type === "sharp");
+          const amcVal = numOf(p.anchor_match_confidence);
+          const matchMissing = !isFinite(amcVal) || !p.anchor_match_method;
+          const untrustedClose = p.clv_log != null && !isTrustedClv(p);
+          const untrusted = staleNow || lacksSharpAnchor || matchMissing || untrustedClose ||
+            p.structural_sane === false || dataIsStale(state.health);
+          if (untrusted) {
+            const warn = document.createElement("div"); warn.className = "trust-banner";
+            warn.setAttribute("role", "note");
+            warn.textContent = "Untrusted / stale pricing — indicative only, not a recommended bet.";
+            body.appendChild(warn);
+          }
+
+          // ==== key metrics row (fix 2026-07-10 #19/#22/#23) ====
+          const eff = p.current_edge == null ? numOf(p.edge) : numOf(p.current_edge);
+          const evNum = numOf(p.ev);
+          // #22: extreme EV (>+100%) or an untrusted/inconsistent pick mutes
+          // the figures and flags them — values are NEVER recomputed/clamped.
+          const figsIndicative = untrusted || (isFinite(evNum) && evNum > 1);
+          const kpis = document.createElement("div");
+          kpis.className = "ticket-kpis" + (figsIndicative ? " indicative" : "");
+          const mkKpi = (label, valText, subText) => {
+            const c = document.createElement("div"); c.className = "tkpi";
+            const v = document.createElement("div"); v.className = "tkpi-v mono"; v.textContent = valText;
+            const k = document.createElement("div"); k.className = "tkpi-k"; k.textContent = label;
+            c.append(v, k);
+            if (subText) {
+              const s0 = document.createElement("div"); s0.className = "tkpi-sub"; s0.textContent = subText;
+              c.appendChild(s0);
+            }
+            return c;
+          };
+          kpis.appendChild(mkKpi("Edge", fmtSignedPct(eff), figsIndicative ? "indicative, unverified" : null));
+          kpis.appendChild(mkKpi("EV", fmtSignedPct(p.ev), figsIndicative ? "indicative, unverified" : null));
+          const sf = numOf(p.recommended_stake_fraction);
+          // Show the actual fractional-Kelly stake (as a % of bankroll) — the
+          // label promises a stake figure, not a confidence rating. A missing or
+          // zero fraction (e.g. a cap-denied pick) reads "—".
+          const stakeTxt = isFinite(sf) && sf > 0 ? (sf * 100).toFixed(2) + "% of bankroll" : "—";
+          // #23: never an actionable-looking stake on an untrusted/stale/
+          // shadow pick — de-emphasized and explicitly not applicable.
+          const stakeGated = untrusted || tierOf(p) === "volume";
+          const stakeCell = mkKpi("Suggested stake (informational)", stakeTxt,
+            stakeGated ? "informational only — not applicable while untrusted" : null);
+          if (stakeGated) stakeCell.classList.add("gated");
+          kpis.appendChild(stakeCell);
+          body.appendChild(kpis);
+
+          // ==== Pricing (fix 2026-07-10 #19) ====
+          body.appendChild(ticketSec("Pricing"));
           const ml = document.createElement("div"); ml.className = "metric-list";
           // FIX 5: the banner's Fair odds, Edge, and Min-acceptable must all
           // reference ONE fair. Prefer the reconciled server-serialized fair_odds
@@ -2719,25 +3050,17 @@
             fairOdds = isFinite(fair) && fair > 0 && fair < 1 ? (1 / fair).toFixed(2) : "—";
           }
           ml.appendChild(metricEl("Offered odds", fmtOdds(p.decimal_odds)));
-          ml.appendChild(metricEl("Fair odds", fairOdds));
-          ml.appendChild(metricEl("Min acceptable odds", fmtOdds(p.min_acceptable_odds)));
-          const eff = p.current_edge == null ? numOf(p.edge) : numOf(p.current_edge);
-          ml.appendChild(metricEl("Edge", fmtSignedPct(eff)));
+          ml.appendChild(metricEl("Fair odds",
+            fairOdds === "—" ? naEl("no reconciled fair price on this row") : fairOdds));
+          const minAcc = fmtOdds(p.min_acceptable_odds);
+          ml.appendChild(metricEl("Min acceptable odds",
+            minAcc === "—" ? naEl("no minimum-odds guard recorded") : minAcc));
           const floor = edgeFloorOf(p, state.health);
-          ml.appendChild(metricEl("Edge vs tier floor", isFinite(floor) ? fmtSignedPct(eff - floor) : "—"));
-          ml.appendChild(metricEl("EV", fmtSignedPct(p.ev)));
+          ml.appendChild(metricEl("Edge vs tier floor",
+            isFinite(floor) ? fmtSignedPct(eff - floor) : naEl("no tier floor available")));
           body.appendChild(ml);
 
-          const stakeRow = document.createElement("div"); stakeRow.className = "metric";
-          const sk = document.createElement("span"); sk.className = "mk"; sk.textContent = "Suggested stake (informational)";
-          const sv = document.createElement("span"); sv.className = "mv";
-          const sf = numOf(p.recommended_stake_fraction);
-          // Show the actual fractional-Kelly stake (as a % of bankroll) — the
-          // label promises a stake figure, not a confidence rating. A missing or
-          // zero fraction (e.g. a cap-denied pick) reads "—".
-          sv.textContent = isFinite(sf) && sf > 0 ? (sf * 100).toFixed(2) + "% of bankroll" : "—";
-          stakeRow.append(sk, sv); body.appendChild(stakeRow);
-
+          body.appendChild(ticketSec("Status"));
           if (p.status === "settled" || (hasStarted(p) && p.status === "alerted")) {
             const settledMl = document.createElement("div"); settledMl.className = "metric-list";
             const oc = p.outcome || p.provisional_outcome;
@@ -2757,8 +3080,9 @@
             body.appendChild(buildResultForm(p));
           }
 
-          // ---- evidence pane ----
+          // ---- evidence pane (fix 2026-07-10 #19: labelled sections) ----
           const ev = $("edge-evidence-body"); ev.replaceChildren();
+          ev.appendChild(ticketSec("Consensus Anchor"));
           const anchorTag = document.createElement("span");
           const at = p.anchor_type;
           anchorTag.className = "tag " + (at === "pinnacle" || at === "sharp" ? "tag-cyan" : at === "consensus" ? "tag-neutral" : "tag-danger tag-dashed");
@@ -2772,21 +3096,27 @@
 
           const evml = document.createElement("div"); evml.className = "metric-list"; evml.style.marginTop = "10px";
           const amc = numOf(p.anchor_match_confidence);
-          evml.appendChild(metricEl("Match confidence", isFinite(amc) ? amc.toFixed(2) : "—"));
-          evml.appendChild(metricEl("Match method", fmt(p.anchor_match_method)));
+          evml.appendChild(metricEl("Match confidence",
+            isFinite(amc) ? amc.toFixed(2) : naEl("no consensus match recorded")));
+          evml.appendChild(metricEl("Match method",
+            p.anchor_match_method ? fmt(p.anchor_match_method) : naEl("no consensus match method recorded")));
           // Freshness applies to any live (alerted, pre-kickoff) pick — the
           // revalidation loop runs for BOTH tiers, so a shadow/volume pick (e.g.
           // an inline-Betfair-canonical match) has a real revalidated_at too.
-          // Started / settled / superseded picks are past the live window -> "—".
-          const freshTxt = p.status === "alerted" && !hasStarted(p)
+          // Started / settled / superseded picks are past the live window -> n/a.
+          const liveWindow = p.status === "alerted" && !hasStarted(p);
+          evml.appendChild(metricEl("Freshness", liveWindow
             ? (isRevalidationFresh(p, state.health) ? "Fresh" : "Stale")
-            : "—";
-          evml.appendChild(metricEl("Freshness", freshTxt));
+            : naEl(p.revalidated_at == null ? "no revalidation yet" : "past the live revalidation window")));
           ev.appendChild(evml);
 
-          const clvTag = document.createElement("span"); clvTag.style.display = "inline-block"; clvTag.style.marginTop = "10px";
+          ev.appendChild(ticketSec("Provenance"));
+          const clvTag = document.createElement("span"); clvTag.style.display = "inline-block";
           clvTag.className = "tag " + (isTrustedClv(p) ? "tag-cyan" : "tag-neutral tag-dashed");
-          clvTag.textContent = clvStateLabel(p);
+          const clvState = clvStateLabel(p);
+          // Fix 2026-07-10 #24: a bare "—" tag reads as broken — name the state.
+          clvTag.textContent = clvState === "—" ? "no close recorded" : clvState;
+          if (clvState === "—") clvTag.title = "no closing line captured for this pick yet";
           ev.appendChild(clvTag);
           if (p.clv_log != null && !clvExclusionOf(p)) {
             const clvVal = document.createElement("span"); clvVal.className = "mono"; clvVal.style.marginLeft = "8px";
@@ -2806,7 +3136,7 @@
           if (!p) { note.textContent = "Nothing selected."; return; }
           const eff = p.current_edge == null ? p.edge : p.current_edge;
           const lines = [
-            fmt(p.event),
+            eventLabel(p.event),
             selLabel(p) + " @ " + fmtOdds(p.decimal_odds),
             "Edge: " + fmtSignedPct(eff),
             "Tier: " + (tierOf(p) === "volume" ? "Shadow" : "Premium"),
@@ -2871,9 +3201,22 @@
         function renderRadar() {
           loadMatchRate();
           const covEl = $("coverage-summary");
-          if (state.matchRateErr) covEl.textContent = "Could not load coverage summary.";
-          else if (state.matchRateLoading || !state.matchRate) covEl.textContent = "Loading coverage summary…";
-          else covEl.textContent = fmt(state.matchRate.coverage_summary && state.matchRate.coverage_summary.headline);
+          covEl.replaceChildren();
+          if (state.matchRate) {
+            // Fix 2026-07-10 #16: prefer already-cached data over a blank
+            // placeholder while a background refresh is in flight.
+            covEl.textContent = fmt(state.matchRate.coverage_summary && state.matchRate.coverage_summary.headline);
+          } else if (state.matchRateErr) {
+            covEl.textContent = "Could not load coverage summary.";
+          } else {
+            // Fix 2026-07-10 #16: skeleton shimmer (console-styled) while the
+            // slow /resolution/match-rate fetch runs — display-only.
+            covEl.setAttribute("role", "status");
+            covEl.setAttribute("aria-label", "Loading coverage summary…");
+            const sk = document.createElement("span"); sk.className = "skeleton-line";
+            const sk2 = document.createElement("span"); sk2.className = "skeleton-line short";
+            covEl.append(sk, sk2);
+          }
 
           const box = $("radar-bands"); box.replaceChildren();
           if (state.gamesErr !== null) {
@@ -2881,6 +3224,15 @@
             box.appendChild(p0); return;
           }
           const now = Date.now();
+          // Fix 2026-07-10 #13: map fixtures to their pick (event + kickoff)
+          // so a radar row can open the SAME Edges detail drawer; fixtures
+          // without a pick stay non-interactive (no misleading hover).
+          const pickByEvent = new Map();
+          state.picks.forEach((p) => {
+            if (p.starts_at == null) return;
+            const k = String(p.event) + "|" + new Date(p.starts_at).getTime();
+            if (!pickByEvent.has(k)) pickByEvent.set(k, p);
+          });
           const bands = [
             ["Next 2h", (ms) => ms >= 0 && ms <= 2 * 3.6e6],
             ["Today", (ms) => ms > 2 * 3.6e6 && ms <= 24 * 3.6e6],
@@ -2897,7 +3249,7 @@
             rows.slice(0, 40).forEach((g) => {
               const r = document.createElement("div"); r.className = "radar-row";
               const tm = document.createElement("span"); tm.className = "rr-t mono"; tm.textContent = fmtLocal(g.starts_at);
-              const ev = document.createElement("span"); ev.className = "rr-ev"; ev.textContent = fmt(g.event);
+              const ev = document.createElement("span"); ev.className = "rr-ev"; ev.textContent = eventLabel(g.event);
               const lg = document.createElement("span"); lg.className = "rr-lg mono"; lg.textContent = fmt(g.league);
               const bc = document.createElement("span"); bc.className = "rr-n mono"; bc.textContent = "books " + fmt(g.bookmaker_count);
               const mc = document.createElement("span"); mc.className = "rr-n mono"; mc.textContent = "markets " + fmt(g.market_count);
@@ -2910,6 +3262,10 @@
                 const note = document.createElement("span"); note.className = "rr-n"; note.textContent = "model not validated — informational only";
                 r.appendChild(note);
               }
+              const linkedPick = g.starts_at != null
+                ? pickByEvent.get(String(g.event) + "|" + new Date(g.starts_at).getTime())
+                : null;
+              if (linkedPick) makeRowOpenPick(r, linkedPick);
               band.appendChild(r);
             });
             if (rows.length === 0) {
@@ -2970,10 +3326,18 @@
           if (!perf) { p0.textContent = "Could not load performance data."; box.appendChild(p0); return; }
           const rows = perf.close_coverage_sla || [];
           if (rows.length === 0) { p0.textContent = "No settled picks yet."; box.appendChild(p0); return; }
+          // Fix 2026-07-10 #15: the SLA explanation reads ONCE as a legend —
+          // every row keeps its data but carries a compact badge instead of
+          // repeating the full sentence. Thresholds unchanged.
+          const thr0 = rows[0] && rows[0].sla_threshold != null ? fmtPct(rows[0].sla_threshold, 0) : "—";
+          const legend = document.createElement("p"); legend.className = "ops-cap";
+          legend.textContent = "Below SLA = trusted-close coverage under " + thr0
+            + ", so the CLV/ROI CLAIM for that market is CLV unreliable (the claim, not the picks).";
+          box.appendChild(legend);
           rows.forEach((r0) => {
             const row = document.createElement("div"); row.className = "kickoff-row";
             const nm = document.createElement("span"); nm.className = "kr-t mono";
-            nm.textContent = String(r0.sport).replace(/_/g, " ") + " · " + String(r0.market).replace(/_/g, " ");
+            nm.textContent = String(r0.sport).replace(/_/g, " ") + " · " + marketLabel(r0.market);
             const cov = document.createElement("span"); cov.className = "kr-s";
             cov.textContent = "coverage " + fmtPct(r0.close_coverage) + " (trusted "
               + (Number(r0.n_trusted_close) || 0) + " / " + fmt(r0.n_settled) + ")";
@@ -2981,9 +3345,7 @@
             const belowSla = !!r0.below_sla;
             const noData = r0.close_coverage === null || r0.close_coverage === undefined;
             tag.className = "tag " + (belowSla ? "tag-warm" : (noData ? "tag-neutral" : "tag-success"));
-            tag.textContent = belowSla
-              ? ("below SLA " + fmtPct(r0.sla_threshold, 0) + " — CLV unreliable")
-              : (noData ? "no settled picks" : "meets SLA");
+            tag.textContent = belowSla ? "below SLA" : (noData ? "no settled picks" : "meets SLA");
             row.append(nm, cov, tag); box.appendChild(row);
           });
         }
@@ -3061,6 +3423,14 @@
             hero.appendChild(num);
             const sub = document.createElement("p"); sub.className = "hero-sub"; sub.textContent = "Low Evidence — accruing trusted sharp closes.";
             hero.appendChild(sub);
+            // Fix 2026-07-10 #14: earn the panel height — progress toward the
+            // evidence floor, same values as the figure above.
+            if (perf) {
+              hero.appendChild(progressBarEl(
+                Number(perf.n_sharp_close) || 0,
+                Number(perf.min_headline_n) || 50,
+                "Trusted sharp closes"));
+            }
           }
           if (perf && perf.stake_weighted_clv_log != null) {
             const ctx = document.createElement("p"); ctx.className = "muted"; ctx.style.marginTop = "10px";
@@ -3078,8 +3448,10 @@
             ml.appendChild(metricEl("Tautological Close Excluded", String(q.clv_excluded_tautological || 0)));
             ml.appendChild(metricEl("Circular Close Excluded", String(q.clv_excluded_circular || 0)));
             ml.appendChild(metricEl("Fabricated excluded", String(q.clv_excluded_fabricated || 0)));
-            ml.appendChild(metricEl("Snapshot vs fallback closes", (q.n_snapshot_close || 0) + " / " + (q.n_fallback_close || 0)));
-            ml.appendChild(metricEl("Close age p50 / p90 (min)", fmtNum(q.close_age_p50_minutes, 0) + " / " + fmtNum(q.close_age_p90_minutes, 0)));
+            // Fix 2026-07-10 #1: n_snapshot_close and n_fallback_close are two
+            // INDEPENDENT counts, never a numerator/denominator — label each.
+            ml.appendChild(metricEl("Close provenance", "snapshot " + (q.n_snapshot_close || 0) + " · fallback " + (q.n_fallback_close || 0)));
+            ml.appendChild(metricEl("Close age (min)", "p50 " + fmtNum(q.close_age_p50_minutes, 0) + " · p90 " + fmtNum(q.close_age_p90_minutes, 0)));
             cq.appendChild(ml);
             const note = document.createElement("p"); note.className = "muted"; note.style.marginTop = "8px";
             note.textContent = "An excluded close is unusable evidence, not a loss. Close-age provenance accruing.";
@@ -3089,7 +3461,11 @@
           const cs = $("calibration-summary"); cs.replaceChildren();
           const cal = perf && perf.calibration;
           if (!cal || cal.insufficient) {
-            const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "Low Evidence — calibration sample too small.";
+            const p0 = document.createElement("p"); p0.className = "muted";
+            // Fix 2026-07-10 #14: carry the sample size (an existing payload
+            // field) so the single-line state earns its panel.
+            p0.textContent = "Low Evidence — calibration sample too small."
+              + (cal && cal.n != null ? " (n=" + cal.n + ")" : "");
             cs.appendChild(p0);
           } else {
             const ml = document.createElement("div"); ml.className = "metric-list";
@@ -3165,14 +3541,16 @@
 
         // ===== SOURCES ============================================================
         function sourceRow(name, freshness, coverage, verdict, notes, verdictClass) {
+          // Fix 2026-07-10 #7: data-label per cell feeds the mobile stacked-
+          // card layout (labels from the column headers, Notes included).
           const tr = document.createElement("tr");
-          const c0 = document.createElement("td"); c0.textContent = name; tr.appendChild(c0);
-          const c1 = document.createElement("td"); c1.textContent = freshness; tr.appendChild(c1);
-          const c2 = document.createElement("td"); c2.textContent = coverage; tr.appendChild(c2);
-          const c3 = document.createElement("td");
+          const c0 = document.createElement("td"); c0.dataset.label = "Source"; c0.textContent = name; tr.appendChild(c0);
+          const c1 = document.createElement("td"); c1.dataset.label = "Freshness"; c1.textContent = freshness; tr.appendChild(c1);
+          const c2 = document.createElement("td"); c2.dataset.label = "Coverage"; c2.textContent = coverage; tr.appendChild(c2);
+          const c3 = document.createElement("td"); c3.dataset.label = "Verdict";
           const tag = document.createElement("span"); tag.className = "tag " + (verdictClass || "tag-neutral"); tag.textContent = verdict;
           c3.appendChild(tag); tr.appendChild(c3);
-          const c4 = document.createElement("td"); c4.textContent = notes; tr.appendChild(c4);
+          const c4 = document.createElement("td"); c4.dataset.label = "Notes"; c4.textContent = notes; tr.appendChild(c4);
           return tr;
         }
         // Task F: honest proxy-pool semantics used by BOTH the Sources source
@@ -3336,7 +3714,7 @@
             const entries = Object.entries(pm).sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 5);
             const row = document.createElement("div"); row.className = "kickoff-row";
             const t = document.createElement("span"); t.className = "kr-t mono"; t.textContent = sport;
-            const s = document.createElement("span"); s.className = "kr-s"; s.textContent = entries.map((e) => e[0] + ":" + e[1]).join(" · ") || "—";
+            const s = document.createElement("span"); s.className = "kr-s"; s.textContent = entries.map((e) => marketLabel(e[0]) + ": " + e[1]).join(" · ") || "—";
             row.append(t, s); pmBox.appendChild(row);
           });
           if (Object.keys(polls).length === 0) {

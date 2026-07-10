@@ -100,7 +100,11 @@ def test_stale_notice_copy() -> None:
 
 def test_required_empty_states() -> None:
     text = _text()
-    assert "Nothing needs attention." in text
+    # Fix 2026-07-10 #10: single clean empty state; the redundant
+    # "Low Evidence" restatements of Qualified Now are no longer queued.
+    assert "Nothing needs attention right now." in text
+    assert "Low Evidence — no premium pick currently qualifies." not in text
+    assert "Low Evidence — sharp evidence insufficient." not in text
     assert "No pick currently qualifies." in text
     assert "Could not load picks." in text
     assert "Could not load games." in text
@@ -140,6 +144,43 @@ def test_state_vocabulary_present() -> None:
     ]
     for s in required:
         assert s in text, s
+
+
+def test_shared_display_formatters_and_row_open() -> None:
+    """Fixes 2026-07-10 #2/#4/#9: ONE shared market-key formatter, a
+    display-only team-typo map (never resolution/alias code), and ONE shared
+    row-open mechanism reusing the Edges hash router."""
+    text = _text()
+    assert "function marketLabel" in text
+    assert '"Moneyline / H2H"' in text
+    assert '"Double Chance"' in text
+    assert '"Both Teams To Score"' in text
+    assert "function eventLabel" in text
+    assert '"Abroath": "Arbroath"' in text
+    assert "function makeRowOpenPick" in text
+    # the router-driven open: navigate to #/edges/<id>, never a second panel
+    assert '"#/edges/" + String(pick.id)' in text
+
+
+def test_quarantine_and_trust_banner_pins() -> None:
+    """Fixes 2026-07-10 #3/#21/#22/#23: quarantined rows stay visible but
+    excluded from rankings; the detail ticket surfaces the untrusted state."""
+    text = _text()
+    assert "function isRankable" in text
+    assert "is-quarantined" in text
+    assert "is-neg-closed" in text
+    assert "Internally inconsistent — excluded, do not bet" in text
+    assert "Untrusted / stale pricing — indicative only, not a recommended bet." in text
+    assert "indicative, unverified" in text
+    assert "informational only — not applicable while untrusted" in text
+
+
+def test_independent_counts_never_joined_with_slash() -> None:
+    """Fix 2026-07-10 #1: n_snapshot_close / n_fallback_close are independent
+    counts — rendered as two labelled values, never "X / Y"."""
+    text = _text()
+    assert "Snapshot vs fallback closes" not in text
+    assert '"snapshot " + (q.n_snapshot_close || 0) + " · fallback "' in text
 
 
 def test_trusted_clv_rule_pins() -> None:
