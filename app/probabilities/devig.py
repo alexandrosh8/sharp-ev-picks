@@ -1,4 +1,5 @@
-"""Vig-stripping: multiplicative, additive, power, and Shin (1993) methods.
+"""Vig-stripping: multiplicative, additive, power, Shin (1993), probit/logit
+shift family, Buchdahl differential margin, and goto_conversion methods.
 
 Pure module (numpy/scipy/stdlib only — NO logging/env/IO side effects; audit
 2026-07-09 removed the per-market logger calls). Method selection per market
@@ -33,6 +34,10 @@ class DevigMethod(StrEnum):
     ODDS_RATIO = "odds_ratio"
     LOGARITHMIC = "logarithmic"
     DIFFERENTIAL_MARGIN = "differential_margin_weighting"
+    # goto_conversion: shrink inverse odds by EQUAL UNITS OF IMPLIED STANDARD
+    # ERROR (favourite-longshot aware). Registered for the pre-registered
+    # single-shot bake-off ONLY (ADR-0021 draft) — never a default anywhere.
+    GOTO = "goto"
 
 
 class DevigFallbackReason(StrEnum):
@@ -51,19 +56,23 @@ class DevigFallbackReason(StrEnum):
     SHIN_UNDERROUND = "shin_underround"
     SHIN_DEGENERATE = "shin_degenerate"
     SHIN_SOLVE_FAILED = "shin_solve_failed"
+    GOTO_NON_POSITIVE = "goto_non_positive"
 
 
 # Documented-EXPECTED fallbacks — the method simply does not apply to the price
 # vector: Shin on the routinely-underround Max-of-books composites (a 46k-match
 # backtest once emitted 154k warning lines before this was demoted), Buchdahl's
-# differential margin on fat-margin longshots, and the degenerate 2-outcome
-# Shin denominator. IO callers should log these at DEBUG, the rest at WARNING.
+# differential margin and goto_conversion's equal-SE shrink on fat-margin
+# longshots (both drive the tail non-positive by construction there), and the
+# degenerate 2-outcome Shin denominator. IO callers should log these at DEBUG,
+# the rest at WARNING.
 EXPECTED_FALLBACKS: frozenset[DevigFallbackReason] = frozenset(
     {
         DevigFallbackReason.SHIN_UNDERROUND,
         DevigFallbackReason.SHIN_DEGENERATE,
         DevigFallbackReason.DIFFERENTIAL_MARGIN_NON_POSITIVE,
         DevigFallbackReason.DIFFERENTIAL_MARGIN_OUT_OF_RANGE,
+        DevigFallbackReason.GOTO_NON_POSITIVE,
     }
 )
 
@@ -158,6 +167,8 @@ def _devig_with_fallback(
         p, reason = _logarithmic(q)
     elif method is DevigMethod.DIFFERENTIAL_MARGIN:
         p, reason = _differential_margin(arr, q)
+    elif method is DevigMethod.GOTO:
+        p, reason = _goto(q)
     else:  # pragma: no cover - enum exhausts
         raise ValueError(f"unknown devig method: {method}")
 
@@ -264,6 +275,37 @@ def _differential_margin(odds: _FloatArray, q: _FloatArray) -> tuple[_FloatArray
     p = denom / (n * odds)
     if np.any(p <= 0.0) or np.any(p >= 1.0):
         return _multiplicative(q), DevigFallbackReason.DIFFERENTIAL_MARGIN_OUT_OF_RANGE
+    return p, None
+
+
+def _goto(q: _FloatArray) -> tuple[_FloatArray, _Fallback]:
+    """goto_conversion: shrink inverse odds by EQUAL UNITS of implied standard
+    error (Kaathan Kulendran, https://github.com/gotoConversion/goto_conversion,
+    MIT — clean-room from the published algorithm, no code vendored).
+
+    Each inverse odd q_i is treated as a probability estimate with implied
+    binomial standard error se_i = sqrt((q_i - q_i^2)/q_i) = sqrt(1 - q_i), and
+    the margin is removed by the SAME multiple of se_i from every outcome:
+
+        p_i = q_i - step*se_i,   step = (sum(q) - 1)/sum(se)   (sum(p) == 1).
+
+    Longshots (small q_i) carry proportionately wider standard errors, so they
+    are shrunk by MORE absolute probability than favourites — the
+    favourite-longshot-aware alternative to a proportional (multiplicative)
+    shrink. Works on underround books too (negative step inflates instead);
+    order is preserved in both directions (for adjacent outcomes a<b the gap is
+    (q_a-q_b)*(1 - |step|/(se_a+se_b)) and |step| < se_a+se_b always holds).
+    On fat-margin longshot books the shrink can drive a tail probability
+    non-positive — the method does not apply there and falls back to
+    multiplicative (same doctrine as the differential-margin denominator),
+    mirroring upstream's ``multiplicativeIfImprudentOdds`` escape hatch."""
+    booksum = q.sum()
+    if abs(booksum - 1.0) < 1e-12:
+        return q.copy(), None
+    se = np.sqrt(1.0 - q)
+    p = q - ((booksum - 1.0) / se.sum()) * se
+    if np.any(p <= 0.0):
+        return _multiplicative(q), DevigFallbackReason.GOTO_NON_POSITIVE
     return p, None
 
 

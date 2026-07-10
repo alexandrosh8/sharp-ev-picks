@@ -112,7 +112,7 @@ def parse_market_devig(raw: str) -> tuple[tuple[str, DevigMethod], ...]:
     """VALUE_DEVIG_PER_MARKET entries as (market_key, DevigMethod) pairs.
 
     Fails FAST (like the other premium knobs) on a method name that is not one
-    of the 8 known DevigMethod values, so a typo in .env can never silently
+    of the 9 known DevigMethod values, so a typo in .env can never silently
     fall through to the global method on the affected markets."""
     out: list[tuple[str, DevigMethod]] = []
     for key, value in _parse_market_map(raw, "VALUE_DEVIG_PER_MARKET"):
@@ -521,7 +521,7 @@ class Settings(BaseSettings):
     # e.g. "over_under_2_5:probit,asian_handicap_-1_5:probit,1x2:shin". Keys are
     # the line-qualified source market (market_detail) or the market family
     # ("h2h","totals",...); most specific wins; unlisted markets keep the global
-    # VALUE_DEVIG. Method names are validated against the 8 DevigMethod values at
+    # VALUE_DEVIG. Method names are validated against the 9 DevigMethod values at
     # startup (a typo fails fast). Empty = DISABLED — every market devigs with
     # VALUE_DEVIG (current behavior, the non-breaking default). The same override
     # flows to the CLV true-up + settlement close pricing so fill and close are

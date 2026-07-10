@@ -119,7 +119,7 @@ class ValuePolicy:
     # devigs with the global method (current behavior, the non-breaking
     # default). Keys are matched line-detail-first then family, exactly like
     # min_edge_by_market (most specific wins). Names are validated against the
-    # 8 DevigMethod values at the composition root (Settings); a bad name fails
+    # 9 DevigMethod values at the composition root (Settings); a bad name fails
     # fast there, never reaching this frozen policy. Different market STRUCTURES
     # devig best with different methods (e.g. probit on symmetric totals/AH;
     # shin/multiplicative on 2-way) — but WHICH method per market is folklore

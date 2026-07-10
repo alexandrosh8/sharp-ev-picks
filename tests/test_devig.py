@@ -28,6 +28,7 @@ ALL_METHODS = [
     DevigMethod.POWER,
     DevigMethod.SHIN,
     DevigMethod.PROBIT,
+    DevigMethod.GOTO,
 ]
 
 
@@ -57,7 +58,7 @@ def test_multiplicative_exact_three_way() -> None:
     assert probs[0] == pytest.approx(0.4 / 1.0573275862068966, rel=1e-12)
 
 
-@pytest.mark.parametrize("method", [DevigMethod.POWER, DevigMethod.SHIN])
+@pytest.mark.parametrize("method", [DevigMethod.POWER, DevigMethod.SHIN, DevigMethod.GOTO])
 def test_longshot_methods_favour_the_favourite(method: DevigMethod) -> None:
     # Power and Shin both correct longshot bias: the favourite keeps MORE
     # probability than multiplicative normalization gives it.
@@ -254,6 +255,105 @@ def test_odds_ratio_and_logarithmic_are_equivalent_methods() -> None:
         a = devig(odds, method=DevigMethod.ODDS_RATIO)
         b = devig(odds, method=DevigMethod.LOGARITHMIC)
         assert a == pytest.approx(b, abs=1e-9)
+
+
+# --- goto_conversion (equal-units-of-standard-error shrink) ----------------- #
+# Published algorithm (https://github.com/gotoConversion/goto_conversion, MIT):
+#   q_i  = 1/odds_i
+#   se_i = sqrt((q_i - q_i^2)/q_i) = sqrt(1 - q_i)
+#   step = (sum(q) - 1) / sum(se)
+#   p_i  = q_i - step*se_i          (sums to 1 exactly, by construction)
+# Longshots (small q) carry the LARGER implied standard error, so they are
+# shrunk by MORE absolute probability — the favourite-longshot-aware property.
+# Golden vectors below are hand-derived from these formulas (arithmetic shown),
+# independently of the implementation.
+
+
+def test_goto_symmetric_two_way_is_half_half() -> None:
+    # [1.9, 1.9]: q = [10/19, 10/19], booksum = 20/19 = 1.0526315789...
+    # se_i = sqrt(1 - 10/19) = sqrt(9/19) = 0.6882472016...
+    # step = (20/19 - 1) / (2*0.6882472016) = 0.0526315789/1.3764944032
+    #      = 0.0382359556...
+    # p_i = 10/19 - 0.0382359556*0.6882472016 = 0.5263157895 - 0.0263157895 = 0.5
+    probs = devig([1.9, 1.9], method=DevigMethod.GOTO)
+    assert probs[0] == pytest.approx(0.5, abs=1e-12)
+    assert probs[1] == pytest.approx(0.5, abs=1e-12)
+
+
+def test_goto_golden_vector_asymmetric_two_way() -> None:
+    # [1.4, 3.2]: q = [0.7142857143, 0.3125], booksum = 1.0267857143
+    # se = [sqrt(0.2857142857), sqrt(0.6875)] = [0.5345224838, 0.8291561976]
+    # step = 0.0267857143 / (0.5345224838 + 0.8291561976)
+    #      = 0.0267857143 / 1.3636786814 = 0.0196422476
+    # p1 = 0.7142857143 - 0.0196422476*0.5345224838 = 0.7142857143 - 0.0104992230
+    #    = 0.7037864913
+    # p2 = 0.3125      - 0.0196422476*0.8291561976 = 0.3125 - 0.0162864913
+    #    = 0.2962135087
+    probs = devig([1.4, 3.2], method=DevigMethod.GOTO)
+    assert probs[0] == pytest.approx(0.7037864913190693, abs=1e-9)
+    assert probs[1] == pytest.approx(0.2962135086809305, abs=1e-9)
+    # Favourite keeps MORE than multiplicative gives it (0.6956521739): the
+    # margin is taken disproportionately from the longshot.
+    mult = devig([1.4, 3.2], method=DevigMethod.MULTIPLICATIVE)
+    assert probs[0] > mult[0] + 5e-3
+
+
+def test_goto_golden_vector_strongly_asymmetric_three_way() -> None:
+    # [1.2, 7.0, 15.0]: q = [0.8333333333, 0.1428571429, 0.0666666667],
+    # booksum = 1.0428571429
+    # se = [sqrt(0.1666666667), sqrt(0.8571428571), sqrt(0.9333333333)]
+    #    = [0.4082482905, 0.9258200998, 0.9660917831]
+    # step = 0.0428571429 / (0.4082482905 + 0.9258200998 + 0.9660917831)
+    #      = 0.0428571429 / 2.3001601734 = 0.0186322428
+    # p1 = 0.8333333333 - 0.0186322428*0.4082482905 = 0.8333333333 - 0.0076065813
+    #    = 0.8257267521
+    # p2 = 0.1428571429 - 0.0186322428*0.9258200998 = 0.1428571429 - 0.0172501049
+    #    = 0.1256070380
+    # p3 = 0.0666666667 - 0.0186322428*0.9660917831 = 0.0666666667 - 0.0180004567
+    #    = 0.0486662100
+    probs = devig([1.2, 7.0, 15.0], method=DevigMethod.GOTO)
+    assert probs[0] == pytest.approx(0.8257267520575725, abs=1e-9)
+    assert probs[1] == pytest.approx(0.1256070379573740, abs=1e-9)
+    assert probs[2] == pytest.approx(0.0486662099850535, abs=1e-9)
+    assert math.isclose(sum(probs), 1.0, abs_tol=1e-9)
+    assert probs[0] > probs[1] > probs[2]  # order-preserving
+    # Must differ MEASURABLY from multiplicative (which gives the 15.0 longshot
+    # 0.0639269406): goto strips over 3x more margin from the tail.
+    mult = devig([1.2, 7.0, 15.0], method=DevigMethod.MULTIPLICATIVE)
+    assert abs(probs[2] - mult[2]) > 0.01
+    assert probs[2] < mult[2]  # tail shrunk, not inflated
+
+
+def test_goto_fair_book_is_identity() -> None:
+    # [2.0, 4.0, 4.0]: booksum exactly 1.0 -> step = 0 -> p = q untouched.
+    probs = devig([2.0, 4.0, 4.0], method=DevigMethod.GOTO)
+    assert probs == pytest.approx([0.5, 0.25, 0.25], abs=1e-12)
+    assert devig_fell_back([2.0, 4.0, 4.0], method=DevigMethod.GOTO) is False
+
+
+def test_goto_underround_book_inflates_without_fallback() -> None:
+    # goto is defined for underround books too (negative step INFLATES, with
+    # the longshot inflated most): [2.2, 2.2] -> 0.5/0.5, no fallback.
+    probs = devig(UNDERROUND_TWO_WAY, method=DevigMethod.GOTO)
+    assert probs[0] == pytest.approx(0.5, abs=1e-12)
+    assert devig_fell_back(UNDERROUND_TWO_WAY, method=DevigMethod.GOTO) is False
+
+
+def test_goto_non_positive_tail_falls_back_to_multiplicative() -> None:
+    # [1.05, 10.0, 100.0]: q = [0.9523809524, 0.1, 0.01], booksum = 1.0623809524
+    # se = [0.2182178902, 0.9486832981, 0.9949874371], sum = 2.1618886254
+    # step = 0.0623809524/2.1618886254 = 0.0288548409
+    # p3 = 0.01 - 0.0288548409*0.9949874371 = 0.01 - 0.0287102042
+    #    = -0.0187102042 <= 0  -> method does not apply; multiplicative fallback.
+    probs, reason = devig_with_diagnostics([1.05, 10.0, 100.0], method=DevigMethod.GOTO)
+    assert reason is DevigFallbackReason.GOTO_NON_POSITIVE
+    assert probs == pytest.approx(
+        devig([1.05, 10.0, 100.0], method=DevigMethod.MULTIPLICATIVE), abs=1e-12
+    )
+    # Fat-margin longshot books are structurally outside the method's domain
+    # (same doctrine as differential-margin's non-positive denominator): the
+    # reason is documented-EXPECTED, debug-grade — not a warning per market.
+    assert reason in EXPECTED_FALLBACKS
 
 
 def test_shin_matches_mberk_shin_golden_vectors() -> None:
