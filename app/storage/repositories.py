@@ -321,6 +321,46 @@ def _is_date_only_midnight(dt: datetime) -> bool:
     return dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0
 
 
+def _league_marker_set(league_name: str | None) -> frozenset[str]:
+    """The {'women','youth','reserve'} markers a LEAGUE label carries.
+
+    Audit 2026-07-11 (NBL1 double-headers): arcadia lists a women's fixture
+    under marker-less club names identical to the men's — the women marker
+    lives ONLY in the league label ("Australia - NBL1 Women"), which the team
+    name marker veto never sees. This derives markers from the league label so
+    that veto family can fire (consume-side) and the mint-time dedup can
+    refuse to merge the double-header's two games (capture-side).
+
+    Reuses matching.py's existing marker VOCABULARY (never a new list), but
+    deliberately EXCLUDES the positional reserve rules that are correct for
+    TEAM names and wrong for league labels: a trailing bare "2"/"3"/"b" and
+    the roman "ii"/"iii" name SENIOR second/third divisions in league labels
+    ("Bundesliga 2", "Serie B", "Liga II", "League 2") — treating them as
+    reserve markers would veto every correct match in those leagues. Only the
+    unambiguous word/age tokens count here.
+    """
+    if not league_name:
+        return frozenset()
+    from app.resolution.matching import (
+        _RESERVE_MARKERS,
+        _WOMEN_MARKERS,
+        _YOUTH_AGE,
+        _YOUTH_WORD_MARKERS,
+        normalize_name,
+    )
+
+    reserve_words = _RESERVE_MARKERS - frozenset({"ii", "iii"})  # words only, no romans
+    out: set[str] = set()
+    for tok in normalize_name(league_name).split():
+        if tok in _WOMEN_MARKERS:
+            out.add("women")
+        elif tok in _YOUTH_WORD_MARKERS or _YOUTH_AGE.match(tok):
+            out.add("youth")
+        elif tok in reserve_words:
+            out.add("reserve")
+    return frozenset(out)
+
+
 async def _resolve_canonical_event(
     session: AsyncSession,
     sport_id: int,
@@ -328,6 +368,7 @@ async def _resolve_canonical_event(
     away_id: int,
     starts_at: datetime,
     external_ref: str,
+    league_markers: frozenset[str] = frozenset(),
 ) -> int | None:
     """Tier-1: the existing canonical event for this fixture (same sport, same
     ORIENTED team pair, kickoff within _RESOLVER_TOLERANCE), or None.
@@ -337,10 +378,22 @@ async def _resolve_canonical_event(
     event_source_links. The link is a best-effort fast-path + audit cache;
     correctness never depends on it — a lost write just means the next cycle
     re-resolves to the SAME id deterministically. Multiple in-window rows are all
-    the same fixture (same oriented ids), so it collapses to the nearest."""
+    the same fixture (same oriented ids), so it collapses to the nearest.
+
+    LEAGUE-MARKER SPLIT (audit 2026-07-11, NBL1 double-headers): the docstring
+    premise "the same two teams cannot start a second meeting within ~2h" is
+    violated by men-plus-women double-headers whose CLUBS share marker-less
+    names — arcadia lists both games 105-120 min apart and this resolver used
+    to merge them into ONE contaminated event row (both games' markets, two
+    totals clusters 30+ points apart). A candidate whose league label
+    DISAGREES with the incoming league on women/youth/reserve markers is a
+    DIFFERENT game — excluded from the merge, never collapsed."""
     rows = (
         await session.execute(
-            select(Event.id, Event.external_ref, Event.starts_at).where(
+            select(Event.id, Event.external_ref, Event.starts_at, League.name)
+            .select_from(Event)
+            .outerjoin(League, Event.league_id == League.id)
+            .where(
                 Event.sport_id == sport_id,
                 Event.home_team_id == home_id,
                 Event.away_team_id == away_id,
@@ -350,10 +403,21 @@ async def _resolve_canonical_event(
             )
         )
     ).all()
-    if not rows:
+    kept = []
+    for eid, ref, kickoff, cand_league in rows:
+        if _league_marker_set(cand_league) != league_markers:
+            logger.info(
+                "event resolve: league-marker split blocks merging %s onto %s "
+                "(candidate league disagrees on women/youth/reserve markers)",
+                external_ref,
+                ref,
+            )
+            continue
+        kept.append((eid, ref, kickoff))
+    if not kept:
         return None
     canon_id, canon_ref, _ = min(
-        rows, key=lambda r: (abs((r[2] - starts_at).total_seconds()), r[0])
+        kept, key=lambda r: (abs((r[2] - starts_at).total_seconds()), r[0])
     )
     canon = await session.get(Event, canon_id)
     if canon is not None:
@@ -384,6 +448,7 @@ async def _resolve_canonical_event_by_pair(
     away_id: int,
     starts_at: datetime,
     external_ref: str,
+    league_markers: frozenset[str] = frozenset(),
 ) -> int | None:
     """Tier-2: the existing canonical event for this fixture matched by the
     NORMALIZED UNORDERED team pair (``fixture_pair_key``) within the sport-aware
@@ -405,7 +470,12 @@ async def _resolve_canonical_event_by_pair(
     several canonicals match, the LOWEST-id one is chosen (deterministic). On a
     hit: upgrade the canonical kickoff (prefer_kickoff) and record the source ref
     in ``event_source_links`` with method ``fixture_pair_key`` — the same
-    best-effort link + return contract as Tier-1."""
+    best-effort link + return contract as Tier-1.
+
+    LEAGUE-MARKER SPLIT: same guard as Tier-1 (audit 2026-07-11) — a candidate
+    whose league label disagrees with the incoming league on women/youth/
+    reserve markers is a double-header's OTHER game, never a duplicate capture,
+    so it is excluded from the merge."""
     # Lazy imports: the pure fixture-pair key + the sport-aware tolerance already
     # proven by the settlement dedup guard. Lazy to keep this module's import
     # graph free of the settlement engine at load time.
@@ -425,10 +495,18 @@ async def _resolve_canonical_event_by_pair(
     home_t, away_t = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
-            select(Event.id, Event.external_ref, Event.starts_at, home_t.name, away_t.name)
+            select(
+                Event.id,
+                Event.external_ref,
+                Event.starts_at,
+                home_t.name,
+                away_t.name,
+                League.name,
+            )
             .select_from(Event)
             .join(home_t, Event.home_team_id == home_t.id)
             .join(away_t, Event.away_team_id == away_t.id)
+            .outerjoin(League, Event.league_id == League.id)
             .where(
                 Event.sport_id == sport_id,
                 Event.external_ref != external_ref,
@@ -438,12 +516,23 @@ async def _resolve_canonical_event_by_pair(
             )
         )
     ).all()
-    matches = [
-        (eid, ref, kickoff)
-        for (eid, ref, kickoff, cand_home, cand_away) in rows
-        if not _is_date_only_midnight(kickoff)  # candidate placeholder excluded
-        and fixture_pair_key(cand_home, cand_away) == target_pair
-    ]
+    matches = []
+    for eid, ref, kickoff, cand_home, cand_away, cand_league in rows:
+        if _is_date_only_midnight(kickoff):  # candidate placeholder excluded
+            continue
+        if fixture_pair_key(cand_home, cand_away) != target_pair:
+            continue
+        if _league_marker_set(cand_league) != league_markers:
+            # double-header split: same club names, marker-disagreeing leagues
+            # (women/youth/reserve) = a DIFFERENT game, never a duplicate.
+            logger.info(
+                "event resolve: league-marker split blocks pair-merging %s onto %s "
+                "(candidate league disagrees on women/youth/reserve markers)",
+                external_ref,
+                ref,
+            )
+            continue
+        matches.append((eid, ref, kickoff))
     if not matches:
         return None
     # Deterministic: lowest-id canonical when several same-fixture rows match.
@@ -562,8 +651,13 @@ async def _get_or_create_event(
     # STAGE 2 — Tier-1 deterministic cross-source resolve. Only with a REAL
     # kickoff: NULL and the date-only-midnight sentinel are unsafe merge keys.
     if starts_at is not None and not _is_date_only_midnight(starts_at):
+        # League-marker context for the double-header split (audit 2026-07-11):
+        # both tiers refuse to merge onto a candidate whose league label
+        # disagrees on women/youth/reserve markers.
+        in_league_name = await session.scalar(select(League.name).where(League.id == league_id))
+        league_markers = _league_marker_set(in_league_name)
         canonical_id = await _resolve_canonical_event(
-            session, sport_id, home_id, away_id, starts_at, external_ref
+            session, sport_id, home_id, away_id, starts_at, external_ref, league_markers
         )
         if canonical_id is not None:
             return canonical_id
@@ -571,7 +665,7 @@ async def _get_or_create_event(
         # fork minted DIFFERENT team ids (Tier-1 exact-id key missed) but the
         # normalized unordered team pair is identical. Same real-kickoff gate.
         canonical_id = await _resolve_canonical_event_by_pair(
-            session, sport_id, home_id, away_id, starts_at, external_ref
+            session, sport_id, home_id, away_id, starts_at, external_ref, league_markers
         )
         if canonical_id is not None:
             return canonical_id
@@ -3081,10 +3175,18 @@ async def resolve_pinnacle_close_snaps(
     window = timedelta(days=max_day_drift + 1)
     rows = (
         await session.execute(
-            select(Event.id, Event.external_ref, home_t.name, away_t.name, Event.starts_at)
+            select(
+                Event.id,
+                Event.external_ref,
+                home_t.name,
+                away_t.name,
+                Event.starts_at,
+                League.name,
+            )
             .join(Sport, Event.sport_id == Sport.id)
             .join(home_t, Event.home_team_id == home_t.id)
             .join(away_t, Event.away_team_id == away_t.id)
+            .outerjoin(League, Event.league_id == League.id)
             .where(
                 Sport.key == pinnacle_sport_key,
                 Event.starts_at.is_not(None),
@@ -3095,7 +3197,7 @@ async def resolve_pinnacle_close_snaps(
     ).all()
     if not rows:
         return []
-    by_ref = {str(eid): (eid, ext, h, a, ko) for eid, ext, h, a, ko in rows}
+    by_ref = {str(eid): (eid, ext, h, a, ko, lg) for eid, ext, h, a, ko, lg in rows}
     candidates = [
         EventCandidate(
             ref=str(eid),
@@ -3103,7 +3205,7 @@ async def resolve_pinnacle_close_snaps(
             away=canonical_tennis_name(a) if is_tennis else a,
             kickoff=ko,
         )
-        for eid, _ext, h, a, ko in rows
+        for eid, _ext, h, a, ko, _lg in rows
     ]
     aliases = default_aliases()
     qhome = canonical_tennis_name(home) if is_tennis else home
@@ -3170,7 +3272,7 @@ async def resolve_pinnacle_close_snaps(
                 select(Event.id).where(Event.external_ref == pick_external_ref)
             )
             if canonical_id is not None:
-                ext_by_ref = {str(eid): ext for eid, ext, _h, _a, _ko in rows}
+                ext_by_ref = {str(eid): ext for eid, ext, _h, _a, _ko, _lg in rows}
                 reviews = [
                     MatchReviewIn(
                         source="pinnacle_arcadia",
@@ -3196,7 +3298,33 @@ async def resolve_pinnacle_close_snaps(
         (_toks(home) | _toks(away)) & (_toks(matched.home) | _toks(matched.away))
     ):
         return []
-    pin_id, pin_ref, pin_home, pin_away, pin_kickoff = by_ref[matched.ref]
+    pin_id, pin_ref, pin_home, pin_away, pin_kickoff, pin_league = by_ref[matched.ref]
+    # LEAGUE-DERIVED MARKER VETO (audit 2026-07-11, TIGHTENING-ONLY): arcadia
+    # lists women's NBL1 double-header fixtures under marker-less club names
+    # identical to the men's — the women marker lives ONLY in the arcadia
+    # league label ("Australia - NBL1 Women"), which the team-name marker veto
+    # never sees, and the 105-120 min double-header drift is inside the 6h
+    # accept bound. Derive markers from the matched event's LEAGUE label and
+    # treat them as if they were on its team names: if the league carries a
+    # women/youth/reserve marker the PICK side's team names lack, the match is
+    # a wrong-game attachment -> REFUSE (fake CLV, the cardinal sin). This can
+    # only ever REJECT matches that previously succeeded, never accept new
+    # ones. Tennis is exempt: fixtures are PERSON-named (no marker-less twin
+    # of the same person exists), and women's-tour league labels ("ITF Women")
+    # would otherwise veto every correct women's tennis close.
+    if not is_tennis:
+        league_only_markers = _league_marker_set(pin_league) - (
+            distinguishing_markers(home) | distinguishing_markers(away)
+        )
+        if league_only_markers:
+            logger.info(
+                "pinnacle close: league-marker veto refused %s -> %s "
+                "(arcadia league carries %s; pick side does not)",
+                pick_external_ref,
+                pin_ref,
+                sorted(league_only_markers),
+            )
+            return []
     # ACCEPTED match: expose the confidence provenance to the caller (per-pick
     # anchor_match_confidence/method) and persist the cross-source link
     # (observability only — a write failure never breaks anchor resolution).
@@ -3936,6 +4064,11 @@ async def persist_pick(
                 if pick.steam_anchor_age_seconds is not None
                 else None
             ),
+            # Task 6 anchor-thinness telemetry (log-only): distinct non-sharp
+            # books quoting the market at mint. Feature-detected — the value
+            # pipeline's ValuePickOut carries it; plain (model-strategy)
+            # PickOut rows stay NULL.
+            anchor_book_count=getattr(pick, "anchor_book_count", None),
             # P2-2: mint-side devig-fallback provenance (close side stamped by the CLV
             # true-up) — the trusted CLV subset drops asymmetric mint/close fallbacks.
             mint_devig_fell_back=pick.mint_devig_fell_back,
@@ -4019,6 +4152,9 @@ async def persist_pick(
             if pick.steam_anchor_age_seconds is not None
             else None
         )
+        # Task 6: the promoting detection's anchor-thinness count replaces the
+        # shadow row's — the row must describe the alert the operator acts on.
+        existing.anchor_book_count = getattr(pick, "anchor_book_count", None)
         # the promoting detection's policy regime replaces the shadow row's: the
         # row now describes the premium alert the operator acts on, so its CLV must
         # attribute to the policy that promoted it (H3).

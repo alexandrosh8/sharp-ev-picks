@@ -34,6 +34,9 @@ not even savepoint-scoped rows are flushed. No config flip, no pick mutation, no
 
     uv run python scripts/research/clv_close_freshness_study.py
     uv run python scripts/research/clv_close_freshness_study.py --limit 50   # smoke
+    # SHADOW per-source sharp-close freshness re-report (report-only; no gate):
+    uv run python scripts/research/clv_close_freshness_study.py \
+        --max-sharp-close-age-minutes 60 120 240
 """
 
 from __future__ import annotations
@@ -259,7 +262,9 @@ def _arc_fair_for_pick(
 # --------------------------------------------------------------------------- #
 # Main study
 # --------------------------------------------------------------------------- #
-async def run_study(limit: int | None) -> str:  # noqa: PLR0912, PLR0915
+async def run_study(  # noqa: PLR0912, PLR0915
+    limit: int | None, freshness_caps: list[float] | None = None
+) -> str:
     from app import storage
     from app.config import get_settings, value_policy
     from app.database import create_engine, create_session_factory
@@ -373,7 +378,7 @@ async def run_study(limit: int | None) -> str:  # noqa: PLR0912, PLR0915
     finally:
         await engine.dispose()
 
-    return _report(rows, n_superseded, n_no_kickoff, devig_method)
+    return _report(rows, n_superseded, n_no_kickoff, devig_method, freshness_caps)
 
 
 # --------------------------------------------------------------------------- #
@@ -389,8 +394,80 @@ def _fmt_p(p: tuple[float, float, float] | None) -> str:
     return f"median {p[1]:.0f}m  [p25 {p[0]:.0f}m, p75 {p[2]:.0f}m]"
 
 
+def _freshness_section(rows: list[Row], caps: list[float]) -> list[str]:
+    """(e) SHADOW per-source sharp-close freshness re-report (report-only).
+
+    Re-reports the STORED-close trusted subset (the exact ``stored_trusted``
+    gate set used in section (c)) excluding rows whose stored sharp close is
+    OLDER than each cap — i.e. ``kickoff - close_snapshot_captured_at`` above
+    ``cap`` minutes. Shadow-first mandate: this is a REPORT ONLY — no
+    production gate, no config flag; nothing here changes which rows enter the
+    live trusted subset."""
+    out: list[str] = []
+    w = out.append
+    trusted = [r for r in rows if r.stored_trusted()]
+    w("--- (e) STORED SHARP-CLOSE FRESHNESS SHADOW (report-only; no gate, no flag) ---")
+    w(f"  trusted subset today (stored close): n={len(trusted)}")
+    if trusted:
+        m, se = _mean_se([r.clv_stored for r in trusted])  # type: ignore[misc]
+        w(f"    baseline trusted CLV (no age cap)          : {m:+.5f} ± {se:.5f} SE")
+    unknown_age = [r for r in trusted if r.stored_close_age_min is None]
+    w(f"  trusted rows with UNKNOWN close age (always excluded under a cap): {len(unknown_age)}")
+    w("")
+    w("  cap_min |    n | mean_clv |      se | excluded_stale (their mean clv)")
+    for cap in caps:
+        fresh = [
+            r
+            for r in trusted
+            if r.stored_close_age_min is not None and r.stored_close_age_min <= cap
+        ]
+        stale = [
+            r
+            for r in trusted
+            if r.stored_close_age_min is not None and r.stored_close_age_min > cap
+        ]
+        stale_note = "n/a"
+        if stale:
+            sm, _ = _mean_se([r.clv_stored for r in stale])  # type: ignore[misc]
+            stale_note = f"{sm:+.5f}"
+        if fresh:
+            fm, fse = _mean_se([r.clv_stored for r in fresh])  # type: ignore[misc]
+            w(
+                f"  {cap:>7.0f} | {len(fresh):>4} | {fm:+.5f} | {fse:.5f} | "
+                f"{len(stale) + len(unknown_age):>3} ({stale_note})"
+            )
+        else:
+            w(
+                f"  {cap:>7.0f} | {len(fresh):>4} |      n/a |     n/a | "
+                f"{len(stale) + len(unknown_age):>3} ({stale_note})"
+            )
+        # per-source (closing_anchor_type) breakdown under this cap
+        by_src: dict[str, list[Row]] = defaultdict(list)
+        for r in trusted:
+            by_src[r.closing_anchor_type or "?"].append(r)
+        for src in sorted(by_src, key=lambda k: -len(by_src[k])):
+            g = by_src[src]
+            g_fresh = [
+                r for r in g if r.stored_close_age_min is not None and r.stored_close_age_min <= cap
+            ]
+            if g_fresh:
+                gm, gse = _mean_se([r.clv_stored for r in g_fresh])  # type: ignore[misc]
+                w(
+                    f"          |      |          |         |   {src}: n={len(g_fresh)}/{len(g)}"
+                    f"  mean {gm:+.5f} ± {gse:.5f} SE"
+                )
+            else:
+                w(f"          |      |          |         |   {src}: n=0/{len(g)}  mean n/a")
+    w("")
+    return out
+
+
 def _report(  # noqa: PLR0912, PLR0915
-    rows: list[Row], n_superseded: int, n_no_kickoff: int, devig_method: DevigMethod
+    rows: list[Row],
+    n_superseded: int,
+    n_no_kickoff: int,
+    devig_method: DevigMethod,
+    freshness_caps: list[float] | None = None,
 ) -> str:
     out: list[str] = []
     w = out.append
@@ -542,6 +619,11 @@ def _report(  # noqa: PLR0912, PLR0915
         f"stored implausible-NEGATIVE edge: {n_stored_neg}"
     )
     w("")
+
+    # ---- (e) stored sharp-close freshness shadow (opt-in) -------------------- #
+    if freshness_caps:
+        out.extend(_freshness_section(rows, freshness_caps))
+
     w("=" * 78)
     w("SHADOW ONLY — no flag flipped, no rows written. Operator signs any flip.")
     w("=" * 78)
@@ -551,8 +633,20 @@ def _report(  # noqa: PLR0912, PLR0915
 async def _main() -> None:
     ap = argparse.ArgumentParser(description="CLV close-freshness shadow study (read-only).")
     ap.add_argument("--limit", type=int, default=None, help="cap settled picks (smoke run)")
+    ap.add_argument(
+        "--max-sharp-close-age-minutes",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="MIN",
+        help=(
+            "SHADOW re-report of the stored-close trusted subset excluding sharp "
+            "closes older than each cap (minutes before kickoff). Report-only: "
+            "no production gate, no config flag."
+        ),
+    )
     args = ap.parse_args()
-    print(await run_study(args.limit))
+    print(await run_study(args.limit, args.max_sharp_close_age_minutes))
 
 
 if __name__ == "__main__":
