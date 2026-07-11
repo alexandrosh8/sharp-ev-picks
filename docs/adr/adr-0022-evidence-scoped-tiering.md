@@ -1,8 +1,9 @@
-# ADR-0022 — Evidence-scoped tiering: pre-registered promotion / kill criteria (DRAFT — awaiting operator signature)
+# ADR-0022 — Evidence-scoped tiering: pre-registered promotion / kill criteria (ACCEPTED)
 
-- **Status:** DRAFT — criteria are binding once the operator signs; written
-  BEFORE the evidence arrives so no future decision re-tunes on observed data.
-- **Date:** 2026-07-10
+- **Status:** ACCEPTED — signed by the operator 2026-07-11 (in-session
+  "proceed" on the decision list). Criteria below are binding; written BEFORE
+  the evidence arrives so no future decision re-tunes on observed data.
+- **Date:** 2026-07-10 (drafted) / 2026-07-11 (signed)
 - **Context:** strategy-revision plan Task 7
   (`docs/superpowers/plans/2026-07-10-strategy-revision.md`). Companion
   evidence: totals post-mortem (`docs/research/2026-07-10-totals-postmortem.md`,
@@ -48,11 +49,19 @@
 7. **No re-tuning on the spent holdout.** Sizing/threshold changes are NEVER
    tuned on seasons 2425+2526; fresh evidence = live shadow or the season
    2627 single-shot (ADR-0023) only.
+8. **BTTS premium-block** (signature-time amendment, 2026-07-11, per the
+   one-time-amendment rule below). BTTS has NO trusted-close instrument
+   (0/70 settled picks; the arcadia namespace structurally lacks BTTS) —
+   premium BTTS picks can never be CLV-validated. BTTS is premium-blocked
+   (`VALUE_MIN_EDGE_PER_MARKET` gains `btts:0.99`, demote-not-drop).
+   Re-promote ONLY when a verifiable independent sharp-close source for BTTS
+   exists AND trusted BTTS CLV 95% CI > 0 at n ≥ 50.
 
 ## Signature
 
-- Operator: ______________________  Date: ____________
+- Operator: **SIGNED — Alexis (operator), 2026-07-11**, via in-session
+  directive: "proceed Decisions waiting on you — 1. Sign ADR-0022 (tier
+  criteria) … 2. btts:0.99 premium-block … say the word." The btts block is
+  the operator's one-time signature amendment (criterion 8).
 
-Until signed, every criterion above still binds Claude-side work (nothing may
-promote/flip without it), but the operator may amend thresholds ONCE at
-signature time; after signature, amendments require a new ADR.
+After this signature, amendments require a new ADR.
