@@ -50,3 +50,6 @@ docker-compose.override.yml
 
 # Throwaway analysis/scratch scripts (workflow agents write here; never shipped)
 scratchpad/
+
+# Database backups (scripts/backup_db.sh — local dumps, never committed)
+backups/

@@ -239,25 +239,18 @@ CLV confirms the holdout evidence — scores then show on the dashboard rows
 ## 5. Backups
 
 The odds-snapshot archive is the irreplaceable asset (NBA closing lines
-cannot be re-fetched — ADR-0010). One-time:
+cannot be re-fetched — ADR-0010).
 
-```bash
-sudo mkdir -p /opt/backups
-sudo chown $USER /opt/backups
-```
+Backups are handled by `scripts/backup_db.sh` (nightly `pg_dump -Fc` of the
+compose postgres service, UTC-timestamped files, 14-day rotation with a
+guarded delete, `--verify` via `pg_restore --list`). Full runbook —
+manual run, crontab line, restore-into-scratch-then-swap procedure,
+retention, same-host warning: **[db-backup.md](db-backup.md)**.
 
-Cron (note `-T`: cron has no TTY and `compose exec` fails without it; `%` is
-escaped because cron expands it; `-Fc` = compressed custom format):
+Quick reference (host crontab, 03:17 UTC nightly):
 
 ```cron
-15 03 * * * docker compose -f /opt/betting-ai/docker-compose.yml exec -T postgres pg_dump -U betting_ai -Fc betting_ai > /opt/backups/betting_ai_$(date -u +\%Y\%m\%dT\%H\%M\%SZ).dump
-45 03 * * * find /opt/backups -name 'betting_ai_*.dump' -mtime +14 -delete
-```
-
-Restore (test this once — an untested backup is not a backup):
-
-```bash
-docker compose exec -T postgres pg_restore -U betting_ai -d betting_ai --clean < /opt/backups/betting_ai_<stamp>.dump
+17 3 * * * /usr/bin/env bash /workspace/scripts/backup_db.sh >> /workspace/backups/backup.log 2>&1
 ```
 
 Push dumps off-box (rsync/rclone to anywhere) — the VPS disk is a single
