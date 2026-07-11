@@ -20,6 +20,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -398,6 +399,16 @@ class Pick(Base):
     steam_reasons: Mapped[str | None] = mapped_column(String(64))
     steam_closed_fraction: Mapped[Decimal | None] = mapped_column(METRIC)
     steam_anchor_age_seconds: Mapped[Decimal | None] = mapped_column(METRIC)
+    # ANCHOR-THINNESS TELEMETRY (Task 6, log-only — nothing gates on it): the
+    # count of distinct NON-SHARP books quoting the pick's devig market group
+    # at mint — exactly the number the thin-coverage floor (value_policy.
+    # distinct_book_count, sharp set excluded) measures. Where the anchor's
+    # own market is thin, a large "edge vs anchor" is usually fake (arbusers
+    # community evidence); telemetry accrues until a walk-forward review
+    # defines a threshold (never tuned on the spent holdout). The AGE half of
+    # anchor thinness is already carried by steam_anchor_age_seconds above.
+    # NULL = model-strategy pick or pre-column row. Additive + nullable.
+    anchor_book_count: Mapped[int | None] = mapped_column(SmallInteger)
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)

@@ -87,6 +87,53 @@ def uncertainty_multiplier(base: float, edge_variance: float, coef: float) -> fl
     return base / (1.0 + coef * edge_variance)
 
 
+@dataclass(frozen=True)
+class UncertaintyShrinkPolicy:
+    """Uncertainty-shrink policy (Task 5, strategy-revision plan 2026-07-10);
+    constructed from Settings at the composition root only.
+
+    ``enabled`` False (the default) keeps the final stake bit-for-bit
+    unchanged — phi/n_eff/shrunk_fraction are SHADOW annotations on the
+    stake breakdown. Flipping it on is gated by the ADR-0022 pre-registered
+    review (30 days of shadow annotations), never by observed-data tuning.
+    """
+
+    enabled: bool = False
+    kappa: float = 50.0
+
+    def __post_init__(self) -> None:
+        if self.kappa <= 0.0:
+            raise ValueError(f"kappa must be > 0, got {self.kappa}")
+
+
+def uncertainty_phi(n_eff: int, kappa: float) -> float:
+    """Sample-size shrink weight phi = n_eff / (n_eff + kappa) in [0, 1).
+
+    Bayesian-Kelly pattern (Baker & McHale 2013; Uhrín 2021 ruin evidence):
+    an edge estimated on few settled trusted-CLV samples deserves a smaller
+    Kelly multiplier. phi is 0 at n_eff == 0, exactly 0.5 at n_eff == kappa
+    (half-weight), monotonically increasing, and -> 1 only as n_eff -> inf.
+    """
+    if kappa <= 0.0:
+        raise ValueError(f"kappa must be > 0, got {kappa}")
+    if n_eff < 0:
+        raise ValueError(f"n_eff must be >= 0, got {n_eff}")
+    return n_eff / (n_eff + kappa)
+
+
+def uncertainty_shrink(fraction: float, n_eff: int, kappa: float) -> float:
+    """Kelly fraction shrunk for SMALL-SAMPLE edge evidence: fraction * phi.
+
+    Never negative, never larger than ``fraction``; equals ``fraction / 2``
+    at ``n_eff == kappa``. Pure and informational — the caller decides
+    (via :class:`UncertaintyShrinkPolicy`) whether it ever reaches the
+    recommended stake; by default it is a shadow annotation only.
+    """
+    if fraction < 0.0:
+        raise ValueError(f"fraction must be >= 0, got {fraction}")
+    return fraction * uncertainty_phi(n_eff, kappa)
+
+
 def correlation_haircut(n_legs: int, avg_correlation: float) -> float:
     """Diversification haircut on a per-leg Kelly fraction for CORRELATED same-slate
     bets (B7). Independent Kelly sizes each leg as if uncorrelated, which OVERBETS

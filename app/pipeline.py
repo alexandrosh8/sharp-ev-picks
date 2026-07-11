@@ -13,7 +13,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
@@ -48,7 +48,15 @@ from app.probabilities.devig import (
     devig_with_diagnostics,
 )
 from app.risk.exposure import DailyExposureLedger
-from app.risk.staking import StakeBreakdown, StakePolicy, recommended_stake, stake_amount
+from app.risk.staking import (
+    StakeBreakdown,
+    StakePolicy,
+    UncertaintyShrinkPolicy,
+    recommended_stake,
+    stake_amount,
+    uncertainty_phi,
+    uncertainty_shrink,
+)
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
@@ -348,6 +356,49 @@ SteamHistoryLoader = Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[Sequenc
 #: log) and NEVER blocks minting.
 StalenessVerdictLoader = Callable[[str], Awaitable[Mapping[str, str]]]
 
+#: Task 5 n_eff source (PipelineDeps.stake_neff_lookup): SYNCHRONOUS, CHEAP
+#: (cached/pre-aggregated — NEVER a per-pick blocking query) lookup of the
+#: settled trusted-CLV sample count for a (strategy, sport, market) cell.
+#: None (the default, and the honest fallback when a cell is unknown) means
+#: the shadow annotation records n_eff=None / phi=None — never fabricated.
+#: Bound at the composition root; stubbed in tests. A lookup failure is
+#: isolated (type-only log) and NEVER blocks minting.
+NEffLookup = Callable[[str, str, str], int | None]
+
+
+class ShrinkAnnotatedStakeBreakdownOut(StakeBreakdownOut):
+    """StakeBreakdownOut + the Task 5 uncertainty-shrink SHADOW annotation.
+
+    Extends the contract model WITHOUT changing app/schemas/picks.py: pydantic
+    keeps subclass instances as-is (revalidate_instances default), and
+    persist_pick serializes via ``pick.stake_breakdown.model_dump()``, so the
+    persisted JSON gains ``{"phi", "n_eff", "shrunk_fraction"}``. All three
+    stay None when no n_eff source is wired — honest, never fabricated.
+    ``final`` is UNCHANGED unless UncertaintyShrinkPolicy.enabled (default
+    off; flipping it is gated by the ADR-0022 pre-registered review).
+    """
+
+    phi: float | None = None
+    n_eff: int | None = None
+    shrunk_fraction: float | None = None
+
+
+class ValuePickOut(PickOut):
+    """PickOut + value-strategy mint telemetry (Task 6, log-only).
+
+    Same subclass pattern as ShrinkAnnotatedStakeBreakdownOut: the schema
+    contract module is untouched; persist_pick feature-detects the extra
+    attribute (getattr default None), so model-strategy picks and pre-column
+    rows stay NULL.
+    """
+
+    # Distinct NON-SHARP books quoting this pick's devig market group at mint
+    # (exactly the thin-coverage floor's number — value_policy.
+    # distinct_book_count with the sharp set excluded, so injected sharp
+    # anchor lines never inflate it). Anchor-thinness telemetry ONLY: nothing
+    # gates on it; the age half is already covered by steam_anchor_age_seconds.
+    anchor_book_count: int | None = None
+
 
 @dataclass
 class PipelineDeps:
@@ -448,9 +499,59 @@ class PipelineDeps:
     # -> consensus, fail-closed). Failure is isolated: empty map + type-only
     # log, NEVER blocks minting. Wired at the composition root; tests stub it.
     staleness_verdict_loader: StalenessVerdictLoader | None = None
+    # Task 5 uncertainty-shrink policy (SHADOW by default: enabled False keeps
+    # the final stake bit-for-bit unchanged; phi/n_eff/shrunk_fraction only
+    # ANNOTATE stake_breakdown). Built from Settings at the composition root
+    # (app/config.uncertainty_shrink_policy).
+    stake_shrink: UncertaintyShrinkPolicy = UncertaintyShrinkPolicy()
+    # Task 5 n_eff source (see NEffLookup above). None (default) => the shadow
+    # annotation records n_eff=None/phi=None — no hot-path queries, ever.
+    stake_neff_lookup: NEffLookup | None = None
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
+
+
+def _shrink_annotated(
+    deps: "PipelineDeps",
+    breakdown: StakeBreakdown,
+    strategy: str,
+    sport_key: str,
+    market: str,
+) -> tuple[StakeBreakdown, int | None, float | None, float | None]:
+    """Task 5 uncertainty-shrink SHADOW annotation for one staking decision.
+
+    Returns ``(breakdown, n_eff, phi, shrunk_fraction)``. n_eff is the
+    (strategy, sport, market) cell's settled trusted-CLV count from the cheap
+    cached lookup (deps.stake_neff_lookup); when the lookup is unwired,
+    returns None, or fails (isolated, type-only log) the annotation is
+    honestly ``(breakdown, None, None, None)`` — never fabricated, never a
+    hot-path query. ``breakdown`` is returned UNCHANGED unless
+    deps.stake_shrink.enabled (default OFF — ADR-0022 gated), in which case
+    ``final`` becomes ``min(shrunk_fraction, final)`` (the shrink can only
+    ever lower a stake, never raise one).
+    """
+    n_eff: int | None = None
+    if deps.stake_neff_lookup is not None:
+        try:
+            n_eff = deps.stake_neff_lookup(strategy, sport_key, market)
+        except Exception as exc:  # annotation must NEVER break minting
+            logger.error(
+                "stake n_eff lookup failed for %s/%s/%s: %s",
+                strategy,
+                sport_key,
+                market,
+                type(exc).__name__,
+            )
+            n_eff = None
+    if n_eff is None:
+        return breakdown, None, None, None
+    kappa = deps.stake_shrink.kappa
+    phi = uncertainty_phi(n_eff, kappa)
+    shrunk = uncertainty_shrink(breakdown.fractional, n_eff, kappa)
+    if deps.stake_shrink.enabled:
+        breakdown = replace(breakdown, final=min(shrunk, breakdown.final))
+    return breakdown, n_eff, phi, shrunk
 
 
 async def _persist_snapshots(
@@ -601,6 +702,11 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             breakdown = recommended_stake(
                 prediction.probability, decision.effective_odds, deps.stake_policy
             )
+            # Task 5 uncertainty-shrink SHADOW annotation (default: final
+            # unchanged; phi/n_eff/shrunk ride stake_breakdown only).
+            breakdown, shrink_n_eff, shrink_phi, shrunk_fraction = _shrink_annotated(
+                deps, breakdown, "model", sport_key, str(snap.market)
+            )
 
             event_label = snap.event_id
             if deps.directory is not None:
@@ -633,12 +739,16 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 confidence=prediction.confidence,
                 recommended_stake_fraction=breakdown.final,
                 recommended_stake_amount=stake_amount(breakdown.final, deps.bankroll),
-                stake_breakdown=StakeBreakdownOut(
+                stake_breakdown=ShrinkAnnotatedStakeBreakdownOut(
                     raw_kelly=breakdown.raw_kelly,
                     fractional=breakdown.fractional,
                     capped=breakdown.capped,
                     final=breakdown.final,
                     daily_clipped=False,
+                    # Task 5 SHADOW annotation (all None when no n_eff source).
+                    phi=shrink_phi,
+                    n_eff=shrink_n_eff,
+                    shrunk_fraction=shrunk_fraction,
                 ),
                 odds_age_seconds=max(candidate.odds_age_seconds, 0.0),
                 liquidity=snap.liquidity,
@@ -1429,6 +1539,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_dc_rejected = 0
     n_moneyline_capped = 0
     n_sanity_demoted = 0
+    # Task 8 probe (Buchalter bet-volume smoke detector, log-only): market
+    # groups that reached the value scan this cycle (anchored fair present).
+    n_eligible_markets = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
     # min() guards a deps-level inversion (Settings already validates the
     # ordering at startup) so a bad override can widen nothing. Per-market
@@ -1485,14 +1598,21 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         # Per-market book-count floor (default 0 = off): a market quoted by
         # too few books is skipped wholesale — scaffolding for new lines/
         # divisions where thin coverage makes the anchor untrustworthy.
+        # Task 6 anchor-thinness telemetry: the SAME distinct-soft-book count
+        # the thin-coverage floor gates on, hoisted so every minted pick can
+        # persist it (log-only — nothing new gates on it).
+        anchor_book_count = distinct_book_count(prices, exclude=_sharp_norm)
         min_books = min_books_for(deps.value_policy, str(market), detail)
-        if min_books and distinct_book_count(prices, exclude=_sharp_norm) < min_books:
+        if min_books and anchor_book_count < min_books:
             n_thin_books += 1
             continue
         anchored = fair.get((event_id, market, detail))
         if anchored is None:
             continue  # no trustworthy fair value for this market
         anchor_book, fair_by_sel = anchored
+        # Buchalter bet-volume smoke detector (Task 8 probe, log-only): this
+        # group reached the value scan — an ELIGIBLE market this cycle.
+        n_eligible_markets += 1
         value_bets = find_value_bets_with_fair(
             prices,
             fair_by_sel,
@@ -1792,6 +1912,11 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             breakdown = recommended_stake(
                 v.sharp_fair_prob, v.best_odds_effective, deps.stake_policy
             )
+            # Task 5 uncertainty-shrink SHADOW annotation (default: final
+            # unchanged; phi/n_eff/shrunk ride stake_breakdown only).
+            breakdown, shrink_n_eff, shrink_phi, shrunk_fraction = _shrink_annotated(
+                deps, breakdown, "value", sport_key, str(market)
+            )
             # Named sharp anchors are backtested; consensus anchors are the
             # fallback path with weaker evidence — reflected in confidence.
             confidence = 0.7 if v.sharp_book == CONSENSUS_ANCHOR else 0.9
@@ -1820,7 +1945,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             anchor_staleness_decision = (
                 staleness_verdicts.get(event_id) if market is Market.H2H else None
             )
-            pick = PickOut(
+            pick: PickOut = ValuePickOut(
                 pick_id=str(uuid.uuid4()),
                 sport=sport_key,  # one deps serves soccer AND basketball polls
                 league=league_label,
@@ -1842,13 +1967,20 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 confidence=confidence,
                 recommended_stake_fraction=breakdown.final,
                 recommended_stake_amount=stake_amount(breakdown.final, deps.bankroll),
-                stake_breakdown=StakeBreakdownOut(
+                stake_breakdown=ShrinkAnnotatedStakeBreakdownOut(
                     raw_kelly=breakdown.raw_kelly,
                     fractional=breakdown.fractional,
                     capped=breakdown.capped,
                     final=breakdown.final,
                     daily_clipped=False,
+                    # Task 5 SHADOW annotation (all None when no n_eff source).
+                    phi=shrink_phi,
+                    n_eff=shrink_n_eff,
+                    shrunk_fraction=shrunk_fraction,
                 ),
+                # Task 6 anchor-thinness telemetry (log-only; the age half is
+                # steam_anchor_age_seconds below).
+                anchor_book_count=anchor_book_count,
                 odds_age_seconds=age,
                 liquidity=None,
                 reason_summary=(
@@ -2065,6 +2197,18 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         sport_key,
         n_premium,
         n_volume,
+    )
+    # Buchalter bet-volume smoke detector (Task 8 probe): one INFO line per
+    # cycle — picks minted / events evaluated / eligible markets. Log-only:
+    # no persistence, no alerting, no thresholds; a drifting minted-to-
+    # eligible ratio is the smoke a future review inspects.
+    logger.info(
+        "value pipeline %s bet-volume probe: %d pick(s) minted / "
+        "%d event(s) evaluated / %d eligible market(s)",
+        sport_key,
+        len(picks),
+        len({key[0] for key in grouped} - started),
+        n_eligible_markets,
     )
     if n_steam_demoted:
         # ENFORCING steam gate: premium candidates demoted because the soft price

@@ -129,4 +129,4 @@ def test_alembic_graph_has_single_head() -> None:
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["c3d5e7f9a1b4"]  # picks.market_detail mint stamp (2026-07-10)
+    assert heads == ["a9d2c4e6f8b1"]  # picks.anchor_book_count telemetry (2026-07-11)

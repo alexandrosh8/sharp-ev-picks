@@ -17,7 +17,7 @@ from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import ScraperProxy
 from app.probabilities.devig import DevigMethod
 from app.risk.exposure import DailyExposureLedger
-from app.risk.staking import StakePolicy
+from app.risk.staking import StakePolicy, UncertaintyShrinkPolicy
 
 # leagues=all scrapes oddsportal's WORLDWIDE daily pages — typically 100-300+
 # matches/day vs a league's ~10 — and every market key costs one browser tab
@@ -625,6 +625,17 @@ class Settings(BaseSettings):
     # without the evidence protocol above.
     stake_max_drawdown: float | None = Field(default=None, gt=0.0, lt=1.0)
     stake_max_drawdown_probability: float | None = Field(default=None, gt=0.0, lt=1.0)
+
+    # --- Uncertainty-shrunk Kelly (Task 5, SHADOW annotation — ships OFF) ----
+    # phi = n_eff / (n_eff + kappa) where n_eff is the pick's (strategy,
+    # sport, market) cell's settled trusted-CLV count (Baker-McHale 2013;
+    # Bayesian-Kelly). Default OFF: phi/n_eff/shrunk_fraction ride the
+    # stake_breakdown JSON as annotations only — the recommended stake is
+    # bit-for-bit unchanged. Enabling (final = min(shrunk, plain final)) is
+    # gated by the ADR-0022 pre-registered 30-day shadow review; never tune
+    # kappa on the spent holdout.
+    stake_uncertainty_shrink_enabled: bool = False
+    stake_uncertainty_kappa: float = Field(default=50.0, gt=0.0)
 
     # --- Bankroll ledger (A8, informational only — ships OFF) -----------------
     # Manual HYPOTHETICAL bankroll tracking: a starting balance plus running
@@ -1538,6 +1549,18 @@ def stake_policy(settings: Settings) -> StakePolicy:
         # 0.25x/2% path, numerically unchanged) — see Settings comments.
         max_drawdown=settings.stake_max_drawdown,
         max_drawdown_probability=settings.stake_max_drawdown_probability,
+    )
+
+
+def uncertainty_shrink_policy(settings: Settings) -> UncertaintyShrinkPolicy:
+    """Task 5 uncertainty-shrink policy (SHADOW by default) from Settings.
+
+    Composition-root builder, mirroring stake_policy above — the pure risk
+    module never reads env/config itself.
+    """
+    return UncertaintyShrinkPolicy(
+        enabled=settings.stake_uncertainty_shrink_enabled,
+        kappa=settings.stake_uncertainty_kappa,
     )
 
 
