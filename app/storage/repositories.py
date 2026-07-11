@@ -1763,6 +1763,67 @@ def _close_coverage_by_sport_market(
 #: to see a drift, short enough that one SELECT stays cheap.
 STEAM_WEEKLY_WINDOW_WEEKS = 8
 
+#: Claims-ledger ETA (2026-07-11): the trusted-close RATE is measured over this
+#: many TRAILING settled premium picks — recent enough to reflect the current
+#: capture pipeline, wide enough not to whipsaw on one weekend.
+TRUSTED_CLOSE_RATE_WINDOW = 30
+
+#: Below this many settled premium picks in the rate window the trusted-close
+#: rate — and everything projected from it — is nulled honestly.
+TRUSTED_CLOSE_RATE_MIN_N = 10
+
+
+def _trusted_close_eta(
+    settled_premium: Sequence[tuple[datetime | None, bool]],
+    *,
+    n_trusted: int,
+    floor: int,
+    open_kickoffs: Sequence[datetime | None],
+    now: datetime,
+    window: int = TRUSTED_CLOSE_RATE_WINDOW,
+    min_rate_n: int = TRUSTED_CLOSE_RATE_MIN_N,
+) -> dict[str, Any]:
+    """ "When will the trusted-close tile move?" — pure (no DB).
+
+    ``settled_premium`` are (settled_at, close_is_trusted) pairs over ALL
+    settled premium picks (trust = the same ``_settled_close_is_trusted``
+    predicate as the headline, applied by the caller); ``open_kickoffs`` are
+    the kickoff times of OPEN (alerted, pre-kickoff) premium picks.
+
+    Components (each nulled honestly when it cannot be computed):
+      - ``last_trusted_settled_at`` — the newest trusted-close settle time;
+      - ``trusted_rate`` — trusted-close fraction over the trailing ``window``
+        settled premium picks; None below ``min_rate_n``;
+      - ``projected_days`` — days until the ``floor`` is reached, projected by
+        walking the open picks' kickoffs in order and crediting ``trusted_rate``
+        expected trusted closes per kickoff. None when the rate is unknown or
+        zero, the floor is already met, or the open pipeline is too thin to
+        reach it (the projection never extrapolates past real open picks — a
+        kickoff-anchored FLOOR estimate, since settlement follows kickoff).
+    """
+    dated = sorted((s, t) for s, t in settled_premium if s is not None)
+    last_trusted = max((s for s, t in dated if t), default=None)
+    recent = dated[-window:]
+    trusted_rate: float | None = None
+    if len(recent) >= min_rate_n:
+        trusted_rate = sum(1 for _s, t in recent if t) / len(recent)
+    remaining = floor - n_trusted
+    projected_days: float | None = None
+    if trusted_rate is not None and trusted_rate > 0.0 and remaining > 0:
+        need = math.ceil(remaining / trusted_rate)
+        future = sorted(k for k in open_kickoffs if k is not None)
+        if len(future) >= need:
+            projected_days = max(0.0, (future[need - 1] - now).total_seconds() / 86400.0)
+    return {
+        "last_trusted_settled_at": last_trusted.isoformat() if last_trusted else None,
+        "open_premium": len(open_kickoffs),
+        "trusted_rate": trusted_rate,
+        "n_rate_window": len(recent),
+        "rate_window": window,
+        "projected_days": projected_days,
+    }
+
+
 #: The steam_shadow settled split carries ONLY the trusted-sharp evidence
 #: fields of _aggregate_settled — the same trust guards + MIN_HEADLINE_N
 #: suppression as every other aggregate (below the floor the payload carries
@@ -1887,6 +1948,9 @@ async def performance_report(
     if steam_attr is not None:
         steam_idx = len(select_cols)
         select_cols.append(steam_attr)
+    # Claims-ledger ETA clock: when did each pick settle (trusted-rate window).
+    settled_at_idx = len(select_cols)
+    select_cols.append(ResultTracking.settled_at)
     rows = (
         await session.execute(
             select(*select_cols)
@@ -1944,6 +2008,47 @@ async def performance_report(
     premium = _aggregate_settled(_tier_rows("premium"))
     volume = _aggregate_settled(_tier_rows("volume"))
     volume["n_pending"] = pending_by_tier.get("volume", 0)
+
+    # Claims-ledger ETA (2026-07-11): "when will the trusted-close tile move?"
+    # Per-row trust reuses the standalone headline predicate so the rate can
+    # never diverge from n_sharp_close's trust definition.
+    def _row_close_trusted(r: Any) -> bool:
+        return _settled_close_is_trusted(
+            clv_log=r[3],
+            closing_anchor=r[close_anchor_idx] if close_anchor_idx is not None else None,
+            close_independent=r[indep_idx] if indep_idx is not None else None,
+            has_snapshot_close=r[snapshot_idx] if snapshot_idx is not None else None,
+            decimal_odds=r[8],
+            closing_fair_probability=r[9],
+            model_probability=r[10],
+            mint_devig_fell_back=r[mint_fb_idx] if mint_fb_idx is not None else None,
+            close_devig_fell_back=r[close_fb_idx] if close_fb_idx is not None else None,
+        )
+
+    now = datetime.now(tz=UTC)
+    open_kickoffs = list(
+        (
+            await session.execute(
+                select(Event.starts_at)
+                .join(Pick, Pick.event_id == Event.id)
+                .where(
+                    Pick.status == "alerted",
+                    Pick.tier == "premium",
+                    Event.starts_at.is_not(None),
+                    Event.starts_at > now,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    trusted_close_eta = _trusted_close_eta(
+        [(r[settled_at_idx], _row_close_trusted(r)) for r in rows if r[5] == "premium"],
+        n_trusted=int(premium["n_sharp_close"]),
+        floor=MIN_HEADLINE_N,
+        open_kickoffs=open_kickoffs,
+        now=now,
+    )
     # PER-SPORT split (Batch 3): TIER-AGNOSTIC — spans premium + the volume/shadow
     # tier so an experimental sport (basketball, currently all-shadow) accrues its
     # own forward CLV/ROI evidence. Each sport is gated on its OWN n inside
@@ -2018,6 +2123,7 @@ async def performance_report(
         "close_coverage_sla": close_coverage,
         "clv_quality": clv_quality,
         "steam_shadow": steam_shadow,
+        "trusted_close_eta": trusted_close_eta,
     }
 
 
@@ -2176,7 +2282,7 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
     indep_attr = getattr(Pick, "close_independent_of_fill", None)
     mint_fb_attr = getattr(Pick, "mint_devig_fell_back", None)  # P2-2 provenance
     close_fb_attr = getattr(Pick, "close_devig_fell_back", None)
-    columns = [
+    columns: list[Any] = [
         Pick.tier,  # 0
         Pick.value_filter_score,  # 1
         Pick.clv_log,  # 2
@@ -2220,6 +2326,9 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
     # decimal_odds: the fabricated-CLV guard input (mirror of _clv_row_is_fabricated).
     decimal_odds_idx = len(columns)
     columns.append(Pick.decimal_odds)
+    # minted_at (Pick.created_at): the ADR-0022 pre-/post-selection-fix cohort key.
+    minted_at_idx = len(columns)
+    columns.append(Pick.created_at)
     rows = (
         await session.execute(
             select(*columns)
@@ -2259,6 +2368,8 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             # P2-2 devig-fallback provenance (feature-detected; None = symmetric).
             mint_devig_fell_back=row[mint_fb_idx] if mint_fb_idx is not None else None,
             close_devig_fell_back=row[close_fb_idx] if close_fb_idx is not None else None,
+            # ADR-0022 cohort key (TIMESTAMPTZ — always UTC-aware from the DB).
+            minted_at=row[minted_at_idx],
         )
         for row in rows
     ]

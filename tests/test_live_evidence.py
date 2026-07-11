@@ -6,13 +6,16 @@ every stratum carries n, sub-min_n strata are flagged insufficient.
 """
 
 import math
+from datetime import datetime, timedelta
 
 import pytest
 
 from app.backtesting.live_evidence import (
     MIN_STRATUM_N,
+    PREMIUM_SELECTION_FIX_AT,
     SettledPickRow,
     live_evidence_report,
+    mc_null_record,
     meta_model_calibration,
 )
 
@@ -34,6 +37,7 @@ def row(
     mint_fell_back: bool | None = None,
     close_fell_back: bool | None = None,
     decimal_odds: float | None = None,
+    minted_at: datetime | None = None,
 ) -> SettledPickRow:
     return SettledPickRow(
         decimal_odds=decimal_odds,
@@ -52,6 +56,7 @@ def row(
         model_probability=model_prob,
         mint_devig_fell_back=mint_fell_back,
         close_devig_fell_back=close_fell_back,
+        minted_at=minted_at,
     )
 
 
@@ -682,3 +687,144 @@ def test_new_report_keys_present_and_nulled_on_empty_report() -> None:
     assert rep["evidence_verdict"].startswith(
         "evidence insufficient to judge profitability at current n"
     )
+    # ADR-0022 crit 3/4 cohorts + the MC null probe ride the same empty report
+    cohorts = tc["premium_cohorts"]
+    assert cohorts["pre_fix"]["n"] == 0
+    assert cohorts["post_fix"]["n"] == 0
+    assert cohorts["pre_fix"]["sufficient"] is False
+    assert rep["mc_null"] == {"n": 0, "observed_units": None, "p_luck": None, "sims": 10_000}
+
+
+# ===== ADR-0022 crit 3/4 (2026-07-11): post-fix premium cohort split ============
+
+
+def trusted_minted(clv: float, minted_at: datetime, tier: str = "premium") -> SettledPickRow:
+    return row(
+        tier=tier,
+        clv=clv,
+        closing_anchor="pinnacle",
+        has_snapshot=True,
+        close_independent=True,
+        minted_at=minted_at,
+    )
+
+
+def test_premium_cohorts_split_on_the_selection_fix_boundary() -> None:
+    # ADR-0022 crit 3: the post-fix cohort is picks minted AFTER 2026-07-07;
+    # crit 4 requires the split reported. Boundary semantics: minted exactly at
+    # the boundary instant is POST-fix (>=), before it is PRE-fix.
+    pre = [
+        trusted_minted(0.02, PREMIUM_SELECTION_FIX_AT - timedelta(hours=1 + i)) for i in range(6)
+    ]
+    post = [
+        trusted_minted(-0.01, PREMIUM_SELECTION_FIX_AT + timedelta(hours=i)) for i in range(6)
+    ]  # i=0 = exactly the boundary -> post_fix
+    tc = live_evidence_report(pre + post, ml_threshold=None, min_n=5)["trusted_clv_ci"]
+    cohorts = tc["premium_cohorts"]
+    assert cohorts["pre_fix"]["n"] == 6
+    assert cohorts["pre_fix"]["sufficient"] is True
+    assert cohorts["pre_fix"]["mean_clv_log"] == pytest.approx(0.02)
+    assert cohorts["post_fix"]["n"] == 6
+    assert cohorts["post_fix"]["mean_clv_log"] == pytest.approx(-0.01)
+    # same entry shape as the tier entries
+    assert set(cohorts["pre_fix"]) == set(tc["by_tier"]["premium"])
+
+
+def test_premium_cohorts_premium_trusted_only_and_nulled_below_floor() -> None:
+    rows = [
+        trusted_minted(0.02, PREMIUM_SELECTION_FIX_AT - timedelta(days=1)),
+        trusted_minted(0.02, PREMIUM_SELECTION_FIX_AT - timedelta(days=2)),
+        # volume-tier trusted row: never enters the PREMIUM cohorts
+        trusted_minted(0.9, PREMIUM_SELECTION_FIX_AT - timedelta(days=1), tier="volume"),
+        # untrusted premium row (consensus close): never enters
+        row(
+            clv=0.9,
+            closing_anchor="consensus",
+            has_snapshot=True,
+            minted_at=PREMIUM_SELECTION_FIX_AT,
+        ),
+        # unknown mint time: excluded from BOTH cohorts (cannot be assigned honestly)
+        row(
+            clv=0.9,
+            closing_anchor="pinnacle",
+            has_snapshot=True,
+            close_independent=True,
+            minted_at=None,
+        ),
+    ]
+    cohorts = live_evidence_report(rows, ml_threshold=None, min_n=5)["trusted_clv_ci"][
+        "premium_cohorts"
+    ]
+    assert cohorts["pre_fix"]["n"] == 2
+    assert cohorts["post_fix"]["n"] == 0
+    # below the floor: estimates nulled at the source, denominators survive
+    assert cohorts["pre_fix"]["sufficient"] is False
+    assert cohorts["pre_fix"]["mean_clv_log"] is None
+    assert cohorts["pre_fix"]["ci_low"] is None
+
+
+def test_premium_cohort_naive_mint_time_is_read_as_utc() -> None:
+    # The DB is TIMESTAMPTZ (aware); a naive minted_at can only come from a
+    # caller bug or a fixture — read it as UTC instead of raising.
+    naive_pre = trusted_minted(0.02, datetime(2026, 7, 6, 12, 0, 0))  # noqa: DTZ001
+    cohorts = live_evidence_report([naive_pre], ml_threshold=None, min_n=1)["trusted_clv_ci"][
+        "premium_cohorts"
+    ]
+    assert cohorts["pre_fix"]["n"] == 1
+
+
+# ===== Task 8 probe (2026-07-11): Monte Carlo zero-edge null record =============
+
+
+def mc_row(odds: float, units: float, clv: float = 0.01) -> SettledPickRow:
+    """A trusted settled row with a flat-stake outcome of ``units``."""
+    return row(
+        clv=clv,
+        closing_anchor="pinnacle",
+        has_snapshot=True,
+        close_independent=True,
+        decimal_odds=odds,
+        stake=10.0,
+        pnl=units * 10.0,
+    )
+
+
+def test_mc_null_p_luck_matches_analytic_probability_and_is_deterministic() -> None:
+    # 3 winning even-money picks: observed +3 units. Under the zero-edge null
+    # each wins w.p. 1/2, and only the all-win path reaches >= +3 -> p = 0.125.
+    rows = [mc_row(2.0, 1.0) for _ in range(3)]
+    mc = mc_null_record(rows, min_n=1)
+    assert mc["n"] == 3
+    assert mc["sims"] == 10_000
+    assert mc["observed_units"] == pytest.approx(3.0)
+    assert mc["p_luck"] == pytest.approx(0.125, abs=0.015)
+    # deterministic: the fixed seed reproduces the exact same p
+    assert mc_null_record(rows, min_n=1) == mc
+
+
+def test_mc_null_certain_outcome_has_p_luck_one() -> None:
+    # An all-lost record: EVERY null sim totals >= observed -> p_luck = 1.0
+    # (the record is fully consistent with zero-edge luck).
+    rows = [mc_row(2.0, -1.0) for _ in range(3)]
+    mc = mc_null_record(rows, min_n=1)
+    assert mc["observed_units"] == pytest.approx(-3.0)
+    assert mc["p_luck"] == pytest.approx(1.0)
+
+
+def test_mc_null_nulled_below_floor_and_skips_incomplete_rows() -> None:
+    rows = [mc_row(2.0, 1.0) for _ in range(3)]
+    thin = mc_null_record(rows, min_n=5)
+    assert thin == {"n": 3, "observed_units": None, "p_luck": None, "sims": 10_000}
+    # rows lacking pnl or odds cannot enter the flat-stake sample
+    incomplete = [
+        row(clv=0.01, closing_anchor="pinnacle", has_snapshot=True, pnl=None, decimal_odds=2.0),
+        row(clv=0.01, closing_anchor="pinnacle", has_snapshot=True, pnl=1.0, decimal_odds=None),
+    ]
+    assert mc_null_record(incomplete, min_n=1)["n"] == 0
+
+
+def test_mc_null_rides_the_trusted_subset_in_the_report() -> None:
+    trusted = [mc_row(2.0, 1.0) for _ in range(3)]
+    untrusted = [row(clv=0.01, closing_anchor="consensus", has_snapshot=True, decimal_odds=2.0)]
+    rep = live_evidence_report(trusted + untrusted, ml_threshold=None, min_n=1)
+    assert rep["mc_null"]["n"] == 3  # only the trusted subset is resampled

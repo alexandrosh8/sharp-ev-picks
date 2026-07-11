@@ -9,7 +9,10 @@ subset is gated independently on its own n (n_sharp_close).
 Pure: _aggregate_settled takes plain row tuples, so no DB is needed.
 """
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import pytest
 
 from app.storage.repositories import (
     MIN_HEADLINE_N,
@@ -546,3 +549,90 @@ def test_clv_row_fabricated_magnitude_cutoff_is_fallback_only() -> None:
         _clv_row_is_fabricated(clv_log=None, decimal_odds=None, closing_fair_probability=None)
         is False
     )
+
+
+# ===== Claims-ledger ETA (2026-07-11): _trusted_close_eta pure helper ===========
+
+
+def _eta_now() -> datetime:
+    return datetime(2026, 7, 11, 12, 0, 0, tzinfo=UTC)
+
+
+def test_trusted_close_eta_rate_and_projection() -> None:
+    from app.storage.repositories import _trusted_close_eta
+
+    now = _eta_now()
+    # 20 settled premium picks, alternating trusted -> trusted_rate 0.5 over the
+    # last-30 window (all 20 inside it).
+    settled = [(now - timedelta(days=20 - i), i % 2 == 0) for i in range(20)]
+    # floor 10, 8 trusted so far -> 2 more needed -> at rate 0.5, 4 open picks
+    # must kick off; the 4th kickoff is now+4d.
+    kicks = [now + timedelta(days=d) for d in range(1, 8)]
+    eta = _trusted_close_eta(settled, n_trusted=8, floor=10, open_kickoffs=kicks, now=now)
+    assert eta["trusted_rate"] == pytest.approx(0.5)
+    assert eta["n_rate_window"] == 20
+    assert eta["open_premium"] == 7
+    assert eta["projected_days"] == pytest.approx(4.0)
+    # last trusted settle: the newest trusted row (i=18 -> now-2d)
+    assert eta["last_trusted_settled_at"] == (now - timedelta(days=2)).isoformat()
+
+
+def test_trusted_close_eta_rate_window_is_trailing_30() -> None:
+    from app.storage.repositories import TRUSTED_CLOSE_RATE_WINDOW, _trusted_close_eta
+
+    now = _eta_now()
+    # 10 OLD trusted picks followed by 30 recent untrusted: the trailing-30
+    # window sees ONLY untrusted -> rate 0.0 -> no projection, but the last
+    # trusted settle time is still reported.
+    old_trusted = [(now - timedelta(days=100 - i), True) for i in range(10)]
+    recent_untrusted = [(now - timedelta(days=30 - i), False) for i in range(30)]
+    eta = _trusted_close_eta(
+        old_trusted + recent_untrusted, n_trusted=10, floor=50, open_kickoffs=[], now=now
+    )
+    assert eta["rate_window"] == TRUSTED_CLOSE_RATE_WINDOW == 30
+    assert eta["n_rate_window"] == 30
+    assert eta["trusted_rate"] == pytest.approx(0.0)
+    assert eta["projected_days"] is None
+    assert eta["last_trusted_settled_at"] == (now - timedelta(days=91)).isoformat()
+
+
+def test_trusted_close_eta_nulls_rate_below_min_n_and_projection_without_pipeline() -> None:
+    from app.storage.repositories import TRUSTED_CLOSE_RATE_MIN_N, _trusted_close_eta
+
+    now = _eta_now()
+    # below the 10-settled floor: the rate (and anything projected from it) is
+    # nulled honestly; the denominators survive.
+    thin = [(now - timedelta(days=i + 1), True) for i in range(TRUSTED_CLOSE_RATE_MIN_N - 1)]
+    kicks = [now + timedelta(days=1)]
+    eta = _trusted_close_eta(thin, n_trusted=9, floor=50, open_kickoffs=kicks, now=now)
+    assert eta["trusted_rate"] is None
+    assert eta["projected_days"] is None
+    assert eta["n_rate_window"] == TRUSTED_CLOSE_RATE_MIN_N - 1
+    assert eta["open_premium"] == 1
+    # enough rate history but TOO FEW open picks to ever reach the floor:
+    # the projection is nulled (never extrapolated past the real pipeline).
+    settled = [(now - timedelta(days=20 - i), True) for i in range(20)]
+    eta2 = _trusted_close_eta(settled, n_trusted=20, floor=50, open_kickoffs=kicks, now=now)
+    assert eta2["trusted_rate"] == pytest.approx(1.0)
+    assert eta2["projected_days"] is None  # 30 more needed; 1 open pick
+
+
+def test_trusted_close_eta_empty_and_floor_met() -> None:
+    from app.storage.repositories import _trusted_close_eta
+
+    now = _eta_now()
+    empty = _trusted_close_eta([], n_trusted=0, floor=50, open_kickoffs=[], now=now)
+    assert empty["last_trusted_settled_at"] is None
+    assert empty["trusted_rate"] is None
+    assert empty["projected_days"] is None
+    assert empty["open_premium"] == 0
+    # floor already met: nothing to project (the tile is no longer accruing)
+    settled = [(now - timedelta(days=20 - i), True) for i in range(20)]
+    met = _trusted_close_eta(
+        settled,
+        n_trusted=50,
+        floor=50,
+        open_kickoffs=[now + timedelta(days=1)],
+        now=now,
+    )
+    assert met["projected_days"] is None

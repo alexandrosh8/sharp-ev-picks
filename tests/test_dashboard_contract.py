@@ -461,3 +461,65 @@ def test_bankroll_tile_is_lazy_with_chart_and_honest_states() -> None:
     # informational-only caption — hypothetical, no bets placed by the system
     assert "Bankroll — hypothetical ledger" in text
     assert "informational only — this system never places a bet" in text
+
+
+def test_pick_ticket_mint_now_provenance_labels() -> None:
+    """2026-07-11 Task 3: the ticket labels value provenance — EV is fixed at
+    mint; Edge and Fair odds are live re-priced values — plus a muted one-liner
+    under Pricing distinguishing the mint-time fair/edge (archived in the raw
+    reason summary) from the live re-priced fair."""
+    text = _text()
+    assert '"EV (at mint)"' in text
+    assert '"Edge (now)"' in text
+    assert '"Fair odds (now)"' in text
+    # the bare, provenance-ambiguous KPI labels are gone
+    assert 'mkKpi("EV",' not in text
+    assert 'mkKpi("Edge",' not in text
+    # the provenance one-liner under Pricing
+    assert "re-priced live" in text
+
+
+def test_volume_demotion_chips_parsed_from_reason_summary() -> None:
+    """2026-07-11 Task 4: volume-tier picks render compact demotion-note chips
+    parsed client-side from reason_summary's " | slug: …" segments (stake_zero,
+    ml-filter, steam, non-major league, per-market floor …). Display only —
+    no schema change, defensive parse."""
+    text = _text()
+    assert "function demotionChips" in text
+    assert 'split(" | ")' in text
+    assert "function demotionChipsEl" in text
+    # chips only ever appear on the shadow/volume tier
+    assert re.search(r'function demotionChips\(p\) \{\s*\n\s*if \(tierOf\(p\) !== "volume"', text)
+
+
+def test_same_game_correlation_chip() -> None:
+    """2026-07-11 Task 5: two or more OPEN premium picks sharing an event_id
+    each show a 'correlated: N picks this game' chip — display only, staking
+    unchanged."""
+    text = _text()
+    assert "function correlatedPremiumCount" in text
+    assert '"correlated: " + n + " picks this game"' in text
+    assert "staking unchanged" in text
+
+
+def test_tier_scorecard_premium_cohorts_and_mc_null_line() -> None:
+    """2026-07-11 Tasks 1+6: the trusted-CLV scorecard reports the ADR-0022
+    crit-3/4 premium pre-/post-selection-fix cohort rows (same entry shape,
+    nulled below the floor) and the Buchdahl-MCoB zero-edge-null Monte Carlo
+    line with its honest insufficient state."""
+    text = _text()
+    assert "premium_cohorts" in text
+    assert "pre-fix, minted < 2026-07-07" in text
+    assert "post-fix, minted ≥ 2026-07-07" in text
+    assert '"Record vs zero-edge null: p = "' in text
+    assert '"Record vs zero-edge null: n="' in text  # insufficient state
+
+
+def test_claims_ledger_trusted_close_eta_line() -> None:
+    """2026-07-11 Task 2: the trusted-sharp-closes tile answers "when will this
+    move" — one muted line projected from the recent trusted-close rate and the
+    open premium pipeline, with every component nulled honestly server-side."""
+    text = _text()
+    assert "trusted_close_eta" in text
+    assert "open premium awaiting kickoff" in text
+    assert "no honest ETA yet" in text

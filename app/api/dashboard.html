@@ -702,6 +702,7 @@
       .er-tier { grid-column: 2; grid-row: 3; justify-self: end; }
       /* Audit 2026-07-09: full-width danger strip for structural_sane=false rows */
       .er-danger { grid-column: 1 / -1; justify-self: start; margin-top: 4px; }
+      .er-chips { grid-column: 1 / -1; justify-self: start; margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
       /* Fix 2026-07-10 #3 — QUARANTINE styling: still visible, never normal.
          Structurally-inconsistent rows grey out hard; negative-edge Closed
          rows get a distinct muted treatment; a negative edge value always
@@ -2684,6 +2685,55 @@
         }
 
         // ===== EDGES — list ====================================================
+        // Task 4 (2026-07-11): volume-tier demotion-note chips. The pipeline
+        // appends demotion notes to reason_summary as " | slug: …" / " | slug (…)"
+        // segments (stake_zero, ml-filter, steam, non-major league, the
+        // per-market premium floor …). Client-side DISPLAY parse only — no
+        // schema or staking change; defensive against unknown segment shapes.
+        function demotionChips(p) {
+          if (tierOf(p) !== "volume" || !p.reason_summary) return [];
+          const segs = String(p.reason_summary).split(" | ").slice(1);
+          const out = [];
+          segs.forEach((seg) => {
+            const cut = seg.search(/[:(]/);
+            let slug = (cut > 0 ? seg.slice(0, cut) : seg).trim();
+            if (slug.length > 28) slug = slug.slice(0, 27) + "…";
+            if (slug && out.indexOf(slug) === -1) out.push(slug);
+          });
+          return out.slice(0, 4);
+        }
+        function demotionChipsEl(p) {
+          const chips = demotionChips(p);
+          if (chips.length === 0) return null;
+          const wrap = document.createElement("span"); wrap.className = "er-chips";
+          chips.forEach((c) => {
+            const t = document.createElement("span"); t.className = "tag tag-warm tag-dashed";
+            t.textContent = c;
+            t.title = "demotion note from the reason summary — display only";
+            wrap.appendChild(t);
+          });
+          return wrap;
+        }
+        // Task 5 (2026-07-11): same-game correlation. Two or more OPEN premium
+        // picks sharing an event_id are correlated exposure — flagged so the
+        // operator sees it before betting both. Display only, staking unchanged.
+        function correlatedPremiumCount(p) {
+          if (tierOf(p) !== "premium" || p.status !== "alerted" || hasStarted(p) || p.event_id == null) return 0;
+          const n = state.picks.filter((q) =>
+            tierOf(q) === "premium" && q.status === "alerted" && !hasStarted(q) &&
+            q.event_id != null && String(q.event_id) === String(p.event_id)).length;
+          return n >= 2 ? n : 0;
+        }
+        function correlationChipEl(p) {
+          const n = correlatedPremiumCount(p);
+          if (n < 2) return null;
+          const wrap = document.createElement("span"); wrap.className = "er-chips";
+          const t = document.createElement("span"); t.className = "tag tag-warm";
+          t.textContent = "correlated: " + n + " picks this game";
+          t.title = "same-game premium picks rise and fall together — display only, staking unchanged";
+          wrap.appendChild(t);
+          return wrap;
+        }
         function trustGlyph(p) {
           if (isTrustedClv(p)) return "●";
           if (p.anchor_type === "pinnacle" || p.anchor_type === "sharp") return "◐";
@@ -2711,6 +2761,12 @@
           sel.appendChild(effEl);
           const trust = document.createElement("span"); trust.className = "er-trust"; trust.textContent = trustGlyph(p); trust.title = anchorLabel(p);
           row.append(ko, ev, tier, sel, trust);
+          // Task 5: same-game correlation chip (premium); Task 4: demotion-note
+          // chips (volume). Both display only.
+          const corr = correlationChipEl(p);
+          if (corr) row.appendChild(corr);
+          const demo = demotionChipsEl(p);
+          if (demo) row.appendChild(demo);
           // Audit 2026-07-09: surface the server's stored-impossible flag —
           // isActionable already refuses these rows; the tag says WHY.
           // Fix 2026-07-10 #3 — QUARANTINE, never hide: structurally
@@ -3052,8 +3108,10 @@
             }
             return c;
           };
-          kpis.appendChild(mkKpi("Edge", fmtSignedPct(eff), figsIndicative ? "indicative, unverified" : null));
-          kpis.appendChild(mkKpi("EV", fmtSignedPct(p.ev), figsIndicative ? "indicative, unverified" : null));
+          // Task 3 (2026-07-11): provenance labels — EV is FIXED at mint;
+          // Edge (and Fair odds below) are live re-priced values.
+          kpis.appendChild(mkKpi("Edge (now)", fmtSignedPct(eff), figsIndicative ? "indicative, unverified" : null));
+          kpis.appendChild(mkKpi("EV (at mint)", fmtSignedPct(p.ev), figsIndicative ? "indicative, unverified" : null));
           const sf = numOf(p.recommended_stake_fraction);
           // Show the actual fractional-Kelly stake (as a % of bankroll) — the
           // label promises a stake figure, not a confidence rating. A missing or
@@ -3067,6 +3125,12 @@
           if (stakeGated) stakeCell.classList.add("gated");
           kpis.appendChild(stakeCell);
           body.appendChild(kpis);
+          // Task 5 correlation chip (premium) + Task 4 demotion chips (volume)
+          // on the ticket too — same builders as the list rows, display only.
+          const tCorr = correlationChipEl(p);
+          if (tCorr) body.appendChild(tCorr);
+          const tDemo = demotionChipsEl(p);
+          if (tDemo) body.appendChild(tDemo);
 
           // ==== Pricing (fix 2026-07-10 #19) ====
           body.appendChild(ticketSec("Pricing"));
@@ -3083,7 +3147,7 @@
             fairOdds = isFinite(fair) && fair > 0 && fair < 1 ? (1 / fair).toFixed(2) : "—";
           }
           ml.appendChild(metricEl("Offered odds", fmtOdds(p.decimal_odds)));
-          ml.appendChild(metricEl("Fair odds",
+          ml.appendChild(metricEl("Fair odds (now)",
             fairOdds === "—" ? naEl("no reconciled fair price on this row") : fairOdds));
           const minAcc = fmtOdds(p.min_acceptable_odds);
           ml.appendChild(metricEl("Min acceptable odds",
@@ -3092,6 +3156,10 @@
           ml.appendChild(metricEl("Edge vs tier floor",
             isFinite(floor) ? fmtSignedPct(eff - floor) : naEl("no tier floor available")));
           body.appendChild(ml);
+          // Task 3: provenance one-liner — where "mint" vs "now" figures live.
+          const prov = document.createElement("p"); prov.className = "muted";
+          prov.textContent = "Mint-time fair/edge are archived in the raw reason summary below; Edge (now) and Fair odds (now) are re-priced live.";
+          body.appendChild(prov);
 
           body.appendChild(ticketSec("Status"));
           if (p.status === "settled" || (hasStarted(p) && p.status === "alerted")) {
@@ -3468,6 +3536,22 @@
                 Number(perf.min_headline_n) || 50,
                 "Trusted sharp closes"));
             }
+            // Task 2 (2026-07-11): "when will this move?" — the server-side
+            // trusted_close_eta projection (every component nulled honestly).
+            const eta = perf && perf.trusted_close_eta;
+            if (eta) {
+              const bits = [];
+              bits.push(eta.projected_days != null
+                ? "~" + Math.ceil(Number(eta.projected_days)) + "d to the floor at the current trusted rate"
+                : "no honest ETA yet");
+              bits.push(eta.trusted_rate != null
+                ? "trusted rate " + Math.round(Number(eta.trusted_rate) * 100) + "% of the last " + (Number(eta.n_rate_window) || 0) + " settled"
+                : "rate unknown (only " + (Number(eta.n_rate_window) || 0) + " recent settled)");
+              bits.push((Number(eta.open_premium) || 0) + " open premium awaiting kickoff");
+              const etaP = document.createElement("p"); etaP.className = "muted"; etaP.style.marginTop = "6px";
+              etaP.textContent = "ETA: " + bits.join(" · ");
+              hero.appendChild(etaP);
+            }
           }
           if (perf && perf.stake_weighted_clv_log != null) {
             const ctx = document.createElement("p"); ctx.className = "muted"; ctx.style.marginTop = "10px";
@@ -3584,26 +3668,46 @@
           } else {
             const ml = document.createElement("div"); ml.className = "metric-list"; ml.style.marginTop = "8px";
             const tierName = { premium: "Premium", volume: "Shadow" };
+            // ONE shared CI-entry formatter: tier rows and the ADR-0022 cohort
+            // rows render identically (estimates arrive nulled below the floor).
+            const ciEntryText = (e) =>
+              e.mean_clv_log != null && e.ci_low != null && e.ci_high != null
+                ? fmtSignedPct(clvPctFromLog(e.mean_clv_log) / 100)
+                  + " (95% CI " + fmtSignedPct(clvPctFromLog(e.ci_low) / 100)
+                  + " … " + fmtSignedPct(clvPctFromLog(e.ci_high) / 100)
+                  + ", n=" + (Number(e.n) || 0) + ")"
+                : "n=" + (Number(e.n) || 0) + " — insufficient";
             const tiers = le.trusted_clv_ci.by_tier || {};
             const tierKeys = Object.keys(tiers).sort();
             if (tierKeys.length === 0) {
               ml.appendChild(metricEl("Trusted CLV", "n=0 — insufficient"));
             }
             tierKeys.forEach((k) => {
-              const e = tiers[k] || {};
-              const v = e.mean_clv_log != null && e.ci_low != null && e.ci_high != null
-                ? fmtSignedPct(clvPctFromLog(e.mean_clv_log) / 100)
-                  + " (95% CI " + fmtSignedPct(clvPctFromLog(e.ci_low) / 100)
-                  + " … " + fmtSignedPct(clvPctFromLog(e.ci_high) / 100)
-                  + ", n=" + (Number(e.n) || 0) + ")"
-                : "n=" + (Number(e.n) || 0) + " — insufficient";
-              ml.appendChild(metricEl("Trusted CLV — " + (tierName[k] || k), v));
+              ml.appendChild(metricEl("Trusted CLV — " + (tierName[k] || k), ciEntryText(tiers[k] || {})));
+            });
+            // ADR-0022 crit 3/4: the premium tier split into pre-/post-
+            // selection-fix mint cohorts (boundary 2026-07-07T00:00:00Z).
+            const cohorts = le.trusted_clv_ci.premium_cohorts || {};
+            [["pre_fix", "Premium (pre-fix, minted < 2026-07-07)"],
+             ["post_fix", "Premium (post-fix, minted ≥ 2026-07-07)"]].forEach(([k, label]) => {
+              if (!cohorts[k]) return;
+              ml.appendChild(metricEl("Trusted CLV — " + label, ciEntryText(cohorts[k])));
             });
             const yr = le.clv_yield_ratio;
             const rv = yr && yr.ratio != null
               ? fmtNum(yr.ratio, 2) + "× (benchmark 0.8×)"
               : "not computable — below floor or trusted CLV ≈ 0";
             ml.appendChild(metricEl("CLV→yield ratio", rv));
+            // Task 8 probe: Monte Carlo zero-edge null (Buchdahl MCoB) — how
+            // often pure luck at the offered prices does at least this well.
+            const mc = le.mc_null;
+            if (mc) {
+              ml.appendChild(metricEl("Luck probe",
+                mc.p_luck != null
+                  ? "Record vs zero-edge null: p = " + Number(mc.p_luck).toFixed(2)
+                    + " (n=" + (Number(mc.n) || 0) + ", " + (Number(mc.sims) || 0) + " resamples)"
+                  : "Record vs zero-edge null: n=" + (Number(mc.n) || 0) + " — insufficient"));
+            }
             scv.appendChild(ml);
             const verdict = document.createElement("p"); verdict.className = "muted"; verdict.style.marginTop = "8px";
             verdict.textContent = "Verdict: " + fmt(le.evidence_verdict);

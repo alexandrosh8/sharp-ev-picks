@@ -31,7 +31,10 @@ composition happens in the route (app/api/routes.py).
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
+
+import numpy as np
 
 from app.backtesting.calibration import (
     CalibrationObservation,
@@ -78,6 +81,23 @@ CLV_YIELD_BENCHMARK_SOURCE = (
     "RebelBetting public benchmark ~0.8x realized yield per unit CLV "
     "(docs/research/2026-07-10-whole-internet-research.md, commercial lane)"
 )
+
+#: ADR-0022 crit 3/4 cohort boundary: the premium SELECTION-fix date. Criterion
+#: 3 defines the "post-fix premium cohort" as picks minted AFTER 2026-07-07
+#: (the odds-ceiling 4.0 + sharp-anchor selection fixes went live 2026-07-07);
+#: criterion 4 requires the trusted-CLV scorecard to report the premium tier
+#: SPLIT into pre-/post-fix cohorts so the kill criterion (post-fix trusted CLV
+#: 95% CI < 0 at n >= 50) is readable directly off the dashboard. Minted exactly
+#: at the boundary instant counts as post-fix (>=).
+PREMIUM_SELECTION_FIX_AT = datetime(2026, 7, 7, tzinfo=UTC)
+
+#: Monte Carlo zero-edge null resampler (Task 8 probe) — method after Joseph
+#: Buchdahl, "Monte Carlo or Bust" (MCoB): resample the settled record under
+#: the null that every pick had ZERO edge (true win prob = offered-implied
+#: 1/odds) and ask how often pure luck does at least as well. Deterministic
+#: seed so the report is reproducible run-to-run.
+MC_NULL_SIMS = 10_000
+MC_NULL_SEED = 20260711
 
 #: A trusted CLV this close to zero cannot anchor a yield ratio — the division
 #: amplifies noise without bound (live example, 2026-07-10: fractional-mean
@@ -133,6 +153,10 @@ class SettledPickRow:
     # subset. Feature-detected: None on either side = symmetric (not excluded).
     mint_devig_fell_back: bool | None = None
     close_devig_fell_back: bool | None = None
+    # Mint time (Pick.created_at) for the ADR-0022 pre-/post-selection-fix
+    # cohort split. None = not joined (pure-test construction) — the row is
+    # then excluded from BOTH cohorts (it cannot be assigned honestly).
+    minted_at: datetime | None = None
 
     @property
     def devig_fallback_asymmetric(self) -> bool:
@@ -418,6 +442,59 @@ def _clv_yield_ratio(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, An
     }
 
 
+def _mint_cohort(minted_at: datetime | None) -> str | None:
+    """ADR-0022 crit 3 cohort of one mint time: 'pre_fix' / 'post_fix' / None.
+
+    None (mint time unknown) is assigned to NEITHER cohort. A naive datetime
+    can only come from a caller bug or a fixture — the DB is TIMESTAMPTZ — and
+    is read as UTC rather than raising inside a report."""
+    if minted_at is None:
+        return None
+    m = minted_at if minted_at.tzinfo is not None else minted_at.replace(tzinfo=UTC)
+    return "post_fix" if m >= PREMIUM_SELECTION_FIX_AT else "pre_fix"
+
+
+def mc_null_record(
+    rows: Sequence[SettledPickRow],
+    *,
+    min_n: int = MIN_STRATUM_N,
+    sims: int = MC_NULL_SIMS,
+    seed: int = MC_NULL_SEED,
+) -> dict[str, Any]:
+    """Monte Carlo LUCK probe on the settled trusted subset (Task 8).
+
+    Method after Joseph Buchdahl, "Monte Carlo or Bust" (MCoB): each pick's
+    flat-stake outcome is resampled under the NULL that its true win
+    probability is its OFFERED-implied probability (1/odds — i.e. zero edge:
+    win +(odds-1) units, lose -1 unit). ``p_luck`` is the fraction of null
+    simulations whose total units are >= the observed total (pnl/stake summed
+    over the sample) — a low value says the record is unlikely to be pure luck
+    at the offered prices. A probe, never a profit promise. Deterministic
+    (numpy Generator, fixed seed) and nulled below the ``min_n`` honesty floor;
+    the denominators always survive. Pure: numpy + the row inputs only.
+    """
+    sample = [
+        (float(r.decimal_odds), r.pnl / r.stake)
+        for r in rows
+        if r.pnl is not None
+        and r.stake > 0.0
+        and r.decimal_odds is not None
+        and r.decimal_odds > 1.0
+    ]
+    n = len(sample)
+    out: dict[str, Any] = {"n": n, "observed_units": None, "p_luck": None, "sims": sims}
+    if n < min_n:
+        return out
+    odds = np.array([o for o, _u in sample], dtype=np.float64)
+    observed = float(sum(u for _o, u in sample))
+    rng = np.random.default_rng(seed)
+    wins = rng.random((sims, n)) < (1.0 / odds)
+    totals = wins @ (odds - 1.0) - (~wins).sum(axis=1)
+    out["observed_units"] = observed
+    out["p_luck"] = float(np.mean(totals >= observed))
+    return out
+
+
 def _evidence_verdict(rows: Sequence[SettledPickRow], min_n: int) -> str:
     """Plain-language verdict on the trusted subset, driven ONLY by the two
     EXISTING significance gates: the t-CI on mean clv_log excluding 0 (either
@@ -493,6 +570,14 @@ def live_evidence_report(
     trusted_by_tier: dict[str, list[SettledPickRow]] = {}
     for r in sharp_rows:
         trusted_by_tier.setdefault(r.tier, []).append(r)
+    # ADR-0022 crit 3/4: the PREMIUM trusted subset split into pre-/post-
+    # selection-fix mint cohorts (boundary PREMIUM_SELECTION_FIX_AT). Rows with
+    # an unknown mint time enter NEITHER cohort.
+    premium_cohorts: dict[str, list[SettledPickRow]] = {"pre_fix": [], "post_fix": []}
+    for r in trusted_by_tier.get("premium", []):
+        cohort = _mint_cohort(r.minted_at)
+        if cohort is not None:
+            premium_cohorts[cohort].append(r)
 
     cal = meta_model_calibration(rows, min_n=min_n)
     return {
@@ -545,9 +630,17 @@ def live_evidence_report(
             "by_tier": {
                 k: _trusted_clv_ci_entry(v, min_n) for k, v in sorted(trusted_by_tier.items())
             },
+            # ADR-0022 crit 3/4: the premium tier split into pre-/post-
+            # selection-fix mint cohorts — same entry shape and min_n floor.
+            "premium_cohorts": {
+                k: _trusted_clv_ci_entry(v, min_n) for k, v in sorted(premium_cohorts.items())
+            },
         },
         "clv_yield_ratio": _clv_yield_ratio(sharp_rows, min_n),
         "evidence_verdict": _evidence_verdict(sharp_rows, min_n),
+        # Task 8 probe: is the trusted flat-stake record distinguishable from
+        # zero-edge luck at the offered prices? (Buchdahl MCoB resampler.)
+        "mc_null": mc_null_record(sharp_rows, min_n=min_n),
     }
 
 
