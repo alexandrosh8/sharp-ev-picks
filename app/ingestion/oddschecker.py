@@ -988,7 +988,10 @@ def parse_match_page(
             market_key, market_detail = mapped
             if wanted is not None and market_key not in wanted:
                 continue
-            selection = _canonical_selection(selection, bet.get("line"), market_key)
+            canonical = _canonical_selection(selection, bet.get("line"), market_key)
+            if canonical is None:
+                continue  # ambiguous selection (e.g. scoreline-less correct score)
+            selection = canonical
         for code, raw_odd in per_book.items():
             if not isinstance(raw_odd, Mapping):
                 continue
@@ -1199,7 +1202,10 @@ def parse_market_api_payloads(
                 market_key, market_detail = mapped
                 if wanted is not None and market_key not in wanted:
                     continue
-                selection = _canonical_selection(selection, line, market_key)
+                canonical = _canonical_selection(selection, line, market_key)
+                if canonical is None:
+                    continue  # ambiguous selection (e.g. scoreline-less correct score)
+                selection = canonical
             elif other_ok:
                 market_key = Market.OTHER
                 market_detail = _other_market_detail(market_type, line)
@@ -1280,6 +1286,8 @@ def parse_legacy_match_page(
         if wanted is not None and market_key not in wanted:
             continue
         selection = _canonical_selection(raw_selection, line, market_key)
+        if selection is None:
+            continue  # ambiguous selection (e.g. scoreline-less correct score)
         for cell in row.select("td[data-bk][data-odig]"):
             decimal = _decimal(cell.get("data-odig"))
             if decimal is None:
@@ -1420,16 +1428,29 @@ def _line_bearing_selection(selection: str, line: Any, market: Market) -> str:
 # exact-selection match (0 sharp snapshot closes across all btts picks).
 _BTTS_SELECTION_PREFIX_RE = re.compile(r"^\s*btts\s+", re.IGNORECASE)
 
+# CORRECT SCORE selections must carry an explicit scoreline ("2-1", "1:1",
+# "Arsenal 2-1") to identify ONE outcome. The feed also emits scoreline-less
+# bet names ("Draw", a bare team name) on this market; persisting those
+# collapses DISTINCT scorelines onto one snapshot key (audit 2026-07-10
+# L-oddschecker-969: every draw scoreline landed on selection='Draw') —
+# poisoning the archive and any future devig group. No scoreline => the
+# outcome is ambiguous => the bet is DROPPED (fail-closed), never guessed.
+_SCORELINE_RE = re.compile(r"\d+\s*[-:–]\s*\d+")
 
-def _canonical_selection(selection: str, line: Any, market: Market) -> str:
-    """The platform-canonical selection for one mapped bet.
+
+def _canonical_selection(selection: str, line: Any, market: Market) -> str | None:
+    """The platform-canonical selection for one mapped bet, or None to DROP it.
 
     BTTS normalizes to the bare 'Yes'/'No' form the Betfair Exchange rows use
-    (see ``_BTTS_SELECTION_PREFIX_RE``); every other market keeps the
-    OddsPortal-parity line-bearing contract of ``_line_bearing_selection``."""
+    (see ``_BTTS_SELECTION_PREFIX_RE``); CORRECT_SCORE requires an explicit
+    scoreline in the bet name (see ``_SCORELINE_RE`` — ambiguous names are
+    dropped, fail-closed); every other market keeps the OddsPortal-parity
+    line-bearing contract of ``_line_bearing_selection``."""
     if market is Market.BTTS:
         stripped = _BTTS_SELECTION_PREFIX_RE.sub("", selection).strip()
         return stripped or selection
+    if market is Market.CORRECT_SCORE:
+        return selection if _SCORELINE_RE.search(selection) else None
     return _line_bearing_selection(selection, line, market)
 
 

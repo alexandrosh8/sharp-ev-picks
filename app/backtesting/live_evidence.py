@@ -243,15 +243,18 @@ def _stratum_stats(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]
     # (is_tautological_close — the close fair equals the pick-time fair, the SAME
     # archived line re-encoding the pick-time edge, #137) must NOT enter the CLV or
     # beat-close samples of ANY stratum; either would drag a per-anchor mean toward a
-    # mechanical zero (or a fabricated value). Only a definite False / proven tautology
-    # excludes; None (pre-column / unknown) and unknowable-fair are treated as
-    # not-proven-circular and not-proven-tautological. pnl_rows is left untouched —
-    # realized P&L is real regardless of how the close was priced.
+    # mechanical zero (or a fabricated value). Independence must be EXACTLY True
+    # (2026-07-11 alignment, completing the 2026-07-10 pass): a NULL (unknown,
+    # pre-column) flag is NOT admitted here either, matching ``sharp_close`` and
+    # the headline predicate app.storage.repositories._settled_close_is_trusted
+    # (``is True``) — the old only-a-proven-False-excludes contract let unknown-
+    # independence rows leak into per-stratum CLV samples. pnl_rows is left
+    # untouched — realized P&L is real regardless of how the close was priced.
     clv_rows = [
         r
         for r in rows
         if r.clv_log is not None
-        and r.close_independent_of_fill is not False
+        and r.close_independent_of_fill is True
         and not r.is_tautological_close
         and not r.is_fabricated
     ]
@@ -260,7 +263,7 @@ def _stratum_stats(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]
         r
         for r in rows
         if r.beat_close is not None
-        and r.close_independent_of_fill is not False
+        and r.close_independent_of_fill is True
         and not r.is_tautological_close
         and not r.is_fabricated
     ]

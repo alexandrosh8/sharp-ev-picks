@@ -1331,11 +1331,18 @@ def _clv_row_is_fabricated(
     clv_log: Any,
     decimal_odds: Any,
     closing_fair_probability: Any,
+    bookmaker: Any = None,
 ) -> bool:
     """True when a settled row's CLV is physically impossible (CLV-1 pollution).
 
-    Primary test: close-implied edge = closing_fair_probability - 1/decimal_odds
+    Primary test: close-implied edge = closing_fair_probability - 1/effective_odds
     exceeds CLV_IMPLAUSIBLE_CLOSE_EDGE (the favorite-prob-on-underdog-leg signature).
+    EFFECTIVE odds (audit 2026-07-10 read/write alignment): the write side computes
+    clv_log from the commission-netted fill (app/clv_trueup.py effective_odds), so
+    the read-side plausibility check must judge the SAME price — raw 1/decimal_odds
+    understates the implied probability on exchange fills. ``bookmaker`` is the
+    fill book; None (feature-detected absent / pure-test rows) degrades to the raw
+    price (effective == raw for every commission-free book anyway).
     When BOTH real inputs (decimal_odds + closing_fair_probability) are present the
     row's CLV is computed from them, so this close-implied edge is the ONLY fabrication
     test — a legitimate plausible-close longshot (modest edge but |clv_log| > 0.5) is
@@ -1347,8 +1354,13 @@ def _clv_row_is_fabricated(
     if clv_log is None:
         return False
     if decimal_odds is not None and closing_fair_probability is not None:
+        from app.edge.value import effective_odds
+
         try:
-            implied = 1.0 / float(decimal_odds)
+            odds = float(decimal_odds)
+            if bookmaker is not None:
+                odds = effective_odds(str(bookmaker), odds)
+            implied = 1.0 / odds
         except (ZeroDivisionError, ValueError, TypeError):
             implied = None
         if implied is not None:
@@ -1511,6 +1523,10 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         kickoff_at = row[15] if len(row) > 15 else None
         # A4 close-exclusion reason (trailing, feature-detected like the rest).
         close_reason = row[16] if len(row) > 16 else None
+        # Fill bookmaker (trailing, feature-detected): lets the CLV-1 guard
+        # judge the close-implied edge on the EFFECTIVE (commission-netted)
+        # fill price — the same price the write side computed clv_log from.
+        fill_bookmaker = row[17] if len(row) > 17 else None
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
@@ -1521,7 +1537,9 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         # (counted above) but its clv_log/beat_close are dropped from BOTH the
         # blended headline and the trusted sharp subset so they cannot inflate
         # stake_weighted_clv_log / beat_close_rate.
-        clv_fabricated = _clv_row_is_fabricated(clv_log, decimal_odds, closing_fair_probability)
+        clv_fabricated = _clv_row_is_fabricated(
+            clv_log, decimal_odds, closing_fair_probability, fill_bookmaker
+        )
         # TAUTOLOGY guard (audit 2026-06-28 P2): a row whose close fair equals its
         # pick-time fair (identical archived line) carries a clv_log that merely
         # re-encodes the pick-time edge — drop it from BOTH the blended headline and
@@ -1948,6 +1966,10 @@ async def performance_report(
     if steam_attr is not None:
         steam_idx = len(select_cols)
         select_cols.append(steam_attr)
+    # Fill bookmaker: the CLV-1 fabrication guard judges the close-implied edge
+    # on the EFFECTIVE (commission-netted) fill price (read/write alignment).
+    bookmaker_idx = len(select_cols)
+    select_cols.append(Pick.bookmaker)
     # Claims-ledger ETA clock: when did each pick settle (trusted-rate window).
     settled_at_idx = len(select_cols)
     select_cols.append(ResultTracking.settled_at)
@@ -2000,6 +2022,7 @@ async def performance_report(
             close_captured_at,  # D3 close provenance — close-age diagnostics
             r[starts_at_idx],  # kickoff — the close-age clock (D4)
             close_reason,  # A4 close-exclusion reason (or None pre-column)
+            r[bookmaker_idx],  # fill book — effective-odds CLV-1 guard input
         )
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
@@ -2023,6 +2046,7 @@ async def performance_report(
             model_probability=r[10],
             mint_devig_fell_back=r[mint_fb_idx] if mint_fb_idx is not None else None,
             close_devig_fell_back=r[close_fb_idx] if close_fb_idx is not None else None,
+            bookmaker=r[bookmaker_idx],
         )
 
     now = datetime.now(tz=UTC)
@@ -4524,15 +4548,17 @@ def _settled_close_is_trusted(
     model_probability: Any,
     mint_devig_fell_back: Any,
     close_devig_fell_back: Any,
+    bookmaker: Any = None,
 ) -> bool:
     """The trusted sharp-close gate as a standalone predicate.
 
     Exactly the guards ``_aggregate_settled`` applies to its trusted subset
     (kept adjacent in this module — see that function for the full rationale):
     a measured clv_log, a GENUINE snapshot close, a named sharp close anchor,
-    independence exactly True, non-tautological, non-fabricated, and a
-    symmetric devig fallback. Used by per-(sport, market) accrual counts so
-    they can never diverge from the headline's trust definition.
+    independence exactly True, non-tautological, non-fabricated (judged on the
+    EFFECTIVE fill price when ``bookmaker`` is threaded), and a symmetric
+    devig fallback. Used by per-(sport, market) accrual counts so they can
+    never diverge from the headline's trust definition.
     """
     if clv_log is None or not bool(has_snapshot_close):
         return False
@@ -4540,7 +4566,7 @@ def _settled_close_is_trusted(
         return False
     if _clv_row_is_tautological(clv_log, closing_fair_probability, model_probability):
         return False
-    if _clv_row_is_fabricated(clv_log, decimal_odds, closing_fair_probability):
+    if _clv_row_is_fabricated(clv_log, decimal_odds, closing_fair_probability, bookmaker):
         return False
     return not _devig_fallback_asymmetric(mint_devig_fell_back, close_devig_fell_back)
 
@@ -4557,7 +4583,9 @@ def promotion_distance_cells(
     ``rows`` are settled-pick tuples: (sport, market, settled_at, clv_log,
     closing_anchor, close_independent, has_snapshot_close, decimal_odds,
     closing_fair_probability, model_probability, mint_devig_fell_back,
-    close_devig_fell_back). Feature-detected-absent columns arrive as None.
+    close_devig_fell_back[, bookmaker]). Feature-detected-absent columns
+    arrive as None; the trailing fill ``bookmaker`` (effective-odds CLV-1
+    guard input) is optional for compatibility with 12-tuple callers.
 
     Honesty rules (binding, mirrored by the dashboard widget):
       - every cell carries its denominators (n_settled, n_trusted);
@@ -4572,20 +4600,22 @@ def promotion_distance_cells(
     cutoff = now - timedelta(days=window_days)
     settled_counts: dict[tuple[str, str], int] = {}
     trusted: dict[tuple[str, str], list[tuple[float, datetime | None]]] = {}
-    for (
-        sport,
-        market,
-        settled_at,
-        clv_log,
-        closing_anchor,
-        close_independent,
-        has_snapshot_close,
-        decimal_odds,
-        closing_fair_probability,
-        model_probability,
-        mint_devig_fell_back,
-        close_devig_fell_back,
-    ) in rows:
+    for row in rows:
+        (
+            sport,
+            market,
+            settled_at,
+            clv_log,
+            closing_anchor,
+            close_independent,
+            has_snapshot_close,
+            decimal_odds,
+            closing_fair_probability,
+            model_probability,
+            mint_devig_fell_back,
+            close_devig_fell_back,
+        ) = row[:12]
+        bookmaker = row[12] if len(row) > 12 else None
         key = (str(sport), str(market))
         settled_counts[key] = settled_counts.get(key, 0) + 1
         if _settled_close_is_trusted(
@@ -4598,6 +4628,7 @@ def promotion_distance_cells(
             model_probability=model_probability,
             mint_devig_fell_back=mint_devig_fell_back,
             close_devig_fell_back=close_devig_fell_back,
+            bookmaker=bookmaker,
         ):
             trusted.setdefault(key, []).append((float(clv_log), settled_at))
     cells: list[dict[str, Any]] = []
@@ -4636,13 +4667,14 @@ def promotion_distance_cells(
     return cells
 
 
-async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, Any]:
-    """B1 aggregate behind GET /lab/promotion-distance (read-only).
+async def _settled_trust_rows(session: AsyncSession) -> list[tuple[Any, ...]]:
+    """The settled-pick trust tuples ``promotion_distance_cells`` consumes.
 
     One SELECT over settled picks; the close-provenance columns are
     FEATURE-DETECTED exactly like performance_report (a pre-migration DB
     serves the report with those inputs None, so nothing counts as trusted
-    — honest, never a 500)."""
+    — honest, never a 500). Shared by the B1 promotion-distance report and
+    the Task 5 stake-shrink n_eff source so the two can never diverge."""
     close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
     indep_attr = getattr(Pick, "close_independent_of_fill", None)
     snapshot_attr = getattr(Pick, "has_snapshot_close", None)
@@ -4656,6 +4688,7 @@ async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, An
         Pick.decimal_odds,
         Pick.closing_fair_probability,
         Pick.model_probability,
+        Pick.bookmaker,  # effective-odds CLV-1 guard input (read/write alignment)
     ]
     optional_idx: dict[str, int | None] = {}
     for name, attr in (
@@ -4698,9 +4731,16 @@ async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, An
             r[6],
             _opt(r, "mint_devig_fell_back"),
             _opt(r, "close_devig_fell_back"),
+            r[7],  # bookmaker — effective-odds CLV-1 guard input
         )
         for r in db_rows
     ]
+    return rows
+
+
+async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, Any]:
+    """B1 aggregate behind GET /lab/promotion-distance (read-only)."""
+    rows = await _settled_trust_rows(session)
     return {
         "ok_n": SPORT_MARKET_OK_N,
         "cadence_window_days": PROMOTION_CADENCE_WINDOW_DAYS,
@@ -4710,6 +4750,19 @@ async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, An
         ),
         "cells": promotion_distance_cells(rows, now=datetime.now(tz=UTC)),
     }
+
+
+async def settled_trusted_counts(session: AsyncSession) -> dict[tuple[str, str], int]:
+    """Task 5 n_eff source: settled TRUSTED-CLV counts per (sport, market) cell.
+
+    Reuses the EXACT per-cell trusted aggregation behind the B1 promotion-
+    distance report (``_settled_trust_rows`` + ``promotion_distance_cells`` /
+    ``_settled_close_is_trusted``) so the stake-shrink annotation's n_eff can
+    never diverge from the headline trust definition. Read-only; called by
+    the scheduler's cached refresh (never per pick)."""
+    rows = await _settled_trust_rows(session)
+    cells = promotion_distance_cells(rows, now=datetime.now(tz=UTC))
+    return {(str(c["sport"]), str(c["market"])): int(c["n_trusted"]) for c in cells}
 
 
 # --------------------------------------------------------------------------- #

@@ -920,6 +920,34 @@ def _is_tennis_game_line_group(
     return any(is_tennis_game_line(str(market), sel) for sel in prices)
 
 
+# INTEGER-line totals gate (audit 2026-07-10 observation 3232): a full-match
+# totals market on an INTEGER line ("Over 3" / totals_3 / totals_3_0) has a
+# THIRD outcome — the push at exactly the line — so the two-outcome
+# mutually-exclusive-and-exhaustive assumption behind the 2-way anchor devig
+# (_DIRECT_MARKETS) does not hold and the fair probabilities are structurally
+# biased. Such groups are rejected at the candidate boundary, the same
+# mechanism as the period/corner/card drop. Detected on the canonical detail
+# token when present (both provider vocabularies), else on the bare integer
+# Over/Under selection tail of a lineless group. Half/quarter lines pass.
+_INT_LINE_TOTALS_DETAIL_RE = re.compile(r"^(?:totals|over_under)_(\d+)(?:_0)?$")
+_INT_LINE_TOTALS_SELECTION_RE = re.compile(r"^(?:over|under)\s+\d+$", re.IGNORECASE)
+
+
+def _is_integer_line_totals_group(
+    market: Market,
+    detail: str | None,
+    prices: Mapping[str, Mapping[str, float]],
+) -> bool:
+    """True for a full-match TOTALS candidate group priced on an INTEGER line
+    (push risk — see the note above). Detail-carrying groups are judged on the
+    detail token; lineless (None-detail) groups on their selection tails."""
+    if market is not Market.TOTALS:
+        return False
+    if detail:
+        return _INT_LINE_TOTALS_DETAIL_RE.match(detail.strip().lower()) is not None
+    return any(_INT_LINE_TOTALS_SELECTION_RE.match(sel.strip()) for sel in prices)
+
+
 # Cross-provider vocabulary equivalences for the SAME full-match line
 # (instrumented live evidence 2026-07-10: 'h2h'/None, 'btts'/None,
 # 'over_under_2_5'/'totals_2_5' collisions were skipping every CLV write on
@@ -935,6 +963,12 @@ def _is_tennis_game_line_group(
 # fail-closed; stamped picks bypass it via the exact-detail match instead.
 _LINELESS_DETAILS = frozenset({"h2h", "1x2", "btts"})
 _OU_DETAIL_RE = re.compile(r"^over_under_(\d+(?:_\d+)?)$")
+# INTEGER-line full-match totals tokens diverge by provider (observation 3232,
+# audit 2026-07-10 L-arcadia-300): Pinnacle/OddsPortal emit the `_0` form
+# ("totals_3_0"), OddsChecker the bare form ("totals_3") — the same line never
+# grouped. Folded to ONE canonical bare form here. Non-integer lines
+# ("totals_2_5", "totals_2_25") never match.
+_INT_TOTALS_DETAIL_RE = re.compile(r"^totals_(\d+)_0$")
 
 
 def canonical_market_detail(detail: str | None) -> str | None:
@@ -953,7 +987,10 @@ def canonical_market_detail(detail: str | None) -> str | None:
         return None
     m = _OU_DETAIL_RE.match(d)
     if m:
-        return f"totals_{m.group(1)}"
+        d = detail = f"totals_{m.group(1)}"
+    im = _INT_TOTALS_DETAIL_RE.match(d)
+    if im:
+        return f"totals_{im.group(1)}"
     return detail
 
 
@@ -1533,6 +1570,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_thin_books = 0
     n_non_settleable = 0
     n_tennis_game_line = 0
+    n_integer_line_totals = 0
     n_visibility_capped = 0
     n_ah_rejected = 0
     n_sanity_dropped = 0
@@ -1594,6 +1632,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         # forever. Same mechanism as the non-settleable sub-market drop above.
         if _is_tennis_game_line_group(sport_key, market, prices):
             n_tennis_game_line += 1
+            continue
+        # INTEGER-LINE totals drop: the push outcome at exactly the line breaks
+        # the 2-way devig's exhaustive-outcomes assumption (see
+        # _is_integer_line_totals_group) — never mint from such a group.
+        if _is_integer_line_totals_group(market, detail, prices):
+            n_integer_line_totals += 1
             continue
         # Per-market book-count floor (default 0 = off): a market quoted by
         # too few books is skipped wholesale — scaffolding for new lines/
@@ -2340,6 +2384,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "auto-settle honestly)",
             sport_key,
             n_tennis_game_line,
+        )
+    if n_integer_line_totals:
+        logger.info(
+            "value pipeline %s: %d integer-line totals group(s) dropped "
+            "(push at exactly the line breaks the 2-way devig assumption)",
+            sport_key,
+            n_integer_line_totals,
         )
     if n_thin_books:
         logger.info(

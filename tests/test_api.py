@@ -371,8 +371,11 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
         }
 
     async def fake_rows(session):  # type: ignore[no-untyped-def]
+        # close_independent_of_fill=True: per-stratum CLV samples require
+        # PROVEN independence (is True, 2026-07-11 alignment) — this test is
+        # about the payload plumbing, not the independence guard.
         return [
-            SettledPickRow("premium", 0.80, 0.02, True, 10.0, 1.0),
+            SettledPickRow("premium", 0.80, 0.02, True, 10.0, 1.0, close_independent_of_fill=True),
             SettledPickRow("volume", None, None, None, 5.0, None),
         ]
 

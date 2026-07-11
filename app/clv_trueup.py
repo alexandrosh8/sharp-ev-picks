@@ -443,14 +443,20 @@ async def revalidate_open_picks(
             )
         ).all()
         for pick, external_ref in rows:
-            key = (external_ref, pick.market, pick.selection)
+            # Close-side vocabulary fold (mirrors finalize_closing_from_snapshots):
+            # legacy BTTS picks stored 'BTTS Yes'/'BTTS No' while every current
+            # close group keys the bare 'Yes'/'No' — without the fold their
+            # revalidation lookup can never match. Lookup-only — pick.selection
+            # (the settlement identity) is never rewritten.
+            lookup_selection = _close_lookup_selection(pick.market, pick.selection)
+            key = (external_ref, pick.market, lookup_selection)
             if pick.market_detail is not None:
                 # MINT-STAMPED pick: match STRICTLY on its own canonical group
                 # (exact detail) — no ambiguity is possible for it, so the
                 # line-blind guard is bypassed. Group absent this cycle -> no
                 # write (fail-closed; never re-priced from a colliding
                 # same-selection vocabulary).
-                exact_key = (external_ref, pick.market, pick.selection, pick.market_detail)
+                exact_key = (external_ref, pick.market, lookup_selection, pick.market_detail)
                 closing_fair = fair_by_exact.get(exact_key)
                 close_anchor = anchor_by_exact.get(exact_key)
                 close_fell_back = fell_back_by_exact.get(exact_key)

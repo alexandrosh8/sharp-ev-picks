@@ -649,6 +649,39 @@ async def test_tennis_set_line_totals_candidate_kept() -> None:
     assert picks[0].selection == "Over 2.5"
 
 
+async def test_integer_line_totals_candidate_dropped() -> None:
+    # Observation 3232: an INTEGER-line totals group ("Over 3") has a push
+    # outcome at exactly the line — the 2-way devig's exhaustive-outcomes
+    # assumption fails, so the candidate gate must drop the whole group,
+    # whether the detail token is the bare form, the `_0` form, or absent.
+    for detail in ("totals_3", "totals_3_0", "over_under_3", None):
+        sink = RecordingSink()
+        snapshots = [
+            totals_snap("Pinnacle", "Over 3", 1.90, detail),
+            totals_snap("Pinnacle", "Under 3", 1.90, detail),
+            totals_snap("SoftBook", "Over 3", 2.20, detail),
+            totals_snap("SoftBook", "Under 3", 1.75, detail),
+        ]
+        picks = await run_value_pipeline(make_deps(sink, FakeLoader(snapshots)), "soccer")
+        assert picks == [], f"integer-line totals minted under detail={detail!r}"
+        assert sink.sent == []
+
+
+async def test_half_line_totals_candidate_survives_integer_gate() -> None:
+    # The half-line group (no push outcome) still mints — the gate is scoped
+    # to integer lines only.
+    sink = RecordingSink()
+    snapshots = [
+        totals_snap("Pinnacle", "Over 2.5", 1.90, "totals_2_5"),
+        totals_snap("Pinnacle", "Under 2.5", 1.90, "totals_2_5"),
+        totals_snap("SoftBook", "Over 2.5", 2.20, "totals_2_5"),
+        totals_snap("SoftBook", "Under 2.5", 1.75, "totals_2_5"),
+    ]
+    picks = await run_value_pipeline(make_deps(sink, FakeLoader(snapshots)), "soccer")
+    assert len(picks) == 1
+    assert picks[0].selection == "Over 2.5"
+
+
 async def test_soccer_big_line_totals_unaffected_by_tennis_gate() -> None:
     # The game-line drop is tennis-scoped: an identical big-line totals group
     # for another sport still mints (corner totals are handled separately by

@@ -40,6 +40,20 @@ def test_canonical_market_detail_folds_proven_lineless_and_totals() -> None:
     assert canonical_market_detail("totals_2_5") == "totals_2_5"  # idempotent
 
 
+def test_canonical_market_detail_folds_integer_line_totals_forms() -> None:
+    # Observation 3232 / L-arcadia-300: Pinnacle emits the `_0` integer form
+    # (totals_3_0), OddsChecker the bare form (totals_3) — the SAME line must
+    # canonicalize identically from BOTH vocabularies (bare form wins).
+    assert canonical_market_detail("totals_3_0") == "totals_3"
+    assert canonical_market_detail("totals_3") == "totals_3"  # idempotent
+    assert canonical_market_detail("over_under_3_0") == "totals_3"
+    assert canonical_market_detail("over_under_3") == "totals_3"
+    assert canonical_market_detail("totals_220_0") == "totals_220"
+    # non-integer lines are untouched — no trailing-token confusion
+    assert canonical_market_detail("totals_0_5") == "totals_0_5"
+    assert canonical_market_detail("totals_2_25") == "totals_2_25"
+
+
 def test_canonical_market_detail_keeps_spreads_vocabularies_fail_closed() -> None:
     """Audit verdict 2026-07-10: AH/spreads must NOT merge — the OddsChecker
     spreads_* key space mixes 2-way AH and 3-way EH products on identical

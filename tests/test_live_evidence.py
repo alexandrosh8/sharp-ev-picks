@@ -359,18 +359,22 @@ def test_tautology_guard_needs_both_fairs_present() -> None:
 
 
 def test_null_independence_row_is_not_sharp_close() -> None:
-    """Alignment pin (2026-07-10): the TRUSTED sharp subset requires
-    close_independent_of_fill EXACTLY True — a NULL (unknown) independence row
-    is NOT sharp_close, exactly like the headline predicate
+    """Alignment pin (2026-07-10, completed 2026-07-11): independence must be
+    EXACTLY True everywhere — a NULL (unknown) independence row is NOT
+    sharp_close AND no longer enters any per-stratum CLV/beat sample either,
+    exactly like the headline predicate
     app.storage.repositories._settled_close_is_trusted (``is True``), so the
-    two trusted-n figures can never drift. The per-stratum CLV samples keep
-    their looser only-a-proven-False-excludes contract (unchanged)."""
+    trusted-n figures and the stratum samples can never drift. (The old
+    contract deliberately admitted unknown rows into per-stratum samples;
+    that looseness was closed by the 2026-07-11 audit-lows pass.)"""
     unknown = row(clv=0.03, closing_anchor="sharp", has_snapshot=True, close_independent=None)
     assert unknown.sharp_close is False
     rep = live_evidence_report([unknown], ml_threshold=None, min_n=1)
     assert rep["sharp_close"]["n"] == 0
-    # per-stratum CLV sample (NOT the trusted subset): unknown still admitted.
-    assert rep["by_close_anchor"]["sharp"]["n_clv"] == 1
+    # per-stratum CLV sample: unknown independence is excluded too (is True).
+    assert rep["by_close_anchor"]["sharp"]["n_clv"] == 0
+    # the row itself still counts into the honest stratum denominator n.
+    assert rep["by_close_anchor"]["sharp"]["n"] == 1
 
 
 def test_by_close_anchor_groups_on_the_close_anchor_not_creation() -> None:

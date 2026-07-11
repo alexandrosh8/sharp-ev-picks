@@ -240,6 +240,78 @@ def test_parse_match_page_emits_snapshots_and_registers_event() -> None:
     assert teams.starts_at == datetime(2026, 8, 21, 19, 0, tzinfo=UTC)
 
 
+def _correct_score_html() -> str:
+    """Minimal bestOdds page carrying one Correct Score market with BOTH
+    scoreline-bearing bet names and the ambiguous scoreline-less forms the
+    feed also emits (audit 2026-07-10 L-oddschecker-969)."""
+    header: dict[str, object] = {
+        "repub": "OC",
+        "eventName": "English Premier League Matches",
+        "subeventName": "Arsenal vs Coventry",
+        "subeventStartTime": "2026-08-21T19:00:00Z",
+        "breadcrumbs": [],
+    }
+    active = {
+        "oddsDecimal": 9.0,
+        "status": "ACTIVE",
+        "expired": False,
+        "notExpired": True,
+    }
+    odds = {
+        "repub": "OC",
+        "lastUpdated": 1783246073819,
+        "bestOdds": {
+            "bets": {
+                "entities": {
+                    "1": {"ocBetId": 1, "betName": "2-1", "marketId": 40, "line": None},
+                    "2": {"ocBetId": 2, "betName": "1:1", "marketId": 40, "line": None},
+                    # scoreline-less names: DISTINCT scorelines collapse onto
+                    # these keys — ambiguous, must be dropped (fail-closed).
+                    "3": {"ocBetId": 3, "betName": "Draw", "marketId": 40, "line": None},
+                    "4": {"ocBetId": 4, "betName": "Arsenal", "marketId": 40, "line": None},
+                },
+                "ids": [1, 2, 3, 4],
+            },
+            "odds": {
+                "1": {"WH": {"bookmakerCode": "WH", **active}},
+                "2": {"WH": {"bookmakerCode": "WH", **active}},
+                "3": {"WH": {"bookmakerCode": "WH", **active}},
+                "4": {"WH": {"bookmakerCode": "WH", **active}},
+            },
+            "markets": {
+                "entities": {"40": {"ocMarketId": 40, "marketTypeName": "Correct Score"}},
+                "ids": [40],
+            },
+            "bookmakers": {
+                "entities": {"WH": {"bookmakerCode": "WH", "bookmakerName": "William Hill"}},
+                "ids": ["WH"],
+            },
+            "subeventConfig": {
+                "name": "Arsenal vs Coventry",
+                "subeventId": "101610032",
+                "eventId": 2458,
+                "homeTeamName": "Arsenal",
+                "awayTeamName": "Coventry",
+            },
+        },
+    }
+    return f"<html><body>{_json_script(header)}{_json_script(odds)}</body></html>"
+
+
+def test_correct_score_keeps_scorelines_and_drops_ambiguous_selections() -> None:
+    # L-oddschecker-969: scoreline-less correct-score bet names ('Draw', a bare
+    # team) collapse DISTINCT scorelines onto one snapshot key. Only selections
+    # carrying an explicit scoreline survive; ambiguous ones are dropped.
+    directory = EventDirectory()
+    snapshots = parse_match_page(
+        _correct_score_html(),
+        url="https://www.oddschecker.com/football/english/premier-league/arsenal-v-coventry/correct-score",
+        directory=directory,
+    )
+    assert {s.selection for s in snapshots} == {"2-1", "1:1"}
+    assert all(s.market is Market.CORRECT_SCORE for s in snapshots)
+
+
 def test_parse_match_page_can_filter_markets() -> None:
     directory = EventDirectory()
 

@@ -36,6 +36,7 @@ def _row(
     model_probability: float | None = None,
     mint_devig_fell_back: bool | None = None,
     close_devig_fell_back: bool | None = None,
+    bookmaker: str | None = None,
 ) -> tuple[object, ...]:
     # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
     #  close_independent, has_snapshot_close, decimal_odds,
@@ -59,6 +60,10 @@ def _row(
         Decimal(str(model_probability)) if model_probability is not None else None,
         mint_devig_fell_back,
         close_devig_fell_back,
+        None,  # close_snapshot_captured_at (D3, unused here)
+        None,  # kickoff (D4, unused here)
+        None,  # close_exclusion_reason (A4, unused here)
+        bookmaker,  # fill book — effective-odds CLV-1 guard input
     )
 
 
@@ -549,6 +554,60 @@ def test_clv_row_fabricated_magnitude_cutoff_is_fallback_only() -> None:
         _clv_row_is_fabricated(clv_log=None, decimal_odds=None, closing_fair_probability=None)
         is False
     )
+
+
+def test_clv_row_fabricated_judges_exchange_fills_on_effective_odds() -> None:
+    # Read/write alignment (audit 2026-07-10): the write side computes clv_log
+    # from the COMMISSION-NETTED fill (effective_odds), so the read-side
+    # plausibility check must judge the SAME price. An exchange fill at raw 2.0
+    # nets to 1.95 (Betfair Exchange 5%): implied 0.5128, so a close fair of
+    # 0.71 is a 0.197 close-implied edge — PLAUSIBLE (<= 0.20) — while the raw
+    # price would misread it as 0.21 > 0.20 and fabricate-flag honest evidence.
+    from app.storage.repositories import _clv_row_is_fabricated
+
+    assert (
+        _clv_row_is_fabricated(
+            clv_log=0.3,
+            decimal_odds=2.0,
+            closing_fair_probability=0.71,
+            bookmaker="Betfair Exchange",
+        )
+        is False
+    )
+    # The SAME inputs at a commission-free book keep the raw verdict (edge 0.21).
+    assert (
+        _clv_row_is_fabricated(
+            clv_log=0.3, decimal_odds=2.0, closing_fair_probability=0.71, bookmaker="SoftBook"
+        )
+        is True
+    )
+    # No bookmaker (pre-threading callers / feature-detected absent): raw price,
+    # bit-identical to the old behavior.
+    assert (
+        _clv_row_is_fabricated(clv_log=0.3, decimal_odds=2.0, closing_fair_probability=0.71) is True
+    )
+
+
+def test_aggregate_settled_threads_fill_bookmaker_to_fabrication_guard() -> None:
+    # End-to-end through the tuple contract: the SAME exchange-fill row keeps
+    # its clv_log in the blended sample when the trailing bookmaker element is
+    # present (effective-odds judgment) and is dropped as fabricated without it.
+    def rows(bookmaker: str | None) -> list[tuple[object, ...]]:
+        return [
+            _row(
+                clv_log=0.3,
+                decimal_odds=2.0,
+                closing_fair_probability=0.71,
+                model_probability=0.60,
+                bookmaker=bookmaker,
+            )
+            for _ in range(MIN_HEADLINE_N)
+        ]
+
+    netted = _aggregate_settled(rows("Betfair Exchange"))
+    assert netted["clv_quality"]["clv_excluded_fabricated"] == 0
+    raw = _aggregate_settled(rows(None))
+    assert raw["clv_quality"]["clv_excluded_fabricated"] == MIN_HEADLINE_N
 
 
 # ===== Claims-ledger ETA (2026-07-11): _trusted_close_eta pure helper ===========

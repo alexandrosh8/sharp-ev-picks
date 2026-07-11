@@ -19,7 +19,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1488,6 +1488,64 @@ async def record_result(
             status_code=409,
             detail="pick is superseded (duplicate twin); settle the canonical pick instead",
         )
+    # Audit 2026-07-10 L-routes-1447: apply the SAME settled-sibling dedup guard
+    # as the auto settler and the manual event path (settle_event_picks). A
+    # cross-source duplicate that is still 'alerted' (its twin on ANOTHER event
+    # row of the same fixture already settled) would double-count the bet in
+    # pnl/ROI/CLV if settled here. Park it terminally as 'superseded' and 409 —
+    # fail-closed, exactly the auto pass's terminal shape. A NULL kickoff or
+    # unresolvable teams cannot be dedup-matched, so the guard simply does not
+    # apply (same as the auto path's NULL-starts_at filter).
+    from sqlalchemy.orm import aliased
+
+    from app.resolution.matching import fixture_pair_key
+    from app.settlement.engine import _settled_sibling_exists
+    from app.storage.models import Sport, Team
+
+    _home_t, _away_t = aliased(Team), aliased(Team)
+    guard_row = (
+        await session.execute(
+            select(Event.starts_at, Event.sport_id, Sport.key, _home_t.name, _away_t.name)
+            .select_from(Event)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(_home_t, Event.home_team_id == _home_t.id)
+            .join(_away_t, Event.away_team_id == _away_t.id)
+            .where(Event.id == pick.event_id)
+        )
+    ).first()
+    if guard_row is not None and guard_row[0] is not None:
+        starts_at, sport_id, sport_key, home_name, away_name = guard_row
+        pair = fixture_pair_key(home_name, away_name)
+        if pair is not None and await _settled_sibling_exists(
+            session,
+            pick_id=pick.id,
+            event_id=pick.event_id,
+            sport_id=sport_id,
+            starts_at=starts_at,
+            market=pick.market,
+            selection=pick.selection,
+            model_version_id=pick.model_version_id,
+            target_pair=pair,
+            sport_key=sport_key,
+        ):
+            # Same terminal shape as the auto/manual-event passes: 'superseded'
+            # writes NO result_tracking row, so it never enters pnl/ROI/CLV.
+            pick.status = "superseded"
+            await session.commit()
+            logger.info(
+                "record_result: superseded duplicate pick %d (%s %s) — a sibling of "
+                "the same fixture is already settled (cross-source event dedup)",
+                pick.id,
+                pick.market,
+                pick.selection,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "an equivalent pick on a sibling event of the same fixture is "
+                    "already settled; this duplicate was parked as superseded"
+                ),
+            )
 
     pnl: Decimal | None = None
     roi: Decimal | None = None

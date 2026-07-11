@@ -1125,6 +1125,91 @@ async def test_record_result_rejects_superseded_pick(committing_session) -> None
     assert pick.status == "superseded"  # status not resurrected
 
 
+async def test_record_result_supersedes_pick_whose_fixture_twin_already_settled(  # type: ignore[no-untyped-def]
+    committing_session,
+) -> None:
+    # Audit 2026-07-10 L-routes-1447: the per-pick manual endpoint must apply
+    # the SAME settled-sibling dedup guard as the auto settler — a cross-source
+    # duplicate still 'alerted' (its twin on ANOTHER event row of the same
+    # fixture already settled) must be parked as 'superseded' + 409, never
+    # given a second ResultTracking row (double-counted bet).
+    from fastapi import HTTPException
+
+    from app.api.routes import record_result
+    from app.schemas.base import Outcome
+    from app.schemas.events import ResultIn
+    from app.storage.models import ResultTracking
+
+    session = committing_session
+    kickoff = datetime.now(tz=UTC) - timedelta(hours=6)
+    teams = EventTeams(
+        home="Guard Dup Home", away="Guard Dup Away", league="test-guard-dup", starts_at=kickoff
+    )
+    await persist_pick(
+        session, make_pick("evt-guard-dup-A", league="test-guard-dup"), teams, "value", "t-gd"
+    )
+    canonical = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == "evt-guard-dup-A")
+    )
+    assert canonical is not None
+    # The canonical twin is already settled (it has the ResultTracking row).
+    canonical.status = "settled"
+    session.add(
+        ResultTracking(pick_id=canonical.id, outcome="won", settled_at=datetime.now(tz=UTC))
+    )
+    await session.flush()
+    # Cross-source duplicate: a SECOND event row for the same fixture + an
+    # equivalent alerted pick on it (same market/selection/model version).
+    ev = await session.get(Event, canonical.event_id)
+    dup_event = Event(
+        sport_id=ev.sport_id,
+        league_id=ev.league_id,
+        home_team_id=ev.home_team_id,
+        away_team_id=ev.away_team_id,
+        external_ref="evt-guard-dup-B",
+        starts_at=ev.starts_at,
+    )
+    session.add(dup_event)
+    await session.flush()
+    dup = Pick(
+        event_id=dup_event.id,
+        model_version_id=canonical.model_version_id,
+        market=canonical.market,
+        selection=canonical.selection,
+        bookmaker=canonical.bookmaker,
+        decimal_odds=canonical.decimal_odds,
+        model_probability=canonical.model_probability,
+        fair_probability=canonical.fair_probability,
+        edge=canonical.edge,
+        ev=canonical.ev,
+        confidence=canonical.confidence,
+        recommended_stake_fraction=canonical.recommended_stake_fraction,
+        recommended_stake_amount=canonical.recommended_stake_amount,
+        reason_summary="dedup-guard test",
+        status="alerted",
+        tier="premium",
+    )
+    session.add(dup)
+    await session.flush()
+
+    with pytest.raises(HTTPException) as exc:
+        await record_result(
+            dup.id,
+            ResultIn(pick_id=str(dup.id), outcome=Outcome.WON, settled_at=datetime.now(tz=UTC)),
+            session,
+        )
+    assert exc.value.status_code == 409
+    assert dup.status == "superseded"  # parked terminally, same as the auto pass
+    rows = (
+        (await session.execute(select(ResultTracking).where(ResultTracking.pick_id == dup.id)))
+        .scalars()
+        .all()
+    )
+    assert rows == []  # no phantom second result row
+
+
 async def test_record_result_rejects_mismatched_body_pick_id(committing_session) -> None:  # type: ignore[no-untyped-def]
     # Audit 2026-07-09: ResultIn.pick_id used to be silently ignored in favor of
     # the path parameter — two sources of truth. A mismatch is now a 422.

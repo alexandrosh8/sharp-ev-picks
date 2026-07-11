@@ -1965,3 +1965,54 @@ async def test_finalize_matches_legacy_btts_pick_to_exchange_form_close(factory)
         assert pick.closing_anchor_type == "pinnacle"
         # The pick's own (soft) book priced the canonical close row.
         assert pick.closing_odds == Decimal("2.0500")
+
+
+async def test_revalidate_matches_legacy_btts_pick_to_exchange_form_close(factory) -> None:  # type: ignore[no-untyped-def]
+    """revalidate_open_picks parity with finalize (audit-lows 2026-07-11): a
+    legacy 'BTTS Yes' OPEN pick must re-price against the canonical 'Yes'/'No'
+    close group — the same _close_lookup_selection fold the snapshot-close
+    path applies. The stored selection (settlement identity) is untouched."""
+    from app.clv_trueup import revalidate_open_picks
+    from app.probabilities.devig import DevigMethod, devig
+
+    event_id = "evt-btts-reval-vocab"
+    pick_out = make_pick(event_id).model_copy(
+        update={
+            "market": Market.BTTS,
+            "selection": "BTTS Yes",
+            "decimal_odds": 2.10,
+            "model_probability": 0.50,
+            "fair_probability": 0.50,
+        }
+    )
+    async with factory() as session:
+        # No kickoff (NULL starts_at): the pick stays in the open re-price set.
+        teams = EventTeams(home="Home FC", away="Away FC")
+        assert await persist_pick(session, pick_out, teams, "value-sharp-vs-soft", "v2-test")
+        await session.commit()
+    snapshots = [
+        OddsSnapshotIn(
+            event_id=event_id,
+            bookmaker=book,
+            market=Market.BTTS,
+            selection=sel,
+            decimal_odds=odds,
+            captured_at=NOW,
+            ingested_at=NOW,
+        )
+        for book, (yes, no) in {"Pinnacle": (1.95, 1.95), "SoftBook": (2.05, 1.87)}.items()
+        for sel, odds in (("Yes", yes), ("No", no))
+    ]
+
+    updated = await revalidate_open_picks(factory, snapshots, DevigMethod.POWER)
+
+    assert updated == 1
+    async with factory() as session:
+        pick = await session.scalar(select(Pick).where(Pick.reason_summary == "clv true-up test"))
+        assert pick is not None
+        fair_yes = devig((1.95, 1.95), method=DevigMethod.POWER)[0]
+        assert pick.closing_fair_probability is not None
+        assert float(pick.closing_fair_probability) == pytest.approx(fair_yes, abs=1e-6)
+        assert pick.clv_log is not None
+        assert pick.closing_anchor_type == "pinnacle"
+        assert pick.selection == "BTTS Yes"  # settlement identity never rewritten

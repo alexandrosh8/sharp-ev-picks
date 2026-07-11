@@ -35,6 +35,7 @@ from app.config import (
     gate_policy,
     stake_policy,
     steam_policy,
+    uncertainty_shrink_policy,
     value_policy,
 )
 from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
@@ -343,6 +344,59 @@ def _unvalidated_sport_scopes(
         else:
             visibility_only |= keys
     return experimental, visibility_only
+
+
+#: Task 5 n_eff cache TTL: the per-(sport, market) settled trusted-CLV counts
+#: behind the stake-shrink SHADOW annotation are re-aggregated at most this
+#: often (refreshed lazily at the top of a poll cycle — NEVER per pick).
+#: Trusted counts accrue on settlement cadence (hours), so 15 min is generous.
+STAKE_NEFF_REFRESH_SECONDS = 900.0
+
+
+def _build_stake_neff_source(
+    session_factory: "async_sessionmaker",
+    ttl_seconds: float = STAKE_NEFF_REFRESH_SECONDS,
+) -> tuple[Callable[[str, str, str], int | None], Callable[[], Awaitable[None]]]:
+    """Task 5 n_eff source (PipelineDeps.stake_neff_lookup) + its refresher.
+
+    ``lookup`` is SYNCHRONOUS and reads only the in-memory cache — the pick
+    hot path never touches the DB. ``refresh`` re-aggregates the per-cell
+    settled trusted-CLV counts (repositories.settled_trusted_counts — the
+    SAME aggregation as the B1 promotion-distance report) at most once per
+    ``ttl_seconds``; the poll job awaits it at cycle start. A refresh failure
+    keeps the previous cache and does NOT stamp the clock (type-only log,
+    retried next cycle) — it never blocks minting. An unknown cell reads None
+    (the honest n_eff=None/phi=None annotation, never fabricated).
+
+    The warehouse trusted aggregation carries no strategy dimension (the
+    model strategy is not deployed and contributes no trusted CLV), so the
+    lookup keys on (sport, market) and ignores ``strategy`` — revisit if a
+    second strategy ever accrues settled evidence.
+    """
+    cache: dict[tuple[str, str], int] = {}
+    state: dict[str, datetime | None] = {"refreshed_at": None}
+
+    async def refresh() -> None:
+        now = datetime.now(tz=UTC)
+        last = state["refreshed_at"]
+        if last is not None and (now - last).total_seconds() < ttl_seconds:
+            return
+        from app.storage.repositories import settled_trusted_counts
+
+        try:
+            async with session_factory() as session:
+                counts = await settled_trusted_counts(session)
+        except Exception as exc:  # annotation source must never block minting
+            logger.error("stake n_eff refresh failed: %s", type(exc).__name__)
+            return
+        cache.clear()
+        cache.update(counts)
+        state["refreshed_at"] = now
+
+    def lookup(strategy: str, sport_key: str, market: str) -> int | None:
+        return cache.get((sport_key, market))
+
+    return lookup, refresh
 
 
 def build_scheduler(
@@ -661,6 +715,15 @@ def build_scheduler(
                 staleness_ttl,
                 "would demote" if settings.value_betfair_staleness_shadow else "demotes",
             )
+        # Task 5 uncertainty-shrink SHADOW wiring: the Settings-built policy
+        # (default OFF — final stake bit-identical) plus the cached n_eff
+        # source, so phi/n_eff/shrunk_fraction annotations are REAL instead of
+        # None. Without persistence there is no settled evidence to count —
+        # the lookup stays None and the annotation stays honestly null.
+        stake_neff_lookup = None
+        refresh_stake_neff: Callable[[], Awaitable[None]] | None = None
+        if session_factory is not None:
+            stake_neff_lookup, refresh_stake_neff = _build_stake_neff_source(session_factory)
         deps = PipelineDeps(
             loader=loader,
             model=model,
@@ -696,12 +759,19 @@ def build_scheduler(
             steam_policy=steam_gate_policy,
             steam_history_loader=steam_history_loader,
             staleness_verdict_loader=staleness_verdict_loader,
+            stake_shrink=uncertainty_shrink_policy(settings),
+            stake_neff_lookup=stake_neff_lookup,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 
         cycle_budget = settings.poll_cycle_timeout_seconds
 
         async def poll_odds() -> None:
+            # Task 5: refresh the n_eff cell counts at most once per TTL —
+            # a cycle-start read, never a per-pick query; failure is isolated
+            # inside the refresher and never blocks the cycle.
+            if refresh_stake_neff is not None:
+                await refresh_stake_neff()
             for sport_key in sport_keys:
                 await run_sport_cycle_guarded(pipeline_fn, deps, sport_key, cycle_budget)
 
@@ -983,13 +1053,17 @@ def build_scheduler(
         # pool); only when BOTH are empty fall back to the direct client (which
         # will 403 — logged, never fatal). An injected test client always wins.
         _arcadia_proxy_urls = settings.arcadia_effective_proxy_urls()
+        # ONE http client for BOTH the capture and the opt-in config discovery
+        # (audit 2026-07-10 L-scheduler-1013: discovery used the direct
+        # http_client even when the capture rode the proxy pool — a config
+        # bypass that 403s on datacenter egress and leaks the egress IP).
+        arcadia_transport_client = arcadia_http_client or (
+            build_arcadia_proxy_http_client(_arcadia_proxy_urls)
+            if _arcadia_proxy_urls
+            else http_client
+        )
         arcadia_client = PinnacleArcadiaClient(
-            arcadia_http_client
-            or (
-                build_arcadia_proxy_http_client(_arcadia_proxy_urls)
-                if _arcadia_proxy_urls
-                else http_client
-            ),
+            arcadia_transport_client,
             base_url=settings.arcadia_base_url,
             guest_key=settings.arcadia_guest_key.get_secret_value(),
         )
@@ -1010,7 +1084,10 @@ def build_scheduler(
             if not settings.arcadia_discover_config or discover_done["ran"]:
                 return
             discover_done["ran"] = True
-            config = await discover_arcadia_config(arcadia_http_client or http_client)
+            # Same client (and therefore the same proxy pool) as the capture —
+            # never the direct client (L-scheduler-1013). On ANY failure the
+            # helper returns None and the configured key/base stand (fail-closed).
+            config = await discover_arcadia_config(arcadia_transport_client)
             if config is not None:
                 arcadia_client.apply_config(config)
 
