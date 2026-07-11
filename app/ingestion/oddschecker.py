@@ -15,7 +15,7 @@ import inspect
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from types import MappingProxyType
@@ -955,6 +955,7 @@ def parse_match_page(
     )
 
     fallback_captured = _parse_epoch_ms(payload.get("lastUpdated")) or ingested_at
+    bet_names_by_market = _bet_names_by_market(bets)
     snapshots: list[OddsSnapshotIn] = []
     for bet_id, per_book in odds.items():
         bet = bets.get(str(bet_id))
@@ -966,17 +967,28 @@ def parse_match_page(
         selection = str(bet.get("betName") or "").strip()
         if not selection:
             continue
-        mapped = _market_for_type(
-            str(market.get("marketTypeName") or ""),
-            bet.get("line"),
-            selection,
+        market_type = str(market.get("marketTypeName") or "")
+        exact_sets_map = _exact_sets_totals_map(
+            market_type, bet_names_by_market.get(str(bet.get("marketId") or ""), ())
         )
-        if mapped is None:
-            continue
-        market_key, market_detail = mapped
-        if wanted is not None and market_key not in wanted:
-            continue
-        selection = _line_bearing_selection(selection, bet.get("line"), market_key)
+        if exact_sets_map is not None:
+            # Proven-bo3 exact-sets bet -> the canonical set-totals group.
+            exact_sets_selection = exact_sets_map.get(selection.lower())
+            if exact_sets_selection is None:
+                continue
+            market_key = Market.TOTALS
+            market_detail = _EXACT_SETS_BO3_DETAIL
+            if wanted is not None and market_key not in wanted:
+                continue
+            selection = exact_sets_selection
+        else:
+            mapped = _market_for_type(market_type, bet.get("line"), selection)
+            if mapped is None:
+                continue
+            market_key, market_detail = mapped
+            if wanted is not None and market_key not in wanted:
+                continue
+            selection = _canonical_selection(selection, bet.get("line"), market_key)
         for code, raw_odd in per_book.items():
             if not isinstance(raw_odd, Mapping):
                 continue
@@ -1047,6 +1059,7 @@ def supported_market_ids_from_match_page(
     if not isinstance(best, Mapping):
         return []
     market_entities = _entity_map(best.get("markets"))
+    bet_names_by_market = _bet_names_by_market(_entity_map(best.get("bets")))
     ids: list[str] = []
     for market_id, market in market_entities.items():
         if not isinstance(market, Mapping):
@@ -1054,9 +1067,17 @@ def supported_market_ids_from_match_page(
         market_type = str(market.get("marketTypeName") or "")
         mapped = _market_for_type(market_type, None)
         if mapped is None:
+            if (
+                _exact_sets_totals_map(market_type, bet_names_by_market.get(market_id, ()))
+                is not None
+            ):
+                # Proven-bo3 exact-sets market: a MAPPED set-totals close
+                # source now — requested without the OTHER opt-in.
+                if wanted is not None and Market.TOTALS not in wanted:
+                    continue
             # Capture-only path: unmapped, non-boost markets, but ONLY when no
             # explicit Market filter is set (capture is all-or-nothing).
-            if not include_other or wanted is not None or _is_boost_market(market_type):
+            elif not include_other or wanted is not None or _is_boost_market(market_type):
                 continue
         else:
             market_key, _detail = mapped
@@ -1123,6 +1144,12 @@ def parse_market_api_payloads(
             and not _is_boost_market(market_type)
             and _odds_have_sharp_anchor(raw_odds)
         )
+        # Best-of-3 exact-sets bijection (computed once/market from the FULL
+        # bet-name set — the market-level proof of format).
+        exact_sets_map = _exact_sets_totals_map(
+            market_type,
+            (str(b.get("betName") or "") for b in raw_bets if isinstance(b, Mapping)),
+        )
         event_id = _api_event_id(market_payload, url)
         home, away = _split_match_name(str(market_payload.get("subeventName") or "")) or ("", "")
         if not home and not away:
@@ -1158,12 +1185,21 @@ def parse_market_api_payloads(
             if not selection:
                 continue
             line = raw_bet.get("line")
-            mapped = _market_for_type(market_type, line, selection)
-            if mapped is not None:
+            exact_sets_selection = (
+                None if exact_sets_map is None else exact_sets_map.get(selection.lower())
+            )
+            if exact_sets_selection is not None:
+                # Proven-bo3 exact-sets bet -> the canonical set-totals group.
+                market_key = Market.TOTALS
+                market_detail = _EXACT_SETS_BO3_DETAIL
+                if wanted is not None and market_key not in wanted:
+                    continue
+                selection = exact_sets_selection
+            elif (mapped := _market_for_type(market_type, line, selection)) is not None:
                 market_key, market_detail = mapped
                 if wanted is not None and market_key not in wanted:
                     continue
-                selection = _line_bearing_selection(selection, line, market_key)
+                selection = _canonical_selection(selection, line, market_key)
             elif other_ok:
                 market_key = Market.OTHER
                 market_detail = _other_market_detail(market_type, line)
@@ -1243,7 +1279,7 @@ def parse_legacy_match_page(
         market_key, market_detail = mapped
         if wanted is not None and market_key not in wanted:
             continue
-        selection = _line_bearing_selection(raw_selection, line, market_key)
+        selection = _canonical_selection(raw_selection, line, market_key)
         for cell in row.select("td[data-bk][data-odig]"):
             decimal = _decimal(cell.get("data-odig"))
             if decimal is None:
@@ -1374,6 +1410,68 @@ def _line_bearing_selection(selection: str, line: Any, market: Market) -> str:
     if selection.endswith(suffix):
         return selection  # already line-bearing (legacy grid rows carry it in the name)
     return f"{selection} {suffix}".strip()
+
+
+# BTTS selection vocabulary (warehouse evidence 2026-07-11): the feed has
+# emitted BOTH bare 'Yes'/'No' (every Betfair Exchange inline row, and all
+# soft rows since 2026-07-05) and a prefixed 'BTTS Yes'/'BTTS No' soft form
+# (~66k rows each through 2026-07-05). Two forms in one two-outcome market
+# split the devig group into four selections and broke the close true-up's
+# exact-selection match (0 sharp snapshot closes across all btts picks).
+_BTTS_SELECTION_PREFIX_RE = re.compile(r"^\s*btts\s+", re.IGNORECASE)
+
+
+def _canonical_selection(selection: str, line: Any, market: Market) -> str:
+    """The platform-canonical selection for one mapped bet.
+
+    BTTS normalizes to the bare 'Yes'/'No' form the Betfair Exchange rows use
+    (see ``_BTTS_SELECTION_PREFIX_RE``); every other market keeps the
+    OddsPortal-parity line-bearing contract of ``_line_bearing_selection``."""
+    if market is Market.BTTS:
+        stripped = _BTTS_SELECTION_PREFIX_RE.sub("", selection).strip()
+        return stripped or selection
+    return _line_bearing_selection(selection, line, market)
+
+
+# Betfair Exchange prices NO tennis set-totals Over/Under on OddsChecker
+# (warehouse 2026-07-11: 0 Exchange rows on totals_2_5/3_5/4_5 — the lines
+# tennis set-total picks live on); it prices the SAME best-of-3 event only as
+# the exact-sets market ("Total Sets Exact", bets "2 Sets"/"3 Sets" — 422
+# Exchange rows stranded under capture-only ``oc_total_sets_exact``). In a
+# best-of-3, exactly-2-sets IS under-2.5-sets and exactly-3-sets IS
+# over-2.5-sets: a bijective RENAME, never a derived/summed price. Only the
+# two-outcome {2 Sets, 3 Sets} form maps — that bet set itself proves
+# best-of-3. A best-of-5 exact market ({3,4,5} Sets) has no per-selection
+# Over/Under bijection and stays unmapped (fail-closed; OTHER at most).
+_EXACT_SETS_MARKET_TYPE = "total sets exact"
+_EXACT_SETS_BO3_SELECTIONS: Mapping[str, str] = MappingProxyType(
+    {"2 sets": "Under 2.5", "3 sets": "Over 2.5"}
+)
+_EXACT_SETS_BO3_DETAIL = "totals_2_5"
+
+
+def _exact_sets_totals_map(market_type: str, bet_names: Iterable[str]) -> Mapping[str, str] | None:
+    """Lowered exact-sets bet name -> canonical set-totals selection, or None
+    when the market is not the provably-best-of-3 exact-sets form."""
+    if market_type.strip().lower() != _EXACT_SETS_MARKET_TYPE:
+        return None
+    names = {str(name).strip().lower() for name in bet_names}
+    names.discard("")
+    if names != set(_EXACT_SETS_BO3_SELECTIONS):
+        return None
+    return _EXACT_SETS_BO3_SELECTIONS
+
+
+def _bet_names_by_market(bets: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Per-marketId bet-name lists from a bestOdds ``bets`` entity map — the
+    market-level evidence ``_exact_sets_totals_map`` needs on the page path."""
+    names: dict[str, list[str]] = {}
+    for bet in bets.values():
+        if isinstance(bet, Mapping):
+            names.setdefault(str(bet.get("marketId") or ""), []).append(
+                str(bet.get("betName") or "")
+            )
+    return names
 
 
 def parse_competition_match_urls(

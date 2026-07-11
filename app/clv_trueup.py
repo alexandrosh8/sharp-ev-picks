@@ -18,6 +18,7 @@ only trusted while it stays positive (docs/backtesting/value-findings.md).
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -739,6 +740,28 @@ def _key_line(line: float, signed: bool = True) -> str:
     return text.replace(".", "_")
 
 
+# The legacy BTTS pick-selection prefix ('BTTS Yes'/'BTTS No', soft rows +
+# picks minted through 2026-07-05). Close groups key on the bare exchange
+# form 'Yes'/'No' — the ONLY form the OddsChecker capture emits now
+# (app/ingestion/oddschecker._canonical_selection).
+_BTTS_SELECTION_PREFIX_RE = re.compile(r"^\s*btts\s+", re.IGNORECASE)
+
+
+def _close_lookup_selection(market: str, selection: str) -> str:
+    """The selection key a pick's snapshot close is grouped under.
+
+    BTTS: legacy picks stored 'BTTS Yes'/'BTTS No' while every current close
+    row (including all Betfair Exchange quotes) keys 'Yes'/'No'; without this
+    fold their snapshot close can never match (live warehouse 2026-07-11:
+    zero sharp snapshot closes across all btts picks). Close-side CONSUMPTION
+    only — the pick's stored selection (its settlement identity) is never
+    rewritten. Every other market passes through unchanged."""
+    if market == Market.BTTS.value:
+        stripped = _BTTS_SELECTION_PREFIX_RE.sub("", selection).strip()
+        return stripped or selection
+    return selection
+
+
 def _pick_market_keys(sport_key: str, market: str, selection: str) -> tuple[str, ...] | None:
     """OddsHarvester market key(s) a stored pick needs for re-pricing; None
     = unmappable (the caller falls back to the loader's full configured
@@ -1394,12 +1417,16 @@ async def finalize_closing_from_snapshots(
     fair: float | None
     close_anchor: str | None
     close_fell_back: bool | None
+    # Close-side vocabulary fold: legacy BTTS picks stored 'BTTS Yes'/'BTTS No'
+    # while the close groups key the exchange-form 'Yes'/'No' (see
+    # _close_lookup_selection). Lookup-only — pick.selection is never rewritten.
+    lookup_selection = _close_lookup_selection(pick.market, pick.selection)
     if pick.market_detail is not None:
         # MINT-STAMPED pick: exact canonical-group match only — no ambiguity
         # is possible for it, so a colliding same-selection group can neither
         # refuse (line-blind skip) nor pollute this close. Group absent ->
         # keep the revalidation close (fail-closed, never guessed).
-        stamped_key = (pick.market, pick.selection, pick.market_detail)
+        stamped_key = (pick.market, lookup_selection, pick.market_detail)
         fair = fair_by_exact.get(stamped_key)
         close_anchor = anchor_by_exact.get(stamped_key)
         close_fell_back = fell_back_by_exact.get(stamped_key)
@@ -1414,18 +1441,18 @@ async def finalize_closing_from_snapshots(
     else:
         # LEGACY (NULL market_detail) pick: today's line-blind behavior,
         # unchanged — including the fail-closed ambiguity refusal.
-        if (pick.market, pick.selection) in ambiguous_keys:
+        if (pick.market, lookup_selection) in ambiguous_keys:
             logger.info(
                 "pick %d: snapshot close key %s/%s maps to >1 market line — "
                 "keeping revalidation close",
                 pick.id,
                 pick.market,
-                pick.selection,
+                lookup_selection,
             )
             return False
-        fair = fair_by_key.get((pick.market, pick.selection))
-        close_anchor = anchor_by_key.get((pick.market, pick.selection))
-        close_fell_back = fell_back_by_key.get((pick.market, pick.selection))
+        fair = fair_by_key.get((pick.market, lookup_selection))
+        close_anchor = anchor_by_key.get((pick.market, lookup_selection))
+        close_fell_back = fell_back_by_key.get((pick.market, lookup_selection))
         if fair is None or not 0.0 < fair < 1.0:
             logger.info(
                 "pick %d: snapshot close has no anchored fair for its market/selection "
@@ -1459,11 +1486,14 @@ async def finalize_closing_from_snapshots(
         # canonical group (see _exact_group_books) — never merged across
         # same-selection vocabularies.
         books, captured_map = _exact_group_books(
-            grouped, pick.market, pick.selection, pick.market_detail
+            grouped, pick.market, lookup_selection, pick.market_detail
         )
     else:
         books, captured_map = _detail_matched_books(
-            grouped, pick.market, pick.selection, detail_by_key.get((pick.market, pick.selection))
+            grouped,
+            pick.market,
+            lookup_selection,
+            detail_by_key.get((pick.market, lookup_selection)),
         )
     close_odds: float | None
     if pick.bookmaker in books:

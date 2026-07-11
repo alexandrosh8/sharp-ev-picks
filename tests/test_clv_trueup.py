@@ -1893,3 +1893,75 @@ async def test_legacy_null_market_detail_keeps_fail_closed_skip(factory) -> None
         assert row is not None
         assert row.market_detail is None
         assert row.clv_log is None
+
+
+# --- BTTS close-side selection vocabulary (capture-coverage upgrade 2026-07-11)
+
+
+def test_close_lookup_selection_folds_legacy_btts_prefix() -> None:
+    """Legacy 'BTTS Yes'/'BTTS No' pick selections must look up the canonical
+    exchange-form 'Yes'/'No' close group; every other market is untouched."""
+    from app.clv_trueup import _close_lookup_selection
+
+    assert _close_lookup_selection("btts", "BTTS Yes") == "Yes"
+    assert _close_lookup_selection("btts", "btts no") == "no"
+    assert _close_lookup_selection("btts", "Yes") == "Yes"
+    assert _close_lookup_selection("btts", "No") == "No"
+    # A degenerate bare-prefix selection never folds to empty.
+    assert _close_lookup_selection("btts", "BTTS ") == "BTTS "
+    # Only BTTS folds — a team literally named 'BTTS ...' elsewhere is data.
+    assert _close_lookup_selection("h2h", "BTTS Wanderers") == "BTTS Wanderers"
+
+
+async def test_finalize_matches_legacy_btts_pick_to_exchange_form_close(factory) -> None:  # type: ignore[no-untyped-def]
+    """A legacy 'BTTS Yes' pick must finalize against the canonical 'Yes'/'No'
+    close group — the ONLY form the current capture emits (every Betfair
+    Exchange inline BTTS row is 'Yes'/'No'; warehouse evidence 2026-07-11)."""
+    from app.clv_trueup import finalize_closing_from_snapshots
+    from app.probabilities.devig import DevigMethod, devig
+    from app.storage.models import OddsSnapshot
+
+    event_id = "evt-btts-close-vocab"
+    kickoff = NOW - timedelta(hours=6)
+    pick_out = make_pick(event_id).model_copy(
+        update={
+            "market": Market.BTTS,
+            "selection": "BTTS Yes",
+            "decimal_odds": 2.10,
+            "model_probability": 0.50,
+            "fair_probability": 0.50,
+            "created_at": NOW - timedelta(days=2),
+        }
+    )
+    async with factory() as session:
+        teams = EventTeams(home="Home FC", away="Away FC", starts_at=kickoff)
+        assert await persist_pick(session, pick_out, teams, "value-sharp-vs-soft", "v2-test")
+        pick = await session.scalar(select(Pick).where(Pick.reason_summary == "clv true-up test"))
+        assert pick is not None
+        close_at = kickoff - timedelta(minutes=30)
+        for book, (yes, no) in {"Pinnacle": (1.95, 1.95), "SoftBook": (2.05, 1.87)}.items():
+            for sel, odds in (("Yes", yes), ("No", no)):
+                session.add(
+                    OddsSnapshot(
+                        event_id=pick.event_id,
+                        bookmaker=book,
+                        market="btts",  # stored snapshot key form (enum value)
+                        selection=sel,
+                        decimal_odds=Decimal(str(odds)),
+                        captured_at=close_at,
+                        ingested_at=close_at,
+                    )
+                )
+        await session.flush()
+        ref = await session.scalar(select(Event.external_ref).where(Event.id == pick.event_id))
+        assert ref is not None
+
+        assert await finalize_closing_from_snapshots(session, pick, ref, kickoff, DevigMethod.POWER)
+
+        fair_yes = devig((1.95, 1.95), method=DevigMethod.POWER)[0]
+        assert pick.closing_fair_probability is not None
+        assert float(pick.closing_fair_probability) == pytest.approx(fair_yes, abs=1e-6)
+        assert pick.has_snapshot_close is True
+        assert pick.closing_anchor_type == "pinnacle"
+        # The pick's own (soft) book priced the canonical close row.
+        assert pick.closing_odds == Decimal("2.0500")
