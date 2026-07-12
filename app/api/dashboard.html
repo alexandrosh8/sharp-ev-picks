@@ -3187,7 +3187,11 @@
 
           // ---- evidence pane (fix 2026-07-10 #19: labelled sections) ----
           const ev = $("edge-evidence-body"); ev.replaceChildren();
-          ev.appendChild(ticketSec("Consensus Anchor"));
+          // Section header is the DIMENSION name, not a value — the tag below
+          // carries the actual anchor (Sharp/Pinnacle/Consensus). The old
+          // hardcoded "Consensus Anchor" header rendered a contradictory
+          // "CONSENSUS ANCHOR / SHARP ANCHOR" pair on sharp-anchored tickets.
+          ev.appendChild(ticketSec("Fair-Value Anchor"));
           const anchorTag = document.createElement("span");
           const at = p.anchor_type;
           anchorTag.className = "tag " + (at === "pinnacle" || at === "sharp" ? "tag-cyan" : at === "consensus" ? "tag-neutral" : "tag-danger tag-dashed");
