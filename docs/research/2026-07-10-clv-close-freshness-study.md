@@ -115,11 +115,26 @@ they are genuine large line moves, which a fresh sharp close surfaces more
 often than a stale one. The tautology rate falls 36%→26% because a T-27m
 Pinnacle close has moved from the mint line more often than a T-3h echo.
 
-## DRAFT operator flip criterion for `CLV_USE_PINNACLE_ARCHIVE` (pre-registered)
+## OPERATOR-SIGNED 2026-07-12 — flip criterion for `CLV_USE_PINNACLE_ARCHIVE` (pre-registered 2026-07-10)
 
-The flag stays OFF until the operator signs. Proposed criterion, with today's
-measured values in brackets — **thresholds fixed now, before any further data
-is collected**, so the flip decision cannot be tuned on the outcome:
+> **Signature + execution record (2026-07-12).** Operator signed in-session
+> ("proceed with both"). Condition 2 (wrong-game audit) was satisfied by the
+> post-veto independent re-audit: **0 wrong / 0 ambiguous / 34**
+> (`docs/research/2026-07-11-arcadia-match-reaudit.md`). **State correction
+> discovered at signature time:** the flag was ALREADY `true` in the
+> production `.env` (earliest arcadia-attached close 2026-07-01) — this
+> study's "flag stays OFF" framing described the code default, not prod. The
+> signature therefore RATIFIES the live setting rather than flipping it.
+> Follow-through executed with the signature: the 6 settled picks whose
+> STORED closes were the proven wrong-game NBL1 attachments (1585, 2307,
+> 2421, 2573, 2574, 2594 — prior values preserved in the audit docs) were
+> re-nulled with `close_exclusion_reason='wrong_game'`; trusted aggregate
+> restated n 216→212, mean −0.0348→−0.0293. Rollback remains flag-off; the
+> T+1-week re-run of this script stands.
+
+The criterion as pre-registered (2026-07-10), with the then-measured values in
+brackets — **thresholds were fixed before any further data was collected**, so
+the flip decision could not be tuned on the outcome:
 
 1. **Match-rate floor (scoped):** arcadia usable-close rate ≥ 50% on the
    markets the archive can price for a settled pick — h2h [60.5% ✅]; report
