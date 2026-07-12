@@ -56,6 +56,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+#: Resolver quarantine counters (monitor-only, PROCESS-LIFETIME): how many
+#: pinnacle-close attachments the two fail-closed refusal guards inside
+#: `resolve_pinnacle_close_snaps` declined — the league-marker veto and the
+#: same-pair ambiguity guard. Deliberately in-memory (plain dict: the app is a
+#: single asyncio loop, increments never interleave) and reset on restart;
+#: /health exposes them alongside the process-start stamp so the operator can
+#: rate refusal volume without grepping logs. Never gates anything.
+_QUARANTINE_SINCE = datetime.now(tz=UTC)
+_QUARANTINE_COUNTS: dict[str, int] = {"marker_veto": 0, "same_pair_ambiguity": 0}
+
+
+def resolver_quarantine_stats() -> dict[str, int | str]:
+    """Snapshot of the resolver refusal counters (counts since process start).
+
+    `since` is the process-start instant (ISO-8601 UTC) the counts date from —
+    the counters are in-memory and reset on every restart."""
+    return {**_QUARANTINE_COUNTS, "since": _QUARANTINE_SINCE.isoformat()}
+
+
 #: Bookmaker name the Betfair Exchange capture persists under (mirrors
 #: app.ingestion.betfair_exchange.BOOKMAKER). Kept as a local literal so this
 #: read-only query module never imports the ingestion layer.
@@ -1879,6 +1898,92 @@ def _weekly_steam_counts(
     return [{"week_start": ws, **counts} for ws, counts in sorted(weeks.items())]
 
 
+#: ADR-0022 crit 5 — uncertainty-shrink shadow-annotation 30-day review window.
+#: Annotations (phi/n_eff/shrunk_fraction on stake_breakdown) began accruing
+#: 2026-07-11; the operator review is due 30 days later. Estimates are nulled
+#: below SHRINK_REVIEW_MIN_N — a handful of annotations is a count, not a mean.
+SHRINK_ANNOTATIONS_SINCE = datetime(2026, 7, 11, tzinfo=UTC)
+SHRINK_REVIEW_DUE = "2026-08-10"
+SHRINK_REVIEW_MIN_N = 10
+
+
+def _shrink_review(breakdowns: Sequence[Mapping[str, Any] | None]) -> dict[str, Any]:
+    """ADR-0022 crit 5 review aggregate over persisted stake_breakdown JSONs
+    (pure — the caller queries picks minted since SHRINK_ANNOTATIONS_SINCE).
+
+    A breakdown is ANNOTATED when it carries the shrink keys at all ("phi" in
+    the JSON — pre-annotation rows never do); ``n_with_phi`` narrows to a real
+    phi value (annotation ran with a wired n_eff source). ``mean_phi`` and
+    ``mean_shrunk_vs_final_ratio`` are nulled below SHRINK_REVIEW_MIN_N on
+    their own denominators — counts survive, sub-floor means never leak."""
+    annotated = [b for b in breakdowns if isinstance(b, Mapping) and "phi" in b]
+    phis = [float(b["phi"]) for b in annotated if b.get("phi") is not None]
+    ratios = [
+        float(b["shrunk_fraction"]) / float(b["final"])
+        for b in annotated
+        if b.get("shrunk_fraction") is not None
+        and b.get("final") is not None
+        and float(b["final"]) > 0.0
+    ]
+    return {
+        "annotations_since": SHRINK_ANNOTATIONS_SINCE.date().isoformat(),
+        "n_annotated": len(annotated),
+        "n_with_phi": len(phis),
+        "review_due": SHRINK_REVIEW_DUE,
+        "mean_phi": (sum(phis) / len(phis)) if len(phis) >= SHRINK_REVIEW_MIN_N else None,
+        "mean_shrunk_vs_final_ratio": (
+            (sum(ratios) / len(ratios)) if len(ratios) >= SHRINK_REVIEW_MIN_N else None
+        ),
+    }
+
+
+#: Close-age histogram buckets (capture-time-before-kickoff, minutes). Labels
+#: are the JSON keys the dashboard renders verbatim.
+CLOSE_AGE_BUCKETS = ("<30m", "30-60m", "1-3h", "3-12h", ">12h")
+
+
+def _close_age_bucket(minutes: float) -> str:
+    if minutes < 30.0:
+        return "<30m"
+    if minutes < 60.0:
+        return "30-60m"
+    if minutes < 180.0:
+        return "1-3h"
+    if minutes < 720.0:
+        return "3-12h"
+    return ">12h"
+
+
+def _close_age_histogram(rows: Sequence[tuple[Any, Any, Any]]) -> dict[str, Any]:
+    """Close-age histogram per CLOSE anchor source (pure — no DB).
+
+    ``rows`` = (closing_anchor_type, close_snapshot_captured_at, kickoff) per
+    settled pick. Age = kickoff − capture time, the same clock as the
+    clv_quality p50/p90 — an honest CAPTURE-TIME proxy for "how close to
+    kickoff was the close observed", NOT the market's true closing instant.
+    Rows missing either timestamp are skipped (unknowable, never guessed);
+    a NULL anchor groups under "unknown". Counts only — no floor needed."""
+    by_anchor: dict[str, dict[str, int]] = {}
+    n = 0
+    for anchor, captured_at, kickoff in rows:
+        if captured_at is None or kickoff is None:
+            continue
+        minutes = (kickoff - captured_at).total_seconds() / 60.0
+        key = str(anchor) if anchor is not None else "unknown"
+        cell = by_anchor.setdefault(key, dict.fromkeys(CLOSE_AGE_BUCKETS, 0))
+        cell[_close_age_bucket(minutes)] += 1
+        n += 1
+    return {
+        "buckets": list(CLOSE_AGE_BUCKETS),
+        "by_anchor": {k: by_anchor[k] for k in sorted(by_anchor)},
+        "n": n,
+        "note": (
+            "age = kickoff − close_snapshot_captured_at (capture time vs "
+            "kickoff — a capture-time proxy, not the market's true close)"
+        ),
+    }
+
+
 async def performance_report(
     session: AsyncSession,
     *,
@@ -2138,6 +2243,19 @@ async def performance_report(
                 "clear": _steam_sharp_evidence(False),
             },
         }
+    # ADR-0022 crit 5 (2026-07-12): the uncertainty-shrink 30-day review over
+    # ALL picks (settled + open) minted since annotations began — the shadow
+    # phi/n_eff/shrunk_fraction keys ride stake_breakdown JSON, so this is a
+    # single cheap projection; the pure helper nulls sub-floor estimates.
+    shrink_breakdowns = (
+        (
+            await session.execute(
+                select(Pick.stake_breakdown).where(Pick.created_at >= SHRINK_ANNOTATIONS_SINCE)
+            )
+        )
+        .scalars()
+        .all()
+    )
     return {
         **premium,
         "n_pending": pending_by_tier.get("premium", 0),
@@ -2148,6 +2266,19 @@ async def performance_report(
         "clv_quality": clv_quality,
         "steam_shadow": steam_shadow,
         "trusted_close_eta": trusted_close_eta,
+        "shrink_review": _shrink_review(shrink_breakdowns),
+        # Task 4 (2026-07-12): close-age histogram per CLOSE anchor over the
+        # settled rows already in hand (capture-time vs kickoff, see helper).
+        "close_age_histogram": _close_age_histogram(
+            [
+                (
+                    r[close_anchor_idx] if close_anchor_idx is not None else None,
+                    r[close_cap_idx] if close_cap_idx is not None else None,
+                    r[starts_at_idx],
+                )
+                for r in rows
+            ]
+        ),
     }
 
 
@@ -3452,6 +3583,7 @@ async def resolve_pinnacle_close_snaps(
             distinguishing_markers(home) | distinguishing_markers(away)
         )
         if league_only_markers:
+            _QUARANTINE_COUNTS["marker_veto"] += 1  # monitor-only (/health)
             logger.info(
                 "pinnacle close: league-marker veto refused %s -> %s "
                 "(arcadia league carries %s; pick side does not)",
@@ -3488,6 +3620,7 @@ async def resolve_pinnacle_close_snaps(
             and _league_marker_set(lg) == matched_markers
         )
         if ambiguous_refs:
+            _QUARANTINE_COUNTS["same_pair_ambiguity"] += 1  # monitor-only (/health)
             logger.info(
                 "pinnacle close: same-pair ambiguity refused %s -> %s "
                 "(marker-indistinguishable arcadia sibling(s) share the club "
@@ -4676,11 +4809,19 @@ def promotion_distance_cells(
         ok = n >= ok_n
         mean: float | None = None
         se: float | None = None
+        ci_low: float | None = None
+        ci_high: float | None = None
         if ok:
             vals = [v for v, _s in cell_trusted]
             mean = sum(vals) / n
             if n >= 2:
                 se = math.sqrt(sum((v - mean) ** 2 for v in vals) / (n - 1)) / math.sqrt(n)
+                # 95% t-CI via the same headline machinery (mean_significance);
+                # nulled below ok_n exactly like mean/se — never a sub-floor read.
+                sig = mean_significance(vals)
+                if sig is not None:
+                    ci_low = sig.ci_low
+                    ci_high = sig.ci_high
         est: float | None = None
         if not ok and n_recent > 0:
             est = (ok_n - n) * window_days / n_recent
@@ -4698,10 +4839,61 @@ def promotion_distance_cells(
                 # nulled at the source below ok_n — never a sub-floor estimate
                 "mean_clv_log": mean,
                 "se_clv_log": se,
+                "ci_low_clv_log": ci_low,
+                "ci_high_clv_log": ci_high,
             }
         )
     cells.sort(key=lambda c: (-int(c["n_trusted"]), str(c["sport"]), str(c["market"])))
     return cells
+
+
+#: ADR-0022 crit 2 promotion gate: the trusted-close count a shadow
+#: (sport, market) must reach before promotion can even be CONSIDERED.
+#: Deliberately distinct from SPORT_MARKET_OK_N (the per-cell CI floor).
+PROMOTION_READINESS_NEEDED_N = 50
+
+
+def promotion_readiness_cells(
+    cells: Sequence[Mapping[str, Any]],
+    *,
+    needed_n: int = PROMOTION_READINESS_NEEDED_N,
+) -> list[dict[str, Any]]:
+    """ADR-0022 crit 2 promotion-readiness rows, one per sport/market cell
+    (pure — consumes ``promotion_distance_cells`` output, no DB).
+
+    Honesty rules (binding, mirrored by the dashboard row):
+      - ``ci_low_gt_zero`` is None while the cell's CI is nulled below the
+        SPORT_MARKET_OK_N floor — "CI>0 pending", never a sub-floor read;
+      - ``source_agreement`` and ``freshness`` are NOT YET INSTRUMENTED: they
+        stay None (an honest state), never a fabricated pass/fail;
+      - ``ready`` is True ONLY when every condition is instrumented (non-null)
+        AND holds — with two conditions still null, nothing can read READY.
+    Informational only: promotion stays gated by SportMarketClvGate and an
+    operator-signed ADR.
+    """
+    out: list[dict[str, Any]] = []
+    for c in cells:
+        n_trusted = int(c["n_trusted"])
+        n_settled = int(c["n_settled"])
+        ci_low = c.get("ci_low_clv_log")
+        ci_low_gt_zero: bool | None = None if ci_low is None else bool(float(ci_low) > 0.0)
+        source_agreement: bool | None = None  # not yet instrumented — never fabricated
+        freshness: bool | None = None  # not yet instrumented — never fabricated
+        conditions = (n_trusted >= needed_n, ci_low_gt_zero, source_agreement, freshness)
+        out.append(
+            {
+                "sport": c["sport"],
+                "market": c["market"],
+                "n_trusted": n_trusted,
+                "needed_n": needed_n,
+                "ci_low_gt_zero": ci_low_gt_zero,
+                "source_agreement": source_agreement,
+                "freshness": freshness,
+                "coverage_pct": (100.0 * n_trusted / n_settled) if n_settled > 0 else 0.0,
+                "ready": all(cond is True for cond in conditions),
+            }
+        )
+    return out
 
 
 async def _settled_trust_rows(session: AsyncSession) -> list[tuple[Any, ...]]:
@@ -4778,6 +4970,7 @@ async def _settled_trust_rows(session: AsyncSession) -> list[tuple[Any, ...]]:
 async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, Any]:
     """B1 aggregate behind GET /lab/promotion-distance (read-only)."""
     rows = await _settled_trust_rows(session)
+    cells = promotion_distance_cells(rows, now=datetime.now(tz=UTC))
     return {
         "ok_n": SPORT_MARKET_OK_N,
         "cadence_window_days": PROMOTION_CADENCE_WINDOW_DAYS,
@@ -4785,7 +4978,19 @@ async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, An
             "Distance to the trusted-CLV evidence floor only — informational. "
             "Promotion stays gated by SportMarketClvGate and operator ADR sign-off."
         ),
-        "cells": promotion_distance_cells(rows, now=datetime.now(tz=UTC)),
+        "cells": cells,
+        # ADR-0022 crit 2: per-cell promotion readiness. source_agreement and
+        # freshness are NOT YET INSTRUMENTED (null — never fabricated), so no
+        # cell can read READY until they are wired AND every condition holds.
+        "promotion_readiness": {
+            "needed_n": PROMOTION_READINESS_NEEDED_N,
+            "note": (
+                "source agreement and freshness are not yet instrumented — "
+                "reported null, never fabricated; ready requires every "
+                "condition instrumented and holding."
+            ),
+            "cells": promotion_readiness_cells(cells),
+        },
     }
 
 

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.backtesting.live_evidence import (
+    KILL_GATE_PROGRESS_MIN_N,
     MIN_STRATUM_N,
     PREMIUM_SELECTION_FIX_AT,
     SettledPickRow,
@@ -730,8 +731,10 @@ def test_premium_cohorts_split_on_the_selection_fix_boundary() -> None:
     assert cohorts["pre_fix"]["mean_clv_log"] == pytest.approx(0.02)
     assert cohorts["post_fix"]["n"] == 6
     assert cohorts["post_fix"]["mean_clv_log"] == pytest.approx(-0.01)
-    # same entry shape as the tier entries
-    assert set(cohorts["pre_fix"]) == set(tc["by_tier"]["premium"])
+    # same entry shape as the tier entries PLUS the kill-gate progress fields
+    # (2026-07-12: progress_ci_* / progress_min_n ride ONLY the cohort entries)
+    progress_keys = {"progress_ci_low", "progress_ci_high", "progress_min_n"}
+    assert set(cohorts["pre_fix"]) == set(tc["by_tier"]["premium"]) | progress_keys
 
 
 def test_premium_cohorts_premium_trusted_only_and_nulled_below_floor() -> None:
@@ -775,6 +778,47 @@ def test_premium_cohort_naive_mint_time_is_read_as_utc() -> None:
         "premium_cohorts"
     ]
     assert cohorts["pre_fix"]["n"] == 1
+
+
+# ===== ADR-0022 crit 3 (2026-07-12): kill/keep gate PROGRESS CI ==================
+
+
+def test_premium_cohort_progress_ci_appears_from_n10_below_the_floor() -> None:
+    # The kill/keep gate progress readout: the post-fix premium cohort exposes a
+    # PROGRESS 95% CI once n >= KILL_GATE_PROGRESS_MIN_N (10), while the headline
+    # mean/CI stay honestly nulled below the MIN_STRATUM_N evidence floor.
+    post = [
+        trusted_minted(0.02 + 0.001 * i, PREMIUM_SELECTION_FIX_AT + timedelta(hours=i))
+        for i in range(12)
+    ]
+    cohorts = live_evidence_report(post, ml_threshold=None)["trusted_clv_ci"]["premium_cohorts"]
+    entry = cohorts["post_fix"]
+    assert entry["n"] == 12
+    assert entry["sufficient"] is False
+    assert entry["mean_clv_log"] is None  # evidence estimates stay nulled below min_n
+    assert entry["ci_low"] is None
+    assert entry["progress_min_n"] == KILL_GATE_PROGRESS_MIN_N
+    assert entry["progress_ci_low"] is not None
+    assert entry["progress_ci_high"] is not None
+    assert entry["progress_ci_low"] < entry["progress_ci_high"]
+
+
+def test_premium_cohort_progress_ci_nulled_below_n10() -> None:
+    post = [trusted_minted(0.02, PREMIUM_SELECTION_FIX_AT + timedelta(hours=i)) for i in range(5)]
+    cohorts = live_evidence_report(post, ml_threshold=None)["trusted_clv_ci"]["premium_cohorts"]
+    entry = cohorts["post_fix"]
+    assert entry["n"] == 5
+    assert entry["progress_ci_low"] is None
+    assert entry["progress_ci_high"] is None
+
+
+def test_progress_ci_fields_are_cohort_only() -> None:
+    # The progress readout exists ONLY for the ADR-0022 kill-gate cohorts —
+    # tier/overall entries keep the strict nulled-below-floor shape.
+    rows = [trusted_minted(0.02, PREMIUM_SELECTION_FIX_AT + timedelta(hours=i)) for i in range(12)]
+    tc = live_evidence_report(rows, ml_threshold=None)["trusted_clv_ci"]
+    assert "progress_ci_low" not in tc["overall"]
+    assert "progress_ci_low" not in tc["by_tier"]["premium"]
 
 
 # ===== Task 8 probe (2026-07-11): Monte Carlo zero-edge null record =============

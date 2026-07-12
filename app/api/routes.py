@@ -897,6 +897,7 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
     from app.ingestion.proxy_health import get_registry as _get_proxy_registry
     from app.maintenance.upstream_watch import LAST_CHECK
     from app.pipeline import LAST_POLL
+    from app.storage.repositories import resolver_quarantine_stats
 
     settings = get_settings()
     # P0-3: real liveness — a process that is up but whose poll cycles stopped
@@ -936,6 +937,12 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
         # tier-resolved `edge_floor`; these are the global fallback.
         "value_min_edge": get_settings().value_min_edge,
         "value_volume_min_edge": get_settings().value_volume_min_edge,
+        # Resolver quarantine counters (monitor-only): how many pinnacle-close
+        # attachments the league-marker veto / same-pair ambiguity guards
+        # refused SINCE PROCESS START ("since" carries that instant; the
+        # counters are in-memory and reset on restart). Operator visibility
+        # for the fail-closed refusal volume — nothing reads these to gate.
+        "resolver_quarantine": resolver_quarantine_stats(),
         # Proxy-pool health for the Diagnostics tile — REDACTED (indices,
         # counters, exception class names; never a URL/IP/credential) and
         # process-local (no DB), so it is cheap here. It ALSO rides

@@ -11,6 +11,16 @@ from typing import Protocol
 from app.edge.value import ceil_odds, min_acceptable_odds
 from app.schemas.picks import PickOut
 
+#: Same-game correlation warning (dashboard-chip parity for Telegram/webhook
+#: alerts). The value pipeline passes it to `build_pick_alert` when the pick's
+#: event already carries reserved exposure from a PRIOR grant today. BODY text
+#: only — never part of the dedupe-key inputs (`raw_key`), so flagging
+#: correlation can never re-alert an otherwise-identical market state.
+#: Informational: the ledger's per-event cap already bounds combined exposure.
+CORRELATED_EXPOSURE_WARNING = (
+    "⚠ Correlated: other premium exposure already on this game today — combined cap 4% applies."
+)
+
 # Per-sport emoji for the alert header (neutral fallback for any new sport).
 _SPORT_EMOJI = {
     "soccer": "⚽",
@@ -44,6 +54,7 @@ def build_pick_alert(
     *,
     model_name: str = "",
     model_version: str = "",
+    correlation_warning: str | None = None,
 ) -> Alert:
     """Render a pick into an alert with a stable idempotency key.
 
@@ -64,6 +75,12 @@ def build_pick_alert(
     devigged sharp fair probability (app/pipeline.py maps
     v.sharp_fair_prob there) — the model strategy must pass None, its edge
     (p_model - p_fair) does not shrink with the price the same way.
+
+    `correlation_warning` (default None -> no line) appends one informational
+    line to the BODY — the same-game correlation note the dashboard shows as a
+    chip (pass CORRELATED_EXPOSURE_WARNING). It is deliberately excluded from
+    `raw_key`: the idempotency key hashes market state, and gaining/losing the
+    warning must neither re-alert nor suppress an otherwise-identical pick.
     """
     # Tier tag: ⭐ PREMIUM (alerted + exposure-reserved) vs 🔵 VOLUME (shadow
     # tier — tracked for CLV, never reserves exposure). The tier is included in
@@ -107,6 +124,8 @@ def build_pick_alert(
             f" · odds {pick.odds_age_seconds:.0f}s old{liq}",
             "",
             f"💡 {pick.reason_summary}",
+            # Informational same-game correlation note — body-only, never keyed.
+            *([correlation_warning] if correlation_warning else []),
         ]
     )
     return Alert(pick_id=pick.pick_id, title=title, body=body, dedupe_key=dedupe_key)

@@ -42,6 +42,7 @@ from app.storage.repositories import (
     _league_marker_set,
     persist_odds_snapshots,
     resolve_pinnacle_close_snaps,
+    resolver_quarantine_stats,
 )
 
 # Same compose test DB as tests/test_resolution_db.py; overridable so the
@@ -164,6 +165,7 @@ async def test_resolver_refuses_womens_league_close_for_markerless_pick(factory)
         "Australia - NBL1 Women",
         KO_W,
     )
+    before = resolver_quarantine_stats()
     async with factory() as session:
         out = await resolve_pinnacle_close_snaps(
             session,
@@ -174,6 +176,11 @@ async def test_resolver_refuses_womens_league_close_for_markerless_pick(factory)
             kickoff=KO_M,  # the men's tip, 120 min after the women's
         )
     assert out == []  # league carries {women}; the pick side does not -> REFUSED
+    # Monitor-only quarantine counter (rides /health): the refusal increments
+    # ITS counter and only its counter.
+    after = resolver_quarantine_stats()
+    assert after["marker_veto"] == before["marker_veto"] + 1  # type: ignore[operator]
+    assert after["same_pair_ambiguity"] == before["same_pair_ambiguity"]
 
 
 async def test_resolver_womens_league_close_still_attaches_for_women_marked_pick(factory) -> None:  # type: ignore[no-untyped-def]
@@ -394,6 +401,7 @@ async def test_resolver_refuses_unmarked_same_pair_ambiguity(factory) -> None:  
         home_odds=2.10,
         away_odds=1.75,
     )
+    before = resolver_quarantine_stats()
     async with factory() as session:
         out = await resolve_pinnacle_close_snaps(
             session,
@@ -406,6 +414,11 @@ async def test_resolver_refuses_unmarked_same_pair_ambiguity(factory) -> None:  
     # nearest-collapse would pick the men's event — but the sibling is NOT
     # marker-distinguished, so which game the pick belongs to is a coin flip.
     assert out == []
+    # Monitor-only quarantine counter (rides /health): the refusal increments
+    # ITS counter and only its counter.
+    after = resolver_quarantine_stats()
+    assert after["same_pair_ambiguity"] == before["same_pair_ambiguity"] + 1  # type: ignore[operator]
+    assert after["marker_veto"] == before["marker_veto"]
 
 
 async def test_resolver_same_pair_rematch_outside_accept_window_still_attaches(factory) -> None:  # type: ignore[no-untyped-def]

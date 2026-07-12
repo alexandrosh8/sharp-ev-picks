@@ -695,3 +695,220 @@ def test_trusted_close_eta_empty_and_floor_met() -> None:
         now=now,
     )
     assert met["projected_days"] is None
+
+
+# ===== 2026-07-12 Task 1: ADR-0022 crit-2 promotion-readiness cells ==============
+
+
+def _trust_tuple(
+    sport: str = "basketball",
+    market: str = "spreads",
+    clv: float | None = 0.02,
+    settled_at: datetime | None = None,
+    closing_anchor: str | None = "pinnacle",
+) -> tuple[object, ...]:
+    """A promotion_distance_cells row tuple (trusted unless closing_anchor says
+    otherwise): (sport, market, settled_at, clv_log, closing_anchor,
+    close_independent, has_snapshot_close, decimal_odds, closing_fair,
+    model_prob, mint_fb, close_fb, bookmaker)."""
+    return (
+        sport,
+        market,
+        settled_at or datetime(2026, 7, 1, tzinfo=UTC),
+        clv,
+        closing_anchor,
+        True,
+        True,
+        2.0,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def test_promotion_cells_carry_ci_at_or_above_ok_n() -> None:
+    from app.storage.repositories import SPORT_MARKET_OK_N, promotion_distance_cells
+
+    now = datetime(2026, 7, 12, tzinfo=UTC)
+    rows = [_trust_tuple(clv=0.02 + 0.001 * (i % 7)) for i in range(SPORT_MARKET_OK_N)]
+    (cell,) = promotion_distance_cells(rows, now=now)
+    assert cell["mean_clv_log"] is not None
+    assert cell["ci_low_clv_log"] is not None
+    assert cell["ci_high_clv_log"] is not None
+    assert cell["ci_low_clv_log"] < cell["mean_clv_log"] < cell["ci_high_clv_log"]
+
+
+def test_promotion_cells_ci_nulled_below_ok_n() -> None:
+    from app.storage.repositories import promotion_distance_cells
+
+    now = datetime(2026, 7, 12, tzinfo=UTC)
+    (cell,) = promotion_distance_cells([_trust_tuple() for _ in range(5)], now=now)
+    assert cell["ci_low_clv_log"] is None
+    assert cell["ci_high_clv_log"] is None
+
+
+def test_promotion_readiness_cell_shape_and_null_semantics() -> None:
+    from app.storage.repositories import promotion_distance_cells, promotion_readiness_cells
+
+    now = datetime(2026, 7, 12, tzinfo=UTC)
+    # 23 trusted + 2 untrusted (consensus) settled -> coverage 23/25 = 92%... use
+    # a thinner trusted share: 2 trusted of 25 settled -> coverage 8%.
+    rows = [_trust_tuple() for _ in range(2)] + [
+        _trust_tuple(closing_anchor="consensus") for _ in range(23)
+    ]
+    cells = promotion_distance_cells(rows, now=now)
+    (entry,) = promotion_readiness_cells(cells)
+    assert entry["sport"] == "basketball"
+    assert entry["market"] == "spreads"
+    assert entry["n_trusted"] == 2
+    assert entry["needed_n"] == 50
+    # below the per-cell CI floor: honestly pending, never fabricated
+    assert entry["ci_low_gt_zero"] is None
+    # not yet instrumented: null, never fabricated
+    assert entry["source_agreement"] is None
+    assert entry["freshness"] is None
+    assert entry["coverage_pct"] == pytest.approx(8.0)
+    assert entry["ready"] is False
+
+
+def test_promotion_readiness_ci_flag_and_never_ready_while_uninstrumented() -> None:
+    from app.storage.repositories import (
+        SPORT_MARKET_OK_N,
+        promotion_distance_cells,
+        promotion_readiness_cells,
+    )
+
+    now = datetime(2026, 7, 12, tzinfo=UTC)
+    positive = [_trust_tuple(clv=0.02 + 0.001 * (i % 7)) for i in range(SPORT_MARKET_OK_N + 5)]
+    negative = [
+        _trust_tuple(sport="soccer", market="h2h", clv=-0.02 - 0.001 * (i % 7))
+        for i in range(SPORT_MARKET_OK_N + 5)
+    ]
+    cells = promotion_distance_cells(positive + negative, now=now)
+    entries = {(e["sport"], e["market"]): e for e in promotion_readiness_cells(cells)}
+    assert entries[("basketball", "spreads")]["ci_low_gt_zero"] is True
+    assert entries[("soccer", "h2h")]["ci_low_gt_zero"] is False
+    # ready requires EVERY condition instrumented AND holding — source_agreement
+    # and freshness are still null, so nothing can be ready yet.
+    assert all(e["ready"] is False for e in entries.values())
+
+
+# ===== 2026-07-12 Task 2: uncertainty-shrink 30-day review (ADR-0022 crit 5) =====
+
+
+def test_shrink_review_counts_and_null_below_floor() -> None:
+    from app.storage.repositories import _shrink_review
+
+    breakdowns: list[dict[str, object] | None] = [
+        # pre-annotation rows (no phi key at all): not annotated
+        {"raw_kelly": 0.1, "fractional": 0.02, "capped": False, "final": 0.02},
+        None,
+        # annotated, but no n_eff source was wired -> phi None (still annotated)
+        {"final": 0.02, "phi": None, "n_eff": None, "shrunk_fraction": None},
+        # annotated with real values
+        {"final": 0.02, "phi": 0.5, "n_eff": 30, "shrunk_fraction": 0.01},
+    ]
+    rev = _shrink_review(breakdowns)
+    assert rev["annotations_since"] == "2026-07-11"
+    assert rev["review_due"] == "2026-08-10"
+    assert rev["n_annotated"] == 2
+    assert rev["n_with_phi"] == 1
+    # below the n=10 floor: estimates nulled at the source
+    assert rev["mean_phi"] is None
+    assert rev["mean_shrunk_vs_final_ratio"] is None
+
+
+def test_shrink_review_estimates_at_or_above_floor() -> None:
+    from app.storage.repositories import _shrink_review
+
+    breakdowns = [
+        {"final": 0.02, "phi": 0.4 + 0.02 * i, "n_eff": 20, "shrunk_fraction": 0.01}
+        for i in range(10)
+    ]
+    rev = _shrink_review(breakdowns)
+    assert rev["n_annotated"] == 10
+    assert rev["n_with_phi"] == 10
+    assert rev["mean_phi"] == pytest.approx(sum(0.4 + 0.02 * i for i in range(10)) / 10)
+    assert rev["mean_shrunk_vs_final_ratio"] == pytest.approx(0.5)
+
+
+def test_shrink_review_ratio_skips_zero_final() -> None:
+    from app.storage.repositories import _shrink_review
+
+    # a zero final fraction can never divide; the row still counts as annotated
+    breakdowns = [{"final": 0.0, "phi": 0.5, "n_eff": 10, "shrunk_fraction": 0.0}] * 12
+    rev = _shrink_review(breakdowns)
+    assert rev["n_annotated"] == 12
+    assert rev["mean_phi"] == pytest.approx(0.5)
+    assert rev["mean_shrunk_vs_final_ratio"] is None
+
+
+# ===== 2026-07-12 Task 4: close-age histogram per close anchor ===================
+
+
+def test_close_age_histogram_buckets_per_anchor() -> None:
+    from app.storage.repositories import CLOSE_AGE_BUCKETS, _close_age_histogram
+
+    kick = datetime(2026, 7, 10, 18, 0, tzinfo=UTC)
+
+    def cap(minutes: float) -> datetime:
+        return kick - timedelta(minutes=minutes)
+
+    rows: list[tuple[object, object, object]] = [
+        ("pinnacle", cap(10.0), kick),  # <30m
+        ("pinnacle", cap(45.0), kick),  # 30-60m
+        ("pinnacle", cap(120.0), kick),  # 1-3h
+        ("consensus", cap(400.0), kick),  # 3-12h
+        (None, cap(800.0), kick),  # >12h, unknown anchor
+        # unknowable rows are skipped, never guessed
+        ("pinnacle", None, kick),
+        ("pinnacle", cap(10.0), None),
+    ]
+    hist = _close_age_histogram(rows)
+    assert hist["buckets"] == list(CLOSE_AGE_BUCKETS)
+    assert hist["n"] == 5
+    assert hist["by_anchor"]["pinnacle"] == {
+        "<30m": 1,
+        "30-60m": 1,
+        "1-3h": 1,
+        "3-12h": 0,
+        ">12h": 0,
+    }
+    assert hist["by_anchor"]["consensus"]["3-12h"] == 1
+    assert hist["by_anchor"]["unknown"][">12h"] == 1
+    assert "capture" in hist["note"]
+
+
+def test_close_age_histogram_boundaries_and_negative_age() -> None:
+    from app.storage.repositories import _close_age_histogram
+
+    kick = datetime(2026, 7, 10, 18, 0, tzinfo=UTC)
+
+    def cap(minutes: float) -> datetime:
+        return kick - timedelta(minutes=minutes)
+
+    rows = [
+        ("sharp", cap(30.0), kick),  # exactly 30m -> 30-60m
+        ("sharp", cap(60.0), kick),  # exactly 1h -> 1-3h
+        ("sharp", cap(180.0), kick),  # exactly 3h -> 3-12h
+        ("sharp", cap(720.0), kick),  # exactly 12h -> >12h
+        ("sharp", cap(-5.0), kick),  # captured AFTER kickoff -> <30m (age <= 0)
+    ]
+    hist = _close_age_histogram(rows)
+    assert hist["by_anchor"]["sharp"] == {
+        "<30m": 1,
+        "30-60m": 1,
+        "1-3h": 1,
+        "3-12h": 1,
+        ">12h": 1,
+    }
+
+
+def test_close_age_histogram_empty() -> None:
+    from app.storage.repositories import _close_age_histogram
+
+    hist = _close_age_histogram([])
+    assert hist["n"] == 0
+    assert hist["by_anchor"] == {}

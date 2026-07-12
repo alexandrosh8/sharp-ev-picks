@@ -99,6 +99,13 @@ PREMIUM_SELECTION_FIX_AT = datetime(2026, 7, 7, tzinfo=UTC)
 MC_NULL_SIMS = 10_000
 MC_NULL_SEED = 20260711
 
+#: ADR-0022 crit 3 kill/keep gate PROGRESS floor: the pre-/post-fix premium
+#: cohort entries expose a PROGRESS 95% t-CI (progress_ci_low/high) from this
+#: n — a readout of where the kill gate is heading, clearly labelled and
+#: rendered as progress. It is NOT evidence: the headline mean/CI stay nulled
+#: below MIN_STRATUM_N, and the kill criterion itself still requires n >= 50.
+KILL_GATE_PROGRESS_MIN_N = 10
+
 #: A trusted CLV this close to zero cannot anchor a yield ratio — the division
 #: amplifies noise without bound (live example, 2026-07-10: fractional-mean
 #: trusted CLV +0.0016 vs flat yield −0.094 rendered a meaningless −59.8x).
@@ -381,12 +388,23 @@ def meta_model_calibration_by_close_anchor(
     }
 
 
-def _trusted_clv_ci_entry(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]:
+def _trusted_clv_ci_entry(
+    rows: Sequence[SettledPickRow],
+    min_n: int,
+    *,
+    progress_min_n: int | None = None,
+) -> dict[str, Any]:
     """Trusted-CLV headline for one (sub)set of TRUSTED rows: mean clv_log with
     its 95% t-CI and n. Same honesty floor as every stratum: below ``min_n`` the
     point estimates are nulled at the source; only n and the flag survive.
     Statistics reuse the existing headline machinery (mean_significance) — no
-    new estimators are invented here."""
+    new estimators are invented here.
+
+    ``progress_min_n`` (ADR-0022 crit 3, kill/keep gate — cohort entries only):
+    when set, the entry additionally carries ``progress_ci_low/high`` — the
+    same 95% t-CI exposed as a PROGRESS readout from that (lower) n while the
+    headline estimates stay nulled below ``min_n``. Progress, never evidence:
+    the kill criterion itself still requires the full ``min_n`` sample."""
     clv_vals = [r.clv_log for r in rows if r.clv_log is not None]
     entry: dict[str, Any] = {
         "n": len(clv_vals),
@@ -396,6 +414,15 @@ def _trusted_clv_ci_entry(rows: Sequence[SettledPickRow], min_n: int) -> dict[st
         "significant": False,
         "sufficient": len(clv_vals) >= min_n,
     }
+    if progress_min_n is not None:
+        entry["progress_min_n"] = progress_min_n
+        entry["progress_ci_low"] = None
+        entry["progress_ci_high"] = None
+        if len(clv_vals) >= progress_min_n:
+            psig = mean_significance(clv_vals)
+            if psig is not None:
+                entry["progress_ci_low"] = psig.ci_low
+                entry["progress_ci_high"] = psig.ci_high
     if not entry["sufficient"]:
         return entry
     sig = mean_significance(clv_vals)
@@ -634,9 +661,12 @@ def live_evidence_report(
                 k: _trusted_clv_ci_entry(v, min_n) for k, v in sorted(trusted_by_tier.items())
             },
             # ADR-0022 crit 3/4: the premium tier split into pre-/post-
-            # selection-fix mint cohorts — same entry shape and min_n floor.
+            # selection-fix mint cohorts — same entry shape and min_n floor,
+            # PLUS the kill/keep-gate PROGRESS 95% CI from n >= 10 (crit 3
+            # readout; the headline estimates stay nulled below min_n).
             "premium_cohorts": {
-                k: _trusted_clv_ci_entry(v, min_n) for k, v in sorted(premium_cohorts.items())
+                k: _trusted_clv_ci_entry(v, min_n, progress_min_n=KILL_GATE_PROGRESS_MIN_N)
+                for k, v in sorted(premium_cohorts.items())
             },
         },
         "clv_yield_ratio": _clv_yield_ratio(sharp_rows, min_n),

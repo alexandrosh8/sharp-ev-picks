@@ -149,6 +149,20 @@ def test_health_exposes_tier_edge_floors() -> None:
     assert body["value_volume_min_edge"] <= body["value_min_edge"]
 
 
+def test_health_exposes_resolver_quarantine_counters() -> None:
+    # Monitor-only operator visibility: process-lifetime counts of the two
+    # fail-closed pinnacle-close refusal guards (league-marker veto and
+    # same-pair ambiguity), stamped with the process start they count from
+    # ("since") so the operator can rate the refusal volume without log greps.
+    body = TestClient(make_app()).get("/health").json()
+    rq = body["resolver_quarantine"]
+    assert isinstance(rq["marker_veto"], int)
+    assert isinstance(rq["same_pair_ambiguity"], int)
+    since = datetime.fromisoformat(rq["since"])
+    assert since.tzinfo is not None  # UTC-aware process-start stamp
+    assert since <= datetime.now(tz=UTC)
+
+
 def test_picks_serializer_includes_tier_aware_edge_floor(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Each /picks row carries `edge_floor` = the tier's minimum edge (premium
     vs volume), so the dashboard can colour/verdict each row against its OWN

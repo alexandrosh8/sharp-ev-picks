@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import fakeredis.aioredis
 
-from app.notifications.base import Alert, build_pick_alert
+from app.notifications.base import CORRELATED_EXPOSURE_WARNING, Alert, build_pick_alert
 from app.notifications.dedupe import (
     DEFAULT_TTL_SECONDS,
     InMemoryIdempotencyStore,
@@ -84,6 +84,29 @@ def test_pick_alert_dedupe_key_differs_by_tier() -> None:
     premium = make_pick()  # tier="premium"
     volume = make_pick().model_copy(update={"tier": "volume"})
     assert build_pick_alert(premium).dedupe_key != build_pick_alert(volume).dedupe_key
+
+
+def test_pick_alert_correlation_warning_appended_when_passed() -> None:
+    # Dashboard same-game chip parity: the alert body carries the warning line
+    # at dispatch time when the caller flags prior same-event exposure.
+    alert = build_pick_alert(make_pick(), correlation_warning=CORRELATED_EXPOSURE_WARNING)
+    assert CORRELATED_EXPOSURE_WARNING in alert.body
+
+
+def test_pick_alert_correlation_warning_absent_by_default() -> None:
+    alert = build_pick_alert(make_pick())
+    assert CORRELATED_EXPOSURE_WARNING not in alert.body
+    assert "Correlated" not in alert.body
+
+
+def test_pick_alert_correlation_warning_never_changes_dedupe_key() -> None:
+    # The warning is informational BODY text only — the idempotency key hashes
+    # the market-state fields, never the body, so flagging correlation must not
+    # re-alert an otherwise-identical market state (and vice versa).
+    plain = build_pick_alert(make_pick())
+    warned = build_pick_alert(make_pick(), correlation_warning=CORRELATED_EXPOSURE_WARNING)
+    assert plain.dedupe_key == warned.dedupe_key
+    assert warned.body != plain.body
 
 
 async def test_duplicate_alert_suppressed() -> None:

@@ -2240,6 +2240,32 @@
             }
             r.append(nm, prog, s); box.appendChild(r);
           });
+          // Task 1 (2026-07-12): ADR-0022 crit-2 promotion-readiness rows, one
+          // per accruing sport/market cell. source_agreement + freshness are
+          // NOT YET INSTRUMENTED — reported null, never fabricated; a cell can
+          // never read READY until they are wired AND every condition holds.
+          const pr = state.promo.promotion_readiness;
+          if (pr && Array.isArray(pr.cells) && pr.cells.length > 0) {
+            const hdr = document.createElement("p"); hdr.className = "muted"; hdr.style.marginTop = "10px";
+            hdr.textContent = "Promotion readiness (ADR-0022) — source agreement + freshness "
+              + "are not yet instrumented (null, never fabricated):";
+            box.appendChild(hdr);
+            const neededN = Number(pr.needed_n) || 50;
+            pr.cells.slice(0, 12).forEach((c) => {
+              const r = document.createElement("div"); r.className = "kickoff-row";
+              const nm = document.createElement("span"); nm.className = "kr-t mono";
+              nm.textContent = "Promotion readiness — " + String(fmt(c.sport)).replace(/_/g, " ")
+                + " · " + marketLabel(c.market);
+              const prog = document.createElement("span"); prog.className = "kr-s mono";
+              prog.textContent = "n " + (Number(c.n_trusted) || 0) + "/" + neededN
+                + " · " + (c.ci_low_gt_zero === true ? "CI>0 met"
+                  : c.ci_low_gt_zero === false ? "CI>0 no" : "CI>0 pending")
+                + " · cov " + fmtNum(c.coverage_pct, 0) + "%";
+              const s = document.createElement("span"); s.className = "kr-s";
+              s.textContent = c.ready === true ? "READY" : "NOT READY";
+              r.append(nm, prog, s); box.appendChild(r);
+            });
+          }
         }
         function loadPromotionDistance() {
           const fresh = state.promoAt != null && Date.now() - state.promoAt < PROMO_TTL_MS;
@@ -3585,6 +3611,24 @@
             const note = document.createElement("p"); note.className = "muted"; note.style.marginTop = "8px";
             note.textContent = "An excluded close is unusable evidence, not a loss. Close-age provenance accruing.";
             cq.appendChild(note);
+            // Task 4 (2026-07-12): close-age histogram per CLOSE anchor source.
+            // Age = kickoff − capture time (capture time vs kickoff — a
+            // capture-time proxy, not the market's true close). Counts only.
+            const hist = perf && perf.close_age_histogram;
+            if (hist && hist.by_anchor && Number(hist.n) > 0) {
+              const hb = document.createElement("div"); hb.className = "metric-list"; hb.style.marginTop = "10px";
+              const buckets = hist.buckets || [];
+              Object.keys(hist.by_anchor).sort().forEach((anchor) => {
+                const cell = hist.by_anchor[anchor] || {};
+                const parts = buckets.map((b) => b + " " + (Number(cell[b]) || 0)).join(" · ");
+                hb.appendChild(metricEl("Close age — " + fmt(anchor), parts));
+              });
+              cq.appendChild(hb);
+              const hn = document.createElement("p"); hn.className = "muted"; hn.style.marginTop = "6px";
+              hn.textContent = "Close-age buckets per anchor source — age is capture time vs kickoff, "
+                + "a capture-time proxy, not the market's true closing instant.";
+              cq.appendChild(hn);
+            }
           }
 
           const cs = $("calibration-summary"); cs.replaceChildren();
@@ -3720,6 +3764,33 @@
             const verdict = document.createElement("p"); verdict.className = "muted"; verdict.style.marginTop = "8px";
             verdict.textContent = "Verdict: " + fmt(le.evidence_verdict);
             scv.appendChild(verdict);
+            // Task 3 (2026-07-12): ADR-0022 crit-3 kill/keep gate — the post-fix
+            // premium cohort's progress toward the n>=50 trusted-close floor.
+            // The PROGRESS 95% CI (progress_ci_low/progress_ci_high) is sent by
+            // the server only once n>=10, so we only show it when present.
+            const postFix = (le.trusted_clv_ci.premium_cohorts || {}).post_fix;
+            if (postFix) {
+              const kg = document.createElement("p"); kg.className = "muted"; kg.style.marginTop = "6px";
+              const needed = 50;
+              let kgTxt = "Kill/keep gate: post-fix premium trusted closes "
+                + (Number(postFix.n) || 0) + " / " + needed;
+              if (postFix.progress_ci_low != null && postFix.progress_ci_high != null) {
+                kgTxt += " · progress 95% CI "
+                  + fmtSignedPct(clvPctFromLog(postFix.progress_ci_low) / 100) + " … "
+                  + fmtSignedPct(clvPctFromLog(postFix.progress_ci_high) / 100);
+              }
+              kg.textContent = kgTxt;
+              scv.appendChild(kg);
+            }
+            // Task 2 (2026-07-12): ADR-0022 crit-5 uncertainty-shrink 30-day
+            // shadow review — one muted line (estimates nulled below n=10).
+            const sr = perf && perf.shrink_review;
+            if (sr) {
+              const srp = document.createElement("p"); srp.className = "muted"; srp.style.marginTop = "6px";
+              srp.textContent = "Shrink shadow review: " + (Number(sr.n_annotated) || 0)
+                + " annotated · due " + fmt(sr.review_due);
+              scv.appendChild(srp);
+            }
           }
 
           renderCloseQualityBySport();

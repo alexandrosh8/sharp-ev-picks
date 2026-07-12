@@ -523,3 +523,46 @@ def test_claims_ledger_trusted_close_eta_line() -> None:
     assert "trusted_close_eta" in text
     assert "open premium awaiting kickoff" in text
     assert "no honest ETA yet" in text
+
+
+def test_promotion_readiness_rows_rendered() -> None:
+    """2026-07-12 Task 1: ADR-0022 crit-2 promotion-readiness rows, one per
+    accruing sport/market cell, with the honest not-yet-instrumented state for
+    source agreement + freshness (null, never fabricated)."""
+    text = _text()
+    assert "promotion_readiness" in text
+    assert '"Promotion readiness — "' in text
+    assert '"CI>0 pending"' in text
+    assert '"NOT READY"' in text
+    assert "not yet instrumented" in text
+
+
+def test_shrink_review_line_under_tier_scorecard() -> None:
+    """2026-07-12 Task 2: ADR-0022 crit-5 uncertainty-shrink 30-day review —
+    one muted line under the tier scorecard driven by /performance
+    shrink_review (estimates arrive nulled below the n=10 floor)."""
+    text = _text()
+    assert "shrink_review" in text
+    assert '"Shrink shadow review: "' in text
+    assert "n_annotated" in text
+    assert "review_due" in text
+
+
+def test_kill_gate_progress_element() -> None:
+    """2026-07-12 Task 3: ADR-0022 crit-3 kill/keep gate — post-fix premium
+    trusted-close progress in the claims-ledger area, with the PROGRESS 95% CI
+    rendered only once the server sends it (n >= 10)."""
+    text = _text()
+    assert '"Kill/keep gate: post-fix premium trusted closes "' in text
+    assert "progress_ci_low" in text
+    assert "progress_ci_high" in text
+
+
+def test_close_age_histogram_rendered_with_capture_caveat() -> None:
+    """2026-07-12 Task 4: per-close-anchor close-age histogram in the Close
+    Quality panel, with the honest caveat that the age is capture-time vs
+    kickoff, not the market's true close."""
+    text = _text()
+    assert "close_age_histogram" in text
+    assert "capture time vs kickoff" in text
+    assert "by_anchor" in text

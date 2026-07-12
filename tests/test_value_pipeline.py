@@ -11,7 +11,7 @@ from app.edge.steam import SteamPolicy
 from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import EventDirectory, EventTeams
 from app.models.base import NullModel
-from app.notifications.base import Alert, build_pick_alert
+from app.notifications.base import CORRELATED_EXPOSURE_WARNING, Alert, build_pick_alert
 from app.notifications.dedupe import InMemoryIdempotencyStore
 from app.notifications.dispatcher import AlertDispatcher
 from app.pipeline import PipelineDeps, run_value_pipeline
@@ -707,6 +707,44 @@ async def test_value_pipeline_alert_key_includes_strategy_identity() -> None:
         deps.value_min_edge,
         model_name=deps.model_name,
         model_version=deps.model_version,
+    )
+    assert sink.sent[0].dedupe_key == expected.dedupe_key
+
+
+async def test_premium_alert_flags_prior_same_event_exposure() -> None:
+    # Dashboard same-game chip parity at the moment it matters: when the
+    # daily-exposure ledger already carries reserved exposure for the pick's
+    # event from a PRIOR grant today, the dispatched alert body carries the
+    # correlation warning line. Informational only — sizing/gating untouched.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.ledger.preload_event(datetime.now(tz=UTC).date(), "evt-1", 0.01)
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert len(picks) == 1
+    assert len(sink.sent) == 1
+    assert CORRELATED_EXPOSURE_WARNING in sink.sent[0].body
+    # The warning must NOT perturb the idempotency key: same key as the
+    # un-warned rendering of the same pick (strategy identity included).
+    expected = build_pick_alert(
+        picks[0], deps.value_min_edge, model_name=deps.model_name, model_version=deps.model_version
+    )
+    assert sink.sent[0].dedupe_key == expected.dedupe_key
+
+
+async def test_premium_alert_no_correlation_warning_without_prior_exposure() -> None:
+    # A fresh ledger (no prior exposure on the event today) -> no warning line.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert len(picks) == 1
+    assert len(sink.sent) == 1
+    assert CORRELATED_EXPOSURE_WARNING not in sink.sent[0].body
+    expected = build_pick_alert(
+        picks[0], deps.value_min_edge, model_name=deps.model_name, model_version=deps.model_version
     )
     assert sink.sent[0].dedupe_key == expected.dedupe_key
 

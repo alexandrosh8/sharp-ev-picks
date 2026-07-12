@@ -40,7 +40,7 @@ from app.edge.value_policy import (
 from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
 from app.models.base import ProbabilityModel
 from app.models.value_filter import ValueFilterModel, live_features
-from app.notifications.base import build_pick_alert
+from app.notifications.base import CORRELATED_EXPOSURE_WARNING, build_pick_alert
 from app.notifications.dispatcher import AlertDispatcher
 from app.probabilities.devig import (
     EXPECTED_FALLBACKS,
@@ -2174,6 +2174,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     premium_candidates.sort(key=lambda c: c[1].raw_kelly, reverse=True)
     n_unpersisted_withheld = 0
     for pick, breakdown, event_id in premium_candidates:
+        # Same-game correlation flag (informational only — dashboard-chip
+        # parity for the alert): read the per-event ledger total BEFORE this
+        # pick's own reserve so only PRIOR grants today count (earlier cycles,
+        # or higher-ranked picks earlier in this loop). The ledger tracks
+        # per-event TOTALS, so a duplicate re-dispatch whose own earlier grant
+        # is the only exposure also flags — acceptable: the combined-cap note
+        # is still true. Never blocks or re-sizes anything.
+        prior_event_exposure = deps.ledger.event_used(now.date(), event_id)
         # SHIELDED: a watchdog cancellation mid-pair lets the in-flight persist
         # run on to its ledger reservation (never a persisted full-stake row
         # the caps don't count); the dispatch below stays cancellable — a lost
@@ -2208,6 +2216,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 deps.value_min_edge,
                 model_name=deps.model_name,
                 model_version=deps.model_version,
+                correlation_warning=(
+                    CORRELATED_EXPOSURE_WARNING if prior_event_exposure > 0.0 else None
+                ),
             )
         )
     if n_unpersisted_withheld:
