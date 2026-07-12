@@ -51,6 +51,46 @@ def test_line_bearing_spreads_match_oddsportal_signed_form(team: str, line: str)
     assert _line_bearing_selection(team, line, Market.SPREADS) == f"{team} {_fmt_line(float(line))}"
 
 
+# --- tennis SET-vs-GAME handicap key collision (capture-side namespacing) -----
+# Both "Set Handicap" and "Game(s) Handicap" used to slug to the SAME
+# spreads_<line> detail at an identical numeric line, risking a mixed devig
+# group of two different units (sets vs games). Fail-closed fix: the
+# GAME-handicap vocabulary stays EXACTLY as-is (existing stamped picks keep
+# matching); SET-handicap markets are routed to a distinct namespaced detail
+# at capture, so a set-line group can never merge with a game-line one.
+
+
+def test_set_handicap_routes_to_namespaced_sets_detail() -> None:
+    from app.ingestion.oddschecker import _market_for_type
+
+    assert _market_for_type("Set Handicap", "-1.5") == (Market.SPREADS, "spreads_sets_minus_1_5")
+    assert _market_for_type("Sets Handicap", "+1.5") == (Market.SPREADS, "spreads_sets_plus_1_5")
+    assert _market_for_type("Asian Set Handicap", "-2.5") == (
+        Market.SPREADS,
+        "spreads_sets_minus_2_5",
+    )
+
+
+def test_game_handicap_vocabulary_is_untouched() -> None:
+    # The game-handicap keys must keep producing the EXACT historical detail —
+    # renaming them would orphan every already-stamped spreads_* pick.
+    from app.ingestion.oddschecker import _market_for_type
+
+    assert _market_for_type("Handicap", "-1.5") == (Market.SPREADS, "spreads_minus_1_5")
+    assert _market_for_type("Game Handicap", "-1.5") == (Market.SPREADS, "spreads_minus_1_5")
+    assert _market_for_type("Games Handicap", "-1.5") == (Market.SPREADS, "spreads_minus_1_5")
+    assert _market_for_type("Asian Handicap", "-1.5") == (Market.SPREADS, "spreads_minus_1_5")
+
+
+def test_set_and_game_handicap_same_line_never_share_a_devig_key() -> None:
+    from app.ingestion.oddschecker import _market_for_type
+
+    set_result = _market_for_type("Set Handicap", "-1.5")
+    game_result = _market_for_type("Games Handicap", "-1.5")
+    assert set_result is not None and game_result is not None
+    assert set_result[1] != game_result[1]
+
+
 def test_line_bearing_is_idempotent_and_skips_non_line_markets() -> None:
     # Already-line-bearing legacy grid rows are not double-appended.
     assert _line_bearing_selection("Over 2.5", "2.5", Market.TOTALS) == "Over 2.5"

@@ -3,13 +3,19 @@
 # rotated local archive.
 #
 # Usage:
-#   bash /workspace/scripts/backup_db.sh            # dump + rotate
-#   bash /workspace/scripts/backup_db.sh --verify   # pg_restore --list on newest dump
+#   bash /workspace/scripts/backup_db.sh                 # dump + rotate [+ off-host copy]
+#   bash /workspace/scripts/backup_db.sh --verify        # pg_restore --list on newest dump
+#   bash /workspace/scripts/backup_db.sh --offhost-copy  # re-ship the NEWEST dump off-host
 #
 # Environment overrides (all optional):
-#   BACKUP_DIR      target directory   (default /workspace/backups)
-#   RETENTION_DAYS  days to keep dumps (default 14)
-#   COMPOSE_FILE    compose file path  (default /workspace/docker-compose.yml)
+#   BACKUP_DIR             target directory   (default /workspace/backups)
+#   RETENTION_DAYS         days to keep dumps (default 14)
+#   COMPOSE_FILE           compose file path  (default /workspace/docker-compose.yml)
+#   OFFHOST_BACKUP_TARGET  optional off-host destination for the fresh dump:
+#                          user@host:/path (rsync -e ssh) or remote:path (rclone
+#                          copyto). Unset = silent no-op; set + failing = LOUD
+#                          non-zero exit. Never carries credentials (ssh keys /
+#                          rclone config live outside this script).
 #
 # Design notes:
 # - Credentials are NEVER passed here: pg_dump runs inside the postgres
@@ -34,9 +40,13 @@ log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 
 usage() {
-  grep '^#' "${BASH_SOURCE[0]}" | head -n 14 | sed 's/^# \{0,1\}//'
+  grep '^#' "${BASH_SOURCE[0]}" | head -n 20 | sed 's/^# \{0,1\}//'
   exit 2
 }
+
+# The dump created by run_backup this run ("" until one succeeds); read by the
+# off-host copy step so it ships exactly the just-created file.
+LATEST_DUMP=""
 
 # ---------- guards -----------------------------------------------------------
 
@@ -84,7 +94,50 @@ run_backup() {
 
   mv "${tmp_file}" "${dump_file}"
   size="$(du -h "${dump_file}" | cut -f1)"
+  LATEST_DUMP="${dump_file}"
   log "backup complete: ${dump_file} (${size})"
+}
+
+# ---------- off-host copy ----------------------------------------------------
+
+newest_dump() {
+  # Filenames embed a UTC timestamp, so lexical sort == chronological sort.
+  find "${BACKUP_DIR}" -maxdepth 1 -type f -name "${DUMP_PREFIX}*.dump" | sort | tail -n 1
+}
+
+copy_offhost() {
+  # $1 = the dump file to ship. Callers own the unset-target contract: the
+  # nightly path skips this call entirely when OFFHOST_BACKUP_TARGET is unset
+  # (silent no-op); the explicit --offhost-copy subcommand requires it.
+  # Set + anything failing here = LOUD non-zero exit (die).
+  local dump_file="$1" target="${OFFHOST_BACKUP_TARGET-}"
+  [ -n "${target}" ] || die "off-host copy: OFFHOST_BACKUP_TARGET is not set"
+  [ -f "${dump_file}" ] || die "off-host copy: dump file not found: ${dump_file}"
+  [ -s "${dump_file}" ] || die "off-host copy: refusing to ship an empty dump: ${dump_file}"
+  case "${target}" in
+    *@*:*)
+      # user@host:/path -> rsync over ssh. Auth is key/agent-based only —
+      # this script never sees or passes a credential.
+      command -v rsync > /dev/null 2>&1 \
+        || die "OFFHOST_BACKUP_TARGET is set but rsync is not installed"
+      log "off-host copy (rsync over ssh): ${dump_file} -> ${target}"
+      rsync -e ssh -- "${dump_file}" "${target%/}/" \
+        || die "off-host copy FAILED (rsync -> ${target})"
+      ;;
+    *:*)
+      # remote:path -> rclone copyto (remote credentials live in rclone's own
+      # config, outside this script and outside the repo).
+      command -v rclone > /dev/null 2>&1 \
+        || die "OFFHOST_BACKUP_TARGET is set but rclone is not installed"
+      log "off-host copy (rclone copyto): ${dump_file} -> ${target}"
+      rclone copyto "${dump_file}" "${target%/}/$(basename "${dump_file}")" \
+        || die "off-host copy FAILED (rclone -> ${target})"
+      ;;
+    *)
+      die "OFFHOST_BACKUP_TARGET must be user@host:/path (rsync) or remote:path (rclone), got: ${target}"
+      ;;
+  esac
+  log "off-host copy complete: ${target}"
 }
 
 # ---------- rotation ---------------------------------------------------------
@@ -134,6 +187,7 @@ run_verify() {
 # ---------- main -------------------------------------------------------------
 
 main() {
+  local newest
   case "${1:-}" in
     --verify)
       run_verify
@@ -141,6 +195,23 @@ main() {
     "")
       run_backup
       prune_old_backups
+      # Optional off-host copy of the just-created dump: silent no-op when the
+      # target is unset; LOUD non-zero failure when it is set and the copy
+      # (or its binary) is missing/broken.
+      if [ -n "${OFFHOST_BACKUP_TARGET-}" ]; then
+        copy_offhost "${LATEST_DUMP}"
+      fi
+      ;;
+    --offhost-copy)
+      # Manual retry entry (e.g. after a failed nightly copy): ship the NEWEST
+      # existing dump without re-dumping.
+      [ -n "${OFFHOST_BACKUP_TARGET-}" ] \
+        || die "--offhost-copy requires OFFHOST_BACKUP_TARGET to be set"
+      check_backup_dir_safe
+      [ -d "${BACKUP_DIR}" ] || die "no backup directory: ${BACKUP_DIR}"
+      newest="$(newest_dump)"
+      [ -n "${newest}" ] || die "no ${DUMP_PREFIX}*.dump files in ${BACKUP_DIR}"
+      copy_offhost "${newest}"
       ;;
     -h | --help)
       usage

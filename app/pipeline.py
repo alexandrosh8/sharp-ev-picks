@@ -1728,6 +1728,22 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             tier = pick_tier(v.edge, premium_floor, deps.value_volume_min_edge)
             if tier is None:
                 continue  # below both floors (unreachable via scan_min_edge)
+            # Per-market FLOOR demotion note (hardening 2026-07-11): a candidate
+            # that would have been PREMIUM under the GLOBAL floor but landed in
+            # volume because the per-market override raised its floor (e.g. the
+            # totals/btts 0.99 blocks) used to arrive silently — the dashboard
+            # chips could not show why. Surface it like every other demotion.
+            # A pick below the global floor is ordinary volume: no note.
+            market_floor_note = ""
+            if (
+                tier == "volume"
+                and premium_floor > deps.value_min_edge
+                and v.edge >= deps.value_min_edge
+            ):
+                market_floor_note = (
+                    f" | market floor: edge {v.edge:.3f} < {market} floor "
+                    f"{premium_floor:g} — volume"
+                )
             # VISIBILITY-ONLY market cap: a market in value_policy.visibility_only_markets
             # can NEVER be premium — it is CAPPED at the volume (shadow) tier regardless
             # of edge (even above the premium floor), so a brand-new market (football AH)
@@ -2039,6 +2055,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         if v.best_odds_effective != v.best_odds
                         else ""
                     )
+                    + market_floor_note
                     + visibility_note
                     + moneyline_note
                     + major_note
@@ -2103,6 +2120,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # excluded so an empty reasons tuple stays the clean-keep signal). Pure
             # MEASUREMENT: isolated, never gates or alters a pick (see helper).
             audit_reasons: list[str] = []
+            if market_floor_note:
+                audit_reasons.append("market_floor")
             if visibility_note:
                 audit_reasons.append("visibility_only")
             if moneyline_note:

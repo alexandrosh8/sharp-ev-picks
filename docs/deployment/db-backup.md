@@ -23,13 +23,22 @@ container environment. The host never sees a password.
   on the newest dump and fails loudly on zero entries.
 - Exits non-zero on any failure (`set -euo pipefail`).
 
+- **Optional off-host copy**: when `OFFHOST_BACKUP_TARGET` is set, the
+  just-created dump is shipped off-host at the end of the run —
+  `user@host:/path` targets via `rsync -e ssh`, `remote:path` targets via
+  `rclone copyto`. Unset = silent no-op; set + anything failing (missing
+  binary, unreachable host, bad remote) = **loud non-zero exit**. No
+  credentials ever appear in the script or its argv — ssh auth is
+  key/agent-based and rclone reads its own config.
+
 Defaults (override via environment):
 
-| Variable         | Default                        |
-| ---------------- | ------------------------------ |
-| `BACKUP_DIR`     | `/workspace/backups`           |
-| `RETENTION_DAYS` | `14`                           |
-| `COMPOSE_FILE`   | `/workspace/docker-compose.yml`|
+| Variable                | Default                         |
+| ----------------------- | ------------------------------- |
+| `BACKUP_DIR`            | `/workspace/backups`            |
+| `RETENTION_DAYS`        | `14`                            |
+| `COMPOSE_FILE`          | `/workspace/docker-compose.yml` |
+| `OFFHOST_BACKUP_TARGET` | unset (off-host copy disabled)  |
 
 `backups/` is gitignored — dumps must never enter the repo.
 
@@ -72,6 +81,63 @@ Optionally add a weekly verification pass:
 ```cron
 47 3 * * 0 /usr/bin/env bash /workspace/scripts/backup_db.sh --verify >> /workspace/backups/backup.log 2>&1
 ```
+
+## Off-host copy (`OFFHOST_BACKUP_TARGET`)
+
+Two accepted target forms:
+
+- `user@host:/path` — shipped with `rsync -e ssh` into that directory.
+- `remote:path` — shipped with `rclone copyto` (any rclone remote: S3, B2,
+  Drive, SFTP, …), keeping the dump's own filename.
+
+Enable it on the cron line (cron does **not** read your shell profile, so the
+variable must be set inline or in a wrapper):
+
+```cron
+17 3 * * * OFFHOST_BACKUP_TARGET=backup@offhost.example:/srv/betting-backups /usr/bin/env bash /workspace/scripts/backup_db.sh >> /workspace/backups/backup.log 2>&1
+```
+
+Crontab implications:
+
+- **Non-interactive auth only.** For rsync: an ssh key without passphrase (or
+  an agent available to cron) for a dedicated low-privilege user on the
+  receiving host; first connect once interactively so the host key is in
+  `known_hosts` — cron cannot answer the prompt. For rclone: the remote must
+  already be configured for the crontab user (`rclone config`), since the
+  config file is per-user.
+- **PATH**: cron's PATH is minimal (`/usr/bin:/bin`). If `rsync`/`rclone`
+  live elsewhere (e.g. `/usr/local/bin`), set `PATH=` on the cron line.
+- **Failure is loud by design**: a set target with a failed copy exits
+  non-zero and logs `off-host copy FAILED …` to `backup.log`. Retry without
+  re-dumping via the manual entry:
+
+```bash
+OFFHOST_BACKUP_TARGET=backup@offhost.example:/srv/betting-backups bash /workspace/scripts/backup_db.sh --offhost-copy
+```
+
+- The local dump always lands and rotates BEFORE the copy step — a broken
+  off-host leg never costs you the local backup.
+- Rotation is local-only: prune the off-host directory on the receiving side
+  (its own cron / lifecycle rule); this script never deletes remote files.
+- No credentials belong in the crontab line, this script, or the repo — the
+  target string is host/path only.
+
+### Restore from the off-host copy
+
+Fetch the dump back to the host, then follow the normal restore procedure
+below from step 1:
+
+```bash
+# rsync form
+rsync -e ssh backup@offhost.example:/srv/betting-backups/betting_<stamp>.dump /workspace/backups/
+
+# rclone form
+rclone copyto offsite:betting-backups/betting_<stamp>.dump /workspace/backups/betting_<stamp>.dump
+```
+
+Verify the fetched file before restoring:
+`bash /workspace/scripts/backup_db.sh --verify` (it picks the newest dump in
+`BACKUP_DIR`, which is the one you just fetched).
 
 ## Restore procedure
 
@@ -123,9 +189,9 @@ older good dumps beyond the age policy.
 
 ## ⚠️ Same-host warning
 
-**These backups live on the same host (and same disk) as the database.**
-They protect against bad migrations, application bugs, and accidental
-deletes — **not** against disk failure or loss of the VPS. An off-host copy
-(e.g. nightly `rsync`/`rclone` of `BACKUP_DIR` to another machine or object
-storage) is the required next step and is deliberately **not** implemented
-here — pick a destination and add it as a separate cron line.
+**By default these backups live on the same host (and same disk) as the
+database.** They protect against bad migrations, application bugs, and
+accidental deletes — **not** against disk failure or loss of the VPS. Set
+`OFFHOST_BACKUP_TARGET` (see the off-host copy section above) so every
+nightly dump also lands on another machine or object storage; until that is
+configured, same-host is all you have.

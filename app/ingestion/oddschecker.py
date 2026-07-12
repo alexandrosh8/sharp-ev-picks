@@ -759,7 +759,15 @@ def _market_for_type(
     if key == "double chance":
         return Market.DOUBLE_CHANCE, "double_chance"
     if _is_spread_market_type(key):
-        detail = _market_detail("spreads", key, line)
+        # SET-vs-GAME handicap collision guard (hardening 2026-07-11): a tennis
+        # SET handicap and a GAME handicap at the same numeric line used to slug
+        # to the SAME spreads_<line> detail, risking a mixed devig group of two
+        # different units. Fail-closed: game handicaps keep the historical
+        # vocabulary EXACTLY (stamped picks stay matched); set handicaps get a
+        # distinct namespaced detail for NEW rows only — an unmatched namespaced
+        # group simply never merges with game-line picks.
+        prefix = "spreads_sets" if _is_set_handicap_market_type(key) else "spreads"
+        detail = _market_detail(prefix, key, line)
         return Market.SPREADS, detail
     if _is_team_total_market_type(key):
         detail = _market_detail("team_totals", key, line)
@@ -774,6 +782,17 @@ def _is_spread_market_type(key: str) -> bool:
     if not any(term in key for term in ("handicap", "spread")):
         return False
     return not any(term in key for term in _EXCLUDED_PLAYER_PROP_TERMS)
+
+
+def _is_set_handicap_market_type(key: str) -> bool:
+    """True for a SET-denominated handicap key ("set handicap", "sets handicap",
+    "asian set handicap") — a different UNIT from the game handicap, so it must
+    never share the game line's spreads_<line> devig key. Token-matched (never
+    substring) so unrelated words can't misfire."""
+    if not _is_spread_market_type(key):
+        return False
+    tokens = set(re.split(r"[^0-9a-z]+", key))
+    return bool(tokens & {"set", "sets"})
 
 
 def _is_team_total_market_type(key: str) -> bool:

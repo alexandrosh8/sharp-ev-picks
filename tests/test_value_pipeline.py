@@ -1555,6 +1555,62 @@ async def test_per_market_floor_on_another_market_changes_nothing() -> None:
     assert picks[0].tier == "premium"
 
 
+def spy_candidate_audit(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, tuple[str, ...]]]:
+    """Capture every _record_candidate_audit call as (pick, reasons) so no-DB
+    tests can assert the demotion note + audit-slug contract for volume picks
+    (which are otherwise dropped without a session factory)."""
+    import app.pipeline as pl
+
+    captured: list[tuple[object, tuple[str, ...]]] = []
+
+    async def spy(  # type: ignore[no-untyped-def]
+        deps, pick, market_detail, reasons, anchor_age_seconds, now
+    ) -> None:
+        captured.append((pick, reasons))
+
+    monkeypatch.setattr(pl, "_record_candidate_audit", spy)
+    return captured
+
+
+async def test_per_market_floor_demotion_is_noted_and_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The candidate (~0.045 edge) clears the GLOBAL premium floor (0.015) but
+    # not the h2h override (0.50): the demotion must be surfaced — a
+    # "market floor" note on reason_summary (dashboard chips) and a
+    # "market_floor" slug in the candidate-audit reasons — never silent.
+    captured = spy_candidate_audit(monkeypatch)
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.value_policy = ValuePolicy(min_edge_by_market=(("h2h", 0.50),))
+    await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # still demoted, never alerted
+    assert len(captured) == 1
+    pick, reasons = captured[0]
+    assert pick.tier == "volume"  # type: ignore[attr-defined]
+    assert "market floor: edge 0.0" in pick.reason_summary  # type: ignore[attr-defined]
+    assert "h2h floor 0.5" in pick.reason_summary  # type: ignore[attr-defined]
+    assert "market_floor" in reasons
+
+
+async def test_ordinary_volume_pick_below_global_floor_has_no_market_floor_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A pick below the GLOBAL premium floor (no per-market override involved)
+    # is ordinary volume — the market-floor note must stay silent.
+    captured = spy_candidate_audit(monkeypatch)
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.value_min_edge = 0.50  # global floor above the ~0.045 edge
+    await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []
+    assert len(captured) == 1
+    pick, reasons = captured[0]
+    assert pick.tier == "volume"  # type: ignore[attr-defined]
+    assert "market floor" not in pick.reason_summary  # type: ignore[attr-defined]
+    assert "market_floor" not in reasons
+
+
 async def test_odds_band_gate_rejects_out_of_band_prices() -> None:
     # SoftBook's 2.90 best price sits outside a 3.0-4.0 band -> no pick, and
     # the rejection happens AFTER the edge scan (it is a price-shape gate).

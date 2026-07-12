@@ -3460,6 +3460,43 @@ async def resolve_pinnacle_close_snaps(
                 sorted(league_only_markers),
             )
             return []
+        # OUT-OF-VOCABULARY DOUBLE-HEADER AMBIGUITY (hardening 2026-07-11,
+        # TIGHTENING-ONLY): the league-marker veto above only sees labels whose
+        # women/youth/reserve token is in matching.py's vocabulary — a same-club
+        # -pair double-header under an unmarked/out-of-vocabulary arcadia label
+        # ("NBL1 Girls") slips past it, and the matcher's nearest-collapse then
+        # attaches a coin-flip close (fake CLV, the cardinal sin). When MORE
+        # THAN ONE distinct arcadia event with the matched event's normalized
+        # club pair sits inside the matcher's ACCEPT window (both attachable)
+        # and a sibling is NOT marker-distinguished from the matched event
+        # (equal league-marker sets — same-pair names carry identical name
+        # markers by construction), REFUSE the attachment. Marker-distinguished
+        # siblings (the vocabulary double-header) and same-pair series rematches
+        # outside the accept window keep today's behavior exactly. Tennis stays
+        # exempt with the veto (person-named fixtures).
+        from app.resolution.matching import _ACCEPT_MINUTE_DRIFT
+
+        matched_pair = (normalize_name(pin_home), normalize_name(pin_away))
+        matched_markers = _league_marker_set(pin_league)
+        accept_window = timedelta(minutes=_ACCEPT_MINUTE_DRIFT)
+        ambiguous_refs = sorted(
+            str(ext)
+            for eid, ext, h, a, ko, lg in rows
+            if eid != pin_id
+            and abs(ko - kickoff) <= accept_window
+            and (normalize_name(h), normalize_name(a)) == matched_pair
+            and _league_marker_set(lg) == matched_markers
+        )
+        if ambiguous_refs:
+            logger.info(
+                "pinnacle close: same-pair ambiguity refused %s -> %s "
+                "(marker-indistinguishable arcadia sibling(s) share the club "
+                "pair inside the accept window: %s)",
+                pick_external_ref,
+                pin_ref,
+                ambiguous_refs,
+            )
+            return []
     # ACCEPTED match: expose the confidence provenance to the caller (per-pick
     # anchor_match_confidence/method) and persist the cross-source link
     # (observability only — a write failure never breaks anchor resolution).

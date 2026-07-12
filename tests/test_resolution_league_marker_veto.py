@@ -353,6 +353,102 @@ async def test_capture_same_league_duplicates_still_merge(factory) -> None:  # t
     assert [r[0] for r in rows] == ["arc-dup-a"]
 
 
+# ---- Part 3: out-of-vocabulary double-header AMBIGUITY refusal --------------- #
+# The league-marker veto only catches labels whose women/youth/reserve token is
+# in matching.py's vocabulary. A same-club-pair double-header under an UNMARKED
+# / out-of-vocabulary arcadia label (e.g. "NBL1 Girls" — "girls" is not a
+# vocabulary token) is invisible to it. Hardening 2026-07-11 (TIGHTENING-ONLY):
+# when MORE THAN ONE distinct arcadia event with the same normalized club pair
+# sits inside the matcher's 6h ACCEPT window and the siblings are NOT
+# marker-distinguished from each other, the attachment is REFUSED (fail-closed)
+# — a coin-flip close is fake CLV. Single candidates and marker-distinguished
+# siblings keep today's behavior exactly.
+
+# 3h apart: outside the 2h mint-dedup tolerance (two event rows mint) but
+# inside the 6h accept bound (both attachable -> ambiguous).
+KO_B = KO_W + timedelta(hours=3)
+
+
+async def test_resolver_refuses_unmarked_same_pair_ambiguity(factory) -> None:  # type: ignore[no-untyped-def]
+    # OUT-OF-VOCABULARY double-header: "Australia - NBL1 Girls" carries NO
+    # vocabulary marker (frozenset()) — exactly like the men's "NBL1 South" —
+    # so the league-marker veto is blind. Two same-pair events inside the 6h
+    # accept window, not marker-distinguished from each other -> REFUSE.
+    await _seed_arcadia_basketball(
+        factory,
+        "arc-oov-girls",
+        "Frankston Blues",
+        "Sandringham Sabres",
+        "Australia - NBL1 Girls",  # out-of-vocabulary label: derives NO marker
+        KO_W,
+        home_odds=1.30,
+        away_odds=3.40,
+    )
+    await _seed_arcadia_basketball(
+        factory,
+        "arc-oov-mens",
+        "Frankston Blues",
+        "Sandringham Sabres",
+        "Australia - NBL1 South",
+        KO_B,
+        home_odds=2.10,
+        away_odds=1.75,
+    )
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_basketball",
+            pick_external_ref="evt-oov-pick",
+            home="Frankston Blues",
+            away="Sandringham Sabres",
+            kickoff=KO_B,
+        )
+    # nearest-collapse would pick the men's event — but the sibling is NOT
+    # marker-distinguished, so which game the pick belongs to is a coin flip.
+    assert out == []
+
+
+async def test_resolver_same_pair_rematch_outside_accept_window_still_attaches(factory) -> None:  # type: ignore[no-untyped-def]
+    # TIGHTENING-ONLY: a genuine series rematch 2 days earlier (same clubs,
+    # same league) sits inside the ±2-day candidate-FETCH window but OUTSIDE
+    # the 6h accept window — only one event is attachable, so there is no
+    # ambiguity and the close keeps attaching exactly as before.
+    await _seed_arcadia_basketball(
+        factory,
+        "arc-series-g1",
+        "Geelong Supercats",
+        "Ballarat Miners",
+        "Australia - NBL1 South",
+        KO_M - timedelta(days=2),
+        home_odds=1.50,
+        away_odds=2.60,
+    )
+    await _seed_arcadia_basketball(
+        factory,
+        "arc-series-g2",
+        "Geelong Supercats",
+        "Ballarat Miners",
+        "Australia - NBL1 South",
+        KO_M,
+        home_odds=2.10,
+        away_odds=1.75,
+    )
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_basketball",
+            pick_external_ref="evt-series-pick",
+            home="Geelong Supercats",
+            away="Ballarat Miners",
+            kickoff=KO_M,
+        )
+    by_sel = {s.selection: s for s in out}
+    assert set(by_sel) == {"Geelong Supercats", "Ballarat Miners"}
+    # game 2's close (2.10/1.75), never game 1's
+    assert by_sel["Geelong Supercats"].decimal_odds == pytest.approx(2.10)
+    assert by_sel["Ballarat Miners"].decimal_odds == pytest.approx(1.75)
+
+
 async def test_resolver_attaches_mens_close_from_split_double_header(factory) -> None:  # type: ignore[no-untyped-def]
     # END-TO-END after the split: with BOTH double-header events present, the
     # men's pick collapses to the NEAREST candidate (its own men's event, delta
