@@ -17,7 +17,8 @@ import os
 import subprocess
 from pathlib import Path
 
-SCRIPT = Path("/workspace/scripts/backup_db.sh")
+# Repo-relative: CI checks out to a different absolute path than the dev box.
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "backup_db.sh"
 DUMP_NAME = "betting_2026-07-11T000000Z.dump"
 
 
