@@ -1,0 +1,10 @@
+=== SMOKE B 2026-07-10T19:03:20Z ===
+=========================== short test summary info ============================
+FAILED tests/test_ingestion.py::test_parse_line_qualifies_totals_and_spreads_market_detail
+--- ruff ---
+All checks passed!
+3 files would be reformatted, 231 files already formatted
+--- mypy ---
+Found 1 error in 1 file (checked 234 source files)
+--- safety ---
+SAFETY AUDIT: PASSED — no bet-placement code path exists

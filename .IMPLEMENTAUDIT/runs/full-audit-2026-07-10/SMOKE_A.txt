@@ -1,0 +1,18 @@
+=== SMOKE A 2026-07-10T17:19:51Z @ c79144e ===
+tests/test_penaltyblog_rho_convention.py: 34 warnings
+  /workspace/.venv/lib/python3.14/site-packages/penaltyblog/models/goal_expectancy.py:292: DeprecationWarning: Passing more than 2 positional arguments to np.maximum and np.minimum is deprecated. If you meant to use the third argument as an output, use the `out` keyword argument instead. If you hoped to work with more than 2 inputs, combine them into a single array and get the extrema for the relevant axis.
+    np.maximum(out, 0.0, out)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+--- ruff ---
+
+Found 1 error.
+[*] 1 fixable with the `--fix` option.
+233 files already formatted
+--- mypy ---
+tests/test_ops_security.py:176: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+Success: no issues found in 233 source files
+--- safety ---
+== 9. betfair_api.py must enforce the runtime read-only op allowlist ==
+== 10. app/ must not import the autoresearch answer key (research/) ==
+SAFETY AUDIT: PASSED — no bet-placement code path exists

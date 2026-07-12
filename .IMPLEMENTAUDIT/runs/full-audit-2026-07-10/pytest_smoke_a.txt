@@ -1,0 +1,68 @@
+........................................................................ [  2%]
+........................................................................ [  4%]
+........................................................................ [  6%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 13%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+......sssss............................................................. [ 23%]
+..................sssssssssss.........................sss............... [ 26%]
+....sssssssssss...................................ss.................... [ 28%]
+.............................sss.sssss.sssssssssssss..sss..ssss.s..ss... [ 30%]
+.....ss................................................................. [ 32%]
+........................................................................ [ 34%]
+........................................................................ [ 36%]
+........................................................................ [ 39%]
+......................................................ssssssssssssssssss [ 41%]
+........................sssss........................................... [ 43%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+...................ssssssss............................................. [ 50%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+........................................................................ [ 56%]
+............................................................ssssssssssss [ 58%]
+s.sssssssssssssssssssssssssss........................................... [ 60%]
+.......................................ss.....................s......... [ 63%]
+.....ss................................................................. [ 65%]
+.........ssssssssssssssssssssssss.ss.................................... [ 67%]
+........................................................................ [ 69%]
+........................................................................ [ 71%]
+........................................................................ [ 73%]
+........................................................................ [ 76%]
+........................................................................ [ 78%]
+...................................................................x.... [ 80%]
+......s................................................................. [ 82%]
+.........sssssss...sss....ss.ssssssssssss.ssssssssssssssssssss.......... [ 84%]
+....................................................................s... [ 86%]
+.sssssssssssssssssssssss................................................ [ 89%]
+................................................s.s..................... [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/fastapi/testclient.py:1
+  /workspace/.venv/lib/python3.14/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/test_ah_bridge.py::test_recovers_goal_expectancies_from_market_probs
+tests/test_ah_bridge.py::test_half_line_price_matches_grid_win_probability
+tests/test_ah_bridge.py::test_quarter_line_is_split_stake_average_of_adjacent_lines
+tests/test_ah_bridge.py::test_ev_zero_at_fair_odds_positive_above
+tests/test_ah_bridge.py::test_sign_convention_negative_line_means_giving_goals
+tests/test_ah_bridge.py::test_invalid_side_raises
+tests/test_ah_bridge.py::test_probabilities_are_a_distribution
+tests/test_penaltyblog_rho_convention.py::test_extended_expectancy_roundtrips_grid_convention
+  /workspace/.venv/lib/python3.14/site-packages/penaltyblog/models/goal_expectancy.py:333: DeprecationWarning: scipy.optimize: The `disp` and `iprint` options of the L-BFGS-B solver are deprecated and will be removed in SciPy 1.18.0.
+    res = minimize(
+
+tests/test_ah_bridge.py: 238 warnings
+tests/test_penaltyblog_rho_convention.py: 34 warnings
+  /workspace/.venv/lib/python3.14/site-packages/penaltyblog/models/goal_expectancy.py:292: DeprecationWarning: Passing more than 2 positional arguments to np.maximum and np.minimum is deprecated. If you meant to use the third argument as an output, use the `out` keyword argument instead. If you hoped to work with more than 2 inputs, combine them into a single array and get the extrema for the relevant axis.
+    np.maximum(out, 0.0, out)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
