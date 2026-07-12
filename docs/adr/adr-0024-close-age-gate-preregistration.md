@@ -1,7 +1,12 @@
-# ADR-0024 — Per-source sharp-close max-age gate (pre-registration, DRAFT — awaiting operator signature)
+# ADR-0024 — Per-source sharp-close max-age gate (pre-registration, ACCEPTED)
 
-- **Status:** DRAFT — pre-registered 2026-07-12, BEFORE further evidence
-  accrues; thresholds below are frozen and may not be re-tuned on outcomes.
+- **Status:** ACCEPTED — the PRE-REGISTRATION is signed by the operator
+  2026-07-12 (in-session "proceed with two remaining"). Signing here commits to
+  the frozen adoption criterion below; it does NOT adopt the gate. The 60-minute
+  cap stays SHADOW/report-only until the criterion is met on post-2026-07-12
+  evidence AND a separate adoption sign-off is recorded (see "Adoption"). The
+  thresholds are frozen as of pre-registration and may not be re-tuned on
+  outcomes.
 - **Context:** the CLV close-freshness study
   (`docs/research/2026-07-10-clv-close-freshness-study.md`, shadow harness
   `scripts/research/clv_close_freshness_study.py --max-sharp-close-age-minutes`)
@@ -45,6 +50,18 @@ Checkpoints: the standing T+1-week study re-run (~2026-07-18) and every
 subsequent re-run until criterion 1 is met. The operator signs at adoption
 time; amendments after signature require a new ADR.
 
-## Signature
+## Adoption (SEPARATE from this pre-registration signature)
 
-- Operator: ______________________  Date: ____________
+Pre-registration signed 2026-07-12 (below) locks the criterion. ADOPTION — the
+actual definition change in `_settled_close_is_trusted` — happens only at a
+future date when a study re-run shows all six conditions met, and requires its
+OWN operator sign-off recorded here at that time. Until then the cap is
+shadow/report-only via the study harness.
+
+- Adopted: ______________________  Date: ____________
+
+## Signature (pre-registration)
+
+- Operator: **SIGNED — Alexis (operator), 2026-07-12**, via in-session
+  directive "proceed with two remaining". This commits the frozen criterion;
+  it does not adopt the gate.

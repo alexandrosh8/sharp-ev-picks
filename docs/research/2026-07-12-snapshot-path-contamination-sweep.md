@@ -53,9 +53,26 @@ Exchange** path (not arcadia, not the double-header class):
 - **1671** — soccer, Euro U19 Women, h2h, clv_log **−1.28**
 - **1672** — soccer, Euro U19 Women, h2h, clv_log **−2.03**
 
-These are not wrong-game (pick and close share the league) and there is no
-evidence to re-null them — but CLV magnitudes past −1.0 warrant a look for a
-fill/close-book mismatch or a bad exchange close on that fixture. Left as-is
-pending investigation; they are consensus/exchange-anchored context, and the
-|clv_log|>0.5 fabrication fallback already governs their trusted-subset
-membership.
+These are not wrong-game (pick and close share the league).
+
+**RESOLVED 2026-07-12 — no action needed (not a bug).** Both are the SAME
+fixture (Bosnia-Herzegovina vs Poland, Euro U19 Women, 2026-07-02): 1671 = the
+Draw (fill 10.0 / close 13.0), 1672 = the B&H underdog (fill 21.0 / close
+41.0). The extreme-negative clv_log is MATHEMATICALLY CORRECT, not a mismatch:
+the model priced the draw at 14.2% and the underdog at 8.0%, while the Betfair
+Exchange sharp close said 2.8% and 0.6% — the market corrected a large model
+mispricing on an obscure U19-women longshot, and both bets lost. The close is
+the right game and the right selection; independence and snapshot flags are
+clean. Both are **volume tier** (shadow — never alerted, never exposure-
+reserved), so they never reached the operator as actionable picks; they exist
+only as CLV evidence. No re-null, no code change.
+
+The only genuine takeaway is a MEASUREMENT-ROBUSTNESS one, not a defect:
+extreme-longshot observations have outsized leverage on the log-CLV mean
+(a handful of obscure-league longshot mispricings can move the volume-tier
+aggregate). The premium odds ceiling (VALUE_MONEYLINE_MAX_ODDS=4.0) already
+keeps such longshots OUT of the premium tier — the exposure they carry is the
+volume aggregate only. A longshot-CLV winsorization or obscure-league scope
+cut for the volume aggregate is a possible future robustness probe, but it is a
+separate PRE-REGISTERED decision (never tuned on the spent holdout), not a fix
+for these rows.
