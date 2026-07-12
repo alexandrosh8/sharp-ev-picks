@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
     from app.backtesting.calibration import BetBandObservation
     from app.backtesting.live_evidence import SettledPickRow
-    from app.resolution.shadow import BetfairCoverageOutcome, ShadowOutcome
+    from app.resolution.shadow import BetfairCoverageOutcome, ShadowOutcome, SlateSharpCoverage
 
 logger = logging.getLogger(__name__)
 
@@ -3994,6 +3994,68 @@ async def betfair_exchange_coverage_outcomes(
             )
         )
     return outcomes
+
+
+async def sharp_slate_coverage(
+    session: AsyncSession,
+    *,
+    window_minutes: int = 60,
+    now: datetime | None = None,
+) -> "SlateSharpCoverage":
+    """Sharp-over-SOFT slate coverage over the recently-scraped events: of the
+    distinct events priced by a SOFT book in the last ``window_minutes``, how
+    many ALSO carry a Betfair EXCHANGE and a Pinnacle price. This answers the
+    operator's actual question ("soft 10, betfair 5 -> 50%"), unlike
+    ``AnchorCoverage`` whose denominator is the dedicated capture's own small
+    fixture list. Soft = any bookmaker that is NOT one of the SHARP_BOOKS
+    (Betfair *Sportsbook* is soft — only the *Exchange* is sharp). Read-only."""
+    from app.resolution.shadow import SlateSharpCoverage
+
+    # NULL-SAFE (mirrors betfair_staleness_metrics): the match-rate route runs
+    # this via _own_session, which yields None when no session factory is
+    # configured (tests / degraded boot) — return an empty coverage (rates
+    # None -> "n/a") rather than 500 the whole panel.
+    if session is None:
+        return SlateSharpCoverage(soft_events=0, betfair_events=0, pinnacle_events=0)
+    now = now if now is not None else datetime.now(tz=UTC)
+    since = now - timedelta(minutes=window_minutes)
+    # SHARP_BOOKS = pinnacle / pinnacle sports / betfair exchange / smarkets.
+    try:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    WITH recent AS (
+                        SELECT event_id, lower(bookmaker) AS bk
+                        FROM odds_snapshots WHERE captured_at > :since
+                    ),
+                    soft AS (
+                        SELECT DISTINCT event_id FROM recent
+                        WHERE bk NOT LIKE 'pinnacle%'
+                          AND bk <> 'betfair exchange' AND bk <> 'smarkets'
+                          AND bk <> 'consensus(median)'
+                    )
+                    SELECT
+                      (SELECT count(*) FROM soft) AS soft_events,
+                      (SELECT count(DISTINCT r.event_id) FROM recent r
+                         JOIN soft s ON s.event_id = r.event_id
+                         WHERE r.bk = 'betfair exchange') AS betfair_events,
+                      (SELECT count(DISTINCT r.event_id) FROM recent r
+                         JOIN soft s ON s.event_id = r.event_id
+                         WHERE r.bk LIKE 'pinnacle%') AS pinnacle_events
+                    """
+                ),
+                {"since": since},
+            )
+        ).one()
+    except Exception as exc:  # never 500 the panel on a diagnostic
+        logger.warning("sharp slate coverage unavailable: %s", type(exc).__name__)
+        return SlateSharpCoverage(soft_events=0, betfair_events=0, pinnacle_events=0)
+    return SlateSharpCoverage(
+        soft_events=int(row.soft_events or 0),
+        betfair_events=int(row.betfair_events or 0),
+        pinnacle_events=int(row.pinnacle_events or 0),
+    )
 
 
 async def betfair_archive_capture_by_sport(

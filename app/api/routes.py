@@ -59,6 +59,7 @@ from app.storage.repositories import (
     review_queue_rows,
     shadow_match_rate_outcomes,
     sharp_close_capture_density,
+    sharp_slate_coverage,
     source_link_metrics,
     sport_market_promotion_distance,
 )
@@ -1265,6 +1266,7 @@ async def resolution_match_rate(
             link_metrics,
             close_density,
             staleness_metrics,
+            slate_coverage,
         ) = await asyncio.gather(
             _own_session(shadow_match_rate_outcomes, since=since),
             _own_session(pinnacle_archive_capture_by_sport),
@@ -1273,6 +1275,7 @@ async def resolution_match_rate(
             _own_session(source_link_metrics),
             _own_session(sharp_close_capture_density),
             _own_session(betfair_staleness_metrics, ttl_seconds=_staleness_ttl),
+            _own_session(sharp_slate_coverage),
         )
     else:
         outcomes = await shadow_match_rate_outcomes(session, since=since)
@@ -1282,6 +1285,7 @@ async def resolution_match_rate(
         link_metrics = await source_link_metrics(session)
         close_density = await sharp_close_capture_density(session)
         staleness_metrics = await betfair_staleness_metrics(session, ttl_seconds=_staleness_ttl)
+        slate_coverage = await sharp_slate_coverage(session)
     report = summarize_match_rate(outcomes).as_dict()
     # Per-sport upcoming capture for ALL arcadia sports (tennis + american_football
     # included), so the panel shows the archive captures every sport, not just the
@@ -1308,6 +1312,12 @@ async def resolution_match_rate(
         betfair_capture=betfair_inline_capture,
         pinnacle_capture=pinnacle_capture,
     ).as_dict()
+    # Sharp-over-SOFT SLATE coverage (2026-07-12): the operator's actual model —
+    # of the events we priced from soft books in the last 60 min, the share that
+    # ALSO carry a Betfair EXCHANGE / Pinnacle sharp price, denominator SHOWN.
+    # Distinct from coverage_summary (whose denominator is the dedicated capture's
+    # own small fixture list and can read a confident "100%" over n=3).
+    report["slate_sharp_coverage"] = slate_coverage.as_dict()
     # Cross-source LINK observability (event_source_links + match_review_queue):
     # auto-linked count, per-source averages, weak links (<0.95 confidence), and
     # the review-queue depth. Null-safe — empty tables yield zeros/empty maps.

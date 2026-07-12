@@ -319,6 +319,50 @@ class AnchorCoverage:
         }
 
 
+@dataclass(frozen=True)
+class SlateSharpCoverage:
+    """Sharp-over-SOFT slate coverage: of the events we actually price from soft
+    books this cycle, what fraction ALSO carry a Betfair Exchange / Pinnacle
+    sharp price. This is the operator's mental model ("soft 10, betfair 5 -> 50%")
+    — denominator = distinct soft-scraped events, NOT the dedicated capture's own
+    small fixture list (which is what AnchorCoverage divides by). Pure: counts in,
+    rates out; rates are None only when nothing soft was scraped (no false 0%)."""
+
+    soft_events: int
+    betfair_events: int
+    pinnacle_events: int
+
+    @property
+    def betfair_rate(self) -> float | None:
+        return self.betfair_events / self.soft_events if self.soft_events else None
+
+    @property
+    def pinnacle_rate(self) -> float | None:
+        return self.pinnacle_events / self.soft_events if self.soft_events else None
+
+    @staticmethod
+    def _label(rate: float | None, num: int, den: int) -> str:
+        return "n/a" if rate is None else f"{round(rate * 100)}% ({num}/{den})"
+
+    def headline(self) -> str:
+        """One-line "Betfair X% (b/soft) · Pinnacle Y% (p/soft)" with the
+        denominator shown so a small-sample cycle can never read as confident."""
+        return (
+            f"Betfair {self._label(self.betfair_rate, self.betfair_events, self.soft_events)}"
+            f" · Pinnacle {self._label(self.pinnacle_rate, self.pinnacle_events, self.soft_events)}"
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "soft_events": self.soft_events,
+            "betfair_events": self.betfair_events,
+            "pinnacle_events": self.pinnacle_events,
+            "betfair_rate": self.betfair_rate,
+            "pinnacle_rate": self.pinnacle_rate,
+            "headline": self.headline(),
+        }
+
+
 def summarize_anchor_coverage(
     *,
     betfair_capture: Sequence[Mapping[str, object]],

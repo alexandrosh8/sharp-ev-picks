@@ -10,11 +10,29 @@ from app.resolution.shadow import (
     BetfairCoverageOutcome,
     GroupRate,
     ShadowOutcome,
+    SlateSharpCoverage,
     arcadia_base_sport,
     summarize_anchor_coverage,
     summarize_betfair_coverage,
     summarize_match_rate,
 )
+
+
+def test_slate_sharp_coverage_rates_denominator_is_soft_events() -> None:
+    # The operator's model: soft 10, betfair 5 -> 50%; pinnacle 9 -> 90%.
+    c = SlateSharpCoverage(soft_events=10, betfair_events=5, pinnacle_events=9)
+    assert c.betfair_rate == pytest.approx(0.5)
+    assert c.pinnacle_rate == pytest.approx(0.9)
+    # The headline SHOWS the denominator so a small sample can't read confident.
+    assert c.headline() == "Betfair 50% (5/10) · Pinnacle 90% (9/10)"
+    d = c.as_dict()
+    assert d["soft_events"] == 10 and d["betfair_events"] == 5 and d["pinnacle_events"] == 9
+
+
+def test_slate_sharp_coverage_no_soft_events_is_none_not_zero() -> None:
+    c = SlateSharpCoverage(soft_events=0, betfair_events=0, pinnacle_events=0)
+    assert c.betfair_rate is None and c.pinnacle_rate is None
+    assert c.headline() == "Betfair n/a · Pinnacle n/a"
 
 
 def _o(pid: int, sport: str, league: str | None, candidates: int, matched: bool) -> ShadowOutcome:

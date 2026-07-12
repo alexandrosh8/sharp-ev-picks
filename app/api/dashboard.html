@@ -3340,7 +3340,16 @@
           if (state.matchRate) {
             // Fix 2026-07-10 #16: prefer already-cached data over a blank
             // placeholder while a background refresh is in flight.
-            covEl.textContent = fmt(state.matchRate.coverage_summary && state.matchRate.coverage_summary.headline);
+            // 2026-07-12: lead with SLATE coverage (sharp events / soft-scraped
+            // events, denominator shown) — the operator's model. It replaces the
+            // old dedicated-capture headline that could read a confident "100%"
+            // over a 3-fixture denominator. Fall back to the old summary only if
+            // the new field is absent (older cached payload).
+            const slate = state.matchRate.slate_sharp_coverage;
+            covEl.textContent = fmt(
+              (slate && slate.headline)
+              || (state.matchRate.coverage_summary && state.matchRate.coverage_summary.headline)
+            );
           } else if (state.matchRateErr) {
             covEl.textContent = "Could not load coverage summary.";
           } else {
@@ -3922,12 +3931,19 @@
           tb.appendChild(sourceRow(oddsSrcLabel, pollAge, String(state.games.length) + " fixtures", health && health.status === "ok" ? "Nominal" : "Source Degraded", "Live odds feed — active provider: " + (oddsSrc || "—") + ".", health && health.status === "ok" ? "tag-success" : "tag-danger"));
 
           const mr = state.matchRate;
-          const pinRate = mr && mr.coverage_summary ? fmtPct(mr.coverage_summary.pinnacle_rate) : (state.matchRateErr ? "Could not load coverage summary." : "Computing coverage… (~15s)");
-          tb.appendChild(sourceRow("Pinnacle ARCADIA", "—", pinRate, mr ? "Nominal" : "Pending", "Sharp-close archive.", mr ? "tag-success" : "tag-neutral"));
+          // 2026-07-12: coverage cells show SLATE coverage "X% (sharp/soft)" —
+          // sharp-priced events over soft-scraped events, denominator visible.
+          const slateCov = mr && mr.slate_sharp_coverage;
+          const slateCell = (num, den, rate) =>
+            slateCov && rate != null && den != null
+              ? fmtPct(rate) + " (" + (Number(num) || 0) + "/" + (Number(den) || 0) + ")"
+              : (mr ? "n/a (no soft slate)" : (state.matchRateErr ? "Could not load coverage." : "Computing coverage… (~15s)"));
+          const pinRate = slateCell(slateCov && slateCov.pinnacle_events, slateCov && slateCov.soft_events, slateCov && slateCov.pinnacle_rate);
+          tb.appendChild(sourceRow("Pinnacle ARCADIA", "—", pinRate, mr ? "Nominal" : "Pending", "Sharp-close archive · share of soft-scraped events also priced by Pinnacle.", mr ? "tag-success" : "tag-neutral"));
 
-          const bfRate = mr && mr.coverage_summary ? fmtPct(mr.coverage_summary.betfair_rate) : (state.matchRateErr ? "Could not load coverage summary." : "Computing coverage… (~15s)");
-          const bfSrc = (health && health.betfair_source) || "Canonical-event inline anchor.";
-          tb.appendChild(sourceRow("Betfair inline", "—", bfRate, mr ? "Nominal" : "Pending", bfSrc, mr ? "tag-success" : "tag-neutral"));
+          const bfRate = slateCell(slateCov && slateCov.betfair_events, slateCov && slateCov.soft_events, slateCov && slateCov.betfair_rate);
+          const bfSrc = (health && health.betfair_source) || "Betfair EXCHANGE share of soft-scraped events (Sportsbook is soft, not counted).";
+          tb.appendChild(sourceRow("Betfair Exchange", "—", bfRate, mr ? "Nominal" : "Pending", bfSrc, mr ? "tag-success" : "tag-neutral"));
 
           const stale = mr && mr.betfair_staleness;
           tb.appendChild(sourceRow("Betfair API", "—", "—", "Monitor-only", stale ? "fresh decisions — " + fmtDecisions(stale.fresh_decisions) : "Monitor-only — not a pick-feeding read.", "tag-neutral"));
