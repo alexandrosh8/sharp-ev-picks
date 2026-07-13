@@ -106,7 +106,8 @@ async-ingestion, postgres-schema, sports-modeling, odds-math, backtesting,
 docker-deployment, security-review, penaltyblog, betfair-api-validator,
 canonical-matcher-verifier, clv-evidence-reviewer, pick-quality-researcher,
 shadow-strategy-engineer, sharp-anchor-auditor, sharp-soft-market-analysis,
-vanilla-dashboard-architecture, html-json-ingestion — triggers in each `SKILL.md`.
+vanilla-dashboard-architecture, html-json-ingestion, webapp-testing — triggers
+in each `SKILL.md`.
 Global betting skills (use for derivations): kelly-bankroll, clv-evaluation,
 walkforward-backtest, betting-feature-engineering, calibration-eval.
 Global engineering skills: architecture-designer, browser-qa,
