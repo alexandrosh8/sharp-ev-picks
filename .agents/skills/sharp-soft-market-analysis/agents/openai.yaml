@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sharp vs Soft Market Analysis"
+  short_description: "Audit sharp anchors and soft-book value gaps"
+  default_prompt: "Use $sharp-soft-market-analysis to audit this sharp-versus-soft signal and its evidence."
