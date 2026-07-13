@@ -16,16 +16,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
-    # Postgres service so the 163 DB-gated tests RUN in CI instead of silently
-    # skipping. tests/conftest.py probes localhost:5433 (the compose host port)
-    # and pytest.skip()s the whole DB suite when it is unreachable — without this
-    # service the settlement engine, CLV re-pricing, snapshot-close and the
-    # Pinnacle close re-key had ZERO CI signal. On ubuntu-latest the job runs on
-    # the runner host (not in a container), so the service's 5433:5432 mapping is
-    # reachable at localhost:5433, exactly where conftest connects. The healthcheck
-    # makes the job wait for readiness before the first step. Credentials match
-    # conftest._BASE (betting_ai/betting_ai) — a throwaway CI database, not a
-    # secret; the schema is built from ORM metadata (no alembic step needed).
+    env:
+      DATABASE_URL: postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai
+      REDIS_URL: redis://localhost:6379/0
+
+    # Throwaway service credentials are fixtures, never production secrets.
+    # PostgreSQL runs both the Alembic gate and isolated DB-backed tests; Redis
+    # exercises readiness and notification integration paths.
     services:
       postgres:
         image: postgres:16-alpine
@@ -41,6 +38,15 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - "6379:6379"
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v6
@@ -52,26 +58,33 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        # Mirror the production image (Dockerfile): the scraper and football
-        # model live in extras; without them pytest collection used to die
-        # on ModuleNotFoundError (CI run 27413210078).
-        run: uv sync --frozen --extra football --extra backfill
+      - name: Install all dependency groups and extras
+        run: uv sync --frozen --all-extras --all-groups
 
-      - name: Tests
-        run: uv run pytest -q
+      - name: Migration integrity
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: Tests and coverage
+        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=85
 
       # Pin ruff so CI formatting matches local exactly — an unpinned `uvx ruff`
       # resolves whatever version the runner cached, which silently drifts from
       # the dev's ruff and fails format-check on identical code.
       - name: Lint
-        run: uvx ruff@0.15.18 check app tests
+        run: uvx ruff@0.15.18 check app tests scripts alembic
 
       - name: Format check
-        run: uvx ruff@0.15.18 format --check app tests
+        run: uvx ruff@0.15.18 format --check app tests scripts alembic
 
       - name: Types
-        run: uv run mypy app
+        run: uv run mypy app tests
+
+      - name: Dependency vulnerability audit
+        run: |
+          uv export --all-extras --all-groups --no-hashes --no-emit-project --output-file /tmp/requirements-audit.txt
+          uvx pip-audit -r /tmp/requirements-audit.txt --no-deps --disable-pip
 
       - name: Safety audit (no bet-placement code path)
         run: bash scripts/safety_audit.sh
