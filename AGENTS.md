@@ -79,7 +79,7 @@ bash scripts/safety_audit.sh          # no-autobet + safety greps
 - `git commit -m "checkpoint"` before any large refactor. Never commit
   untested code. Feature branches for new work; small focused commits.
 
-## Agent routing (project agents in .Codex/agents/)
+## Agent routing (project agents in `.codex/agents/`)
 
 | Delegate when...                 | Agent                      |
 | -------------------------------- | -------------------------- |
@@ -101,9 +101,11 @@ bash scripts/safety_audit.sh          # no-autobet + safety greps
 
 ## Skill routing
 
-Project skills (.Codex/skills/): github-research, python-fastapi,
+Project skills (`.agents/skills/`): github-research, python-fastapi,
 async-ingestion, postgres-schema, sports-modeling, odds-math, backtesting,
-docker-deployment, security-review — triggers in each SKILL.md.
+docker-deployment, security-review, penaltyblog, betfair-api-validator,
+canonical-matcher-verifier, clv-evidence-reviewer, pick-quality-researcher,
+shadow-strategy-engineer, sharp-anchor-auditor — triggers in each `SKILL.md`.
 Global betting skills (use for derivations): kelly-bankroll, clv-evaluation,
 walkforward-backtest, betting-feature-engineering, calibration-eval.
 
