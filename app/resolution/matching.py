@@ -624,6 +624,100 @@ def _markers_conflict(home: str, away: str, cand_home: str, cand_away: str) -> b
     ) or distinguishing_markers(away) != distinguishing_markers(cand_away)
 
 
+@lru_cache(maxsize=1)
+def _confirmed_wnba_canonicals() -> frozenset[str]:
+    """Curated WNBA canonical identities from the bundled local seed.
+
+    This is deliberately NOT inferred from arbitrary ``"... W"`` aliases: other
+    all-women competitions can use that suffix too, and the mixed Pinnacle
+    basketball namespace carries no trustworthy league discriminator. Invalid or
+    duplicate roster metadata fails closed to an empty set.
+    """
+    data = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
+    metadata = data.get("_confirmed_all_women_league_teams")
+    if not isinstance(metadata, dict):
+        return frozenset()
+    roster = metadata.get("wnba")
+    if not isinstance(roster, list) or not roster:
+        return frozenset()
+    if not all(isinstance(team, str) for team in roster):
+        return frozenset()
+    canonicals = [normalize_name(team) for team in roster]
+    if any(not canonical for canonical in canonicals) or len(set(canonicals)) != len(canonicals):
+        return frozenset()
+    return frozenset(canonicals)
+
+
+def _has_literal_w_marker(name: str) -> bool:
+    """Whether ``name`` carries the standalone provider suffix ``W``."""
+    return "w" in normalize_name(name).split()
+
+
+def _confirmed_wnba_w_marker_exception(
+    home: str,
+    away: str,
+    cand_home: str,
+    cand_away: str,
+    *,
+    aliases: AliasTable,
+) -> bool:
+    """Allow only a bilaterally confirmed WNBA ``W``-suffix disagreement.
+
+    Both oriented participants must independently resolve through an EXPLICIT
+    curated alias to the same canonical WNBA identity on the query and candidate
+    sides. The only categorical difference permitted is a literal standalone
+    ``W`` token. Youth/reserve markers, ``Women``/``Ladies`` spellings, fuzzy
+    identities, a non-WNBA opponent, or an uncurated alias all fail closed.
+    """
+    pairs = ((home, cand_home), (away, cand_away))
+    roster = _confirmed_wnba_canonicals()
+    resolved: list[str] = []
+    saw_w_difference = False
+    for query_name, candidate_name in pairs:
+        query_markers = distinguishing_markers(query_name)
+        candidate_markers = distinguishing_markers(candidate_name)
+        if (query_markers | candidate_markers) - {"women"}:
+            return False
+        if query_markers != candidate_markers:
+            marked_name = query_name if "women" in query_markers else candidate_name
+            if query_markers ^ candidate_markers != {"women"} or not _has_literal_w_marker(
+                marked_name
+            ):
+                return False
+            saw_w_difference = True
+
+        # Raw-name canonical equality is intentional: stripping ``W`` first would
+        # turn any roster-looking string into evidence and bypass the requirement
+        # for a reviewed canonical<->W alias in aliases_seed.json.
+        query_canonical = aliases.canonical(query_name)
+        candidate_canonical = aliases.canonical(candidate_name)
+        if query_canonical != candidate_canonical or query_canonical not in roster:
+            return False
+        resolved.append(query_canonical)
+
+    return saw_w_difference and len(set(resolved)) == 2
+
+
+def fixture_markers_compatible(
+    home: str,
+    away: str,
+    cand_home: str,
+    cand_away: str,
+    *,
+    aliases: AliasTable,
+) -> bool:
+    """Marker agreement, plus the narrow curated WNBA ``W``-suffix exception."""
+    if not _markers_conflict(home, away, cand_home, cand_away):
+        return True
+    return _confirmed_wnba_w_marker_exception(
+        home,
+        away,
+        cand_home,
+        cand_away,
+        aliases=aliases,
+    )
+
+
 def _tennis_initial(name: str) -> str | None:
     """The trailing first-initial when ``name`` has the tennis canonical shape
     ``"surname f"`` produced by tennis_names.canonical_tennis_name (two or more
@@ -832,7 +926,10 @@ def match_event_hardened_scored(
                       kickoff window (tighter than the strict calendar day).
     STAGE 1  VETO   — categorical marker negative-rule: a one-sided women/youth/
                       reserve marker REJECTS (known-club whitelist consulted
-                      first, in ``strip_markers``).
+                      first, in ``strip_markers``). The sole exception is a
+                      literal ``W`` suffix mismatch where BOTH oriented teams
+                      have exact curated alias equivalence and explicit WNBA
+                      all-women-roster confirmation.
     STAGE 4/5 NAME  — exact canonical OR two-tier Jaro-Winkler + token-sort on
                       marker-stripped base names, with a disambiguating-token
                       blocklist; the REVIEW band (0.84<=JW<0.92) is NOT accepted.
@@ -887,7 +984,7 @@ def match_event_hardened_scored(
 
         # Forward orientation.
         forward = (
-            not _markers_conflict(home, away, cand.home, cand.away)
+            fixture_markers_compatible(home, away, cand.home, cand.away, aliases=aliases)
             and _base_name_ok(base_home, cand_base_home)
             and _base_name_ok(base_away, cand_base_away)
         )
@@ -905,7 +1002,7 @@ def match_event_hardened_scored(
         )
         if flip_ok:
             swapped = (
-                not _markers_conflict(home, away, cand.away, cand.home)
+                fixture_markers_compatible(home, away, cand.away, cand.home, aliases=aliases)
                 and _base_name_ok(base_home, cand_base_away)
                 and _base_name_ok(base_away, cand_base_home)
             )
@@ -923,7 +1020,9 @@ def match_event_hardened_scored(
         # forward-orientation name miss whose sides BOTH sit in an accept/review
         # band (never a categorical wrong-game veto) is recorded for a human
         # review queue. Marker conflicts are categorical and never reviewable.
-        if review_out is not None and not _markers_conflict(home, away, cand.home, cand.away):
+        if review_out is not None and fixture_markers_compatible(
+            home, away, cand.home, cand.away, aliases=aliases
+        ):
             side_home = _review_side_status(base_home, cand_base_home)
             side_away = _review_side_status(base_away, cand_base_away)
             if side_home is not None and side_away is not None:
