@@ -11,6 +11,7 @@ Covers the 2026-06-11 live-log findings:
 """
 
 import ast
+import asyncio
 import importlib.util
 import inspect
 import logging
@@ -29,11 +30,14 @@ from app.ingestion.base import EventDirectory  # noqa: E402
 from app.ingestion.oddsportal import (  # noqa: E402
     OddsPortalLoader,
     _apply_nav_timeout_override,
+    _assert_browser_args_hardened,
     _ExchangeIncompleteOddsFilter,
+    _harden_browser_args,
     _is_real_more_button,
     _patch_upstream_quirks,
     _patched_click_more_if_market_hidden,
     _patched_extract_bookmaker_name,
+    _patched_playwright_initialize,
     _patched_tab_selectors,
     _patched_wait_and_click,
     _patched_wait_for_market_switch,
@@ -550,7 +554,167 @@ def test_patch_guard_rejects_unverified_upstream_version(
         _patch_upstream_quirks()
 
 
-def test_apply_nav_timeout_override_raises_the_15s_match_page_timeout() -> None:
+def test_browser_arg_hardening_preserves_safe_features_and_enforces_isolation() -> None:
+    hardened = _harden_browser_args(
+        [
+            "--no-sandbox",
+            "--disable-web-security=true",
+            "--disable-features IsolateOrigins,BackForwardCache,SitePerProcess",
+            "--mute-audio",
+            "--site-per-process=false",
+        ]
+    )
+
+    assert "--no-sandbox" not in hardened
+    assert "--disable-web-security=true" not in hardened
+    assert "--disable-features=BackForwardCache" in hardened
+    assert "--mute-audio" in hardened
+    assert hardened.count("--site-per-process") == 1
+    _assert_browser_args_hardened(hardened, name="test args")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_error"),
+    [
+        (["--no-sandbox", "--site-per-process"], "forbidden switch"),
+        (["--no-sandbox true", "--site-per-process"], "forbidden switch"),
+        (
+            ["--disable-features BackForwardCache,IsolateOrigins", "--site-per-process"],
+            "disables site isolation",
+        ),
+        (["--mute-audio"], "must enable --site-per-process"),
+    ],
+)
+def test_browser_arg_guard_fails_closed(arguments: list[str], expected_error: str) -> None:
+    with pytest.raises(RuntimeError, match=expected_error):
+        _assert_browser_args_hardened(arguments, name="test args")
+
+
+def test_upstream_browser_lists_are_hardened_in_place_on_every_patch_call() -> None:
+    import oddsharvester.core.playwright_manager as playwright_manager
+    import oddsharvester.utils.constants as constants
+
+    for name in ("PLAYWRIGHT_BROWSER_ARGS", "PLAYWRIGHT_BROWSER_ARGS_DOCKER"):
+        arguments = getattr(constants, name)
+        assert getattr(playwright_manager, name) is arguments
+        arguments[:] = [
+            argument for argument in arguments if not argument.startswith("--site-per-process")
+        ]
+        arguments.extend(
+            [
+                "--no-sandbox",
+                "--disable-features=IsolateOrigins,BackForwardCache,site-per-process",
+            ]
+        )
+
+    # `_upstream_patched` may already be true: the security repair must still
+    # execute before the ordinary idempotency return.
+    _patch_upstream_quirks()
+
+    for name in ("PLAYWRIGHT_BROWSER_ARGS", "PLAYWRIGHT_BROWSER_ARGS_DOCKER"):
+        arguments = getattr(constants, name)
+        _assert_browser_args_hardened(arguments, name=name)
+        assert "--disable-features=BackForwardCache" in arguments
+        assert getattr(playwright_manager, name) is arguments
+
+
+def test_patched_playwright_initializer_matches_pinned_upstream_signature() -> None:
+    ours = list(inspect.signature(_patched_playwright_initialize).parameters)
+    upstream = _upstream_method_params(
+        "oddsharvester.core.playwright_manager",
+        "PlaywrightManager",
+        "initialize",
+    )
+    assert ours == upstream
+
+
+@pytest.mark.asyncio
+async def test_playwright_launch_forces_chromium_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import oddsharvester.core.playwright_manager as playwright_manager
+
+    _patch_upstream_quirks()
+    captured: dict[str, Any] = {}
+
+    class FakeChromium:
+        async def launch(self, **kwargs: Any) -> object:
+            captured.update(kwargs)
+            return object()
+
+    class FakePlaywrightContextManager:
+        async def start(self) -> object:
+            return SimpleNamespace(chromium=FakeChromium())
+
+    class FakePage:
+        async def evaluate(self, _script: str) -> str:
+            return "UTC"
+
+    class FakeContext:
+        async def new_page(self) -> FakePage:
+            return FakePage()
+
+    async def create_context(**_kwargs: Any) -> FakeContext:
+        return FakeContext()
+
+    monkeypatch.setattr(
+        playwright_manager,
+        "async_playwright",
+        lambda: FakePlaywrightContextManager(),
+    )
+    monkeypatch.setattr(playwright_manager, "is_running_in_docker", lambda: True)
+    manager = playwright_manager.PlaywrightManager()
+    manager._create_context = create_context
+
+    await manager.initialize(headless=True, timezone_id="UTC")
+
+    assert captured["chromium_sandbox"] is True
+    assert captured["headless"] is True
+    _assert_browser_args_hardened(captured["args"], name="captured launch args")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_playwright_initialize_reaps_partial_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import oddsharvester.core.playwright_manager as playwright_manager
+
+    _patch_upstream_quirks()
+    stopped = False
+
+    class CancellingChromium:
+        async def launch(self, **_kwargs: Any) -> object:
+            raise asyncio.CancelledError
+
+    class PartialPlaywright:
+        chromium = CancellingChromium()
+
+        async def stop(self) -> None:
+            nonlocal stopped
+            stopped = True
+
+    class FakePlaywrightContextManager:
+        async def start(self) -> PartialPlaywright:
+            return PartialPlaywright()
+
+    monkeypatch.setattr(
+        playwright_manager,
+        "async_playwright",
+        lambda: FakePlaywrightContextManager(),
+    )
+    manager = playwright_manager.PlaywrightManager()
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.initialize(headless=True)
+
+    assert stopped is True
+    assert manager.playwright is None
+    assert manager.browser is None
+
+
+def test_apply_nav_timeout_override_raises_the_15s_match_page_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The headline robustness lever for issue 1: OddsHarvester hardcodes a 15s
     match-page Page.goto timeout (NAVIGATION_TIMEOUT_MS), not env-configurable.
     The override rebinds the binding base_scraper.scrape_match actually reads
@@ -558,18 +722,16 @@ def test_apply_nav_timeout_override_raises_the_15s_match_page_timeout() -> None:
     import oddsharvester.core.base_scraper as base_scraper
     import oddsharvester.utils.constants as constants
 
-    original_base = base_scraper.NAVIGATION_TIMEOUT_MS
-    original_const = constants.NAVIGATION_TIMEOUT_MS
-    assert original_base == 15000  # upstream's too-tight default (pinned 0.4.0)
-    try:
-        _apply_nav_timeout_override(30000)
-        # base_scraper.scrape_match() reads its OWN module global at goto time —
-        # that exact binding must change, or the override is a no-op.
-        assert base_scraper.NAVIGATION_TIMEOUT_MS == 30000
-        assert constants.NAVIGATION_TIMEOUT_MS == 30000
-    finally:
-        base_scraper.NAVIGATION_TIMEOUT_MS = original_base
-        constants.NAVIGATION_TIMEOUT_MS = original_const
+    # Other loader tests intentionally exercise the process-wide binding. Pin
+    # this test's precondition explicitly so it remains deterministic under the
+    # full suite and xdist load-file scheduling.
+    monkeypatch.setattr(base_scraper, "NAVIGATION_TIMEOUT_MS", 15000)
+    monkeypatch.setattr(constants, "NAVIGATION_TIMEOUT_MS", 15000)
+    _apply_nav_timeout_override(30000)
+    # base_scraper.scrape_match() reads its OWN module global at goto time —
+    # that exact binding must change, or the override is a no-op.
+    assert base_scraper.NAVIGATION_TIMEOUT_MS == 30000
+    assert constants.NAVIGATION_TIMEOUT_MS == 30000
 
 
 def test_apply_nav_timeout_override_none_is_a_noop() -> None:

@@ -14,10 +14,11 @@
 
 set -u
 
-# Derive the repo from the script location (like safety_audit.sh) — this
-# script also runs on the VPS clone at /opt/betting-ai; never hardcode a path.
-cd "$(dirname "$0")/.." || exit 1
-REPO="$(pwd)"
+# Derive an absolute repo path from this script; the same file runs from local
+# clones and the production /opt/sharp-ev-picks checkout.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")"; pwd -P)"
+REPO="$(cd -- "$SCRIPT_DIR/.."; pwd -P)"
+cd "$REPO" || exit 1
 
 BACKUP="$(mktemp /tmp/uv.lock.backup.XXXXXX)"
 cp "$REPO/uv.lock" "$BACKUP" || exit 1
@@ -52,7 +53,7 @@ if [ $? -ne 0 ]; then restore "ruff"; fi
 uv run mypy app tests
 if [ $? -ne 0 ]; then restore "mypy"; fi
 
-bash scripts/safety_audit.sh
+bash "$REPO/scripts/safety_audit.sh"
 if [ $? -ne 0 ]; then restore "safety audit"; fi
 
 echo
@@ -68,6 +69,6 @@ echo "[upgrade] review:  git diff uv.lock"
 echo "[upgrade] commit:  git add uv.lock   (then)   git commit -m 'chore: bump upstream engines (gated)'"
 echo "[upgrade] restart the app to run the new versions"
 echo "[upgrade] Docker: rebuild the image (docker compose up -d --build) — and"
-echo "[upgrade]   re-verify the Dockerfile's oddsharvester sandbox note: 0.3.0"
-echo "[upgrade]   launches Chromium with --no-sandbox/--disable-dev-shm-usage"
-echo "[upgrade]   when /.dockerenv exists; a bump must keep that behavior."
+echo "[upgrade]   rerun the hardened-container Chromium smoke test from the"
+echo "[upgrade]   deployment runbook: the app must strip upstream --no-sandbox"
+echo "[upgrade]   switches and Chromium must retain its process sandbox."

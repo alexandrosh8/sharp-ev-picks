@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sharp-ev-picks — sign in</title>
+    <style>
+
+      /* Control Room auth — matches the dashboard: obsidian base, emerald
+         signal accent, hairline panels, mono data voice. Falls back to the
+         system mono stack if the font CDN is unreachable. */
+      :root {
+        --bg: #0a0a0a;
+        --panel: #121213;
+        --panel2: #17171a;
+        --ink: #000000;
+        --line: #222226;
+        --line2: #2e2e34;
+        --text: #fafafa;
+        --text2: #a1a1aa;
+        --text3: #8b8b96;
+        --cyan: #10b981;
+        --cyan-dim: rgba(16, 185, 129, 0.12);
+        --cyan-line: rgba(16, 185, 129, 0.35);
+        --danger: #ef4444;
+        --font-head: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      html { background: var(--bg); }
+      body {
+        color: var(--text);
+        font: 13px/1.5 var(--mono);
+        font-variant-numeric: tabular-nums;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        padding: 24px;
+        background:
+          radial-gradient(760px 340px at 50% -12%, rgba(16, 185, 129, 0.07), transparent 60%),
+          var(--bg);
+      }
+      /* faint static grain so the black never reads flat */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.35;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.028 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .brand .brand-svg { display: block; width: 24px; height: 24px; }
+      .wm {
+        font-family: var(--font-head);
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        color: var(--text);
+      }
+      .wm .w-ev { color: var(--cyan); }
+      .card {
+        position: relative;
+        width: 100%;
+        max-width: 380px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--panel);
+        box-shadow: inset 0 2px 0 var(--cyan), 0 24px 70px rgba(0, 0, 0, 0.55);
+        padding: 0 24px 22px;
+      }
+      .card-h {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 -24px 6px;
+        padding: 13px 24px;
+        border-bottom: 1px solid var(--line);
+        font-size: 10.5px;
+        font-weight: 600;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: var(--text2);
+      }
+      .card-h::before { content: "01 / "; color: var(--cyan); font-weight: 500; }
+      .dot {
+        width: 7px;
+        height: 7px;
+        margin-left: auto;
+        border-radius: 50%;
+        background: var(--cyan);
+        box-shadow: 0 0 8px var(--cyan);
+        animation: breathe 2.6s ease-in-out infinite;
+      }
+      @keyframes breathe {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+      }
+      .sub {
+        color: var(--text3);
+        font-size: 10px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        margin: 14px 0 6px;
+      }
+      label {
+        display: block;
+        color: var(--text3);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        margin: 16px 0 6px;
+      }
+      input {
+        width: 100%;
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--line2);
+        border-radius: 4px;
+        padding: 11px 12px;
+        min-height: 44px;
+        font: 16px var(--mono);
+        letter-spacing: 0.02em;
+        transition: border-color 150ms ease-out;
+      }
+      input:hover { border-color: var(--text3); }
+      input:focus-visible { outline: 1px solid var(--cyan); outline-offset: 2px; border-color: var(--cyan-line); }
+      button {
+        width: 100%;
+        margin-top: 24px;
+        min-height: 44px;
+        cursor: pointer;
+        background: var(--cyan);
+        color: var(--ink);
+        border: 1px solid var(--cyan);
+        border-radius: 4px;
+        padding: 12px;
+        font: 600 11px var(--mono);
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        transition: opacity 150ms ease-out, box-shadow 150ms ease-out;
+      }
+      button:hover { opacity: 0.88; box-shadow: 0 0 24px var(--cyan-dim); }
+      button:focus-visible { outline: 1px solid var(--cyan); outline-offset: 3px; }
+      button:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
+      .err {
+        color: var(--danger);
+        font-size: 11px;
+        min-height: 16px;
+        margin-top: 13px;
+        letter-spacing: 0.02em;
+      }
+      .foot {
+        font-size: 9.5px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--text3);
+        text-align: center;
+      }
+      .foot b { color: var(--cyan); font-weight: 500; }
+      @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; animation: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="brand">
+      <svg class="brand-svg" viewBox="0 0 26 26" aria-hidden="true"><polyline
+        points="3,20 9,15 14,10 21,4" fill="none" stroke="#10b981"
+        stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
+        /><circle cx="21" cy="4" r="3.2" fill="#10b981"/></svg>
+      <span class="wm">sharp<span class="w-ev">-ev-</span>picks</span>
+    </div>
+    <form class="card" id="login-form" method="post" autocomplete="off">
+      <div class="card-h">Operator sign in<span class="dot" aria-hidden="true"></span></div>
+      <div class="sub">+EV picks console · decision-support desk</div>
+      <label for="u">Username</label>
+      <input id="u" name="username" type="text" autocomplete="username" autofocus required />
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required />
+      <button type="submit" id="login-submit">Sign in</button>
+      <div class="err" id="err" role="alert"></div>
+    </form>
+    <div class="foot"><b>Picks-only desk</b> · informational — never places bets</div>
+    <script>
+      "use strict";
+      const form = document.getElementById("login-form");
+      const errEl = document.getElementById("err");
+      const submitBtn = document.getElementById("login-submit");
+      form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        // double-submit guard: one in-flight attempt at a time. The button is
+        // re-enabled ONLY on failure so a wrong password can be retried; on
+        // success the page navigates away, so it stays disabled.
+        if (submitBtn.disabled) return;
+        submitBtn.disabled = true;
+        errEl.textContent = "";
+        const username = document.getElementById("u").value;
+        const password = document.getElementById("p").value;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        let succeeded = false;
+        try {
+          const res = await fetch("/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+            signal: controller.signal,
+          });
+          if (res.ok) {
+            succeeded = true;
+            window.location = "/";
+            return;
+          }
+          if (res.status === 429) {
+            const raw = Number.parseInt(res.headers.get("Retry-After") || "", 10);
+            const wait = Number.isFinite(raw) ? Math.min(Math.max(raw, 1), 300) : null;
+            errEl.textContent = wait
+              ? "Too many attempts — retry in " + wait + "s"
+              : "Too many attempts — try again later";
+          } else {
+            errEl.textContent =
+              res.status === 401
+                ? "Invalid username or password"
+                : "Sign-in failed (HTTP " + res.status + ")";
+          }
+        } catch (e) {
+          errEl.textContent =
+            e && e.name === "AbortError"
+              ? "Sign-in timed out — try again"
+              : "Sign-in failed — could not reach the server";
+        } finally {
+          clearTimeout(timer);
+          if (!succeeded) submitBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

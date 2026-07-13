@@ -81,6 +81,7 @@ def _json_loader(
     *,
     scrape_match: Any,
     listing: Any = None,
+    now_fn: Any = None,
 ) -> OddsPortalLoader:
     """A loader with the JSON feed ON, an injected listing scrape, and an
     injected per-match JSON scrape (so no network and no curl_cffi import)."""
@@ -91,6 +92,7 @@ def _json_loader(
         scrape_fn=listing or _listing_scrape(matches),
         use_json_feed=True,
         json_scrape_fn=scrape_match,
+        now_fn=now_fn,
     )
 
 
@@ -133,6 +135,70 @@ async def test_json_feed_source_selected_when_flag_on() -> None:
     assert by_sel[("bet365", "Beta United")] == 4.20  # idx2 = away
     assert all(s.bookmaker == "bet365" for s in snaps)  # NAME, no numeric, no PWBook
     assert all(s.market is Market.H2H for s in snaps)
+    assert loader.last_fetch_complete["soccer"] is True
+    assert loader.last_fetch_completeness_reason["soccer"] == ""
+
+
+async def test_json_cycle_uses_post_listing_clock_for_provider_timestamp() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    cycle_start = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    post_listing = cycle_start + timedelta(minutes=10)
+    clock = iter((cycle_start, post_listing))
+    feed_data = FEED_PAYLOAD["d"]
+    assert isinstance(feed_data, dict)
+    payload: dict[str, Any] = {
+        **FEED_PAYLOAD,
+        "d": {**feed_data, "time-base": post_listing.timestamp()},
+    }
+
+    async def scrape_match(match_url: str, **kwargs: Any) -> list[Any]:
+        from app.ingestion.oddsportal_json import parse_feed_payload
+
+        return parse_feed_payload(
+            payload,
+            event_url=match_url,
+            home="Alpha FC",
+            away="Beta United",
+            league="Testland League",
+            starts_at=None,
+            markets=kwargs["markets"],
+            directory=kwargs["directory"],
+            now=kwargs["now"],
+            bookmakers=REGISTRY,
+        )
+
+    loader = _json_loader(
+        EventDirectory(),
+        [LISTED_MATCH],
+        scrape_match=scrape_match,
+        now_fn=lambda: next(clock),
+    )
+    snapshots = await loader.fetch_odds("soccer")
+
+    assert snapshots
+    assert {snapshot.captured_at for snapshot in snapshots} == {post_listing}
+
+
+async def test_html_cycle_uses_post_fetch_clock_for_scraped_timestamp() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    cycle_start = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    post_fetch = cycle_start + timedelta(minutes=10)
+    clock = iter((cycle_start, post_fetch))
+    match = {**LISTED_MATCH, "scraped_date": post_fetch.isoformat()}
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        markets=("1x2",),
+        scrape_fn=_listing_scrape([match]),
+        now_fn=lambda: next(clock),
+    )
+
+    snapshots = await loader.fetch_odds("soccer")
+
+    assert snapshots
+    assert {snapshot.captured_at for snapshot in snapshots} == {post_fetch}
 
 
 async def test_json_failure_skips_match_no_playwright_fallback() -> None:
@@ -150,6 +216,8 @@ async def test_json_failure_skips_match_no_playwright_fallback() -> None:
     # No fallback: the match is a scrape gap, NOT the Playwright PWBook odds.
     assert snaps == []
     assert not any(s.bookmaker == "PWBook" for s in snaps)
+    assert loader.last_fetch_complete["soccer"] is False
+    assert "failed" in loader.last_fetch_completeness_reason["soccer"]
 
 
 async def test_json_empty_skips_match_no_playwright_fallback() -> None:
@@ -164,6 +232,8 @@ async def test_json_empty_skips_match_no_playwright_fallback() -> None:
     snaps = await loader.fetch_odds("soccer")
     assert snaps == []
     assert not any(s.bookmaker == "PWBook" for s in snaps)
+    assert loader.last_fetch_complete["soccer"] is False
+    assert "0 rows" in loader.last_fetch_completeness_reason["soccer"]
 
 
 async def test_json_cycle_rotates_proxy_per_match_when_pool_configured(

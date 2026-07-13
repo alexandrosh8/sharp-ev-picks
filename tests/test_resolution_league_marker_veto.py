@@ -27,7 +27,6 @@ treat the trailing-ordinal/roman reserve rules (correct for TEAM names) as
 league markers.
 """
 
-import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -44,14 +43,12 @@ from app.storage.repositories import (
     resolve_pinnacle_close_snaps,
     resolver_quarantine_stats,
 )
+from tests.database import TEST_DATABASE_URL
 
 # Same compose test DB as tests/test_resolution_db.py; overridable so the
 # suite can also run from an environment where the compose port mapping is
 # not on localhost (e.g. a sibling container reaching postgres directly).
-DB_URL = os.environ.get(
-    "BETTING_AI_TEST_DB_URL",
-    "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test",
-)
+DB_URL = TEST_DATABASE_URL
 # The women's tip of the double-header; the men's game tips 2h later (the
 # audit class showed 105-120 min gaps).
 KO_W = datetime(2026, 12, 3, 8, 0, tzinfo=UTC)

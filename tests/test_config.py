@@ -1,5 +1,6 @@
 """Settings safety validator: tampering with picks-only flags is fatal."""
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -8,10 +9,25 @@ from pydantic import ValidationError
 from app.config import Settings, gate_policy, stake_policy, steam_policy, value_policy
 from app.edge.value_policy import ValuePolicy
 
+_VALID_AUTH_HASH = "pbkdf2_sha256$600000$" + "00" * 16 + "$" + "00" * 32
+_VALID_SESSION_SECRET = "test-session-" + "x" * 32
+_VALID_PRODUCTION_DATABASE_URL = (
+    "postgresql+asyncpg://betting_ai:correct-horse-battery-staple@postgres:5432/betting_ai"
+)
+
 
 def make_settings(**overrides: Any) -> Settings:
     # _env_file=None keeps tests hermetic from any local .env
     return Settings(_env_file=None, **overrides)
+
+
+def _example_env_value(key: str) -> str:
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    prefix = f"{key}="
+    for line in env_example.read_text(encoding="utf-8").splitlines():
+        if line.startswith(prefix):
+            return line.removeprefix(prefix).partition("#")[0].strip()
+    raise AssertionError(f"{key} is missing from .env.example")
 
 
 def test_defaults_are_safe_and_load() -> None:
@@ -22,6 +38,47 @@ def test_defaults_are_safe_and_load() -> None:
     assert s.bet_execution_enabled is False
     assert s.read_only_market_data is True
     assert s.paper_trading is False
+    assert s.odds_source == "oddsportal"
+
+
+def test_reference_env_tracks_capture_and_value_runtime_defaults() -> None:
+    settings = make_settings()
+    assert float(_example_env_value("VALUE_MONEYLINE_MAX_ODDS")) == (
+        settings.value_moneyline_max_odds
+    )
+    assert _example_env_value("ODDSPORTAL_BASKETBALL_MARKETS") == (
+        settings.oddsportal_basketball_markets
+    )
+    assert int(_example_env_value("RESULTS_SCRAPE_INTERVAL_SECONDS")) == (
+        settings.results_scrape_interval_seconds
+    )
+
+
+def test_oddschecker_requires_proxy_pool_at_startup() -> None:
+    with pytest.raises(ValidationError, match="SCRAPER_PROXY_POOL"):
+        make_settings(odds_source="oddschecker")
+    settings = make_settings(
+        odds_source="oddschecker",
+        scraper_proxy_pool="proxy.example|8080|user|pass",
+    )
+    assert settings.odds_source == "oddschecker"
+
+
+def test_unknown_odds_source_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="ODDS_SOURCE"):
+        make_settings(odds_source="mystery")
+
+
+def test_oddschecker_concurrency_is_bounded_to_container_memory_budget() -> None:
+    assert make_settings(oddschecker_max_clients=8).oddschecker_max_clients == 8
+    with pytest.raises(ValidationError):
+        make_settings(oddschecker_max_clients=9)
+
+
+def test_betfair_proxy_failover_is_three_total_attempts_not_three_retries() -> None:
+    assert make_settings().proxy_max_failover_betfair == 3
+    with pytest.raises(ValidationError):
+        make_settings(proxy_max_failover_betfair=4)
 
 
 @pytest.mark.parametrize(
@@ -54,6 +111,57 @@ def test_stake_caps_within_bounds_accepted() -> None:
     )
     assert s.max_recommended_stake_percent == 0.02
     assert s.max_daily_exposure_percent == 0.05
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("value_min_edge", float("nan")),
+        ("min_edge", float("inf")),
+        ("bankroll_base", float("inf")),
+        ("football_totals_line", float("-inf")),
+    ],
+)
+def test_every_float_setting_rejects_non_finite_values(field: str, value: float) -> None:
+    with pytest.raises(ValidationError, match="finite"):
+        make_settings(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"min_edge": -0.001},
+        {"min_edge": 1.001},
+        {"value_min_edge": -0.001},
+        {"value_min_edge": 1.001},
+        {"min_confidence": -0.001},
+        {"min_confidence": 1.001},
+        {"model_confidence": -0.001},
+        {"model_confidence": 1.001},
+        {"max_odds_age_seconds": 0.0},
+        {"min_liquidity": -0.01},
+        {"value_min_odds": 1.0},
+        {"value_min_odds": 1000.01},
+    ],
+)
+def test_core_float_domains_fail_fast(overrides: dict[str, float]) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**overrides)
+
+
+def test_money_settings_fit_numeric_12_2_worst_case() -> None:
+    # 600m * 2% * 999 exceeds the ten-integer-digit MONEY envelope.
+    with pytest.raises(ValidationError, match=r"999.*NUMERIC\(12,2\)"):
+        make_settings(bankroll_base=600_000_000.0)
+    with pytest.raises(ValidationError, match="BANKROLL_STARTING_BALANCE"):
+        make_settings(bankroll_starting_balance=10_000_000_000.0)
+
+    accepted = make_settings(
+        bankroll_base=500_000_000.0,
+        bankroll_starting_balance=9_999_999_999.99,
+    )
+    assert accepted.bankroll_base == 500_000_000.0
+    assert accepted.bankroll_starting_balance == 9_999_999_999.99
 
 
 @pytest.mark.parametrize(
@@ -182,7 +290,7 @@ def test_public_app_bind_blocks_blank_cred_first_run_setup() -> None:
         make_settings(
             app_host_bind="0.0.0.0",
             dashboard_auth_enabled=True,
-            dashboard_auth_password_hash="pbkdf2_sha256$1$abcd$1234",
+            dashboard_auth_password_hash=_VALID_AUTH_HASH,
         )
 
 
@@ -198,10 +306,81 @@ def test_public_app_bind_passes_with_dashboard_auth() -> None:
     s = make_settings(
         app_host_bind="0.0.0.0",
         dashboard_auth_enabled=True,
-        dashboard_auth_password_hash="pbkdf2_sha256$1$abcd$1234",
-        dashboard_session_secret="test-session-secret",
+        dashboard_auth_password_hash=_VALID_AUTH_HASH,
+        dashboard_session_secret=_VALID_SESSION_SECRET,
     )
     assert s.app_host_bind == "0.0.0.0"
+
+
+def test_app_env_rejects_aliases_and_typos() -> None:
+    with pytest.raises(ValidationError):
+        make_settings(app_env="prod")
+    with pytest.raises(ValidationError):
+        make_settings(app_env="development")
+
+
+def test_production_requires_enabled_preprovisioned_auth_and_loopback_bind() -> None:
+    with pytest.raises(ValidationError, match="DASHBOARD_AUTH_ENABLED"):
+        make_settings(app_env="production")
+    with pytest.raises(ValidationError, match="pre-provisioned"):
+        make_settings(app_env="production", dashboard_auth_enabled=True)
+    with pytest.raises(ValidationError, match="loopback"):
+        make_settings(
+            app_env="production",
+            app_host_bind="0.0.0.0",
+            dashboard_auth_enabled=True,
+            dashboard_auth_password_hash=_VALID_AUTH_HASH,
+            dashboard_session_secret=_VALID_SESSION_SECRET,
+        )
+    settings = make_settings(
+        app_env="production",
+        app_host_bind="127.0.0.1",
+        dashboard_auth_enabled=True,
+        dashboard_auth_password_hash=_VALID_AUTH_HASH,
+        dashboard_session_secret=_VALID_SESSION_SECRET,
+        database_url=_VALID_PRODUCTION_DATABASE_URL,
+    )
+    assert settings.is_production is True
+    assert settings.secure_session_cookie is True
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+asyncpg://betting_ai@postgres:5432/betting_ai",
+        "postgresql+asyncpg://betting_ai:@postgres:5432/betting_ai",
+        "postgresql+asyncpg://betting_ai:betting_ai@postgres:5432/betting_ai",
+        "postgresql+asyncpg://postgres:postgres@postgres:5432/betting_ai",
+        "postgresql+asyncpg://betting_ai:%62etting_ai@postgres:5432/betting_ai",
+    ],
+)
+def test_production_rejects_blank_or_known_default_database_password(
+    database_url: str,
+) -> None:
+    with pytest.raises(ValidationError, match="DATABASE_URL password"):
+        make_settings(
+            app_env="production",
+            dashboard_auth_enabled=True,
+            dashboard_auth_password_hash=_VALID_AUTH_HASH,
+            dashboard_session_secret=_VALID_SESSION_SECRET,
+            database_url=database_url,
+        )
+
+
+def test_production_rejects_non_postgresql_database_url() -> None:
+    with pytest.raises(ValidationError, match="PostgreSQL DATABASE_URL"):
+        make_settings(
+            app_env="production",
+            dashboard_auth_enabled=True,
+            dashboard_auth_password_hash=_VALID_AUTH_HASH,
+            dashboard_session_secret=_VALID_SESSION_SECRET,
+            database_url="sqlite+aiosqlite:///production.db",
+        )
+
+
+def test_auth_off_is_local_only() -> None:
+    with pytest.raises(ValidationError, match="outside APP_ENV=local"):
+        make_settings(app_env="test")
 
 
 def test_dashboard_auth_password_hash_format_is_validated() -> None:
@@ -209,8 +388,41 @@ def test_dashboard_auth_password_hash_format_is_validated() -> None:
         make_settings(
             dashboard_auth_enabled=True,
             dashboard_auth_password_hash="pbkdf2_sha256",
-            dashboard_session_secret="test-session-secret",
+            dashboard_session_secret=_VALID_SESSION_SECRET,
         )
+
+
+@pytest.mark.parametrize(
+    ("password_hash", "session_secret", "username"),
+    [
+        (_VALID_AUTH_HASH, "short", "admin"),
+        (_VALID_AUTH_HASH, "s" * 513, "admin"),
+        (_VALID_AUTH_HASH, _VALID_SESSION_SECRET, ""),
+        (_VALID_AUTH_HASH, _VALID_SESSION_SECRET, "u" * 129),
+        ("pbkdf2_sha256$99999$" + "00" * 16 + "$" + "00" * 32, _VALID_SESSION_SECRET, "admin"),
+        ("pbkdf2_sha256$2000001$" + "00" * 16 + "$" + "00" * 32, _VALID_SESSION_SECRET, "admin"),
+        ("pbkdf2_sha256$600000$00$" + "00" * 32, _VALID_SESSION_SECRET, "admin"),
+        ("pbkdf2_sha256$600000$" + "00" * 16 + "$00", _VALID_SESSION_SECRET, "admin"),
+        ("x" * 1025, _VALID_SESSION_SECRET, "admin"),
+    ],
+)
+def test_dashboard_auth_credential_bounds_are_validated(
+    password_hash: str,
+    session_secret: str,
+    username: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(
+            dashboard_auth_enabled=True,
+            dashboard_auth_username=username,
+            dashboard_auth_password_hash=password_hash,
+            dashboard_session_secret=session_secret,
+        )
+
+
+def test_dashboard_session_ttl_is_bounded_to_cookie_contract() -> None:
+    with pytest.raises(ValidationError):
+        make_settings(dashboard_session_ttl_seconds=7 * 24 * 60 * 60 + 1)
 
 
 def test_loopback_app_bind_does_not_require_dashboard_auth() -> None:
@@ -229,7 +441,7 @@ def test_dashboard_auth_requires_both_hash_and_secret_or_neither() -> None:
     with pytest.raises(ValidationError, match="BOTH DASHBOARD_AUTH_PASSWORD_HASH"):
         make_settings(
             dashboard_auth_enabled=True,
-            dashboard_auth_password_hash="pbkdf2_sha256$1$abcd$1234",
+            dashboard_auth_password_hash=_VALID_AUTH_HASH,
             dashboard_session_secret="",
         )
 
@@ -604,6 +816,9 @@ def test_value_policy_parses_major_leagues() -> None:
         ("value_min_edge_per_market", "1x2:1.5"),  # edge outside (0, 1)
         ("value_odds_bands", "2.6-1.8"),  # lo > hi
         ("value_odds_bands", "0.9-2.0"),  # lo <= 1.0 (not decimal odds)
+        ("value_odds_bands", "1.5-inf"),
+        ("value_odds_bands", "nan-2.0"),
+        ("value_odds_bands", "1.5-1000.1"),
         ("value_odds_bands", "abc"),
         ("value_min_books_per_market", "h2h:0"),  # < 1 is a pointless entry
         ("value_min_books_per_market", "h2h:1.5"),  # not an integer

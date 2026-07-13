@@ -16,10 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from app.storage.models import MatchReviewQueue
 from app.storage.repositories import MatchReviewIn, enqueue_match_reviews
+from tests.database import TEST_DATABASE_URL
 from tools.alias_vetting import CSV_COLUMNS
 from tools.review_queue_cli import _STATUS_MAP, _mark, queue_row_to_review_row
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 
 _EVIDENCE = {
     "query_base_home": "alpha united",

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.edge.value import ceil_odds, min_acceptable_odds
-from app.schemas.picks import PickOut
+from app.schemas.picks import ALERT_FOOTER, PickOut
 
 #: Same-game correlation warning (dashboard-chip parity for Telegram/webhook
 #: alerts). The value pipeline passes it to `build_pick_alert` when the pick's
@@ -55,12 +55,13 @@ def build_pick_alert(
     model_name: str = "",
     model_version: str = "",
     correlation_warning: str | None = None,
+    repriced: bool = False,
 ) -> Alert:
     """Render a pick into an alert with a stable idempotency key.
 
     The key deliberately EXCLUDES pick_id (a fresh uuid per cycle): the same
-    market state must not re-alert every poll; a price change produces a new
-    key and a fresh alert.
+    market state must not re-alert every poll; a price or execution-venue
+    change produces a new key and a fresh alert.
 
     The key DOES include `model_name`/`model_version` (the strategy identity
     from PipelineDeps): a strategy-version bump re-emits the same opportunity
@@ -87,8 +88,17 @@ def build_pick_alert(
     # the dedupe key so a VOLUME alert never suppresses a later PREMIUM *upgrade*
     # alert for the same market at the same odds (distinct keys, distinct alerts).
     tier_tag = "⭐ PREMIUM" if pick.tier == "premium" else "🔵 VOLUME"
+    # Preserve the exact pre-market-detail hash shape for lineless/legacy
+    # picks. Inserting an empty detail field changed every unchanged open
+    # pick's key during rollout and replayed alerts. Only a real detail adds a
+    # new component, where it is required to distinguish instruments.
+    market_identity = (
+        f"{pick.market}|{pick.selection}"
+        if not pick.market_detail
+        else f"{pick.market}|{pick.market_detail}|{pick.selection}"
+    )
     raw_key = (
-        f"{pick.event_id}|{pick.bookmaker}|{pick.market}|{pick.selection}"
+        f"{pick.event_id}|{pick.bookmaker}|{market_identity}"
         f"|{pick.decimal_odds}|{pick.tier}|{model_name}|{model_version}"
     )
     dedupe_key = hashlib.sha256(raw_key.encode()).hexdigest()[:32]
@@ -110,6 +120,13 @@ def build_pick_alert(
             value_line.append(f"⏳ Value holds to {ceil_odds(floor):.2f} — skip below")
     sport_emoji = _SPORT_EMOJI.get(pick.sport, "🏟️")
     liq = f" · liquidity {pick.liquidity}" if pick.liquidity is not None else ""
+    stake_line = (
+        f"💰 Updated TOTAL target {pick.recommended_stake_fraction:.1%} of bankroll "
+        f"(~{pick.recommended_stake_amount}) — do not add this total again"
+        if repriced
+        else f"💰 Stake {pick.recommended_stake_fraction:.1%} of bankroll "
+        f"(~{pick.recommended_stake_amount})"
+    )
     body = "\n".join(
         [
             f"🎯 {tier_tag} +EV PICK — {pick.event}",
@@ -117,8 +134,7 @@ def build_pick_alert(
             "",
             f"📈 Edge {pick.edge:+.1%} · EV {pick.ev:+.1%} · Conf {pick.confidence:.0%}",
             f"🎯 Fair {fair_odds:.2f}{anchor} → {pick.decimal_odds:.2f} beats it",
-            f"💰 Stake {pick.recommended_stake_fraction:.1%} of bankroll "
-            f"(~{pick.recommended_stake_amount})",
+            stake_line,
             *value_line,
             f"{sport_emoji} {pick.sport.replace('_', ' ').title()} · {pick.league}"
             f" · odds {pick.odds_age_seconds:.0f}s old{liq}",
@@ -126,6 +142,8 @@ def build_pick_alert(
             f"💡 {pick.reason_summary}",
             # Informational same-game correlation note — body-only, never keyed.
             *([correlation_warning] if correlation_warning else []),
+            "",
+            ALERT_FOOTER,
         ]
     )
     return Alert(pick_id=pick.pick_id, title=title, body=body, dedupe_key=dedupe_key)

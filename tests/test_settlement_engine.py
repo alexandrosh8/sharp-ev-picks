@@ -7,7 +7,7 @@ from decimal import Decimal
 import httpx
 import pytest
 from sqlalchemy import insert, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
@@ -20,8 +20,9 @@ from app.settlement.engine import (
 from app.settlement.results import FinalScore, ScoreBook
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import persist_pick
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 
 NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 KICKOFF = NOW - timedelta(hours=6)
@@ -117,6 +118,8 @@ async def test_settles_past_pick_with_result_row(session) -> None:  # type: igno
     assert row.outcome == "won"  # Over 2.5 with 3 goals
     assert row.pnl == Decimal("22.00")  # 20 @ 2.10
     assert row.roi == Decimal("1.1")
+    assert row.settled_stake_amount == Decimal("20.00")
+    assert row.settled_effective_odds == Decimal("2.1000")
     assert row.settled_at == NOW
 
 
@@ -166,6 +169,60 @@ async def test_uses_manual_bet_log_stake_and_odds(session) -> None:  # type: ign
     row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
     assert row is not None
     assert row.pnl == Decimal("75.00")  # 50 @ 2.50 won
+    assert row.settled_stake_amount == Decimal("50.00")
+    assert row.settled_effective_odds == Decimal("2.5000")
+
+
+@pytest.mark.parametrize(
+    ("bookmaker", "expected_pnl", "expected_effective_odds"),
+    [
+        ("Betfair", Decimal("71.25"), Decimal("2.4250")),
+        ("Matchbook", Decimal("73.50"), Decimal("2.4700")),
+    ],
+)
+async def test_manual_exchange_fill_is_commission_netted_once(
+    session: AsyncSession,
+    bookmaker: str,
+    expected_pnl: Decimal,
+    expected_effective_odds: Decimal,
+) -> None:
+    pick = await seed_pick(session, f"evt-settle-exchange-{bookmaker.lower()}")
+    await session.execute(
+        insert(ManualBetLog).values(
+            pick_id=pick.id,
+            bet_placed=True,
+            actual_stake=Decimal("50.00"),
+            actual_odds=Decimal("2.50"),
+            bookmaker_used=bookmaker,
+        )
+    )
+    await settle_open_picks(session, book_with_score(2, 1), NOW)
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.pnl == expected_pnl
+    assert row.settled_stake_amount == Decimal("50.00")
+    assert row.settled_effective_odds == expected_effective_odds
+
+
+async def test_manual_bet_without_actual_odds_uses_blended_recommendation(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-manual-blended")
+    pick.settlement_stake_amount = Decimal("30.00")
+    pick.settlement_raw_odds_stake = Decimal("66.000000")
+    pick.settlement_effective_odds_stake = Decimal("66.000000")
+    await session.execute(
+        insert(ManualBetLog).values(
+            pick_id=pick.id,
+            bet_placed=True,
+            actual_stake=Decimal("50.00"),
+            actual_odds=None,
+        )
+    )
+    await settle_open_picks(session, book_with_score(2, 1), NOW)
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.pnl == Decimal("60.00")  # 50 at blended 2.20, not latest 2.10
+    assert row.settled_stake_amount == Decimal("50.00")
+    assert row.settled_effective_odds == Decimal("2.2000")
 
 
 async def test_lost_pick_settles_negative(session) -> None:  # type: ignore[no-untyped-def]
@@ -212,6 +269,50 @@ async def test_settles_football_ah_quarter_line_half_win(session) -> None:  # ty
     assert row.outcome == "half_won"
     assert row.pnl == Decimal("11.00")  # half of 20 @ 2.10 -> 10 * 1.10
     assert row.settled_at == NOW
+
+
+@pytest.mark.parametrize(
+    ("market", "selection", "home_score", "away_score", "outcome", "expected_pnl"),
+    [
+        (Market.TOTALS, "Over 2.5", 2, 1, "won", Decimal("36.00")),
+        (Market.TOTALS, "Over 2.5", 1, 0, "lost", Decimal("-30.00")),
+        (Market.SPREADS, f"{HOME} -0.75", 2, 1, "half_won", Decimal("18.00")),
+        (Market.SPREADS, f"{HOME} +0.75", 0, 1, "half_lost", Decimal("-15.00")),
+    ],
+)
+async def test_two_tranche_basis_grades_exact_pnl(
+    session: AsyncSession,
+    market: Market,
+    selection: str,
+    home_score: int,
+    away_score: int,
+    outcome: str,
+    expected_pnl: Decimal,
+) -> None:
+    """20 @ 2.10 plus 10 @ 2.40 grades as 30 @ blended 2.20."""
+    pick = await seed_pick(
+        session,
+        f"evt-two-tranche-{outcome}",
+        market=market,
+        selection=selection,
+    )
+    pick.settlement_stake_amount = Decimal("30.00")
+    pick.settlement_raw_odds_stake = Decimal("66.000000")
+    pick.settlement_effective_odds_stake = Decimal("66.000000")
+    assert (
+        await settle_open_picks(
+            session,
+            book_with_score(home_score, away_score),
+            NOW,
+        )
+        == 1
+    )
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == outcome
+    assert row.pnl == expected_pnl
+    assert row.settled_stake_amount == Decimal("30.00")
+    assert row.settled_effective_odds == Decimal("2.2000")
 
 
 async def test_football_ah_unparseable_selection_skipped(session, caplog) -> None:  # type: ignore[no-untyped-def]
@@ -466,6 +567,61 @@ async def test_voids_unsettleable_known_kickoff_pick(session) -> None:  # type: 
     assert row is not None and row.outcome == "void"
     # idempotent
     assert await void_unsettleable_known_kickoff_picks(session, now) == 0
+
+
+async def test_known_kickoff_void_supersedes_cross_source_duplicate(session) -> None:  # type: ignore[no-untyped-def]
+    """The stale-void path must not mint two P&L rows for one fixture."""
+    from sqlalchemy import update as sa_update
+
+    from app.settlement.engine import (
+        STALE_UNSETTLEABLE_AGE,
+        void_unsettleable_known_kickoff_picks,
+    )
+
+    now = datetime.now(tz=UTC)
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    canonical = await seed_pick(session, "evt-stale-void-dedup-a")
+    canonical.status = "alerted"
+    event = await session.get(Event, canonical.event_id)
+    assert event is not None
+    event.starts_at = now - STALE_UNSETTLEABLE_AGE - timedelta(days=1)
+
+    duplicate_event = Event(
+        sport_id=event.sport_id,
+        league_id=event.league_id,
+        home_team_id=event.home_team_id,
+        away_team_id=event.away_team_id,
+        external_ref="evt-stale-void-dedup-b",
+        starts_at=event.starts_at,
+    )
+    session.add(duplicate_event)
+    await session.flush()
+    values = {
+        column.name: getattr(canonical, column.name)
+        for column in Pick.__table__.columns
+        if column.name not in {"id", "created_at"}
+    }
+    values["event_id"] = duplicate_event.id
+    duplicate = Pick(**values)
+    session.add(duplicate)
+    await session.flush()
+
+    assert await void_unsettleable_known_kickoff_picks(session, now) == 1
+    await session.refresh(canonical)
+    await session.refresh(duplicate)
+    assert {canonical.status, duplicate.status} == {"settled", "superseded"}
+    result_pick_ids = set(
+        (
+            await session.scalars(
+                select(ResultTracking.pick_id).where(
+                    ResultTracking.pick_id.in_((canonical.id, duplicate.id))
+                )
+            )
+        ).all()
+    )
+    assert len(result_pick_ids) == 1
 
 
 # --- full cycle (providers -> book -> settle), as the scheduler job runs it ----

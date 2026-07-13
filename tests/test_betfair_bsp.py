@@ -156,6 +156,16 @@ def test_kickoff_and_inplay_are_utc_aware() -> None:
     assert market.in_play_utc == datetime.fromtimestamp(1_700_000_120_000 / 1000, tz=UTC)
 
 
+def test_out_of_range_publish_timestamp_is_ignored_not_raised() -> None:
+    lines = _soccer_stream()
+    message = json.loads(lines[2])
+    message["pt"] = 10**100
+    lines[2] = json.dumps(message)
+    market = parse_market_stream(lines)
+    assert market is not None
+    assert market.in_play_utc is None
+
+
 def test_bsp_preferred_as_close_when_reconciled() -> None:
     market = parse_market_stream(_soccer_stream(with_bsp=True))
     assert market is not None
@@ -171,6 +181,20 @@ def test_skips_non_mcm_and_blank_lines() -> None:
     market = parse_market_stream(lines)
     assert market is not None
     assert len(market.runners) == 3
+
+
+def test_malformed_nested_change_containers_do_not_abort_valid_siblings() -> None:
+    malformed_mc = json.dumps({"op": "mcm", "pt": 1_700_000_000_000, "mc": {"id": "bad"}})
+    malformed_rc = json.dumps(
+        {
+            "op": "mcm",
+            "pt": 1_700_000_000_001,
+            "mc": [{"id": "bad", "rc": {"id": HOME_ID}}],
+        }
+    )
+    market = parse_market_stream([malformed_mc, malformed_rc, *_soccer_stream()])
+    assert market is not None
+    assert market.market_id == "1.234567890"
 
 
 def test_home_draw_away_close_maps_by_name_and_draw_id() -> None:
@@ -237,8 +261,25 @@ def test_load_betfair_dir_reads_bz2_and_plain(tmp_path: Path) -> None:
     assert types == {"1", "7522"}
 
 
+def test_load_betfair_dir_malformed_nested_member_does_not_abort_sibling(tmp_path: Path) -> None:
+    (tmp_path / "bad.json").write_text(
+        json.dumps({"op": "mcm", "mc": {"id": "bad"}}), encoding="utf-8"
+    )
+    (tmp_path / "good.json").write_text("\n".join(_soccer_stream()), encoding="utf-8")
+
+    markets = load_betfair_dir(tmp_path)
+
+    assert [market.market_id for market in markets] == ["1.234567890"]
+
+
 def test_load_betfair_dir_absent_is_empty(tmp_path: Path) -> None:
     assert load_betfair_dir(tmp_path / "nope") == []
+
+
+def test_load_betfair_dir_skips_member_over_decompressed_limit(tmp_path: Path) -> None:
+    compressed = tmp_path / "oversized.bz2"
+    compressed.write_bytes(bz2.compress("\n".join(_soccer_stream()).encode("utf-8")))
+    assert load_betfair_dir(tmp_path, max_decompressed_bytes=64) == []
 
 
 def _soccer_over_under_stream() -> list[str]:
@@ -485,6 +526,13 @@ def test_load_betfair_tar_keeps_only_soccer_match_odds(tmp_path: Path) -> None:
     by_id = {r.selection_id: r for r in m.runners}
     assert by_id[HOME_ID].close_price == Decimal("2.05")
     assert by_id[HOME_ID].won is True
+
+
+def test_load_betfair_tar_enforces_member_and_archive_limits(tmp_path: Path) -> None:
+    tar_path = tmp_path / "data.tar"
+    _make_betfair_tar(tar_path)
+    assert load_betfair_tar(tar_path, max_compressed_bytes=1) == []
+    assert load_betfair_tar(tar_path, max_members=0) == []
 
 
 def test_load_betfair_tar_absent_is_empty(tmp_path: Path) -> None:

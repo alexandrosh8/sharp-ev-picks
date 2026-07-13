@@ -25,10 +25,11 @@ from app.storage.candidate_audit import (
     record_candidate_evaluation,
 )
 from app.storage.models import CandidateEvaluation, Event, League, Sport, Team
+from tests.database import TEST_DATABASE_URL
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATH = ROOT / "alembic" / "versions" / "d1e2f3a4b5c6_candidate_evaluations.py"
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
 
 
@@ -46,7 +47,7 @@ def test_migration_chains_off_prior_head_single_head() -> None:
     assert callable(mod.downgrade)
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["a9d2c4e6f8b1"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["e7f1a9c3b5d2"]
 
 
 def test_documented_reason_vocabulary_covers_pipeline_gates() -> None:

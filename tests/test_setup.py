@@ -29,6 +29,7 @@ from app.api.routes import router
 from app.config import Settings
 
 _PW = "s3cret-test-pw"  # synthetic, in-process only
+_SESSION_SECRET = "setup-test-session-" + ("s" * 32)
 
 # /setup is loopback-gated (WP7 hardening): present a direct loopback peer so
 # these tests keep exercising the first-run flow itself, not the gate
@@ -37,7 +38,12 @@ _LOOPBACK = ("127.0.0.1", 50000)
 
 
 def _client(app) -> TestClient:  # type: ignore[no-untyped-def]
-    return TestClient(app, follow_redirects=False, client=_LOOPBACK)
+    return TestClient(
+        app,
+        base_url="http://localhost",
+        follow_redirects=False,
+        client=_LOOPBACK,
+    )
 
 
 async def _no_session() -> AsyncIterator[None]:
@@ -127,7 +133,7 @@ def test_setup_post_creates_credential_and_signs_in(monkeypatch) -> None:  # typ
 
 def test_setup_post_is_one_shot_409_when_configured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, calls = _build_app(monkeypatch, _unconfigured_settings())
-    set_active_credentials("admin", hash_password(_PW), "an-existing-secret")
+    set_active_credentials("admin", hash_password(_PW), _SESSION_SECRET)
     client = _client(app)
     res = client.post("/setup", json={"username": "admin", "password": "another-pw-9"})
     assert res.status_code == 409
@@ -136,7 +142,7 @@ def test_setup_post_is_one_shot_409_when_configured(monkeypatch) -> None:  # typ
 
 def test_setup_get_redirects_home_when_configured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, _ = _build_app(monkeypatch, _unconfigured_settings())
-    set_active_credentials("admin", hash_password(_PW), "an-existing-secret")
+    set_active_credentials("admin", hash_password(_PW), _SESSION_SECRET)
     client = _client(app)
     res = client.get("/setup", headers={"accept": "text/html"})
     assert res.status_code == 303

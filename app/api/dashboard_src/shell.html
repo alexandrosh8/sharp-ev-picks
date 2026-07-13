@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>sharp-ev-picks — +EV picks console</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230a0a0a'/%3E%3Cpolyline points='3,13 7,10 10,7 13,4' fill='none' stroke='%2310b981' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <!-- Installable PWA: same-origin manifest + service worker (app/api/routes.py),
+         both public (no auth). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link
+      rel="apple-touch-icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='36' fill='%230a0a0a'/%3E%3Cpolyline points='42,132 78,102 108,72 138,42' fill='none' stroke='%2310b981' stroke-width='10' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='138' cy='42' r='9' fill='%2310b981'/%3E%3C/svg%3E"
+    />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="sharp-ev-picks" />
+    <meta
+      name="description"
+      content="sharp-ev-picks — a picks-only +EV decision-support console: sharp-anchored, vig-stripped edges with trusted-CLV tracking. The system never places bets."
+    />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta property="og:title" content="sharp-ev-picks" />
+    <meta
+      property="og:description"
+      content="Picks-only +EV console — sharp-anchored, vig-stripped, CLV-validated. Informational only; never places bets."
+    />
+    <meta property="og:type" content="website" />
+    <style>
+      @@DASHBOARD_STYLES@@
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <!-- ============ LEFT RAIL — desktop navigation ============ -->
+      <nav class="rail" id="rail" aria-label="Sections">
+        <div class="rail-brand">
+          <svg class="brand-mark" viewBox="0 0 26 26" aria-hidden="true">
+            <defs>
+              <linearGradient id="brandg" x1="0" y1="1" x2="1" y2="0">
+                <stop offset="0" stop-color="#10b981" stop-opacity="0.4"/>
+                <stop offset="1" stop-color="#10b981"/>
+              </linearGradient>
+            </defs>
+            <polyline points="3,20 9,15 14,10 21,4" fill="none" stroke="url(#brandg)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="21" cy="4" r="3.2" fill="#10b981"/>
+          </svg>
+          <div class="brand-copy">
+            <h1>sharp<span class="brand-ev">-ev-</span>picks</h1>
+            <span class="brand-sub">picks console</span>
+          </div>
+        </div>
+        <span class="rail-cap" aria-hidden="true">sections</span>
+        <button type="button" data-view="today" aria-current="true" data-testid="rail-nav-today"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-gauge"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="m12 14 4-4" />
+  <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+</svg><span class="rail-lbl">Today</span></button>
+        <button type="button" data-view="edges" aria-current="false" data-testid="rail-nav-edges"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-activity"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />
+</svg><span class="rail-lbl">Edges</span></button>
+        <button type="button" data-view="radar" aria-current="false" data-testid="rail-nav-radar"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-radar"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M19.07 4.93A10 10 0 0 0 6.99 3.34" />
+  <path d="M4 6h.01" />
+  <path d="M2.29 9.62A10 10 0 1 0 21.31 8.35" />
+  <path d="M16.24 7.76A6 6 0 1 0 8.23 16.67" />
+  <path d="M12 18h.01" />
+  <path d="M17.99 11.66A6 6 0 0 1 15.77 16.67" />
+  <circle cx="12" cy="12" r="2" />
+  <path d="m13.41 10.59 5.66-5.66" />
+</svg><span class="rail-lbl">Radar</span></button>
+        <button type="button" data-view="lab" aria-current="false" data-testid="rail-nav-lab"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-flask-conical"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2" />
+  <path d="M6.453 15h11.094" />
+  <path d="M8.5 2h7" />
+</svg><span class="rail-lbl">Lab</span></button>
+        <button type="button" data-view="sources" aria-current="false" data-testid="rail-nav-sources"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-database"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <ellipse cx="12" cy="5" rx="9" ry="3" />
+  <path d="M3 5V19A9 3 0 0 0 21 19V5" />
+  <path d="M3 12A9 3 0 0 0 21 12" />
+</svg><span class="rail-lbl">Sources</span></button>
+        <div class="rail-foot">
+          <p>Picks-only desk<br />informational — never places bets</p>
+        </div>
+      </nav>
+
+      <div class="workspace">
+        <!-- ============ TOPBAR — status chrome ============ -->
+        <header class="topbar">
+          <div class="topbar-brand">
+            <svg viewBox="0 0 26 26" aria-hidden="true"><polyline points="3,20 9,15 14,10 21,4" fill="none" stroke="#10b981" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="21" cy="4" r="3.2" fill="#10b981"/></svg>
+            <h1>sharp-ev-picks</h1>
+          </div>
+          <span class="topbar-eyebrow">decision-support desk · picks only</span>
+          <span class="topbar-grow"></span>
+          <button
+            id="system-pill" class="system-pill" type="button"
+            aria-expanded="false" aria-controls="system-popover" aria-haspopup="dialog"
+            data-testid="system-status-pill"
+          >
+            <span class="pill-dot" id="pill-dot" aria-hidden="true"></span>
+            <span id="pill-text" aria-live="polite">Connecting…</span>
+          </button>
+          <button id="logout-btn" class="icon-btn" type="button" aria-label="Log out" title="Log out" data-testid="logout-button">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          </button>
+          <div id="system-popover" class="popover" role="dialog" aria-label="System status detail" hidden>
+            <div class="metric-list" id="popover-body"></div>
+          </div>
+        </header>
+
+        <main id="main">
+          <div id="offline-banner" class="banner banner-danger" role="alert" data-testid="offline-banner"></div>
+          <div id="stale-banner" class="banner banner-warn" role="status" data-testid="stale-banner">
+            Odds data is stale. Picks should not be treated as current.
+          </div>
+
+          <!-- ================= TODAY — the control room ==================== -->
+          <section class="view" id="view-today" data-view-key="today" data-testid="view-today">
+            <div class="viewbar">
+              <div class="view-h"><h2>Today</h2><span class="eyebrow" id="today-asof"></span></div>
+              <div class="desk-ticker" id="desk-ticker" role="status" aria-live="polite" aria-label="Desk vitals"></div>
+            </div>
+            <div class="signal-board" id="today-stats" data-testid="today-kpi-board"></div>
+            <!-- Fix 2026-07-10 #26: two INDEPENDENT columns — each panel
+                 sizes to its own content; no cross-column row height coupling. -->
+            <div class="board today-board">
+              <div class="today-col">
+                <section class="panel" aria-labelledby="actionable-h" data-testid="panel-qualified-now">
+                  <div class="panel-h"><h3 id="actionable-h">Qualified now</h3><span class="tag tag-cyan" id="actionable-count">—</span></div>
+                  <div class="panel-b" id="actionable-now"></div>
+                </section>
+                <section class="panel" aria-labelledby="topedge-h" data-testid="panel-top-edges">
+                  <div class="panel-h"><h3 id="topedge-h">Top tracked edges</h3></div>
+                  <div class="panel-b">
+                    <div id="top-edges"></div>
+                  </div>
+                </section>
+                <section class="panel" aria-labelledby="evpos-h" data-testid="panel-evidence-position">
+                  <div class="panel-h"><h3 id="evpos-h">Evidence position</h3></div>
+                  <div class="panel-b"><div class="muted" id="evidence-position">—</div></div>
+                </section>
+              </div>
+              <div class="today-col">
+                <section class="panel" aria-labelledby="attn-h" data-testid="panel-needs-attention">
+                  <div class="panel-h"><h3 id="attn-h">Needs attention</h3></div>
+                  <div class="panel-b" id="needs-attention"></div>
+                </section>
+                <section class="panel" aria-labelledby="next-h" data-testid="panel-next-kickoffs">
+                  <div class="panel-h"><h3 id="next-h">Next kickoffs</h3></div>
+                  <div class="panel-b" id="next-kickoffs"></div>
+                </section>
+                <section class="panel" aria-labelledby="recent-h" data-testid="panel-recent-results">
+                  <div class="panel-h"><h3 id="recent-h">Recent results</h3></div>
+                  <div class="panel-b" id="recent-results"></div>
+                </section>
+              </div>
+            </div>
+            <section class="panel solo" aria-labelledby="syshealth-h" data-testid="panel-system-health">
+              <div class="panel-h"><h3 id="syshealth-h">System health</h3></div>
+              <div class="health-strip" id="today-health"></div>
+            </section>
+            <footer class="desk-foot" id="desk-foot" data-testid="desk-statusbar"></footer>
+          </section>
+
+          <!-- ================= EDGES — signal stream + drawer =============== -->
+          <section class="view" id="view-edges" data-view-key="edges" hidden data-testid="view-edges">
+            <div class="viewbar">
+              <div class="view-h"><h2>Edges</h2><span class="eyebrow">signal stream</span></div>
+              <div class="desk-ticker" id="edges-summary" role="status" aria-live="polite" aria-label="Edge counts"></div>
+            </div>
+            <div class="edge-tools" data-testid="edges-filter-toolbar">
+              <input id="eq-search" type="search" placeholder="search event, selection, league…" aria-label="Search edges" data-testid="edges-search-input" />
+              <select id="eq-tier" aria-label="Tier filter" data-testid="edges-tier-filter">
+                <option value="">All tiers</option>
+                <option value="premium">Premium</option>
+                <option value="volume">Shadow</option>
+              </select>
+              <select id="eq-status" aria-label="Status filter" data-testid="edges-status-filter">
+                <option value="">All statuses</option>
+                <option value="actionable">Qualified</option>
+                <option value="stale">Stale</option>
+                <option value="tracked">Tracked</option>
+                <option value="closed">Closed</option>
+              </select>
+              <select id="eq-sort" aria-label="Sort edges" data-testid="edges-sort">
+                <option value="edge">Sort: Edge ↓</option>
+                <option value="kickoff">Sort: Kickoff</option>
+                <option value="odds">Sort: Odds ↓</option>
+              </select>
+              <button id="eq-export" type="button" class="eq-export" aria-label="Export the current edges view to CSV" data-testid="edges-export">⤓ CSV</button>
+            </div>
+            <div id="edge-list" role="list" aria-label="Edges" data-testid="edges-list"></div>
+            <div class="edge-backdrop" id="edge-backdrop" data-testid="edge-detail-backdrop" hidden></div>
+            <div class="edge-detail" id="edge-detail" role="dialog" aria-modal="true" aria-labelledby="edge-detail-title" aria-hidden="true" tabindex="-1" data-testid="edge-detail-drawer">
+              <div class="edge-detail-head">
+                <button id="edge-back" class="back-btn" type="button" aria-label="Back to the list" data-testid="edge-detail-back">&larr; Back</button>
+                <h2 id="edge-detail-title">Select a row</h2>
+                <button id="edge-copy" class="copy-btn" type="button" data-testid="edge-detail-copy">Copy summary</button>
+                <span class="mono" id="edge-copy-note" aria-live="polite"></span>
+              </div>
+              <div class="edge-detail-grid">
+                <section id="edge-detail-body" aria-label="Pick detail"></section>
+                <section id="edge-evidence-body" aria-label="Evidence"></section>
+              </div>
+            </div>
+          </section>
+
+          <!-- ================= RADAR — market coverage ====================== -->
+          <section class="view" id="view-radar" data-view-key="radar" hidden data-testid="view-radar">
+            <div class="viewbar">
+              <div class="view-h"><h2>Radar</h2><span class="eyebrow">market coverage</span></div>
+              <div class="desk-ticker" id="radar-summary" role="status" aria-live="polite" aria-label="Coverage vitals"></div>
+            </div>
+            <p id="radar-cache-notice" class="muted stale-cache" role="status" hidden></p>
+            <section class="panel solo" aria-labelledby="coverage-h" data-testid="panel-coverage">
+              <div class="panel-h"><h3 id="coverage-h">Coverage summary</h3></div>
+              <div class="panel-b"><p class="muted" id="coverage-summary">Not loaded yet.</p></div>
+            </section>
+            <div id="radar-bands" data-testid="radar-bands"></div>
+          </section>
+
+          <!-- ================= LAB — evidence & validation ================== -->
+          <section class="view" id="view-lab" data-view-key="lab" hidden data-testid="view-lab">
+            <div class="viewbar">
+              <div class="view-h"><h2>Lab</h2><span class="eyebrow">evidence &amp; validation</span></div>
+              <div class="desk-ticker" id="lab-summary" role="status" aria-live="polite" aria-label="Evidence vitals"></div>
+            </div>
+            <p id="lab-cache-notice" class="muted stale-cache" role="status" hidden></p>
+            <div class="board lab-board">
+              <section class="panel pa-claims" aria-labelledby="claims-h" data-testid="panel-claims-ledger">
+                <div class="panel-h"><h3 id="claims-h">Claims ledger</h3></div>
+                <div class="panel-b" id="claims-ledger"></div>
+              </section>
+              <section class="panel pa-hero" aria-labelledby="sharpclv-h" data-testid="panel-sharp-clv">
+                <div class="panel-h"><h3 id="sharpclv-h">Trusted sharp-close CLV</h3></div>
+                <div class="panel-b" id="sharp-clv-hero"></div>
+              </section>
+              <section class="panel pa-closeq" aria-labelledby="closeq-h" data-testid="panel-close-quality">
+                <div class="panel-h"><h3 id="closeq-h">Close quality</h3></div>
+                <div class="panel-b" id="close-quality"></div>
+              </section>
+              <section class="panel pa-calib" aria-labelledby="calib-h" data-testid="panel-calibration">
+                <div class="panel-h"><h3 id="calib-h">Calibration</h3></div>
+                <div class="panel-b" id="calibration-summary"></div>
+              </section>
+              <section class="panel" aria-labelledby="closeqsport-h" data-testid="panel-closeq-sport">
+                <div class="panel-h"><h3 id="closeqsport-h">Close quality by sport</h3></div>
+                <div class="panel-b">
+                  <div id="closeq-sport"></div>
+                  <p class="muted">Per-sport counts of the persisted close-exclusion reason.
+                    An excluded close is unusable evidence, not a loss. "no guard tripped"
+                    counts the close-write stamp only (no exclusion guard tripped when the
+                    close was written) — a looser read than, and not the trusted-sharp subset
+                    behind, the SLA and evidence-distance panels.</p>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="closesla-h" data-testid="panel-close-sla">
+                <div class="panel-h"><h3 id="closesla-h">Close coverage SLA — CLV reliability</h3></div>
+                <div class="panel-b">
+                  <div id="close-sla"></div>
+                  <p class="muted">Share of each sport-market's settled picks with a trusted
+                    independent sharp close. Below the SLA the CLV/ROI number is built on
+                    thin closing-line coverage — the claim is flagged unreliable, not the picks.</p>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="promodist-h" data-testid="panel-promo-distance">
+                <div class="panel-h"><h3 id="promodist-h">Evidence distance — sport / market</h3></div>
+                <div class="panel-b">
+                  <div id="promo-distance"></div>
+                  <p class="muted">Distance to the trusted-CLV evidence threshold only — informational.
+                    Promotion stays gated by SportMarketClvGate and operator ADR sign-off.</p>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="steamshadow-h" data-testid="panel-steam-shadow">
+                <div class="panel-h"><h3 id="steamshadow-h">Steam shadow — Monitor-only</h3></div>
+                <div class="panel-b">
+                  <div id="steam-shadow"></div>
+                  <p class="muted">Shadow verdicts are observability only — no pick is demoted by steam.</p>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="bankroll-h" data-testid="panel-bankroll">
+                <div class="panel-h"><h3 id="bankroll-h">Bankroll — hypothetical ledger</h3></div>
+                <div class="panel-b">
+                  <div id="bankroll-body"></div>
+                  <p class="muted">Hypothetical running balance (manual starting amount + settled P&amp;L)
+                    and any stake figures are informational only — this system never places a bet; the
+                    operator reviews picks and places any bet personally.</p>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="tiers-h" data-testid="panel-tiers">
+                <div class="panel-h"><h3 id="tiers-h">Premium vs Shadow — never mixed</h3></div>
+                <div class="panel-b">
+                  <div class="tscroll">
+                    <table aria-label="Premium versus shadow tier performance">
+                      <thead><tr><th scope="col">Tier</th><th scope="col" class="r">Settled</th><th scope="col" class="r">Record</th><th scope="col" class="r">ROI</th></tr></thead>
+                      <tbody id="tier-rows"></tbody>
+                    </table>
+                  </div>
+                  <div id="tier-scorecard"></div>
+                  <p class="muted">The trusted-CLV rows above lead the read: per-tier trusted
+                    sharp-close CLV with its 95% CI and n, the realized flat-stake yield ÷ trusted
+                    CLV calibration ratio against the RebelBetting public benchmark 0.8×, and the
+                    evidence verdict. Small-sample ROI is context, never the verdict.</p>
+                  <p class="muted">Definition change 2026-07-12 (operator-signed): Pinnacle archive
+                    closes are admitted at settlement (CLV_USE_PINNACLE_ARCHIVE — live since
+                    ~2026-07-01, ratified after the 0-wrong/34 re-audit) and 6 proven wrong-game
+                    NBL1 closes were re-nulled — trusted n restated 216→212, mean −3.5%→−2.9%.</p>
+                </div>
+              </section>
+              <section class="panel pa-ready" aria-labelledby="sportready-h" data-testid="panel-sport-readiness">
+                <div class="panel-h"><h3 id="sportready-h">Sport readiness</h3></div>
+                <div class="panel-b">
+                  <div id="sport-readiness"></div>
+                  <p class="muted">Shadow-first policy: basketball, NFL and tennis promote only on
+                    trusted CLV, source agreement, freshness, coverage and sample size — never on
+                    small-sample ROI or all-closes CLV.</p>
+                </div>
+              </section>
+            </div>
+            <p class="safety" data-testid="lab-safety-notice"><b>Suggested stake fractions are informational only.</b> <b>This system never places bets</b> — the operator reviews the evidence here and places any bet themselves. CLV and ROI figures are not a profit guarantee.</p>
+          </section>
+
+          <!-- ================= SOURCES — operations & health ================ -->
+          <section class="view" id="view-sources" data-view-key="sources" hidden data-testid="view-sources">
+            <div class="viewbar">
+              <div class="view-h"><h2>Sources</h2><span class="eyebrow">operations &amp; health</span></div>
+              <div class="desk-ticker" id="sources-summary" role="status" aria-live="polite" aria-label="Operations vitals"></div>
+            </div>
+            <p id="sources-cache-notice" class="muted stale-cache" role="status" hidden></p>
+            <section class="panel solo source-matrix" aria-labelledby="matrix-h" data-testid="panel-source-matrix">
+              <div class="panel-h"><h3 id="matrix-h">Source matrix</h3></div>
+              <div class="panel-b">
+                <div class="tscroll">
+                  <table aria-label="Source quality matrix">
+                    <thead><tr><th scope="col">Source</th><th scope="col">Freshness</th><th scope="col">Coverage</th><th scope="col">Verdict</th><th scope="col">Notes</th></tr></thead>
+                    <tbody id="source-rows"></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+            <div class="board sources-board">
+              <section class="panel" aria-labelledby="proxyh-h" data-testid="panel-proxy-health">
+                <div class="panel-h"><h3 id="proxyh-h">Proxy pool health</h3><span class="tag tag-neutral" id="proxyh-verdict">—</span></div>
+                <div class="panel-b">
+                  <div id="proxy-health"></div>
+                  <p class="muted">Proxies power the odds scrape. A degraded pool only slows scraping — no pick is ever <em>minted</em> from a stale price (the mint-time freshness gate drops it first). If a live pick's price later ages out because its market stops refreshing, it is flagged <strong>Stale</strong> and drops out of “Qualified now” until it re-prices. Dead or quarantined slots are listed automatically.</p>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="stale-mon-h" data-testid="panel-staleness">
+                <div class="panel-h"><h3 id="stale-mon-h">Staleness monitor</h3></div>
+                <div class="panel-b"><div class="muted" id="staleness-monitor">Not loaded yet.</div></div>
+              </section>
+              <section class="panel" aria-labelledby="reviewq-h" data-testid="panel-review-queues">
+                <div class="panel-h"><h3 id="reviewq-h">Review queues</h3></div>
+                <div class="panel-b">
+                  <div class="muted" id="review-queues">Not loaded yet.</div>
+                  <details class="raw-reason" id="reviewq-browse" data-testid="reviewq-disclosure">
+                    <summary>Review queue — newest</summary>
+                    <p class="muted" id="reviewq-browse-status">Not loaded yet.</p>
+                    <div class="tscroll">
+                      <table aria-label="Review queue newest rows (read-only)">
+                        <thead><tr><th scope="col">Event</th><th scope="col">Candidate</th><th scope="col">Kickoff (UTC)</th><th scope="col">Source</th><th scope="col">Conf</th><th scope="col">Reason</th><th scope="col">Status</th><th scope="col">Queued</th></tr></thead>
+                        <tbody id="reviewq-browse-rows"></tbody>
+                      </table>
+                    </div>
+                  </details>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="permarket-h" data-testid="panel-per-market">
+                <div class="panel-h"><h3 id="permarket-h">Per-market top 5</h3></div>
+                <div class="panel-b" id="per-market-summary"></div>
+              </section>
+              <section class="panel" aria-labelledby="ceiling-h" data-testid="panel-match-ceiling">
+                <div class="panel-h"><h3 id="ceiling-h">Match ceiling — structural vs addressable</h3></div>
+                <div class="panel-b">
+                  <details class="raw-reason" id="ceiling-browse" data-testid="ceiling-disclosure">
+                    <summary>Ceiling decomposition — last 30 days</summary>
+                    <p class="muted" id="ceiling-status">Not loaded yet.</p>
+                    <div class="tscroll">
+                      <table aria-label="Pinnacle match-ceiling decomposition per sport (read-only)">
+                        <thead><tr><th scope="col">Sport</th><th scope="col" class="r">Events</th><th scope="col" class="r">Matched</th><th scope="col" class="r">Structural</th><th scope="col" class="r">Addressable</th><th scope="col" class="r">Unknown league</th><th scope="col">Corrected rate</th></tr></thead>
+                        <tbody id="ceiling-rows"></tbody>
+                      </table>
+                    </div>
+                  </details>
+                  <p class="muted">Structural = Pinnacle prices no in-window event for the league, so no
+                    match was ever possible; addressable = the league is priced but the matcher missed the
+                    event. Computed live — never from a static research artifact.</p>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="h2-h" data-testid="panel-h2-readiness">
+                <div class="panel-h"><h3 id="h2-h">H2 validation readiness</h3></div>
+                <div class="panel-b">
+                  <p class="muted" id="h2-readiness">—</p>
+                  <p class="muted" id="h6-status">Agreement gate (H6): monitor-only. The system checks
+                    whether independent sources agree on a price, but this check never changes or blocks a
+                    pick yet — a tolerance (proposed 0.02) is awaiting operator sign-off.</p>
+                </div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <!-- ============ MOBILE DOCK ============ -->
+    <nav class="dock" id="dock" aria-label="Sections (mobile)">
+      <button type="button" data-view="today" aria-current="true" data-testid="dock-nav-today"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-gauge"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="m12 14 4-4" />
+  <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+</svg>Today</button>
+      <button type="button" data-view="edges" aria-current="false" data-testid="dock-nav-edges"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-activity"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />
+</svg>Edges</button>
+      <button type="button" data-view="radar" aria-current="false" data-testid="dock-nav-radar"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-radar"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M19.07 4.93A10 10 0 0 0 6.99 3.34" />
+  <path d="M4 6h.01" />
+  <path d="M2.29 9.62A10 10 0 1 0 21.31 8.35" />
+  <path d="M16.24 7.76A6 6 0 1 0 8.23 16.67" />
+  <path d="M12 18h.01" />
+  <path d="M17.99 11.66A6 6 0 0 1 15.77 16.67" />
+  <circle cx="12" cy="12" r="2" />
+  <path d="m13.41 10.59 5.66-5.66" />
+</svg>Radar</button>
+      <button type="button" data-view="lab" aria-current="false" data-testid="dock-nav-lab"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-flask-conical"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2" />
+  <path d="M6.453 15h11.094" />
+  <path d="M8.5 2h7" />
+</svg>Lab</button>
+      <button type="button" data-view="sources" aria-current="false" data-testid="dock-nav-sources"><!-- @license lucide-static v1.23.0 - ISC -->
+<svg
+  class="lucide lucide-database"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <ellipse cx="12" cy="5" rx="9" ry="3" />
+  <path d="M3 5V19A9 3 0 0 0 21 19V5" />
+  <path d="M3 12A9 3 0 0 0 21 12" />
+</svg>Sources</button>
+    </nav>
+
+    <script>
+      @@DASHBOARD_SCRIPT@@
+    </script>
+  </body>
+</html>

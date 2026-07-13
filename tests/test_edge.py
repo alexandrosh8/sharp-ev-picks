@@ -86,6 +86,74 @@ def test_odds_age_boundary() -> None:
     assert "odds_too_stale" in stale.reasons
 
 
+def test_future_odds_timestamp_rejected() -> None:
+    decision = evaluate(candidate(odds_age_seconds=-0.001), POLICY)
+    assert decision.accepted is False
+    assert "odds_timestamp_in_future" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("decimal_odds", float("inf")),
+        ("model_probability", float("nan")),
+        ("fair_probability", float("nan")),
+        ("confidence", float("inf")),
+        ("odds_age_seconds", float("nan")),
+        ("liquidity", float("inf")),
+    ],
+)
+def test_nonfinite_candidate_rejected(field: str, value: float) -> None:
+    decision = evaluate(candidate(**{field: value}), POLICY)
+    assert decision.accepted is False
+    assert "invalid_numeric" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("decimal_odds", 1.0),
+        ("model_probability", 1.01),
+        ("fair_probability", -0.01),
+        ("confidence", 1.01),
+        ("liquidity", -1.0),
+    ],
+)
+def test_out_of_range_candidate_rejected(field: str, value: float) -> None:
+    decision = evaluate(candidate(**{field: value}), POLICY)
+    assert decision.accepted is False
+    assert "invalid_numeric" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("min_edge", float("nan")),
+        ("min_ev", -0.01),
+        ("min_confidence", 1.01),
+        ("max_odds_age_seconds", -1.0),
+        ("min_liquidity", -1.0),
+    ],
+)
+def test_invalid_gate_policy_rejected_at_construction(field: str, value: float) -> None:
+    values = {
+        "min_edge": 0.03,
+        "min_ev": 0.01,
+        "min_confidence": 0.60,
+        "max_odds_age_seconds": 300.0,
+        "min_liquidity": 0.0,
+    }
+    values[field] = value
+    with pytest.raises(ValueError):
+        GatePolicy(
+            min_edge=values["min_edge"],
+            min_ev=values["min_ev"],
+            min_confidence=values["min_confidence"],
+            max_odds_age_seconds=values["max_odds_age_seconds"],
+            min_liquidity=values["min_liquidity"],
+        )
+
+
 def test_insufficient_liquidity_trips() -> None:
     policy = GatePolicy(
         min_edge=0.03,

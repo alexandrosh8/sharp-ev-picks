@@ -172,3 +172,46 @@ async def test_odds_api_branch_without_keys_skips_gate(
     settings = make_settings(odds_source="odds_api")
     calls = await _recorded_scope_calls(settings, monkeypatch)
     assert calls == []
+
+
+async def test_odds_api_branch_wires_shared_event_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fakeredis.aioredis as fakeredis
+
+    import app.scheduler as scheduler_mod
+    from app.ingestion.base import EventDirectory
+
+    captured: dict[str, object] = {}
+
+    class RecordingOddsApiClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def fetch_odds(self, sport_key: str) -> list[object]:  # noqa: ARG002
+            return []
+
+    monkeypatch.setattr(scheduler_mod, "OddsApiClient", RecordingOddsApiClient)
+    settings = make_settings(odds_source="odds_api", odds_api_key_1="test-key")
+    async with httpx.AsyncClient() as client:
+        scheduler_mod.build_scheduler(settings, client, fakeredis.FakeRedis())
+
+    assert isinstance(captured.get("directory"), EventDirectory)
+
+
+async def test_ml_enforcement_refuses_startup_when_artifacts_do_not_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fakeredis.aioredis as fakeredis
+
+    import app.scheduler as scheduler_mod
+
+    monkeypatch.setattr(
+        scheduler_mod.ValueFilterModel,
+        "load",
+        classmethod(lambda cls, *args, **kwargs: None),
+    )
+    settings = make_settings(value_ml_filter=True, value_ml_model_dir="/missing/value-model")
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(RuntimeError, match="refusing unfiltered startup"):
+            scheduler_mod.build_scheduler(settings, client, fakeredis.FakeRedis())

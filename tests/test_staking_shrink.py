@@ -173,7 +173,14 @@ def _deps(
     stake_neff_lookup: object = None,
 ) -> PipelineDeps:
     directory = EventDirectory()
-    directory.register("evt-1", EventTeams(home="Home FC", away="Away FC"))
+    directory.register(
+        "evt-1",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+        ),
+    )
     kwargs: dict[str, object] = {}
     if stake_shrink is not None:
         kwargs["stake_shrink"] = stake_shrink

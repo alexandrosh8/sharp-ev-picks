@@ -86,7 +86,14 @@ def market_snapshots(age_s: float = 30.0) -> list[OddsSnapshotIn]:
 
 def make_deps(sink: RecordingSink, loader: FakeLoader) -> PipelineDeps:
     directory = EventDirectory()
-    directory.register("evt-1", EventTeams(home="Home FC", away="Away FC"))
+    directory.register(
+        "evt-1",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+        ),
+    )
     return PipelineDeps(
         loader=loader,
         model=NullModel(),
@@ -111,7 +118,15 @@ def make_deps_league(
     """Like make_deps, but the event carries a scraped league and the deps a
     value_policy — the inputs to the major-league premium gate."""
     directory = EventDirectory()
-    directory.register("evt-1", EventTeams(home="Home FC", away="Away FC", league=league))
+    directory.register(
+        "evt-1",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            league=league,
+            starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+        ),
+    )
     return PipelineDeps(
         loader=loader,
         model=NullModel(),
@@ -601,7 +616,8 @@ async def test_value_pipeline_produces_pick_and_alert() -> None:
     assert pick.anchor_type == "pinnacle"  # live CLV stratification key
     assert pick.event == "Home FC vs Away FC"
     assert len(sink.sent) == 1
-    assert "you place any bet" not in sink.sent[0].body  # footer removed per operator request
+    assert "you place any bet" in sink.sent[0].body
+    assert "No profit guaranteed" in sink.sent[0].body
     assert "value: Pinnacle fair" in pick.reason_summary
 
 
@@ -810,7 +826,11 @@ def patch_persist_dedupe_after_first(monkeypatch: pytest.MonkeyPatch) -> None:
         calls["n"] += 1
         return "inserted" if calls["n"] == 1 else "duplicate"
 
+    async def fake_update_pick_stake(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return True
+
     monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", fake_update_pick_stake)
 
 
 async def test_duplicate_pick_releases_exposure_and_unchanged_odds_stay_quiet(
@@ -837,6 +857,34 @@ async def test_duplicate_pick_releases_exposure_and_unchanged_odds_stay_quiet(
     assert second == []  # duplicate is not a new pick this cycle
     assert deps.ledger.used(day) == pytest.approx(used_after_first)  # grant returned
     assert len(sink.sent) == 1  # idempotency (key includes odds) suppressed it
+
+
+async def test_revalidation_failure_logs_type_only_without_secret_url(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import app.clv_trueup as clv_trueup
+
+    patch_persist_dedupe_after_first(monkeypatch)
+    sentinel = "https://proxy-user:SUPER-SECRET@proxy.invalid/path?apiKey=LEAK"
+
+    async def explode(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(clv_trueup, "revalidate_open_picks", explode)
+    monkeypatch.setattr(clv_trueup, "revalidate_offwindow_picks", explode)
+    deps = make_deps(RecordingSink(), FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+
+    with caplog.at_level("ERROR", logger="app.pipeline"):
+        await run_value_pipeline(deps, "soccer")
+
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert messages.count("RuntimeError") >= 2
+    assert "SUPER-SECRET" not in messages
+    assert "apiKey=LEAK" not in messages
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 async def test_duplicate_pick_with_price_move_realerts_and_still_releases(
@@ -909,7 +957,7 @@ async def test_cap_denied_inserted_premium_zeroes_stake_and_never_alerts(
     rewrites: list[float] = []
 
     async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
-        session, pick, teams, model_name, model_version, *, persist_tier=False
+        session, pick, teams, model_name, model_version, *, persist_tier=False, **kwargs
     ):
         rewrites.append(pick.recommended_stake_fraction)
         return True
@@ -943,7 +991,7 @@ def spy_stake_rewrites(
     rewrites: list[tuple[str, float, str, bool]] = []
 
     async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
-        session, pick, teams, model_name, model_version, *, persist_tier=False
+        session, pick, teams, model_name, model_version, *, persist_tier=False, **kwargs
     ):
         rewrites.append(
             (pick.tier, pick.recommended_stake_fraction, pick.reason_summary, persist_tier)
@@ -1069,7 +1117,11 @@ def patch_persist_recording(
         seen.append((pick.selection, pick.tier))
         return next(script)
 
+    async def fake_update_pick_stake(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return True
+
     monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", fake_update_pick_stake)
     return seen
 
 
@@ -1326,9 +1378,25 @@ async def test_value_pipeline_skips_started_events() -> None:
     assert deps.ledger.used(datetime.now(tz=UTC).date()) == 0.0
 
 
+async def test_value_pipeline_skips_unknown_kickoff_events() -> None:
+    """Unknown kickoff is visibility-only: no quote can be proven pre-game."""
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.directory = EventDirectory()
+    deps.directory.register(
+        "evt-1",
+        EventTeams(home="Home FC", away="Away FC", starts_at=None),
+    )
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert picks == []
+    assert sink.sent == []
+    assert deps.ledger.used(datetime.now(tz=UTC).date()) == 0.0
+
+
 async def test_value_pipeline_keeps_future_kickoff_events() -> None:
-    # The gate keys on starts_at <= now: future kickoffs (and NULL — cannot
-    # prove the game started) keep flowing.
+    # A known future kickoff proves the quote is still pre-game.
     sink = RecordingSink()
     deps = make_deps(sink, FakeLoader(market_snapshots()))
     assert deps.directory is not None
@@ -1943,8 +2011,9 @@ def make_deps_two_events(
     """make_deps with BOTH evt-A and evt-B registered and a caller-set daily
     exposure cap so the cap can be made to bind on a 2-pick slate."""
     directory = EventDirectory()
-    directory.register("evt-A", EventTeams(home="Home FC", away="Away FC"))
-    directory.register("evt-B", EventTeams(home="Home FC", away="Away FC"))
+    kickoff = datetime.now(tz=UTC) + timedelta(hours=6)
+    directory.register("evt-A", EventTeams(home="Home FC", away="Away FC", starts_at=kickoff))
+    directory.register("evt-B", EventTeams(home="Home FC", away="Away FC", starts_at=kickoff))
     deps = PipelineDeps(
         loader=loader,
         model=NullModel(),
@@ -2206,10 +2275,10 @@ async def test_cycle_cancellation_never_leaks_persisted_unreserved_exposure(
 ) -> None:
     """Watchdog-cancellation safety (2026-07-08 audit): a premium pick's DB
     persist and its daily-exposure reservation must land as ONE unit. Cancel the
-    cycle while the FIRST premium persist is in flight: the shielded pair must
-    still run to completion (row persisted AND stake on the ledger), and the
-    not-yet-started candidate must not have been persisted at all — never a
-    persisted full-stake row the daily/per-event caps don't count."""
+    cycle while the FIRST premium persist is in flight: cancellation must not
+    propagate until the pair completes (row persisted AND stake on the ledger),
+    and the not-yet-started candidate must not have been persisted at all —
+    never a persisted full-stake row the daily/per-event caps don't count."""
     import asyncio
 
     import app.storage.repositories as repos
@@ -2225,7 +2294,11 @@ async def test_cycle_cancellation_never_leaks_persisted_unreserved_exposure(
             await release_persist.wait()  # the watchdog fires mid-persist
         return "inserted"
 
+    async def fake_update_pick_stake(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return True
+
     monkeypatch.setattr(repos, "persist_pick", blocking_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", fake_update_pick_stake)
 
     sink = RecordingSink()
     deps = make_deps_two_events(sink, FakeLoader(two_event_snapshots(3.20, 4.00)), max_daily=0.05)
@@ -2234,13 +2307,16 @@ async def test_cycle_cancellation_never_leaks_persisted_unreserved_exposure(
     task = asyncio.create_task(run_value_pipeline(deps, "soccer"))
     await asyncio.wait_for(persist_started.wait(), timeout=5.0)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await asyncio.sleep(0)
 
-    # Let the shielded persist+reserve pair run to completion in the background.
+    # Cancellation is held at the call site while the atomic child owns DB and
+    # ledger resources; teardown cannot begin with that child still running.
+    assert not task.done()
+    assert deps.ledger.used(day) == 0.0  # persist is still blocked before reserve
+
     release_persist.set()
-    for _ in range(20):
-        await asyncio.sleep(0)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
 
     # Only the in-flight (highest-raw_kelly: evt-B) persist ran; the deferred
     # evt-A candidate was cancelled BEFORE its persist -> nothing to orphan.

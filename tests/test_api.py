@@ -1,8 +1,10 @@
 """API surface: health endpoint and payload validation (no DB required)."""
 
+import asyncio
 import re
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -53,6 +55,82 @@ def test_health_reports_picks_only_mode() -> None:
     assert body["mode"] == "picks-only"
 
 
+def test_live_is_process_only_even_when_poll_is_stale() -> None:
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = {"finished_at": "2026-01-01T00:00:00+00:00"}
+    try:
+        response = TestClient(make_app()).get("/live")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "mode": "picks-only"}
+    finally:
+        LAST_POLL.clear()
+
+
+def test_router_only_ready_fails_closed_without_dependencies() -> None:
+    response = TestClient(make_app()).get("/ready")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "not_ready"
+    assert body["checks"] == {
+        "exposure_seeded": False,
+        "scheduler": False,
+        "database": False,
+        "redis": False,
+        "polls": True,
+    }
+
+
+def test_ready_dependency_probes_are_ttl_cached() -> None:
+    from app.api import routes
+    from app.pipeline import LAST_POLL
+
+    class Session:
+        def __init__(self, calls: dict[str, int]) -> None:
+            self.calls = calls
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+        async def execute(self, statement):  # type: ignore[no-untyped-def]
+            self.calls["db"] += 1
+
+    class Factory:
+        def __init__(self, calls: dict[str, int]) -> None:
+            self.calls = calls
+
+        def __call__(self) -> Session:
+            return Session(self.calls)
+
+    class Redis:
+        def __init__(self, calls: dict[str, int]) -> None:
+            self.calls = calls
+
+        async def ping(self) -> bool:
+            self.calls["redis"] += 1
+            return True
+
+    routes._READINESS_CACHE.clear()
+    routes._READINESS_LOCKS.clear()
+    LAST_POLL.clear()
+    calls = {"db": 0, "redis": 0}
+    app = make_app()
+    app.state.exposure_seeded = True
+    app.state.scheduler = SimpleNamespace(running=True)
+    app.state.expected_poll_sports = ()
+    app.state.session_factory = Factory(calls)
+    app.state.redis = Redis(calls)
+    client = TestClient(app)
+
+    assert client.get("/ready").status_code == 200
+    assert client.get("/ready").status_code == 200
+    assert calls == {"db": 1, "redis": 1}
+
+
 def test_health_degraded_when_polls_stale() -> None:
     # P0-3: a recorded cycle whose newest finish is far older than N*poll_interval
     # means the engine is starved/dead -> 503 + status:"degraded" + the stale age,
@@ -97,6 +175,139 @@ def test_health_ok_when_polls_fresh() -> None:
         body = resp.json()
         assert body["status"] == "ok"
         assert body["newest_poll_age_seconds"] is not None
+    finally:
+        LAST_POLL.clear()
+
+
+def test_poll_health_uses_full_sequential_sweep_budget() -> None:
+    from app.api.routes import _poll_freshness_ceiling, _poll_health
+
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    assert _poll_freshness_ceiling(300, 4, 900) == 3600.0
+    polls = {
+        sport: {"finished_at": (now - timedelta(seconds=3500)).isoformat()}
+        for sport in ("soccer", "basketball", "tennis", "american_football")
+    }
+    assert _poll_health(
+        polls,
+        now,
+        300,
+        expected_sport_count=4,
+        cycle_timeout_seconds=900,
+    )[:2] == ("ok", 200)
+    polls["soccer"]["finished_at"] = (now - timedelta(seconds=3700)).isoformat()
+    assert _poll_health(
+        polls,
+        now,
+        300,
+        expected_sport_count=4,
+        cycle_timeout_seconds=900,
+    )[:2] == ("degraded", 503)
+
+
+def test_recent_in_progress_heartbeat_supersedes_old_finish() -> None:
+    from app.api.routes import _poll_health
+
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    poll = {
+        "finished_at": (now - timedelta(hours=2)).isoformat(),
+        "started_at": (now - timedelta(minutes=10)).isoformat(),
+        "in_progress": True,
+        "state": "in_progress",
+        "degraded": False,
+    }
+    assert _poll_health(
+        {"soccer": poll},
+        now,
+        300,
+        expected_sport_count=4,
+        cycle_timeout_seconds=900,
+    )[:2] == ("ok", 200)
+
+
+def test_over_budget_or_failed_heartbeat_degrades() -> None:
+    from app.api.routes import _poll_health
+
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    over_budget = {
+        "started_at": (now - timedelta(seconds=901)).isoformat(),
+        "in_progress": True,
+        "state": "in_progress",
+    }
+    failed = {
+        "finished_at": now.isoformat(),
+        "in_progress": False,
+        "state": "failed",
+        "degraded": True,
+    }
+    for poll in (over_budget, failed):
+        assert _poll_health(
+            {"soccer": poll},
+            now,
+            300,
+            expected_sport_count=4,
+            cycle_timeout_seconds=900,
+        )[:2] == ("degraded", 503)
+
+
+def test_health_exposes_full_sweep_poll_ceiling() -> None:
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = {"finished_at": datetime.now(tz=UTC).isoformat()}
+    app = make_app()
+    app.state.expected_poll_sports = (
+        "soccer",
+        "basketball",
+        "tennis",
+        "american_football",
+    )
+    try:
+        body = TestClient(app).get("/health").json()
+        assert body["poll_max_age_seconds"] == 3600.0
+    finally:
+        LAST_POLL.clear()
+
+
+def test_one_fresh_poll_cannot_mask_another_stale_poll() -> None:
+    from app.pipeline import LAST_POLL
+
+    now = datetime.now(tz=UTC)
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = {"finished_at": now.isoformat()}
+    LAST_POLL["basketball"] = {"finished_at": (now - timedelta(days=1)).isoformat()}
+    try:
+        response = TestClient(make_app()).get("/health")
+        assert response.status_code == 503
+        assert response.json()["status"] == "degraded"
+    finally:
+        LAST_POLL.clear()
+
+
+@pytest.mark.parametrize("finished_at", [None, "not-a-date", "2026-07-13T12:00:00"])
+def test_invalid_or_naive_poll_finish_degrades_without_crashing(finished_at: object) -> None:
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = {"finished_at": finished_at}
+    try:
+        response = TestClient(make_app()).get("/health")
+        assert response.status_code == 503
+        assert response.json()["status"] == "degraded"
+    finally:
+        LAST_POLL.clear()
+
+
+def test_explicit_degraded_cycle_is_unhealthy_even_when_fresh() -> None:
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = {
+        "finished_at": datetime.now(tz=UTC).isoformat(),
+        "degraded": True,
+    }
+    try:
+        assert TestClient(make_app()).get("/health").status_code == 503
     finally:
         LAST_POLL.clear()
 
@@ -211,6 +422,8 @@ def test_picks_tier_param_is_validated() -> None:
 def test_games_endpoint_serves_unrestricted_latest_fixture_view() -> None:
     from app.pipeline import AVAILABLE_GAMES
 
+    saved = dict(AVAILABLE_GAMES)
+    AVAILABLE_GAMES.clear()
     AVAILABLE_GAMES["soccer"] = [
         {
             "sport": "soccer",
@@ -266,9 +479,12 @@ def test_games_endpoint_serves_unrestricted_latest_fixture_view() -> None:
         tennis_resp = client.get("/games?sport=tennis")
         assert tennis_resp.status_code == 200
         assert tennis_resp.json() == []
+        football_resp = client.get("/games?sport=american_football")
+        assert football_resp.status_code == 200
+        assert football_resp.json() == []
     finally:
-        AVAILABLE_GAMES.pop("soccer", None)
-        AVAILABLE_GAMES.pop("basketball", None)
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved)
 
 
 def test_games_endpoint_falls_back_to_warehouse_when_poll_registry_empty(
@@ -336,6 +552,84 @@ def test_games_endpoint_falls_back_to_warehouse_when_poll_registry_empty(
     assert calls == [(1000, "basketball")]
     assert body[0]["event"] == "Restart Hawks vs Restart Bulls"
     assert body[0]["snapshot_count"] == 6
+
+
+def test_games_endpoint_merges_partial_registry_with_warehouse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One completed poll must not hide durable rows for pending sports."""
+    from app.api import routes
+    from app.pipeline import AVAILABLE_GAMES
+
+    saved = dict(AVAILABLE_GAMES)
+    live_soccer = {
+        "sport": "soccer",
+        "sport_label": "Football",
+        "event_id": "evt-shared",
+        "event": "Fresh Home vs Fresh Away",
+        "home": "Fresh Home",
+        "away": "Fresh Away",
+        "league": "Live",
+        "starts_at": "2026-06-16T18:00:00+00:00",
+        "market_count": 2,
+        "markets": ["h2h", "totals"],
+        "bookmaker_count": 2,
+        "bookmakers": ["A", "B"],
+        "snapshot_count": 12,
+        "first_captured_at": None,
+        "last_captured_at": None,
+        "updated_at": "2026-06-16T12:00:00+00:00",
+    }
+    AVAILABLE_GAMES.clear()
+    AVAILABLE_GAMES["soccer"] = [live_soccer]
+
+    class FakeSessionFactory:
+        def __call__(self) -> "FakeSessionFactory":
+            return self
+
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    async def fake_latest_available_games_with_events(
+        session: object,
+        limit: int,
+        sport: str | None,
+    ) -> list[dict[str, object]]:
+        assert limit == 1000
+        assert sport is None
+        return [
+            {**live_soccer, "event": "Stale Home vs Stale Away", "snapshot_count": 1},
+            {
+                **live_soccer,
+                "sport": "basketball",
+                "sport_label": "NBA",
+                "event_id": "evt-db-basketball",
+                "event": "Durable Hawks vs Durable Bulls",
+                "starts_at": "2026-06-16T20:00:00+00:00",
+            },
+        ]
+
+    monkeypatch.setattr(
+        routes,
+        "latest_available_games_with_events",
+        fake_latest_available_games_with_events,
+    )
+    app = make_app()
+    app.state.session_factory = FakeSessionFactory()
+    try:
+        rows = TestClient(app).get("/games").json()
+    finally:
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved)
+
+    by_id = {row["event_id"]: row for row in rows}
+    assert set(by_id) == {"evt-shared", "evt-db-basketball"}
+    assert by_id["evt-shared"]["event"] == "Fresh Home vs Fresh Away"
+    assert by_id["evt-shared"]["snapshot_count"] == 12
+    assert by_id["evt-db-basketball"]["event"] == "Durable Hawks vs Durable Bulls"
 
 
 def test_picks_payload_carries_reason_summary(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -516,7 +810,16 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     monkeypatch.setattr(routes, "betfair_inline_capture_by_sport", fake_betfair_inline_capture)
     monkeypatch.setattr(routes, "source_link_metrics", fake_link_metrics)
     monkeypatch.setattr(routes, "sharp_close_capture_density", fake_close_density)
-    body = TestClient(make_app()).get("/resolution/match-rate").json()
+
+    async def fake_session() -> AsyncIterator[object]:
+        # Router-only mode still requires a request-scoped session. The report
+        # functions above are stubbed; the two null-safe diagnostics below see
+        # this inert sentinel and return their documented empty shapes.
+        yield object()
+
+    app = make_app()
+    app.dependency_overrides[get_session] = fake_session
+    body = TestClient(app).get("/resolution/match-rate").json()
     # Betfair STALENESS-GUARD diagnostics ride the same payload (P3). NOT
     # stubbed — the real repositories.betfair_staleness_metrics runs and must
     # be NULL-SAFE on an empty/absent verdict table: zeros + None medians,
@@ -580,6 +883,79 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     assert cov["pinnacle_scraped"] == 219
     assert cov["pinnacle_rate"] == pytest.approx(75 / 219)
     assert cov["headline"] == "Betfair 46% · Pinnacle 34%"
+
+
+async def test_match_rate_singleflight_caches_after_waiter_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import routes
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    report = {"total": 7, "matched": 5}
+
+    async def fake_compute(request, session, days):  # type: ignore[no-untyped-def]
+        started.set()
+        await release.wait()
+        return report
+
+    monkeypatch.setattr(routes, "_compute_resolution_match_rate", fake_compute)
+    routes._MATCH_RATE_CACHE.clear()
+    routes._MATCH_RATE_INFLIGHT.clear()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=object())))
+    waiter = asyncio.create_task(
+        routes.resolution_match_rate(request, None, 17)  # type: ignore[arg-type]
+    )
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    release.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if 17 in routes._MATCH_RATE_CACHE:
+            break
+    assert routes._MATCH_RATE_CACHE[17][1] == report
+    assert 17 not in routes._MATCH_RATE_INFLIGHT
+
+
+async def test_match_rate_singleflight_retrieves_detached_error_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.api import routes
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    secret_url = "https://operator:credential@example.invalid/private"
+
+    async def fake_compute(request, session, days):  # type: ignore[no-untyped-def]
+        started.set()
+        await release.wait()
+        raise RuntimeError(secret_url)
+
+    monkeypatch.setattr(routes, "_compute_resolution_match_rate", fake_compute)
+    routes._MATCH_RATE_CACHE.clear()
+    routes._MATCH_RATE_INFLIGHT.clear()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=object())))
+    waiter = asyncio.create_task(
+        routes.resolution_match_rate(request, None, 23)  # type: ignore[arg-type]
+    )
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    with caplog.at_level("ERROR"):
+        release.set()
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if 23 not in routes._MATCH_RATE_INFLIGHT:
+                break
+    assert 23 not in routes._MATCH_RATE_CACHE
+    assert 23 not in routes._MATCH_RATE_INFLIGHT
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "RuntimeError" in log_text
+    assert secret_url not in log_text
 
 
 def test_resolution_review_queue_endpoint_serializes_rows(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -789,6 +1165,81 @@ def test_result_payload_validation_rejects_naive_datetime() -> None:
             "pick_id": "1",
             "outcome": "won",
             "settled_at": "2026-06-10T12:00:00",  # naive
+        },
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("invalid_id", [0, -1, 9_223_372_036_854_775_808])
+def test_manual_settlement_path_ids_are_bounded_before_database(invalid_id: int) -> None:
+    client = TestClient(make_app())
+    timestamp = datetime.now(tz=UTC).isoformat()
+    pick_response = client.post(
+        f"/picks/{invalid_id}/result",
+        json={
+            "pick_id": str(invalid_id),
+            "outcome": "won",
+            "settled_at": timestamp,
+        },
+    )
+    event_response = client.post(
+        f"/events/{invalid_id}/result",
+        json={"home_score": 1, "away_score": 0},
+    )
+    assert pick_response.status_code == 422
+    assert event_response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"pick_id": "1" * 65},
+        {"actual_stake": "10000000000.00"},
+        {"actual_stake": "1.001"},
+        {"actual_odds": "NaN"},
+        {"actual_odds": "Infinity"},
+        {"actual_odds": "1000.0001"},
+        {"actual_odds": "2.12345"},
+        {"bookmaker_used": "b" * 65},
+        {"notes": "n" * 4097},
+        {"actual_stake": "10100000.00", "actual_odds": "1000.0000"},
+    ],
+)
+def test_result_payload_rejects_values_that_cannot_fit_persistence(
+    invalid_fields: dict[str, str],
+) -> None:
+    payload = {
+        "pick_id": "1",
+        "outcome": "won",
+        "settled_at": "2026-06-10T12:00:00Z",
+        **invalid_fields,
+    }
+    response = TestClient(make_app()).post("/picks/1/result", json=payload)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "fill_fields",
+    [
+        {"bet_placed": False, "actual_stake": "10.00"},
+        {"bet_placed": False, "actual_odds": "2.10"},
+        {"bet_placed": False, "bookmaker_used": "Betfair"},
+        {"bet_placed": True, "actual_odds": "2.10"},
+        {"bet_placed": True, "bookmaker_used": "Betfair"},
+        {"bet_placed": True, "actual_stake": "0.00"},
+    ],
+)
+def test_result_payload_rejects_inconsistent_actual_fill_fields(
+    fill_fields: dict[str, object],
+) -> None:
+    response = TestClient(make_app()).post(
+        "/picks/1/result",
+        json={
+            "pick_id": "1",
+            "outcome": "won",
+            "settled_at": "2026-06-10T12:00:00Z",
+            **fill_fields,
         },
     )
     assert response.status_code == 422
@@ -1047,6 +1498,6 @@ def test_login_page_hardened_against_double_submit() -> None:
     assert "if (submitBtn.disabled) return;" in _LOGIN_HTML
     assert "submitBtn.disabled = true;" in _LOGIN_HTML
     # failure paths re-enable so the user can retry after a 401
-    assert _LOGIN_HTML.count("submitBtn.disabled = false;") == 2
+    assert _LOGIN_HTML.count("submitBtn.disabled = false;") == 1
     # error text still set via textContent (never innerHTML)
     assert "innerHTML" not in _LOGIN_HTML

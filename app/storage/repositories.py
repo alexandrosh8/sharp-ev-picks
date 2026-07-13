@@ -12,11 +12,11 @@ import math
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, case, func, select, text
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -25,6 +25,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.backtesting.clv import mean_significance, wilson_interval
+from app.identity import (
+    BOOKMAKER_MAX_BYTES,
+    COUNTRY_MAX_BYTES,
+    EVENT_REF_MAX_BYTES,
+    LEAGUE_KEY_MAX_BYTES,
+    MARKET_DETAIL_MAX_BYTES,
+    SELECTION_MAX_BYTES,
+    SPORT_KEY_MAX_BYTES,
+    SPORT_NAME_MAX_BYTES,
+    TEAM_NAME_MAX_BYTES,
+    require_bounded_identity,
+)
 from app.ingestion.base import EventTeams, prefer_kickoff
 from app.schemas.base import Market, to_utc
 from app.schemas.odds import OddsSnapshotIn
@@ -54,6 +66,69 @@ if TYPE_CHECKING:
     from app.resolution.shadow import BetfairCoverageOutcome, ShadowOutcome, SlateSharpCoverage
 
 logger = logging.getLogger(__name__)
+
+
+def _settlement_stake_expr() -> Any:
+    """Recommended amount that actually feeds settlement (legacy fallback)."""
+    return case(
+        (Pick.settlement_stake_amount > 0, Pick.settlement_stake_amount),
+        else_=Pick.recommended_stake_amount,
+    )
+
+
+def _settlement_effective_odds_expr() -> Any:
+    """Commission-net blended fill used by P&L/CLV (legacy fallback raw odds)."""
+    return case(
+        (
+            Pick.settlement_stake_amount > 0,
+            Pick.settlement_effective_odds_stake / func.nullif(Pick.settlement_stake_amount, 0),
+        ),
+        else_=Pick.decimal_odds,
+    )
+
+
+def _settlement_guard_bookmaker_expr() -> Any:
+    """Book to commission-net a legacy raw fill; basis odds are already net."""
+    return case(
+        (Pick.settlement_stake_amount > 0, None),
+        else_=Pick.bookmaker,
+    )
+
+
+def _result_settlement_stake_expr() -> Any:
+    """Exact P&L denominator, falling back for pre-migration result rows."""
+    return func.coalesce(ResultTracking.settled_stake_amount, _settlement_stake_expr())
+
+
+def _result_settlement_effective_odds_expr() -> Any:
+    """Exact commission-net result fill, with a legacy recommendation fallback."""
+    return func.coalesce(
+        ResultTracking.settled_effective_odds,
+        _settlement_effective_odds_expr(),
+    )
+
+
+def _result_settlement_guard_bookmaker_expr() -> Any:
+    """Only legacy raw fills still need their bookmaker in CLV guards."""
+    return case(
+        (ResultTracking.settled_effective_odds.is_not(None), None),
+        else_=_settlement_guard_bookmaker_expr(),
+    )
+
+
+def _settlement_close_independent_expr() -> Any:
+    """Persisted close independence with conservative repricing overrides."""
+    return case(
+        (Pick.settlement_basis_repriced.is_(True), False),
+        (
+            and_(
+                Pick.settlement_stake_amount > 0,
+                Pick.settlement_basis_bookmaker.is_(None),
+            ),
+            False,
+        ),
+        else_=Pick.close_independent_of_fill,
+    )
 
 
 #: Resolver quarantine counters (monitor-only, PROCESS-LIFETIME): how many
@@ -250,6 +325,8 @@ async def select_betfair_targets(
 # reachable under today's single sequential writer, but mandatory before any
 # parallel writer / second poller.
 async def _get_or_create_sport(session: AsyncSession, key: str, name: str) -> int:
+    key = require_bounded_identity(key, maximum_bytes=SPORT_KEY_MAX_BYTES, field="sport key")
+    name = require_bounded_identity(name, maximum_bytes=SPORT_NAME_MAX_BYTES, field="sport name")
     found = await session.scalar(select(Sport.id).where(Sport.key == key))
     if found is not None:
         return found
@@ -270,7 +347,13 @@ async def _get_or_create_league(
     # country freezes and mislabels the rest ("Ethiopia — Premier League" bug).
     # Normalize NULL/absent to '' — a NULL would be treated as distinct by the
     # unique index and defeat dedup for country-less sources.
-    country = country or ""
+    key = require_bounded_identity(key, maximum_bytes=LEAGUE_KEY_MAX_BYTES, field="league key")
+    country = require_bounded_identity(
+        country or "",
+        maximum_bytes=COUNTRY_MAX_BYTES,
+        field="league country",
+        allow_empty=True,
+    )
     where = (League.sport_id == sport_id, League.key == key, League.country == country)
     found = await session.scalar(select(League.id).where(*where))
     if found is not None:
@@ -300,8 +383,16 @@ def _strip_live_status(name: str) -> str:
 async def _get_or_create_team(
     session: AsyncSession, sport_id: int, league_id: int, name: str
 ) -> int:
-    name = _strip_live_status(name)
-    normalized = name.strip().lower()
+    name = require_bounded_identity(
+        _strip_live_status(name),
+        maximum_bytes=TEAM_NAME_MAX_BYTES,
+        field="team name",
+    )
+    normalized = require_bounded_identity(
+        name.strip().lower(),
+        maximum_bytes=TEAM_NAME_MAX_BYTES,
+        field="normalized team name",
+    )
     where = (Team.sport_id == sport_id, Team.normalized_name == normalized)
     found = await session.scalar(select(Team.id).where(*where))
     if found is not None:
@@ -596,6 +687,9 @@ async def _get_or_create_event(
     (OddsPortal shows a live running score, OddsHarvester exposes no finished
     flag), so letting it write scraped_* could record an in-play partial as the
     result and corrupt settlement + ROI (review 2026-06-21)."""
+    external_ref = require_bounded_identity(
+        external_ref, maximum_bytes=EVENT_REF_MAX_BYTES, field="event external_ref"
+    )
     # STAGE 0b — REDIRECT consult (PR2b live-shell guard). A fold event that the
     # PR2b merge could not delete (still referenced by an actively-live fixture)
     # lingers as a shell whose OWN external_ref equals this incoming ref — so the
@@ -616,6 +710,7 @@ async def _get_or_create_event(
         select(Event.id)
         .join(EventSourceLink, EventSourceLink.canonical_event_id == Event.id)
         .where(
+            EventSourceLink.source == _source_of_ref(external_ref),
             EventSourceLink.source_event_id == external_ref,
             EventSourceLink.active.is_(True),
             Event.sport_id == sport_id,
@@ -634,6 +729,11 @@ async def _get_or_create_event(
             return canon.id
     existing = await session.scalar(select(Event).where(Event.external_ref == external_ref))
     if existing is not None:
+        if existing.sport_id != sport_id:
+            # ``events.external_ref`` is globally unique. Reusing one provider
+            # ref under another sport is corrupt input, not permission to bind
+            # the new pick/snapshot onto the first sport's fixture.
+            raise ValueError("event external_ref already belongs to another sport")
         # Earlier rows may be NULL (or carry a legacy placeholder); a real kickoff
         # from the source upgrades them. Apply the SAME precedence rule as the
         # in-memory EventDirectory (app.ingestion.base.prefer_kickoff): a real time
@@ -649,11 +749,15 @@ async def _get_or_create_event(
     # STAGE 1 — link fast-path: this ref was merged into a canonical on an earlier
     # cycle (no own event row, only an active source link). Deterministic
     # (most-recent active link) so a re-get never splits back into two rows.
+    source = _source_of_ref(external_ref)
     linked_id = await session.scalar(
         select(EventSourceLink.canonical_event_id)
+        .join(Event, Event.id == EventSourceLink.canonical_event_id)
         .where(
+            EventSourceLink.source == source,
             EventSourceLink.source_event_id == external_ref,
             EventSourceLink.active.is_(True),
+            Event.sport_id == sport_id,
         )
         .order_by(EventSourceLink.matched_at.desc(), EventSourceLink.id.desc())
         .limit(1)
@@ -701,7 +805,12 @@ async def _get_or_create_event(
         )
         .on_conflict_do_nothing(constraint="uq_events_external_ref")
     )
-    event_id = await session.scalar(select(Event.id).where(Event.external_ref == external_ref))
+    event_id = await session.scalar(
+        select(Event.id).where(
+            Event.external_ref == external_ref,
+            Event.sport_id == sport_id,
+        )
+    )
     if event_id is None:  # pragma: no cover
         raise RuntimeError(f"could not resolve event {external_ref!r}")
     return event_id
@@ -752,6 +861,16 @@ def _provisional_result_fields(
     # Sport-aware: the same refusals the settler applies (tennis game-line
     # vs set-score, 2-way tie push) hold for the DISPLAY grade too — a wrong
     # provisional tag was the residual of the 2026-07-10 operator report.
+    settlement_stake = pick.settlement_stake_amount or Decimal("0")
+    settlement_effective_term = pick.settlement_effective_odds_stake or Decimal("0")
+    if settlement_stake > 0 and settlement_effective_term > 0:
+        stake = settlement_stake
+        odds = settlement_effective_term / settlement_stake
+        bookmaker = None  # the blended basis is already commission-net
+    else:
+        stake = pick.recommended_stake_amount
+        odds = pick.decimal_odds
+        bookmaker = pick.bookmaker
     outcome, pnl = provisional_result(
         pick.market,
         pick.selection,
@@ -759,10 +878,10 @@ def _provisional_result_fields(
         away,
         shs,
         saws,
-        pick.recommended_stake_amount,
-        pick.decimal_odds,
+        stake,
+        odds,
         sport_key=sport_key,
-        bookmaker=pick.bookmaker,
+        bookmaker=bookmaker,
     )
     return {"provisional_outcome": outcome, "provisional_pnl": pnl}
 
@@ -1997,9 +2116,8 @@ async def performance_report(
     aggregates over the volume tier ride along under "volume" (accumulating
     that tier's CLV/ROI evidence IS its purpose).
 
-    Staking/weighting uses the platform's recommended stake — the same
-    sizing the backtests report — while pnl/roi per pick already reflect
-    the user's actual stake when they logged one.
+    Staking/weighting uses the exact stake that produced each persisted P&L.
+    Pre-migration result rows fall back to the recommendation basis.
     """
     # closing_anchor_type is FEATURE-DETECTED (same migration contract as
     # live_evidence_rows): until the ORM attr lands, the close anchor is None and
@@ -2012,13 +2130,13 @@ async def performance_report(
     select_cols: list[Any] = [
         ResultTracking.outcome,  # 0
         ResultTracking.pnl,  # 1
-        Pick.recommended_stake_amount,  # 2
+        _result_settlement_stake_expr(),  # 2
         Pick.clv_log,  # 3
         Pick.beat_close,  # 4
         Pick.tier,  # 5 — split key, not passed to _aggregate_settled
         Pick.closing_odds,  # 6 — optional SOFT display price (no longer the gate)
         Sport.key,  # 7 — per-sport split key, not passed to _aggregate_settled
-        Pick.decimal_odds,  # 8 — CLV-1 close-implied-edge guard (fill price)
+        _result_settlement_effective_odds_expr(),  # 8 — exact/net CLV guard fill
         Pick.closing_fair_probability,  # 9 — CLV-1 close-implied-edge guard (close fair)
         Pick.model_probability,  # 10 — TAUTOLOGY guard (pick-time fair; P2-3: this
         # IS the market fair only under the deployed value strategy — see
@@ -2035,7 +2153,9 @@ async def performance_report(
         select_cols.append(close_anchor_attr)  # 7
     if indep_attr is not None:
         indep_idx = len(select_cols)
-        select_cols.append(indep_attr)  # 8 — INDEPENDENCE provenance (P0-1/P0-3)
+        select_cols.append(
+            _settlement_close_independent_expr()
+        )  # 8 — INDEPENDENCE provenance (P0-1/P0-3)
     if snapshot_attr is not None:
         snapshot_idx = len(select_cols)
         select_cols.append(snapshot_attr)  # 9 — clv-1 genuine-snapshot-close marker
@@ -2074,7 +2194,7 @@ async def performance_report(
     # Fill bookmaker: the CLV-1 fabrication guard judges the close-implied edge
     # on the EFFECTIVE (commission-netted) fill price (read/write alignment).
     bookmaker_idx = len(select_cols)
-    select_cols.append(Pick.bookmaker)
+    select_cols.append(_result_settlement_guard_bookmaker_expr())
     # Claims-ledger ETA clock: when did each pick settle (trusted-rate window).
     settled_at_idx = len(select_cols)
     select_cols.append(ResultTracking.settled_at)
@@ -2442,7 +2562,7 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
         Pick.value_filter_score,  # 1
         Pick.clv_log,  # 2
         Pick.beat_close,  # 3
-        Pick.recommended_stake_amount,  # 4
+        _result_settlement_stake_expr(),  # 4
         ResultTracking.pnl,  # 5
         Pick.closing_odds,  # 6 — snapshot-close marker (NON-NULL = a true close)
         Sport.key,  # 7 — per-sport split key (Batch 3)
@@ -2463,7 +2583,7 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
         columns.append(close_anchor_attr)
     if indep_attr is not None:
         indep_idx = len(columns)
-        columns.append(indep_attr)
+        columns.append(_settlement_close_independent_expr())
     mint_fb_idx = close_fb_idx = None
     if mint_fb_attr is not None:
         mint_fb_idx = len(columns)
@@ -2480,7 +2600,7 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
         columns.append(snap_close_attr)
     # decimal_odds: the fabricated-CLV guard input (mirror of _clv_row_is_fabricated).
     decimal_odds_idx = len(columns)
-    columns.append(Pick.decimal_odds)
+    columns.append(_result_settlement_effective_odds_expr())
     # minted_at (Pick.created_at): the ADR-0022 pre-/post-selection-fix cohort key.
     minted_at_idx = len(columns)
     columns.append(Pick.created_at)
@@ -2550,7 +2670,7 @@ async def bet_band_observations(session: AsyncSession) -> list["BetBandObservati
             select(
                 Pick.model_probability,
                 ResultTracking.outcome,
-                Pick.decimal_odds,
+                _result_settlement_effective_odds_expr(),
             )
             .join(Pick, ResultTracking.pick_id == Pick.id)
             .where(ResultTracking.outcome.in_(("won", "lost")))
@@ -2572,6 +2692,25 @@ async def bet_band_observations(session: AsyncSession) -> list["BetBandObservati
 _SNAPSHOT_INSERT_CHUNK = 500
 
 
+class SnapshotPersistResult(int):
+    """Integer-compatible row count plus per-event persistence outcomes."""
+
+    successful_event_ids: frozenset[str]
+    failed_event_ids: frozenset[str]
+
+    def __new__(
+        cls,
+        written: int,
+        *,
+        successful_event_ids: Collection[str] = (),
+        failed_event_ids: Collection[str] = (),
+    ) -> "SnapshotPersistResult":
+        value = int.__new__(cls, written)
+        value.successful_event_ids = frozenset(successful_event_ids)
+        value.failed_event_ids = frozenset(failed_event_ids)
+        return value
+
+
 def snapshot_market_key(snapshot: OddsSnapshotIn) -> str:
     """The `market` string stored in odds_snapshots: the provider submarket
     key ("asian_handicap_-1_5") when present, else the Market enum value.
@@ -2580,9 +2719,14 @@ def snapshot_market_key(snapshot: OddsSnapshotIn) -> str:
     quarter-line handicap-games keys (e.g. "asian_handicap_games_-10_25_games",
     33 chars), dropping the trailing axis token so two distinct lines collapsed
     into one devig group AND the reverse mapping mis-parsed. The column is now
-    String(64); clamp only as a last-resort overflow guard (no realistic key
-    approaches 64) so a distinct line can never be lost to truncation."""
-    return (snapshot.market_detail or str(snapshot.market))[:64]
+    String(512). Oversized identities are rejected explicitly; they are never
+    truncated because truncation can alias two instruments under the unique
+    observation key."""
+    return require_bounded_identity(
+        snapshot.market_detail or str(snapshot.market),
+        maximum_bytes=MARKET_DETAIL_MAX_BYTES,
+        field="snapshot market",
+    )
 
 
 def market_from_snapshot_key(key: str) -> tuple[Market, str | None] | None:
@@ -2630,7 +2774,7 @@ async def persist_odds_snapshots(
     default_league: str,
     *,
     attach_only_to_existing: bool = False,
-) -> int:
+) -> SnapshotPersistResult:
     """Append price observations into odds_snapshots (the backtest /
     line-movement / CLV dataset). Returns the number of NEW rows written.
 
@@ -2658,21 +2802,20 @@ async def persist_odds_snapshots(
     column) must not abort the whole cycle's history, every cycle, for as
     long as the bad match stays in the scrape window. A failed event is
     logged (team names + exception type only, never URLs) and skipped; its
-    rows count as seen by the caller's change-only cache, which is correct:
-    a deterministic overflow would fail identically on every retry.
-    Free-text row fields (bookmaker, selection) are clamped to their column
-    lengths up front — display strings, where truncation beats losing the
-    event's whole history.
+    rows are reported as failed to the caller, so its change-only cache retries
+    them. Identity fields are validated and never silently truncated.
     """
     by_event: dict[str, list[OddsSnapshotIn]] = {}
     for snapshot in snapshots:
         if snapshot.event_id in teams_by_event:
             by_event.setdefault(snapshot.event_id, []).append(snapshot)
     if not by_event:
-        return 0
+        return SnapshotPersistResult(0)
 
     written = 0
     failed_events = 0
+    successful_event_ids: set[str] = set()
+    failed_event_ids: set[str] = set()
     async with session_factory() as session:
         if attach_only_to_existing:
             # ATTACH-ONLY: keep ONLY refs whose Event already exists. The
@@ -2689,7 +2832,9 @@ async def persist_odds_snapshots(
                 .scalars()
                 .all()
             )
-            skipped = len(by_event) - len(present)
+            absent = set(by_event) - present
+            failed_event_ids.update(absent)
+            skipped = len(absent)
             by_event = {ref: snaps for ref, snaps in by_event.items() if ref in present}
             if skipped:
                 logger.info(
@@ -2700,7 +2845,7 @@ async def persist_odds_snapshots(
                     skipped + len(by_event),
                 )
             if not by_event:
-                return 0
+                return SnapshotPersistResult(0, failed_event_ids=failed_event_ids)
         sport_id = await _get_or_create_sport(session, sport, sport.title())
         for external_ref, event_snapshots in by_event.items():
             teams = teams_by_event[external_ref]
@@ -2726,9 +2871,17 @@ async def persist_odds_snapshots(
                     rows: list[dict[str, Any]] = [
                         {
                             "event_id": event_id,
-                            "bookmaker": snapshot.bookmaker[:64],
+                            "bookmaker": require_bounded_identity(
+                                snapshot.bookmaker,
+                                maximum_bytes=BOOKMAKER_MAX_BYTES,
+                                field="snapshot bookmaker",
+                            ),
                             "market": snapshot_market_key(snapshot),
-                            "selection": snapshot.selection[:64],
+                            "selection": require_bounded_identity(
+                                snapshot.selection,
+                                maximum_bytes=SELECTION_MAX_BYTES,
+                                field="snapshot selection",
+                            ),
                             "decimal_odds": Decimal(str(snapshot.decimal_odds)),
                             "liquidity": (
                                 Decimal(str(snapshot.liquidity))
@@ -2750,8 +2903,10 @@ async def persist_odds_snapshots(
                         )
                         event_written += len((await session.execute(stmt)).scalars().all())
                 written += event_written
+                successful_event_ids.add(external_ref)
             except Exception as exc:  # poisoned event: skip it, keep the cycle
                 failed_events += 1
+                failed_event_ids.add(external_ref)
                 logger.warning(
                     "odds snapshot persistence skipped event '%s vs %s' (%d rows): %s",
                     teams.home,
@@ -2766,7 +2921,11 @@ async def persist_odds_snapshots(
             failed_events,
             len(by_event),
         )
-    return written
+    return SnapshotPersistResult(
+        written,
+        successful_event_ids=successful_event_ids,
+        failed_event_ids=failed_event_ids,
+    )
 
 
 async def closing_odds_from_snapshots(
@@ -2923,14 +3082,38 @@ class SourceLinkByRef:
     raw_start_time_utc: datetime | None = None
     evidence: dict[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        require_bounded_identity(self.source, maximum_bytes=32, field="link source")
+        require_bounded_identity(
+            self.source_event_id,
+            maximum_bytes=EVENT_REF_MAX_BYTES,
+            field="link source_event_id",
+        )
+        require_bounded_identity(
+            self.canonical_external_ref,
+            maximum_bytes=EVENT_REF_MAX_BYTES,
+            field="link canonical_external_ref",
+        )
+        require_bounded_identity(self.method, maximum_bytes=32, field="link method")
+        optional_fields = (
+            ("link source_market_id", self.source_market_id, 64),
+            ("link raw_sport", self.raw_sport, SPORT_KEY_MAX_BYTES),
+            ("link raw_league", self.raw_league, LEAGUE_KEY_MAX_BYTES),
+            ("link raw_home", self.raw_home, TEAM_NAME_MAX_BYTES),
+            ("link raw_away", self.raw_away, TEAM_NAME_MAX_BYTES),
+        )
+        for field, value, maximum_bytes in optional_fields:
+            if value is not None:
+                require_bounded_identity(value, maximum_bytes=maximum_bytes, field=field)
+
 
 async def upsert_event_source_links(session: AsyncSession, links: Sequence[SourceLinkByRef]) -> int:
     """Bulk-upsert confirmed cross-source links (observability — NEVER gates
     matching). Canonical refs that do not resolve to an events row yet are
-    skipped (nothing to link against). ON CONFLICT refreshes matched_at +
-    confidence (+method), so a re-confirmed link stays one row. Returns the
-    number of rows written. Raises on DB failure — callers that must never
-    break (anchor resolution) wrap this themselves."""
+    skipped. Re-confirming the same target refreshes it in place; re-linking a
+    provider id retires the old target and preserves it as inactive history.
+    Returns rows offered after deterministic batch dedupe. Raises on DB failure;
+    callers that must never break anchor resolution wrap this themselves."""
     if not links:
         return 0
     refs = sorted({link.canonical_external_ref for link in links})
@@ -2940,7 +3123,7 @@ async def upsert_event_source_links(session: AsyncSession, links: Sequence[Sourc
         )
     ).all()
     id_by_ref = {ref: eid for ref, eid in id_rows}
-    values = [
+    raw_values = [
         {
             "canonical_event_id": id_by_ref[link.canonical_external_ref],
             "source": link.source,
@@ -2959,15 +3142,56 @@ async def upsert_event_source_links(session: AsyncSession, links: Sequence[Sourc
         for link in links
         if link.canonical_external_ref in id_by_ref
     ]
-    if not values:
+    if not raw_values:
         return 0
+    # A buggy/mixed capture batch must not submit two active targets for one
+    # provider id. Keep the newest/highest-confidence observation
+    # deterministically; prior DB targets are retired below.
+    by_source_event: dict[tuple[str, str], dict[str, Any]] = {}
+    for value in raw_values:
+        key = (str(value["source"]), str(value["source_event_id"]))
+        previous = by_source_event.get(key)
+        if previous is None or (
+            value["matched_at"],
+            value["confidence_score"],
+            value["canonical_event_id"],
+        ) > (
+            previous["matched_at"],
+            previous["confidence_score"],
+            previous["canonical_event_id"],
+        ):
+            by_source_event[key] = value
+    values = list(by_source_event.values())
+    # A source event has exactly one active canonical target. Retain prior
+    # links as inactive audit history before inserting/re-activating the new
+    # target. This also makes the partial unique index race-safe inside the
+    # writer transaction.
+    for value in values:
+        await session.execute(
+            sa_update(EventSourceLink)
+            .where(
+                EventSourceLink.source == value["source"],
+                EventSourceLink.source_event_id == value["source_event_id"],
+                EventSourceLink.canonical_event_id != value["canonical_event_id"],
+                EventSourceLink.active.is_(True),
+            )
+            .values(active=False)
+        )
     stmt = pg_insert(EventSourceLink).values(values)
     stmt = stmt.on_conflict_do_update(
         constraint="uq_event_source_links_source_event",
         set_={
+            "active": True,
             "matched_at": stmt.excluded.matched_at,
             "confidence_score": stmt.excluded.confidence_score,
             "match_method": stmt.excluded.match_method,
+            "source_market_id": stmt.excluded.source_market_id,
+            "raw_sport": stmt.excluded.raw_sport,
+            "raw_league": stmt.excluded.raw_league,
+            "raw_home": stmt.excluded.raw_home,
+            "raw_away": stmt.excluded.raw_away,
+            "raw_start_time_utc": stmt.excluded.raw_start_time_utc,
+            "evidence_json": stmt.excluded.evidence_json,
         },
     )
     await session.execute(stmt)
@@ -3002,6 +3226,21 @@ class MatchReviewIn:
     source_market_id: str | None = None
     evidence: dict[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        require_bounded_identity(self.source, maximum_bytes=32, field="review source")
+        require_bounded_identity(
+            self.source_event_id,
+            maximum_bytes=EVENT_REF_MAX_BYTES,
+            field="review source_event_id",
+        )
+        require_bounded_identity(self.reason, maximum_bytes=64, field="review reason")
+        if self.source_market_id is not None:
+            require_bounded_identity(
+                self.source_market_id,
+                maximum_bytes=64,
+                field="review source_market_id",
+            )
+
 
 async def enqueue_match_reviews(session: AsyncSession, rows: Sequence[MatchReviewIn]) -> int:
     """Bulk-enqueue borderline rejects into match_review_queue. Idempotent by
@@ -3035,12 +3274,22 @@ async def source_link_metrics(session: AsyncSession) -> dict[str, Any]:
     """Roll-up of the cross-source link tables for GET /resolution/match-rate:
     counts + per-source averages over event_source_links and the review-queue
     depth. Read-only and null-safe — empty tables yield zeros/empty maps."""
-    auto_linked = await session.scalar(select(func.count()).select_from(EventSourceLink)) or 0
+    auto_linked = (
+        await session.scalar(
+            select(func.count())
+            .select_from(EventSourceLink)
+            .where(EventSourceLink.active.is_(True))
+        )
+        or 0
+    )
     weak_links = (
         await session.scalar(
             select(func.count())
             .select_from(EventSourceLink)
-            .where(EventSourceLink.confidence_score < Decimal("0.95"))
+            .where(
+                EventSourceLink.active.is_(True),
+                EventSourceLink.confidence_score < Decimal("0.95"),
+            )
         )
         or 0
     )
@@ -3061,7 +3310,9 @@ async def source_link_metrics(session: AsyncSession) -> dict[str, Any]:
                 EventSourceLink.source,
                 func.count(),
                 func.avg(EventSourceLink.confidence_score),
-            ).group_by(EventSourceLink.source)
+            )
+            .where(EventSourceLink.active.is_(True))
+            .group_by(EventSourceLink.source)
         )
     ).all()
     return {
@@ -3115,6 +3366,20 @@ class AnchorVerdictIn:
     inline_captured_at: datetime | None
     api_captured_at: datetime
     decision: str
+
+    def __post_init__(self) -> None:
+        require_bounded_identity(
+            self.event_ref,
+            maximum_bytes=EVENT_REF_MAX_BYTES,
+            field="verdict event_ref",
+        )
+        require_bounded_identity(self.market, maximum_bytes=64, field="verdict market")
+        require_bounded_identity(
+            self.selection_role,
+            maximum_bytes=16,
+            field="verdict selection_role",
+        )
+        require_bounded_identity(self.decision, maximum_bytes=16, field="verdict decision")
 
 
 #: Verdict retention: rows whose api_captured_at is older than this are swept
@@ -4011,10 +4276,9 @@ async def sharp_slate_coverage(
     (Betfair *Sportsbook* is soft — only the *Exchange* is sharp). Read-only."""
     from app.resolution.shadow import SlateSharpCoverage
 
-    # NULL-SAFE (mirrors betfair_staleness_metrics): the match-rate route runs
-    # this via _own_session, which yields None when no session factory is
-    # configured (tests / degraded boot) — return an empty coverage (rates
-    # None -> "n/a") rather than 500 the whole panel.
+    # NULL-SAFE (mirrors betfair_staleness_metrics): retain a defensive None
+    # fallback for direct callers and degraded tests. The production route
+    # always supplies either a lifespan-owned or request-scoped DB session.
     if session is None:
         return SlateSharpCoverage(soft_events=0, betfair_events=0, pinnacle_events=0)
     now = now if now is not None else datetime.now(tz=UTC)
@@ -4292,10 +4556,38 @@ async def pinnacle_archive_capture_by_sport(
 PickPersistOutcome = Literal["inserted", "upgraded", "duplicate", "duplicate_denied"]
 
 
+@dataclass(frozen=True)
+class PickRepriced:
+    """An existing actionable pick whose offered line changed.
+
+    The previous total recommendation lets the pipeline reserve only the
+    positive stake delta before committing the updated row. Returning metadata
+    only for this path keeps the long-standing string outcomes stable.
+    """
+
+    previous_stake_fraction: float
+    outcome: Literal["repriced"] = "repriced"
+
+
+def _settlement_basis_terms(
+    stake_amount: Decimal,
+    bookmaker: str,
+    decimal_odds: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """Raw/effective odds×stake terms for the blended settlement basis."""
+    from app.edge.value import effective_odds
+
+    if stake_amount < 0:
+        raise ValueError("settlement stake amount must be non-negative")
+    effective = Decimal(str(effective_odds(bookmaker, float(decimal_odds))))
+    return stake_amount * decimal_odds, stake_amount * effective
+
+
 async def _supersede_older_versions(
     session: AsyncSession,
     event_id: int,
     market: str,
+    market_detail: str | None,
     selection: str,
     model_version_id: int,
     tier: str,
@@ -4309,6 +4601,7 @@ async def _supersede_older_versions(
     conditions = [
         Pick.event_id == event_id,
         Pick.market == market,
+        Pick.market_detail.is_not_distinct_from(market_detail),
         Pick.selection == selection,
         Pick.model_version_id != model_version_id,
         Pick.status == "alerted",
@@ -4324,7 +4617,7 @@ async def persist_pick(
     teams: EventTeams,
     model_name: str,
     model_version: str,
-) -> PickPersistOutcome:
+) -> PickPersistOutcome | PickRepriced:
     """Resolve entities and insert the pick (tier comes from pick.tier).
 
     Returns:
@@ -4348,6 +4641,31 @@ async def persist_pick(
     (open -> settled/superseded/void) shared by revalidation and settlement;
     `tier` alone scopes alerting, exposure, and reporting.
     """
+    pick_selection = require_bounded_identity(
+        pick.selection, maximum_bytes=SELECTION_MAX_BYTES, field="pick selection"
+    )
+    pick_bookmaker = require_bounded_identity(
+        pick.bookmaker, maximum_bytes=BOOKMAKER_MAX_BYTES, field="pick bookmaker"
+    )
+    pick_market_detail = (
+        require_bounded_identity(
+            pick.market_detail,
+            maximum_bytes=MARKET_DETAIL_MAX_BYTES,
+            field="pick market_detail",
+            allow_empty=True,
+        )
+        if pick.market_detail is not None
+        else None
+    )
+    pick_anchor_book = (
+        require_bounded_identity(
+            pick.anchor_book,
+            maximum_bytes=BOOKMAKER_MAX_BYTES,
+            field="pick anchor_book",
+        )
+        if pick.anchor_book is not None
+        else None
+    )
     sport_id = await _get_or_create_sport(session, pick.sport, pick.sport.title())
     # country is part of league IDENTITY — pass the loader's country through so
     # the pick path resolves the SAME (sport, key, country) row the snapshot
@@ -4370,6 +4688,12 @@ async def persist_pick(
     model_version_id = await _get_or_create_model_version(
         session, sport_id, model_name, model_version
     )
+    pick_odds = Decimal(str(pick.decimal_odds))
+    initial_raw_basis, initial_effective_basis = _settlement_basis_terms(
+        pick.recommended_stake_amount,
+        pick_bookmaker,
+        pick_odds,
+    )
 
     stmt = (
         pg_insert(Pick)
@@ -4377,12 +4701,12 @@ async def persist_pick(
             event_id=event_id,
             model_version_id=model_version_id,
             market=str(pick.market),
-            selection=pick.selection,
+            selection=pick_selection,
             # Mint-time CANONICAL devig-group detail (exact CLV close matching;
             # NULL = lineless market or pre-column mint path).
-            market_detail=pick.market_detail,
-            bookmaker=pick.bookmaker,
-            decimal_odds=Decimal(str(pick.decimal_odds)),
+            market_detail=pick_market_detail,
+            bookmaker=pick_bookmaker,
+            decimal_odds=pick_odds,
             model_probability=Decimal(str(pick.model_probability)),
             fair_probability=Decimal(str(pick.fair_probability)),
             edge=Decimal(str(pick.edge)),
@@ -4390,6 +4714,13 @@ async def persist_pick(
             confidence=Decimal(str(pick.confidence)),
             recommended_stake_fraction=Decimal(str(pick.recommended_stake_fraction)),
             recommended_stake_amount=pick.recommended_stake_amount,
+            settlement_stake_amount=pick.recommended_stake_amount,
+            settlement_raw_odds_stake=initial_raw_basis,
+            settlement_effective_odds_stake=initial_effective_basis,
+            settlement_basis_bookmaker=(
+                pick_bookmaker if pick.recommended_stake_amount > 0 else None
+            ),
+            settlement_basis_repriced=False,
             stake_breakdown=pick.stake_breakdown.model_dump(),
             reason_summary=pick.reason_summary,
             status="alerted",
@@ -4402,7 +4733,7 @@ async def persist_pick(
             anchor_type=pick.anchor_type,
             # CLV-3: the concrete pick-time anchor BOOK (behind anchor_type) so the CLV
             # close can test BOOK independence, not just anchor-type equality.
-            anchor_book=pick.anchor_book,
+            anchor_book=pick_anchor_book,
             # anchor MATCH-CONFIDENCE provenance (observability only): how the
             # sharp anchor was matched to this fixture and how confident the
             # matcher was. NULL/NULL = consensus/model pick or pre-column row.
@@ -4452,7 +4783,13 @@ async def persist_pick(
     inserted = result.scalar_one_or_none()
     if inserted is not None:
         await _supersede_older_versions(
-            session, event_id, str(pick.market), pick.selection, model_version_id, pick.tier
+            session,
+            event_id,
+            str(pick.market),
+            pick_market_detail,
+            pick_selection,
+            model_version_id,
+            pick.tier,
         )
         return "inserted"
 
@@ -4460,7 +4797,8 @@ async def persist_pick(
         select(Pick).where(
             Pick.event_id == event_id,
             Pick.market == str(pick.market),
-            Pick.selection == pick.selection,
+            Pick.market_detail.is_not_distinct_from(pick_market_detail),
+            Pick.selection == pick_selection,
             Pick.model_version_id == model_version_id,
         )
     )
@@ -4474,7 +4812,7 @@ async def persist_pick(
         # alert threshold. Promote the row in place with the premium
         # detection's market numbers (the alert must quote the row).
         existing.tier = "premium"
-        existing.bookmaker = pick.bookmaker
+        existing.bookmaker = pick_bookmaker
         existing.decimal_odds = Decimal(str(pick.decimal_odds))
         existing.model_probability = Decimal(str(pick.model_probability))
         existing.fair_probability = Decimal(str(pick.fair_probability))
@@ -4483,6 +4821,13 @@ async def persist_pick(
         existing.confidence = Decimal(str(pick.confidence))
         existing.recommended_stake_fraction = Decimal(str(pick.recommended_stake_fraction))
         existing.recommended_stake_amount = pick.recommended_stake_amount
+        existing.settlement_stake_amount = pick.recommended_stake_amount
+        existing.settlement_raw_odds_stake = initial_raw_basis
+        existing.settlement_effective_odds_stake = initial_effective_basis
+        existing.settlement_basis_bookmaker = (
+            pick_bookmaker if pick.recommended_stake_amount > 0 else None
+        )
+        existing.settlement_basis_repriced = False
         existing.stake_breakdown = pick.stake_breakdown.model_dump()
         existing.reason_summary = pick.reason_summary
         # the promoting detection's score replaces the shadow row's (it is
@@ -4495,7 +4840,7 @@ async def persist_pick(
         # likewise the promoting detection's anchor: the row must describe
         # the alert the operator acts on
         existing.anchor_type = pick.anchor_type
-        existing.anchor_book = pick.anchor_book
+        existing.anchor_book = pick_anchor_book
         existing.anchor_match_confidence = (
             Decimal(str(round(pick.anchor_match_confidence, 6)))
             if pick.anchor_match_confidence is not None
@@ -4567,7 +4912,13 @@ async def persist_pick(
         existing.revalidated_at = None
         await session.flush()
         await _supersede_older_versions(
-            session, event_id, str(pick.market), pick.selection, model_version_id, "premium"
+            session,
+            event_id,
+            str(pick.market),
+            pick_market_detail,
+            pick_selection,
+            model_version_id,
+            "premium",
         )
         return "upgraded"
     if existing is not None and existing.recommended_stake_fraction <= 0:
@@ -4575,6 +4926,80 @@ async def persist_pick(
         # granted nothing when this row was inserted) — the re-detection must
         # never dispatch the alert the cap refused.
         return "duplicate_denied"
+    if (
+        existing is not None
+        and pick.tier == "premium"
+        and existing.tier == "premium"
+        and existing.status == "alerted"
+        and (
+            existing.decimal_odds != Decimal(str(pick.decimal_odds))
+            or existing.bookmaker != pick_bookmaker
+        )
+    ):
+        # A price or execution-venue move deliberately creates a new notification
+        # key. Persist the same market state the alert quotes, while returning the
+        # old exposure so the caller reserves only an increase. The caller may
+        # overwrite the stake in this SAME transaction when the remaining daily
+        # room clips it.
+        previous = float(existing.recommended_stake_fraction)
+        existing.settlement_basis_repriced = True
+        existing.bookmaker = pick_bookmaker
+        existing.decimal_odds = Decimal(str(pick.decimal_odds))
+        existing.model_probability = Decimal(str(pick.model_probability))
+        existing.fair_probability = Decimal(str(pick.fair_probability))
+        existing.edge = Decimal(str(pick.edge))
+        existing.ev = Decimal(str(pick.ev))
+        existing.confidence = Decimal(str(pick.confidence))
+        existing.recommended_stake_fraction = Decimal(str(pick.recommended_stake_fraction))
+        existing.recommended_stake_amount = pick.recommended_stake_amount
+        existing.stake_breakdown = pick.stake_breakdown.model_dump()
+        existing.reason_summary = pick.reason_summary
+        existing.value_filter_score = (
+            Decimal(str(round(pick.value_filter_score, 6)))
+            if pick.value_filter_score is not None
+            else None
+        )
+        existing.anchor_type = pick.anchor_type
+        existing.anchor_book = pick_anchor_book
+        existing.anchor_match_confidence = (
+            Decimal(str(round(pick.anchor_match_confidence, 6)))
+            if pick.anchor_match_confidence is not None
+            else None
+        )
+        existing.anchor_match_method = pick.anchor_match_method
+        existing.anchor_staleness_decision = pick.anchor_staleness_decision
+        existing.steam_tripped = pick.steam_tripped
+        existing.steam_reasons = pick.steam_reasons
+        existing.steam_closed_fraction = (
+            Decimal(str(round(pick.steam_closed_fraction, 6)))
+            if pick.steam_closed_fraction is not None
+            else None
+        )
+        existing.steam_anchor_age_seconds = (
+            Decimal(str(round(pick.steam_anchor_age_seconds, 6)))
+            if pick.steam_anchor_age_seconds is not None
+            else None
+        )
+        existing.anchor_book_count = getattr(pick, "anchor_book_count", None)
+        existing.policy_fingerprint = pick.policy_fingerprint
+        existing.mint_devig_fell_back = pick.mint_devig_fell_back
+        existing.closing_odds = None
+        existing.closing_fair_probability = None
+        existing.clv_log = None
+        existing.beat_close = None
+        existing.closing_anchor_type = None
+        existing.has_snapshot_close = None
+        existing.close_independent_of_fill = None
+        existing.close_exclusion_reason = None
+        existing.close_devig_fell_back = None
+        existing.close_anchor_book = None
+        existing.close_snapshot_captured_at = None
+        existing.current_odds = None
+        existing.current_edge = None
+        existing.current_bookmaker = None
+        existing.revalidated_at = None
+        await session.flush()
+        return PickRepriced(previous_stake_fraction=previous)
     return "duplicate"
 
 
@@ -4586,15 +5011,22 @@ async def update_pick_stake(
     model_version: str,
     *,
     persist_tier: bool = False,
+    exposure_reserved_on: date | None = None,
+    exposure_reserved_delta: float = 0.0,
+    settlement_basis_increment_amount: Decimal | None = None,
 ) -> bool:
     """Overwrite an already-persisted pick's recommended stake with the value
     actually reserved by the daily-exposure ledger.
 
-    BUG 2: picks are persisted (per-bet-capped Kelly) BEFORE the daily-exposure
-    reservation runs, so a pick whose stake the daily cap then clips would keep
-    the pre-clip amount on its row — the persisted/reported stake would escape
-    the daily cap and diverge from what the ledger reserved. The pipeline calls
-    this AFTER a clip to bring the row in line with the granted stake.
+    The pipeline invokes this in the same transaction as ``persist_pick`` and
+    the daily-exposure reservation. It writes the cap-adjusted total before
+    commit, so the persisted/reported stake cannot diverge from the ledger
+    grant. Repricing may also use it when the total is unchanged but a durable
+    positive exposure delta still needs to be recorded. By default the
+    settlement basis is RESET to this cap-adjusted recommendation (new insert
+    or volume->premium upgrade). Repricing passes
+    ``settlement_basis_increment_amount`` so only the newly granted amount is
+    accumulated at the new price; zero leaves the previous fill basis intact.
 
     Resolves the same natural key as `persist_pick` (the get-or-create lookups
     are idempotent: the row already exists). Returns True when a row was
@@ -4610,6 +5042,22 @@ async def update_pick_stake(
     takes the volume->premium UPGRADE path in ``persist_pick`` — the denial
     is no longer permanent once daily capacity frees up.
     """
+    pick_selection = require_bounded_identity(
+        pick.selection, maximum_bytes=SELECTION_MAX_BYTES, field="pick selection"
+    )
+    pick_bookmaker = require_bounded_identity(
+        pick.bookmaker, maximum_bytes=BOOKMAKER_MAX_BYTES, field="pick bookmaker"
+    )
+    pick_market_detail = (
+        require_bounded_identity(
+            pick.market_detail,
+            maximum_bytes=MARKET_DETAIL_MAX_BYTES,
+            field="pick market_detail",
+            allow_empty=True,
+        )
+        if pick.market_detail is not None
+        else None
+    )
     sport_id = await _get_or_create_sport(session, pick.sport, pick.sport.title())
     # same (sport, key, country) league identity as persist_pick — never a ''-twin
     league_id = await _get_or_create_league(session, sport_id, pick.league, teams.country)
@@ -4625,7 +5073,8 @@ async def update_pick_stake(
         select(Pick).where(
             Pick.event_id == event_id,
             Pick.market == str(pick.market),
-            Pick.selection == pick.selection,
+            Pick.market_detail.is_not_distinct_from(pick_market_detail),
+            Pick.selection == pick_selection,
             Pick.model_version_id == model_version_id,
         )
     )
@@ -4634,6 +5083,56 @@ async def update_pick_stake(
     existing.recommended_stake_fraction = Decimal(str(pick.recommended_stake_fraction))
     existing.recommended_stake_amount = pick.recommended_stake_amount
     existing.stake_breakdown = pick.stake_breakdown.model_dump()
+    odds = Decimal(str(pick.decimal_odds))
+    if settlement_basis_increment_amount is None:
+        raw_term, effective_term = _settlement_basis_terms(
+            pick.recommended_stake_amount,
+            pick_bookmaker,
+            odds,
+        )
+        existing.settlement_stake_amount = pick.recommended_stake_amount
+        existing.settlement_raw_odds_stake = raw_term
+        existing.settlement_effective_odds_stake = effective_term
+        existing.settlement_basis_bookmaker = (
+            pick_bookmaker if pick.recommended_stake_amount > 0 else None
+        )
+        existing.settlement_basis_repriced = False
+    else:
+        increment = settlement_basis_increment_amount
+        if increment < 0:
+            raise ValueError("settlement_basis_increment_amount must be non-negative")
+        if increment > 0:
+            raw_term, effective_term = _settlement_basis_terms(
+                increment,
+                pick_bookmaker,
+                odds,
+            )
+            previous_basis = existing.settlement_stake_amount or Decimal("0")
+            existing.settlement_stake_amount = previous_basis + increment
+            existing.settlement_raw_odds_stake = (
+                existing.settlement_raw_odds_stake or Decimal("0")
+            ) + raw_term
+            existing.settlement_effective_odds_stake = (
+                existing.settlement_effective_odds_stake or Decimal("0")
+            ) + effective_term
+            if previous_basis <= 0:
+                existing.settlement_basis_bookmaker = pick_bookmaker
+            elif existing.settlement_basis_bookmaker != pick_bookmaker:
+                # Positive basis + NULL means more than one execution venue.
+                # CLV treats this conservatively because no single book proves
+                # close independence for every tranche.
+                existing.settlement_basis_bookmaker = None
+    if exposure_reserved_delta < 0.0:
+        raise ValueError("exposure_reserved_delta must be non-negative")
+    if exposure_reserved_on is not None and exposure_reserved_delta > 0.0:
+        delta = Decimal(str(exposure_reserved_delta))
+        if existing.exposure_reserved_on == exposure_reserved_on:
+            existing.exposure_reserved_fraction = (
+                existing.exposure_reserved_fraction or Decimal("0")
+            ) + delta
+        else:
+            existing.exposure_reserved_on = exposure_reserved_on
+            existing.exposure_reserved_fraction = delta
     if persist_tier:
         existing.tier = pick.tier
         existing.reason_summary = pick.reason_summary
@@ -4976,10 +5475,10 @@ async def _settled_trust_rows(session: AsyncSession) -> list[tuple[Any, ...]]:
         Pick.market,
         ResultTracking.settled_at,
         Pick.clv_log,
-        Pick.decimal_odds,
+        _result_settlement_effective_odds_expr(),
         Pick.closing_fair_probability,
         Pick.model_probability,
-        Pick.bookmaker,  # effective-odds CLV-1 guard input (read/write alignment)
+        _result_settlement_guard_bookmaker_expr(),  # persisted result odds are net
     ]
     optional_idx: dict[str, int | None] = {}
     for name, attr in (
@@ -4991,7 +5490,9 @@ async def _settled_trust_rows(session: AsyncSession) -> list[tuple[Any, ...]]:
     ):
         if attr is not None:
             optional_idx[name] = len(select_cols)
-            select_cols.append(attr)
+            select_cols.append(
+                _settlement_close_independent_expr() if name == "close_independent" else attr
+            )
         else:
             optional_idx[name] = None
     db_rows = (

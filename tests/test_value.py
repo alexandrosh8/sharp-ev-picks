@@ -873,47 +873,39 @@ def test_exchange_liquidity_gate_off_by_default_keeps_exchange_anchor() -> None:
     assert res is not None and res[0] == "betfair exchange"
 
 
-def test_exchange_liquidity_gate_demotes_known_thin_keeps_unknown() -> None:
-    # WP5: floor > 0 + KNOWN liquidity below floor -> Betfair does NOT earn
+def test_exchange_liquidity_gate_demotes_thin_and_unknown() -> None:
+    # WP5: floor > 0 + below-floor liquidity -> Betfair does NOT earn
     # 'sharp'; the anchor falls back to the consensus median. UNKNOWN (None /
-    # absent) liquidity stays anchor-ELIGIBLE — the dominant main-scrape
-    # Betfair rows carry liquidity=None and anchor 59/62 Betfair events
-    # (memory: do-not-remove-main-scrape-betfair); only known-thin is rejected.
+    # absent) liquidity also fails a positive evidence floor.
     from app.edge.value import CONSENSUS_ANCHOR, anchor_fair_probs
 
     thin = {s: {"betfair exchange": 5.0} for s in _EX_PRICES}  # below a 100 floor
     res = anchor_fair_probs(_EX_PRICES, liquidity=thin, exchange_min_liquidity=100.0)
     assert res is not None and res[0] == CONSENSUS_ANCHOR
-    # unknown liquidity (no map) stays eligible under a positive floor
+    # unknown liquidity (no map) cannot satisfy a positive floor
     res2 = anchor_fair_probs(_EX_PRICES, exchange_min_liquidity=100.0)
-    assert res2 is not None and res2[0] == "betfair exchange"
+    assert res2 is not None and res2[0] == CONSENSUS_ANCHOR
 
 
-def test_exchange_liquidity_gate_main_scrape_none_anchors_premium() -> None:
-    # audit-item-#1 regression: the audit asked to "demote unknown-liquidity
-    # exchange anchors from premium". That blanket rule is FORBIDDEN here — the
-    # dominant main-scrape Betfair rows carry liquidity=None BY DESIGN and anchor
-    # 59/62 Betfair events (memory: do-not-remove-main-scrape-betfair). This
-    # locks the safe discriminator (liquidity IS the source signal: None =
-    # main-scrape) even when a liquidity MAP IS PRESENT for the event (a mixed
-    # event where the dedicated capture set liquidity on OTHER books but the
-    # Betfair line is main-scrape). Two unknown encodings must both stay
-    # anchor-ELIGIBLE and premium-eligible (is_sharp_anchored True):
+def test_exchange_liquidity_gate_main_scrape_none_is_shadow_only() -> None:
+    # A positive minimum is provable only from measured liquidity. Two unknown
+    # encodings must both fail closed to consensus (the rows remain available
+    # there and can still accrue shadow evidence):
     #   (1) the exchange key is ABSENT from the per-selection liquidity map,
     #   (2) the exchange key is present with an explicit None value.
-    from app.edge.value import anchor_fair_probs, is_sharp_anchored
+    from app.edge.value import CONSENSUS_ANCHOR, anchor_fair_probs, is_sharp_anchored
 
-    # (1) map present, betfair key absent -> unknown -> stays the sharp anchor
+    # (1) map present, betfair key absent -> unknown -> consensus
     key_absent = {s: {"SoftA": 250.0} for s in _EX_PRICES}
     res = anchor_fair_probs(_EX_PRICES, liquidity=key_absent, exchange_min_liquidity=100.0)
-    assert res is not None and res[0] == "betfair exchange"
-    assert is_sharp_anchored(res[0])  # premium-eligible, not demoted to consensus
+    assert res is not None and res[0] == CONSENSUS_ANCHOR
+    assert not is_sharp_anchored(res[0])
 
-    # (2) map present, betfair value explicitly None -> unknown -> stays eligible
+    # (2) map present, betfair value explicitly None -> unknown -> consensus
     value_none = {s: {"betfair exchange": None} for s in _EX_PRICES}
     res2 = anchor_fair_probs(_EX_PRICES, liquidity=value_none, exchange_min_liquidity=100.0)
-    assert res2 is not None and res2[0] == "betfair exchange"
-    assert is_sharp_anchored(res2[0])
+    assert res2 is not None and res2[0] == CONSENSUS_ANCHOR
+    assert not is_sharp_anchored(res2[0])
 
 
 def test_exchange_liquidity_gate_keeps_liquid_exchange() -> None:

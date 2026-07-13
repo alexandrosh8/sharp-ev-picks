@@ -36,12 +36,19 @@ from app.risk.staking import StakePolicy
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.storage.models import Event, OddsSnapshot
-from app.storage.repositories import persist_odds_snapshots
+from app.storage.repositories import SnapshotPersistResult, persist_odds_snapshots
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 NOW = datetime.now(tz=UTC)
 EVENT = "evt-odds-persist-1"
-TEAMS = {EVENT: EventTeams(home="Persist Home FC", away="Persist Away FC")}
+TEAMS = {
+    EVENT: EventTeams(
+        home="Persist Home FC",
+        away="Persist Away FC",
+        starts_at=NOW + timedelta(hours=6),
+    )
+}
 
 POLICY = GatePolicy(
     min_edge=0.0,
@@ -117,7 +124,17 @@ def make_deps(
 ) -> PipelineDeps:
     directory = EventDirectory()
     for s in snapshots:
-        directory.register(s.event_id, TEAMS.get(s.event_id, EventTeams(home="H", away="A")))
+        directory.register(
+            s.event_id,
+            TEAMS.get(
+                s.event_id,
+                EventTeams(
+                    home="H",
+                    away="A",
+                    starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+                ),
+            ),
+        )
     return PipelineDeps(
         loader=FakeLoader(snapshots),
         model=NullModel(),
@@ -319,32 +336,32 @@ async def test_unresolvable_event_skipped_and_not_cached(factory) -> None:  # ty
 
 async def test_poisoned_event_does_not_kill_other_events_history(factory) -> None:  # type: ignore[no-untyped-def]
     """Per-event SAVEPOINT isolation: ONE event whose insert fails (here an
-    external_ref longer than events.external_ref String(128) — live max is
-    already 112 chars) must not abort the whole batch. Pre-fix the entire
-    cycle's odds history died, every cycle, for as long as the bad match
-    stayed in the scrape window. The poisoned event leads the batch to prove
-    recovery after its savepoint rollback."""
-    bad_ref = "https://www.oddsportal.com/football/world/" + "x" * 120  # > 128 chars
+    external_ref beyond the shared 512-byte boundary) must not abort the whole
+    batch. Pre-fix the entire cycle's odds history died, every cycle, for as
+    long as the bad match stayed in the scrape window. The poisoned event leads
+    the batch to prove recovery after its savepoint rollback. ``model_copy``
+    deliberately bypasses the schema guard to exercise repository defence."""
+    bad_ref = "https://www.oddsportal.com/football/world/" + "x" * 500
     teams = {
         bad_ref: EventTeams(home="Poison Home FC", away="Poison Away FC"),
         EVENT: TEAMS[EVENT],
     }
-    rows = [
-        snap("Pinnacle", "Poison Sel", 2.10, event=bad_ref),
-        snap("Pinnacle", "Home FC", 2.50),
-    ]
+    poisoned = snap("Pinnacle", "Poison Sel", 2.10).model_copy(update={"event_id": bad_ref})
+    rows = [poisoned, snap("Pinnacle", "Home FC", 2.50)]
     written = await persist_odds_snapshots(factory, rows, teams, "soccer", "test-league")
     assert written == 1  # the healthy event persisted despite the poison
     assert await _rows_for_event(factory, EVENT) == 1
     assert await _rows_for_event(factory, bad_ref) == 0
 
 
-async def test_overlong_free_text_fields_are_clamped_not_fatal(factory) -> None:  # type: ignore[no-untyped-def]
-    """bookmaker/selection are display strings: clamping to their column
-    lengths (64) beats losing the event's whole history to one oversized
-    'TeamName +10.5'-style selection (leagues=all surfaces long slugs)."""
+async def test_long_identity_fields_are_preserved_without_aliasing(factory) -> None:  # type: ignore[no-untyped-def]
+    """Identity strings within the widened schema bounds are stored exactly;
+    truncating them could collapse two distinct books, markets, or selections."""
     rows = [snap("B" * 80, "S" * 80, 2.50)]
-    assert await persist_odds_snapshots(factory, rows, TEAMS, "soccer", "test-league") == 1
+    result = await persist_odds_snapshots(factory, rows, TEAMS, "soccer", "test-league")
+    assert result == 1
+    assert result.successful_event_ids == frozenset({EVENT})
+    assert result.failed_event_ids == frozenset()
 
     async with factory() as session:
         stored = await session.scalar(
@@ -353,8 +370,20 @@ async def test_overlong_free_text_fields_are_clamped_not_fatal(factory) -> None:
             .where(Event.external_ref == EVENT)
         )
     assert stored is not None
-    assert stored.bookmaker == "B" * 64
-    assert stored.selection == "S" * 64
+    assert stored.bookmaker == "B" * 80
+    assert stored.selection == "S" * 80
+
+
+async def test_oversized_identity_is_rejected_without_truncation(factory) -> None:  # type: ignore[no-untyped-def]
+    # Bypass the earlier Pydantic guard to prove the repository independently
+    # rejects, rather than truncates, an oversized instrument identity.
+    poisoned = snap("Pinnacle", "valid", 2.50).model_copy(update={"selection": "S" * 1025})
+    rows = [poisoned]
+    result = await persist_odds_snapshots(factory, rows, TEAMS, "soccer", "test-league")
+    assert result == 0
+    assert result.successful_event_ids == frozenset()
+    assert result.failed_event_ids == frozenset({EVENT})
+    assert await _rows_for_event(factory, EVENT) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +435,31 @@ async def test_last_poll_carries_snapshots_persisted(monkeypatch: pytest.MonkeyP
     assert batches == [6]  # repo not even called for an all-unchanged cycle
 
 
+async def test_incomplete_value_cycle_persists_partial_evidence_but_mints_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.pipeline import LAST_POLL
+
+    batches = patch_persist_counting(monkeypatch)
+    sink = RecordingSink()
+    snapshots = market_snapshots()
+    deps = make_deps(snapshots, session_factory=FakeSessionFactory())
+    deps.dispatcher = AlertDispatcher([sink], InMemoryIdempotencyStore())
+    deps.loader.last_fetch_complete = {"soccer": False}  # type: ignore[attr-defined]
+    deps.loader.last_fetch_completeness_reason = {  # type: ignore[attr-defined]
+        "soccer": "missing expected market btts"
+    }
+
+    assert await run_value_pipeline(deps, "soccer") == []
+    assert sink.sent == []
+    assert batches == [6]  # raw partial rows are still durable evidence
+    poll = LAST_POLL["soccer"]
+    assert poll["snapshots_persisted"] == 6
+    assert poll["degraded"] is True
+    assert poll["source_complete"] is False
+    assert poll["completeness_reason"] == "missing expected market btts"
+
+
 async def test_price_move_is_persisted_again(monkeypatch: pytest.MonkeyPatch) -> None:
     batches = patch_persist_counting(monkeypatch)
     deps = make_deps(market_snapshots(), session_factory=FakeSessionFactory())
@@ -438,7 +492,11 @@ async def test_pipeline_completes_when_snapshot_persistence_raises(
     async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
         return "inserted"
 
+    async def fake_update_pick_stake(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return True
+
     monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", fake_update_pick_stake)
 
     from app.pipeline import LAST_POLL
 
@@ -457,6 +515,38 @@ async def test_no_session_factory_records_none(monkeypatch: pytest.MonkeyPatch) 
     await run_value_pipeline(deps, "soccer")
     assert LAST_POLL["soccer"]["snapshots_persisted"] is None
     assert batches == []
+
+
+async def test_partial_event_failure_advances_only_successful_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.repositories as repos
+
+    good = snap("Book", "Good", 2.10, event="evt-good")
+    bad = snap("Book", "Bad", 2.20, event="evt-bad")
+    batches: list[set[str]] = []
+
+    async def fake_persist(session_factory, snapshots, teams_by_event, sport, default_league):  # type: ignore[no-untyped-def]
+        events = {snapshot.event_id for snapshot in snapshots}
+        batches.append(events)
+        if events == {"evt-good", "evt-bad"}:
+            return SnapshotPersistResult(
+                1,
+                successful_event_ids={"evt-good"},
+                failed_event_ids={"evt-bad"},
+            )
+        return SnapshotPersistResult(1, successful_event_ids=events)
+
+    monkeypatch.setattr(repos, "persist_odds_snapshots", fake_persist)
+    deps = make_deps([good, bad], session_factory=FakeSessionFactory())
+
+    assert await _persist_snapshots(deps, [good, bad], "soccer", "league", NOW) == 1
+    assert {key[0] for key in deps.odds_seen} == {"evt-good"}
+
+    later = NOW + timedelta(minutes=1)
+    assert await _persist_snapshots(deps, [good, bad], "soccer", "league", later) == 1
+    assert batches == [{"evt-good", "evt-bad"}, {"evt-bad"}]
+    assert {key[0] for key in deps.odds_seen} == {"evt-good", "evt-bad"}
 
 
 def test_odds_seen_sweep_evicts_stale_then_oldest() -> None:

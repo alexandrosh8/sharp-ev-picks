@@ -20,7 +20,7 @@ set -euo pipefail
 VENV="/srv/betting-ai/.venv"
 
 attempts=0
-max_attempts=10
+max_attempts=3
 until "$VENV/bin/alembic" upgrade head; do
   attempts=$((attempts + 1))
   if [ "$attempts" -ge "$max_attempts" ]; then

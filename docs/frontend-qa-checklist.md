@@ -1,87 +1,124 @@
-# Dashboard manual QA checklist
+# Dashboard frontend QA checklist
 
-Repeatable pass for `app/api/dashboard.html` (served at `/`). Run after any
-dashboard change, on top of the automated gates (`uv run pytest -q`,
-`bash scripts/safety_audit.sh`). Use a real browser; DevTools device mode is
-fine for the phone widths.
+Repeatable validation for `app/api/dashboard.html` served at `/`.
 
-## 0. Setup
+## 0. Automated gates
 
-- [ ] `docker compose up -d postgres redis`, `uv run uvicorn app.main:app --reload`, open `/`.
-- [ ] Console clean on load (no errors, no unhandled promise rejections).
-- [ ] With `DASHBOARD_AUTH_ENABLED=true`: anonymous `/` → 303 to `/login`; after login → dashboard.
+- [ ] `.venv/bin/python -m pytest tests/test_dashboard_contract.py -q`
+- [ ] `.venv/bin/python -m ruff check scripts/dashboard_qa.py`
+- [ ] `.venv/bin/python -m py_compile scripts/dashboard_qa.py`
+- [ ] Mock-only browser suite when local Chromium is installed:
 
-## 1. Viewports (no horizontal scroll for pick info)
+  ```bash
+  DASHQA_MOCK_ONLY=1 \
+  DASHQA_HTML=/absolute/path/to/sharp-ev-picks/app/api/dashboard.html \
+  DASHQA_OUT=/tmp/sharp-dashboard-qa \
+  .venv/bin/python scripts/dashboard_qa.py
+  ```
 
-Check at **360 / 390 / 430 / 768 / 1024 px**:
+- [ ] Live + mocked container sweep: `bash scripts/dashboard_qa.sh`
+- [ ] `bash scripts/safety_audit.sh`
 
-- [ ] Top status bar wraps cleanly; summary chips (Source Freshness / Premium / Shadow / Open / ROI / CLV) visible, no overlap.
-- [ ] ≤430px: chips collapse to ONE non-wrapping horizontally swipeable strip (no wrap, momentum scroll, no visible scrollbar); total bar height ~90–100px at 360px; health dot + freshness stamp still visible on the top row; brand tagline hidden.
-- [ ] ≤430px: auto-hide still works (scroll down hides, up restores) and the chip strip scrolls horizontally without moving the page.
-- [ ] ≤980px: bottom section nav (PICKS/GAMES/PERF/DIAG) fixed, 44px+ targets; desktop top nav hidden.
-- [ ] Pick cards: no horizontal scroll; event names ellipsize; drift bar fits.
-- [ ] Focusing search/sort/tier on iOS does NOT zoom the page (16px inputs at ≤980px).
-- [ ] Wide tables (Games, Diagnostics, evidence) scroll inside their own `.tscroll` wrapper only.
-- [ ] Scrolling down hides the header (mobile); scrolling up restores it; never stuck hidden at ≥981px.
+## 1. Setup and shell
 
-## 2. Sections & navigation
+- [ ] Start dependencies, then `.venv/bin/python -m uvicorn app.main:app --reload`.
+- [ ] Console is clean: no errors or unhandled promise rejections.
+- [ ] With dashboard auth enabled: anonymous `/` redirects to `/login`; a valid session opens `/`.
+- [ ] `/manifest.webmanifest` loads and `/sw.js` registers without console noise.
+- [ ] Dashboard HTML returns `Cache-Control: no-store` after a deployment.
 
-- [ ] Picks / Games / Performance / Diagnostics switch via top nav AND bottom bar; active state on both.
-- [ ] Section choice persists across reload (localStorage `pt_view`); invalid stored value falls back to Picks.
-- [ ] Entering Games/Diagnostics auto-expands their primary panel.
+## 2. Responsive structure and accessibility
 
-## 3. Picks states (each must be visually distinct, never color-only)
+Check **360 / 390 / 430 / 768 / 1024 / 1440px**:
 
-- [ ] Premium card: solid PREMIUM badge; Shadow card: dashed SHADOW badge + muted/hatched card + "tracked — not actionable" footer.
-- [ ] ALL TIERS: Premium group first, then "Shadow — tracked, not actionable" group header.
-- [ ] State badges: ● LIVE / ○ UNVERIFIED / ■ CLOSED / ▣ SETTLED (glyph + word, not just color).
-- [ ] Risk row: ◈ SHARP / ◇ CONSENSUS / △ MISSING ANCHOR always present (absence is marked).
-- [ ] Freshness: ● Last Updated Nm ago vs ○ STALE; display-only sports carry ▲ DISPLAY-ONLY.
-- [ ] Value-gone pick: faded + "◌ no value now", still listed (no survivorship pruning).
-- [ ] CLV chip states: pending / self-priced / n/a (fabricated or tautological) / dim indicative "consensus close" / trusted green-red; "provisional" tag on open picks with live CLV.
-- [ ] Match Confidence: ≥0.95 renders quiet "Match Confidence: X.XX" stat in the risk row (no warning); <0.95 renders dashed △ WEAK MATCH badge whose tooltip carries the value + method; null confidence renders nothing extra (never "undefined").
-- [ ] Settled: score, ✓ WON / ✕ LOST / ▣ PUSH / ∅ VOID glyph badges, Closing Line, p&l.
-- [ ] CLOSED card only: small dashed "✎ Record result" control (44px+ on mobile); expanding reveals labeled Home/Away score inputs pre-filled from the scraped score; LIVE/UNVERIFIED cards never show it.
-- [ ] Record result submit: success shows "Result recorded — N picks settled." then the card re-renders settled after the auto re-fetch; server error shows inline "Could not record result. (HTTP …)"; killed network shows the timeout variant; expired session redirects to /login.
-- [ ] Record result is keyboard-operable: Tab to the toggle, Enter expands, Tab through inputs, Enter submits.
-- [ ] Missing numeric fields render "—", never NaN/undefined (test a pick with null `decimal_odds` via devtools override).
+- [ ] No document-level horizontal overflow; wide tables scroll only in their own containers.
+- [ ] Desktop rail is visible above 1080px; five-item bottom dock is visible at and below 1080px.
+- [ ] A visible `h1` identifies `sharp-ev-picks` on desktop and mobile.
+- [ ] Mobile text inputs/selects compute to at least 16px, so iOS does not zoom on focus.
+- [ ] Every mobile button, select, text input, summary, and row-button target is at least 44px high.
+- [ ] Event and evidence text wraps or ellipsizes without covering adjacent controls.
+- [ ] Keyboard focus is visible throughout; reduced-motion mode suppresses slide/shimmer/pulse movement.
+- [ ] Heading order, live regions, alert/status roles, and labels are coherent in an accessibility tree.
 
-## 4. Empty & error states (exact copy)
+## 3. Five-view routing
 
-- [ ] Premium empty (live tab): "Nothing currently passes Premium gates. Shadow candidates may still be tracked."
-- [ ] Volume filter empty: "No shadow candidates currently tracked."
-- [ ] Stale poll (stop the scheduler / age the poll): amber banner "Odds data is stale. Picks should not be treated as current."
-- [ ] Stop postgres: red banner (SERVER ERROR/UNRESPONSIVE/OFFLINE distinct), tape shows "Could not load picks.", ledger cells flagged FROZEN/STALE, stamp shows frozen time.
-- [ ] Kill one tier's endpoint only (devtools request blocking): other tier still renders + amber "Could not refresh … picks" note.
-- [ ] 401 (delete session cookie, wait for refresh): "Authentication required." then redirect to /login — no console TypeError.
-- [ ] /health 503-degraded: engine label DEGRADED, chips still populated from the body (not "health: unavailable").
-- [ ] Coverage fetch failing: "Sharp anchor coverage is unavailable or insufficient." in the panel.
+- [ ] Today / Edges / Radar / Lab / Sources work from both rail and dock.
+- [ ] Reloading each hash (`#/today`, `#/edges`, `#/radar`, `#/lab`, `#/sources`) restores that view.
+- [ ] A cold load of `#/edges/<valid-id>` opens the matching drawer only after core data resolves.
+- [ ] `#/edges/<missing-id>` does not freeze body scrolling or open an empty drawer.
+- [ ] A missing ID is normalized only after both pick tiers loaded successfully; a partial outage does not discard it.
 
-## 5. Data honesty spot-checks
+## 4. Edge drawer modal behavior
 
-- [ ] Hero below 50 sharp closes: "n / 50" accruing state, never a blended CLV in its place.
-- [ ] All-closes CLV tile dim + "Indicative only" tooltip.
-- [ ] Tier switch (PREMIUM→ALL) immediately re-renders the beat-close distribution.
-- [ ] Evidence strata under min-n read "insufficient data (n<50)", never point estimates.
-- [ ] All times in the BROWSER timezone; change OS timezone → kickoffs shift accordingly; countdown agrees with wall clock.
-- [ ] Signed percentages (+4.8%), decimal odds 2dp, CLV as % from log-ratio.
+- [ ] Open drawer exposes `role=dialog`, `aria-modal=true`, a title reference, and `aria-hidden=false`.
+- [ ] Backdrop is visible and background body scrolling is disabled while open.
+- [ ] Initial focus moves to Back; Tab/Shift+Tab cycle inside the drawer.
+- [ ] Escape, Back, and backdrop click close the drawer, set `aria-hidden=true`, and restore focus to the invoking row or stable Edges search fallback.
+- [ ] Periodic rendering preserves focus/selection on keyed rows and controls.
 
-## 6. Accessibility
+## 5. Qualification honesty
 
-- [ ] Tab through header → nav → filters → tabs → cards: visible focus ring everywhere; logout reachable.
-- [ ] Headings outline sane (h1 brand, h2 per section/panel) — check with an outline tool.
-- [ ] Pick tabs: `role=tab` + `aria-selected` + `aria-controls="cards"`; banner has `role=alert`; stale banner `role=status`; stamp region `aria-live`.
-- [ ] Table headers carry `scope="col"`.
-- [ ] `prefers-reduced-motion`: no pulse/shimmer/slide animations.
-- [ ] Contrast spot-check (DevTools): chip text on chip bg, faint text on cards ≥ 4.5:1.
+Use at least seven qualifying Premium rows plus these counterexamples:
 
-## 7. Language / safety
+- [ ] The Qualified KPI reports the full qualifying count; the Today list remains capped at five.
+- [ ] A row cannot qualify without `structural_sane === true`.
+- [ ] A row cannot qualify without a sharp/Pinnacle anchor, bounded confidence, or match method.
+- [ ] A started, missing, or invalid kickoff cannot qualify.
+- [ ] A missing/invalid offered price or `current_edge` below its tier floor cannot qualify.
+- [ ] A missing, invalid, stale, or future `revalidated_at` cannot qualify.
+- [ ] Premium endpoint failure changes the KPI to `—`; retained Premium cache is explicitly non-actionable.
+- [ ] Volume-only failure retains valid Premium qualification but raises the global degraded state.
 
-- [ ] No "lock(ed)", "guaranteed", "sure bet", "easy money" anywhere (also enforced by
-      `test_dashboard_avoids_promotional_language`).
-- [ ] "This system never places bets" + "not a profit guarantee" visible (legend + performance safety note).
-- [ ] Suggested Stake reads as informational fraction of bankroll with the never-a-guarantee tooltip.
+## 6. Health, transport, and schema failures
 
-## 8. PWA / caching
+Exercise each endpoint with DevTools interception or the mocked QA harness:
 
-- [ ] `/manifest.webmanifest` loads; SW registers without console noise; dashboard HTML `Cache-Control: no-store` (fresh shell after deploy).
+- [ ] Request deadline covers headers and the complete body; a body stalled beyond 15s becomes a timeout state.
+- [ ] Empty, malformed, wrong-shape, and over-4MiB JSON fail closed without a console exception.
+- [ ] `/health` accepts only HTTP 200 + `status=ok` or HTTP 503 + `status=degraded`.
+- [ ] Wrong HTTP/body status pairing is rejected as unknown health.
+- [ ] Missing picks-only health detail, invalid ages/windows, or future poll completion fails closed.
+- [ ] Cold start (`polls={}`, no completed poll) displays the unverified message and Qualified `—`.
+- [ ] Stale/degraded health keeps cached displays visible but never marks them Verified or actionable.
+- [ ] A 401 shows Authentication required and redirects to `/login` without a TypeError.
+
+## 7. Partial failure and last-good data
+
+- [ ] Premium and Volume retain independent last-good rows and timestamps.
+- [ ] Games, Performance, and Health retain last-good payloads after refresh failure.
+- [ ] The red global banner enumerates each failed source and says when cached data is shown.
+- [ ] Today/Edges/Radar/Lab/Sources label cached counts or panels; none silently resemble fresh data.
+- [ ] Review queue, promotion distance, bankroll, match ceiling, and match-rate panels display explicit refresh-failed/cache copy.
+- [ ] A first-load failure with no cache uses a true unavailable/empty state, not `0`.
+
+## 8. Refresh lifecycle
+
+- [ ] Normal visible operation refreshes countdown rendering every 30s and core data every 60s.
+- [ ] No countdown/core polling fires while the document is hidden.
+- [ ] Returning to a visible tab immediately re-renders countdowns and requests current data.
+- [ ] A focused or dirty result form is never replaced by periodic refresh.
+- [ ] A non-dirty form may refresh normally.
+
+## 9. Result entry
+
+For a closed unsettled pick with `scraped_score="2-1"`:
+
+- [ ] Home/Away inputs are prefilled `2` and `1` and have unique IDs/labels.
+- [ ] Enter from either score input submits the native form; click submission also works.
+- [ ] Missing home/away and non-integer/out-of-range values identify and focus the exact invalid field.
+- [ ] Success reads `Result recorded — N picks settled.` before refresh.
+- [ ] HTTP failure includes `(HTTP N)`; timeout says `No answer within 15s`; network and invalid-response failures are distinct.
+- [ ] The JSON response is schema checked and body consumption stays inside the request deadline.
+
+## 10. CSV export
+
+- [ ] Export follows the active search/tier/status/sort filters.
+- [ ] Commas, quotes, CR, and LF produce valid RFC 4180 cells and CRLF rows.
+- [ ] Cells beginning with optional whitespace/control characters followed by `=`, `+`, `-`, or `@` receive a leading apostrophe.
+- [ ] Test event names and selections such as `=2+2`, `+cmd`, `-1+2`, and `@SUM(A1:A2)`.
+
+## 11. Language and safety
+
+- [ ] No promotional claims (`sure bet`, `easy money`, `best bet`, `risk-free`, guaranteed, or lock language).
+- [ ] Picks-only/informational/never-places-bets framing remains visible.
+- [ ] Untrusted, stale, inconsistent, and Shadow rows remain clearly non-actionable without relying on color alone.

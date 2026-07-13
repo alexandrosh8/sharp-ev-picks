@@ -566,3 +566,186 @@ def test_close_age_histogram_rendered_with_capture_caveat() -> None:
     assert "close_age_histogram" in text
     assert "capture time vs kickoff" in text
     assert "by_anchor" in text
+
+
+def test_response_deadline_covers_streamed_body_and_caps_json_size() -> None:
+    """Headers alone never clear the request deadline; the JSON body is read
+    incrementally, byte-capped, parsed, and only then releases the guard."""
+    text = _text()
+    assert "const responseGuards = new WeakMap()" in text
+    assert "const MAX_JSON_BYTES = 4 * 1024 * 1024" in text
+    assert "async function readJsonBody" in text
+    assert "res.body.getReader()" in text
+    assert "received > MAX_JSON_BYTES" in text
+    assert '"PayloadTooLargeError"' in text
+    assert "releaseResponseGuard(res)" in text
+    assert "const [premiumBodyR, volumeBodyR, gamesBodyR, perfBodyR, healthBodyR]" in text
+    assert "jsonOf(premiumR" in text and "healthOf(healthR)" in text
+    # One raw network primitive remains, inside fetchGuarded only.
+    assert text.count("fetch(") == 1
+
+
+def test_health_contract_and_cold_start_fail_closed() -> None:
+    text = _text()
+    assert "function validateHealthPayload" in text
+    assert 'httpStatus === 200 && health.status !== "ok"' in text
+    assert 'httpStatus === 503 && health.status !== "degraded"' in text
+    assert 'health.mode !== "picks-only"' in text
+    assert "function healthHasCompletedPoll" in text
+    assert "finishedAt <= Date.now()" in text
+    assert "health.newest_poll_age_seconds === null" in text
+    assert "Health payload contains an invalid poll record." in text
+    assert "if (!healthHasCompletedPoll(health)) return true" in text
+    assert "function healthIsTrusted" in text
+    assert "no completed poll cycle yet" in text
+
+
+def test_actionability_requires_current_structural_and_temporal_evidence() -> None:
+    text = _text()
+    actionable = text[text.index("function isActionable") : text.index("function isRankable")]
+    assert "p.structural_sane === true" in actionable
+    assert "state.premiumErr === null" in actionable
+    assert "state.premiumLastGoodAt !== null" in actionable
+    assert "hasFutureKickoff(p)" in actionable
+    assert "hasQualifyingEdgeNow(p, health)" in actionable
+    assert "healthIsTrusted(health)" in actionable
+    edge_group = text[text.index("function edgeGroupOf") : text.index("function edgeFloorOf")]
+    assert 'if (isActionable(p, state.health)) return "actionable"' in edge_group
+    assert "const stakeGated = !isActionable(p, state.health)" in text
+    assert "const MAX_FUTURE_TIMESTAMP_MS = 0" in text
+    assert "age >= -MAX_FUTURE_TIMESTAMP_MS" in text
+
+
+def test_tier_failures_retain_last_good_rows_and_raise_global_degraded_state() -> None:
+    text = _text()
+    for token in (
+        "premiumErr",
+        "volumeErr",
+        "premiumLastGoodAt",
+        "volumeLastGoodAt",
+        "gamesLastGoodAt",
+        "perfLastGoodAt",
+        "healthLastGoodAt",
+        "globalDegraded",
+    ):
+        assert token in text
+    assert "premiumRows || oldPremium" in text
+    assert "volumeRows || oldVolume" in text
+    assert "Could not refresh premium picks — showing the last loaded rows" in text
+    assert "Could not refresh volume picks — showing the last loaded rows" in text
+    assert "cached premium rows cannot qualify" in text
+
+
+def test_qualified_kpi_counts_full_set_but_is_unavailable_without_trust() -> None:
+    text = _text()
+    today = text[text.index("function renderToday") : text.index("// ===== EDGES")]
+    assert (
+        "const qualificationAvailable = state.premiumErr === null && healthIsTrusted(health)"
+        in today
+    )
+    assert today.count('qualificationAvailable ? String(qualified.length) : "—"') >= 2
+    # The display list is capped separately; the KPI never reads its length.
+    assert ".slice(0, 5)" in today
+    assert 'String(actionable.length), "Qualified now"' not in today
+
+
+def test_csv_export_neutralizes_spreadsheet_formulas() -> None:
+    text = _text()
+    assert "function csvSafeCell" in text
+    assert re.search(r"\[=\+\\-@\]", text)
+    assert 'cell = "\'" + cell' in text
+    assert "cols.map(csvSafeCell)" in text
+    assert 'lines.join("\\r\\n")' in text
+
+
+def test_edges_deep_link_is_an_accessible_modal_route() -> None:
+    text = _text()
+    assert 'role="dialog" aria-modal="true" aria-labelledby="edge-detail-title"' in text
+    assert 'id="edge-backdrop"' in text
+    assert "function syncDrawerFromRoute" in text
+    assert 'selectedId = boot.view === "edges" ? boot.id : null' in text
+    assert "rememberDrawerOpener" in text
+    assert "restoreDrawerOpener" in text
+    assert "requestDrawerClose" in text
+    assert 'if (ev.key !== "Tab") return' in text
+    assert 'detail.setAttribute("aria-hidden", "false")' in text
+    assert 'detail.setAttribute("aria-hidden", "true")' in text
+
+
+def test_refresh_preserves_focus_and_pauses_while_hidden_or_editing() -> None:
+    text = _text()
+    assert "function captureFocusState" in text
+    assert "function restoreFocusState" in text
+    assert 'row.dataset.focusKey = "pick-" + String(p.id)' in text
+    assert "function operatorIsEditingResult" in text
+    assert 'form.dataset.dirty === "true"' in text
+    assert 'form.dataset.dirty = "true"' in text
+    editing_guard = text[
+        text.index("function operatorIsEditingResult") : text.index("// ===== boot")
+    ]
+    assert 'detail.getAttribute("aria-hidden") !== "false"' in editing_guard
+    assert '!detail.classList.contains("open")' in editing_guard
+    assert "document.hidden || operatorIsEditingResult()" in text
+    assert 'document.addEventListener("visibilitychange"' in text
+
+
+def test_system_condition_distinguishes_health_and_partial_refresh_failures() -> None:
+    text = _text()
+    condition = text[text.index("function systemCondition") : text.index("function renderGlobal")]
+    assert "state.healthErr !== null || !health" in condition
+    assert 'health.status === "degraded"' in condition
+    assert "coreRefreshHasErrors()" in condition
+    assert 'label: "Health unknown"' in condition
+    assert 'label: "Source Degraded"' in condition
+    assert 'label: "Data refresh degraded"' in condition
+    assert 'label: "Health unverified"' in condition
+
+    pill_start = text.index("function renderPill")
+    pill = text[pill_start : text.index('$("system-pill").addEventListener', pill_start)]
+    assert "systemCondition(health)" in pill
+    assert "state.globalDegraded" not in pill
+
+
+def test_mobile_has_visible_heading_zoom_safe_inputs_and_touch_targets() -> None:
+    text = _text()
+    assert '<div class="topbar-brand">' in text
+    assert "<h1>sharp-ev-picks</h1>" in text
+    mobile = text[
+        text.index("@media (max-width: 1080px)") : text.index("@media (max-width: 960px)")
+    ]
+    assert "input, select, textarea { font-size: 16px !important; }" in mobile
+    assert "min-height: 44px" in mobile
+    assert "min-width: 44px" in mobile
+
+
+def test_result_form_supports_prefill_enter_schema_and_specific_errors() -> None:
+    text = _text()
+    form = text[
+        text.index("function validateSettlementPayload") : text.index("function renderEdgeDetail")
+    ]
+    assert 'document.createElement("form")' in form
+    assert 'submit.type = "submit"' in form
+    assert 'form.addEventListener("submit"' in form
+    assert "p.scraped_score.match" in form
+    assert "validateSettlementPayload" in form
+    assert "Result recorded — " in form
+    assert "picks settled." in form
+    assert "Could not record result. No answer within 15s." in form
+    assert "Could not record result. (HTTP " in form
+    assert "Could not record result. Network error." in form
+    assert 'note.setAttribute("aria-live", "polite")' in form
+
+
+def test_cached_core_and_lazy_panels_surface_refresh_failures() -> None:
+    text = _text()
+    for marker in ("radar-cache-notice", "lab-cache-notice", "sources-cache-notice"):
+        assert f'id="{marker}"' in text
+    for copy in (
+        "Could not refresh review queue — showing last loaded data.",
+        "Could not refresh promotion distance — showing last loaded data.",
+        "Could not refresh bankroll — showing last loaded data.",
+        "Could not refresh match ceiling — showing last loaded data.",
+        "Could not refresh performance data — showing last loaded evidence",
+        "Could not refresh games — showing last loaded fixtures",
+    ):
+        assert copy in text

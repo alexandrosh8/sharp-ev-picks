@@ -38,6 +38,7 @@ from app.edge.value import (
     persisted_close_independent,
 )
 from app.edge.value_policy import ValuePolicy
+from app.identity import BOOKMAKER_MAX_BYTES, require_bounded_identity
 from app.ingestion.base import EventDirectory, OddsLoader
 from app.pipeline import (
     GroupedMarkets,
@@ -63,6 +64,22 @@ logger = logging.getLogger(__name__)
 # Shared frozen no-op policy for the default-OFF path (ruff B008: no call in a
 # function default). ValuePolicy is immutable, so one instance is safe to share.
 _EMPTY_VALUE_POLICY = ValuePolicy()
+
+
+def _settlement_fill_for_clv(pick: Pick) -> tuple[float, str, bool]:
+    """Blended commission-net fill, representative book, mixed-book flag."""
+    stake = pick.settlement_stake_amount or Decimal("0")
+    effective_term = pick.settlement_effective_odds_stake or Decimal("0")
+    if stake > 0 and effective_term > 0:
+        provenance_untrusted = (
+            pick.settlement_basis_bookmaker is None or pick.settlement_basis_repriced
+        )
+        return (
+            float(effective_term / stake),
+            pick.settlement_basis_bookmaker or pick.bookmaker,
+            provenance_untrusted,
+        )
+    return effective_odds(pick.bookmaker, float(pick.decimal_odds)), pick.bookmaker, False
 
 
 def _best_soft_book(books: dict[str, float]) -> tuple[str | None, float | None]:
@@ -486,7 +503,7 @@ async def revalidate_open_picks(
             if closing_fair is None or not 0.0 < closing_fair < 1.0:
                 continue
             # EFFECTIVE fill vs net-anchored close — see docstring convention.
-            fill_eff = effective_odds(pick.bookmaker, float(pick.decimal_odds))
+            fill_eff, fill_book, mixed_fill_books = _settlement_fill_for_clv(pick)
             # CLV-2: skip a physically-implausible close rather than store fake CLV.
             if closing_fair - 1.0 / fill_eff > CLV_IMPLAUSIBLE_CLOSE_EDGE:
                 logger.warning(
@@ -517,7 +534,11 @@ async def revalidate_open_picks(
                 # of the rows behind this re-scrape close (from the cycle's grouped
                 # timestamps). What later separates an ECHO of the mint anchor row
                 # (captured_at <= created_at) from a fresh-but-unmoved line.
-                pick.close_anchor_book = close_anchor[:64]
+                pick.close_anchor_book = require_bounded_identity(
+                    close_anchor,
+                    maximum_bytes=BOOKMAKER_MAX_BYTES,
+                    field="close anchor bookmaker",
+                )
                 pick.close_snapshot_captured_at = _anchor_capture_time(
                     captured_for_key, close_anchor
                 )
@@ -533,39 +554,47 @@ async def revalidate_open_picks(
                 # A3: mint-anchor + capture-time kwargs — a PROVABLE mint echo
                 # (same source, captured at/before pick creation) is demoted
                 # even when the fair jittered past the tautology epsilon.
-                pick.close_independent_of_fill = persisted_close_independent(
-                    close_anchor_book=close_anchor,
-                    fill_book=pick.bookmaker,
-                    pick_fair=(
-                        float(pick.model_probability)
-                        if pick.model_probability is not None
-                        else None
-                    ),
-                    closing_fair=closing_fair,
-                    mint_anchor_book=pick.anchor_book,
-                    mint_anchor_type=pick.anchor_type,
-                    close_captured_at=pick.close_snapshot_captured_at,
-                    pick_created_at=pick.created_at,
+                pick.close_independent_of_fill = (
+                    False
+                    if mixed_fill_books
+                    else persisted_close_independent(
+                        close_anchor_book=close_anchor,
+                        fill_book=fill_book,
+                        pick_fair=(
+                            float(pick.model_probability)
+                            if pick.model_probability is not None
+                            else None
+                        ),
+                        closing_fair=closing_fair,
+                        mint_anchor_book=pick.anchor_book,
+                        mint_anchor_type=pick.anchor_type,
+                        close_captured_at=pick.close_snapshot_captured_at,
+                        pick_created_at=pick.created_at,
+                    )
                 )
                 # A4: persist the SPECIFIC reason beside the boolean (closed
                 # vocabulary, observability only — the boolean above stays the
                 # trusted-subset gate input, unchanged).
-                pick.close_exclusion_reason = close_exclusion_reason(
-                    close_anchor_book=close_anchor,
-                    fill_book=pick.bookmaker,
-                    pick_fair=(
-                        float(pick.model_probability)
-                        if pick.model_probability is not None
-                        else None
-                    ),
-                    closing_fair=closing_fair,
-                    fill_eff=fill_eff,
-                    mint_devig_fell_back=pick.mint_devig_fell_back,
-                    close_devig_fell_back=pick.close_devig_fell_back,
-                    close_captured_at=pick.close_snapshot_captured_at,
-                    pick_created_at=pick.created_at,
-                    mint_anchor_book=pick.anchor_book,
-                    mint_anchor_type=pick.anchor_type,
+                pick.close_exclusion_reason = (
+                    "circular_self_priced"
+                    if mixed_fill_books
+                    else close_exclusion_reason(
+                        close_anchor_book=close_anchor,
+                        fill_book=fill_book,
+                        pick_fair=(
+                            float(pick.model_probability)
+                            if pick.model_probability is not None
+                            else None
+                        ),
+                        closing_fair=closing_fair,
+                        fill_eff=fill_eff,
+                        mint_devig_fell_back=pick.mint_devig_fell_back,
+                        close_devig_fell_back=pick.close_devig_fell_back,
+                        close_captured_at=pick.close_snapshot_captured_at,
+                        pick_created_at=pick.created_at,
+                        mint_anchor_book=pick.anchor_book,
+                        mint_anchor_type=pick.anchor_type,
+                    )
                 )
             # The pick's own book is the actionable price; if it dropped the
             # market, the best remaining price is what a bettor could take —
@@ -1467,7 +1496,7 @@ async def finalize_closing_from_snapshots(
             )
             return False
     # EFFECTIVE fill vs net-anchored close — same symmetry as the live path.
-    fill_eff = effective_odds(pick.bookmaker, float(pick.decimal_odds))
+    fill_eff, fill_book, mixed_fill_books = _settlement_fill_for_clv(pick)
     # CLV-2: refuse to finalize a physically-implausible snapshot close (see constant).
     if fair - 1.0 / fill_eff > CLV_IMPLAUSIBLE_CLOSE_EDGE:
         logger.warning(
@@ -1532,7 +1561,11 @@ async def finalize_closing_from_snapshots(
         # the anchor rows behind the snapshot close. Together with created_at this
         # separates an ECHO of the mint anchor row (captured_at <= created_at)
         # from a fresh observation of a genuinely unmoved line (> created_at).
-        pick.close_anchor_book = close_anchor[:64]
+        pick.close_anchor_book = require_bounded_identity(
+            close_anchor,
+            maximum_bytes=BOOKMAKER_MAX_BYTES,
+            field="close anchor bookmaker",
+        )
         pick.close_snapshot_captured_at = _anchor_capture_time(captured_map, close_anchor)
         # INDEPENDENCE provenance (P0-1/P0-3 + audit 2026-06-28): a close is
         # independent only when the fill book did NOT price its own close (CIRCULAR
@@ -1548,35 +1581,43 @@ async def finalize_closing_from_snapshots(
         # PROVABLE mint echo (same source, captured at/before pick creation)
         # even when the recomputed fair jittered past the tautology epsilon —
         # the sub-4h blind spot where the D2 stale arm never fires.
-        pick.close_independent_of_fill = persisted_close_independent(
-            close_anchor_book=close_anchor,
-            fill_book=pick.bookmaker,
-            pick_fair=(
-                float(pick.model_probability) if pick.model_probability is not None else None
-            ),
-            closing_fair=fair,
-            mint_anchor_book=pick.anchor_book,
-            mint_anchor_type=pick.anchor_type,
-            close_captured_at=pick.close_snapshot_captured_at,
-            pick_created_at=pick.created_at,
+        pick.close_independent_of_fill = (
+            False
+            if mixed_fill_books
+            else persisted_close_independent(
+                close_anchor_book=close_anchor,
+                fill_book=fill_book,
+                pick_fair=(
+                    float(pick.model_probability) if pick.model_probability is not None else None
+                ),
+                closing_fair=fair,
+                mint_anchor_book=pick.anchor_book,
+                mint_anchor_type=pick.anchor_type,
+                close_captured_at=pick.close_snapshot_captured_at,
+                pick_created_at=pick.created_at,
+            )
         )
         # A4: persist the SPECIFIC reason beside the boolean (closed vocabulary,
         # observability only — the boolean above stays the trusted-subset gate
         # input, unchanged).
-        pick.close_exclusion_reason = close_exclusion_reason(
-            close_anchor_book=close_anchor,
-            fill_book=pick.bookmaker,
-            pick_fair=(
-                float(pick.model_probability) if pick.model_probability is not None else None
-            ),
-            closing_fair=fair,
-            fill_eff=fill_eff,
-            mint_devig_fell_back=pick.mint_devig_fell_back,
-            close_devig_fell_back=pick.close_devig_fell_back,
-            close_captured_at=pick.close_snapshot_captured_at,
-            pick_created_at=pick.created_at,
-            mint_anchor_book=pick.anchor_book,
-            mint_anchor_type=pick.anchor_type,
+        pick.close_exclusion_reason = (
+            "circular_self_priced"
+            if mixed_fill_books
+            else close_exclusion_reason(
+                close_anchor_book=close_anchor,
+                fill_book=fill_book,
+                pick_fair=(
+                    float(pick.model_probability) if pick.model_probability is not None else None
+                ),
+                closing_fair=fair,
+                fill_eff=fill_eff,
+                mint_devig_fell_back=pick.mint_devig_fell_back,
+                close_devig_fell_back=pick.close_devig_fell_back,
+                close_captured_at=pick.close_snapshot_captured_at,
+                pick_created_at=pick.created_at,
+                mint_anchor_book=pick.anchor_book,
+                mint_anchor_type=pick.anchor_type,
+            )
         )
     if close_odds is not None and close_odds > 1.0:
         pick.closing_odds = Decimal(f"{close_odds:.4f}")

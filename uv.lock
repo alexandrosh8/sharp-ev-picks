@@ -16,6 +16,9 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[manifest]
+excludes = ["socks"]
+
 [[package]]
 name = "aiosqlite"
 version = "0.22.1"
@@ -1982,7 +1985,6 @@ dependencies = [
     { name = "pulp" },
     { name = "requests" },
     { name = "scipy" },
-    { name = "socks" },
     { name = "statsbombpy" },
     { name = "tabulate" },
     { name = "tqdm" },
@@ -2776,12 +2778,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
 ]
-
-[[package]]
-name = "socks"
-version = "0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/3b/a3/2192084c11c90df6947635a06181f5c1f9df94ae71be1808f4df91579640/socks-0.tar.gz", hash = "sha256:727e9b4620730601c0360a00c7f4ae26295146c0a91af173bd155cc991edf765", size = 618, upload-time = "2019-09-20T20:25:45.064Z" }
 
 [[package]]
 name = "sortedcontainers"

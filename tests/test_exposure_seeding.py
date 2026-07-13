@@ -20,8 +20,9 @@ from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.models import Pick
 from app.storage.repositories import persist_pick
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 NOW = datetime.now(tz=UTC)
 
 
@@ -124,6 +125,37 @@ async def test_seeding_counts_only_todays_picks(factory) -> None:  # type: ignor
     await seed_exposure_ledger(ledger, factory)
     # today's two picks count; yesterday's 0.04 must NOT leak into today
     assert ledger.used(today_utc) == pytest.approx(baseline + 0.03, abs=1e-9)
+
+
+async def test_seeding_prefers_durable_charge_over_created_at_and_recommendation(factory) -> None:  # type: ignore[no-untyped-def]
+    today = datetime.now(tz=UTC).date()
+    baseline_ledger = DailyExposureLedger(max_daily_fraction=1.0)
+    await seed_exposure_ledger(baseline_ledger, factory)
+    baseline = baseline_ledger.used(today)
+
+    marker = "seeding-durable-charge"
+    await _persist_with_created_at(
+        factory,
+        "evt-seed-durable",
+        0.02,
+        marker,
+        datetime.now(tz=UTC) - timedelta(days=1),
+    )
+    async with factory() as session:
+        await session.execute(
+            sa_update(Pick)
+            .where(Pick.reason_summary == marker)
+            .values(
+                exposure_reserved_on=today,
+                exposure_reserved_fraction=Decimal("0.005"),
+            )
+        )
+        await session.commit()
+
+    ledger = DailyExposureLedger(max_daily_fraction=1.0, max_event_fraction=1.0)
+    await seed_exposure_ledger(ledger, factory)
+    assert ledger.used(today) == pytest.approx(baseline + 0.005, abs=1e-9)
+    assert ledger.event_used(today, "evt-seed-durable") == pytest.approx(0.005, abs=1e-9)
 
 
 async def test_seeding_excludes_volume_tier(factory) -> None:  # type: ignore[no-untyped-def]

@@ -39,7 +39,7 @@ def test_pick_model_has_anchor_book_column() -> None:
     col = Pick.__table__.columns["anchor_book"]
     assert col.nullable is True
     assert isinstance(col.type, sa.String)
-    assert col.type.length == 64
+    assert col.type.length == 512
 
 
 def test_pick_model_has_snapshot_close_column() -> None:

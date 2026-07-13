@@ -38,7 +38,7 @@ The doctrine, in order of importance:
 
 **Historical backtests** (labeled historical — not live proof): an 18-league, 7-season sweep with a pre-registered holdout showed positive held-out CLV for the sharp-vs-soft method, with documented limitations (gross-fill optimism, correlated-sample SEs — since corrected to cluster-robust). That holdout is **spent**, and a later pre-registered single-shot on early-2026 data failed its sample-size bar due to a data-coverage anomaly, neither validating nor refuting the strategy. Details and caveats: [`docs/backtesting/`](docs/backtesting/) and [ADR-0019](docs/adr/). **Live trusted-CLV accrual is the primary evidence path today, and it is not yet conclusive.**
 
-> **On the OddsChecker default (added 2026-07-05):** those historical backtests are *method-level* and were measured on OddsPortal-era book coverage and team-name forms. Switching the default odds provider to OddsChecker does **not** inherit that evidence — its book set, matching, and closing-line capture differ, so its live trusted-CLV starts accruing from zero. A provider-specific backtest is not possible until settled results and closing lines accrue on the new source; until then OddsChecker picks are treated as unvalidated (shadow-first), exactly like any new source. No historical claim on this README implies the OddsChecker-sourced live system is validated.
+> **Provider-specific evidence:** the historical backtests are *method-level* and were measured on OddsPortal-era book coverage and team-name forms. OddsPortal is therefore the fail-safe default. Switching to OddsChecker does **not** inherit that evidence — its book set, matching, and closing-line capture differ, so its live trusted-CLV starts accruing from zero. Until enough provider-specific closes and settlements accrue, OddsChecker picks remain unvalidated (shadow-first).
 
 ## Sports coverage
 
@@ -63,10 +63,12 @@ Both supported paths run the **same code** and serve the dashboard at **http://l
 git clone https://github.com/alexandrosh8/sharp-ev-picks.git
 cd sharp-ev-picks
 cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
+# Set POSTGRES_PASSWORD, DASHBOARD_AUTH_PASSWORD_HASH and
+# DASHBOARD_SESSION_SECRET in .env (generation commands are documented there).
 docker compose --profile prod up -d --build
 ```
 
-Open **http://localhost:8000/**. On first launch a one-time **setup screen** creates your admin password (stored hashed). Stop with `docker compose --profile prod down` (data survives in a Docker volume); logs via `docker compose --profile prod logs -f app`.
+Open **http://localhost:8000/** and sign in with the password whose hash you provisioned. The container profile runs with `APP_ENV=production`, so it deliberately refuses blank/default credentials and does not expose first-run `/setup`. Stop with `docker compose --profile prod down` (data survives in a Docker volume); logs via `docker compose --profile prod logs -f app`.
 
 ### Option 2 — Ubuntu VPS (always-on, 24/7)
 
@@ -79,12 +81,12 @@ sudo chown -R $USER /opt/sharp-ev-picks
 cd /opt/sharp-ev-picks
 cp .env.example .env
 chmod 600 .env
-# edit .env (COMPOSE_PROFILES=prod, TELEGRAM_*); create the /setup password
-# over an SSH tunnel BEFORE exposing the port
+# edit .env: set COMPOSE_PROFILES=prod, POSTGRES_PASSWORD,
+# DASHBOARD_AUTH_PASSWORD_HASH and DASHBOARD_SESSION_SECRET
 docker compose up -d --build
 ```
 
-Reach it over an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <vps>`), or on the VPS IP once dashboard auth is on. Full runbook: [`docs/deployment/openclaw-ubuntu.md`](docs/deployment/openclaw-ubuntu.md).
+Reach it over an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <vps>`) or through an authenticated TLS reverse proxy. Production binds the app to loopback and rejects direct public binds. Full runbook: [`docs/deployment/openclaw-ubuntu.md`](docs/deployment/openclaw-ubuntu.md).
 
 ### Mac / Linux — run natively (no Docker)
 
@@ -102,7 +104,7 @@ uv run uvicorn app.main:app --reload         # http://localhost:8000/
 Prefer not to install the databases? `docker compose up -d postgres redis` and keep the app native. First-time commands live in [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). Dev tasks:
 
 ```bash
-uv run pytest -q                          # 3,200+ tests (no network)
+uv run pytest -q                          # 3,600+ tests (no network)
 uvx ruff check .                          # lint
 uvx ruff format --check app tests scripts # formatting (CI-gated separately)
 uv run mypy app tests                     # types
@@ -145,14 +147,14 @@ No performance claims appear on the dashboard; low-evidence and shadow items are
 
 ## Configuration
 
-All secrets live in `.env` only (copy from `.env.example`; `0600`, gitignored — **never commit it**). Every key ships with a safe default — the app works with none of them set. The keys that matter most:
+All secrets live in `.env` only (copy from `.env.example`; `0600`, gitignored — **never commit it**). Local native development needs no external provider keys. The production Compose profile fails closed until its database and dashboard credentials are explicitly provisioned. The keys that matter most:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `ODDS_SOURCE` | `oddschecker` | Odds provider (switchable): `oddschecker` (free OddsChecker scrape, **default** — Betfair Exchange inline, all four sports, all markets), `oddsportal` (free OddsPortal scrape), or `odds_api` (The Odds API). |
+| `ODDS_SOURCE` | `oddsportal` | Odds provider (switchable): `oddsportal` (free OddsPortal scrape, **default**), `oddschecker` (free scrape with inline Betfair Exchange; requires proxies), or `odds_api` (The Odds API). |
 | `ODDSCHECKER_SPORTS` | `soccer,basketball,tennis,american_football` | Which sports the OddsChecker feed polls (csv). |
 | `ODDSCHECKER_CAPTURE_SHARP_MARKETS` | `true` | Also capture every sharp-anchored (Betfair Exchange) prop/period/combo market as odds history (never priced or settled — pure capture). |
-| `DASHBOARD_AUTH_ENABLED` | `true` in `.env.example` | First-run `/setup` creates the admin password (stored hashed). `false` = no login. |
+| `DASHBOARD_AUTH_ENABLED` | `true` in `.env.example` | Production requires a pre-provisioned password hash and session secret. Loopback local mode may use one-time `/setup`. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Pick alerts. Blank just disables alerts; the dashboard still works. |
 | `VALUE_REQUIRE_SHARP_ANCHOR` | `true` | When `true` (default since 2026-07-07), a premium pick without a real Pinnacle/Betfair anchor demotes to shadow. |
 | `SCRAPER_PROXY_POOL` | empty | Optional rotating proxies for the scrape *and* the Pinnacle close capture (see below). |
@@ -161,7 +163,7 @@ All secrets live in `.env` only (copy from `.env.example`; `0600`, gitignored �
 
 The full key reference (scrape tuning, timeouts, results-settlement cadence) is documented inline in [`.env.example`](.env.example).
 
-**Scrape proxies.** The default **OddsChecker** source is Cloudflare-walled on datacenter-direct egress, so it **requires** a rotating pool to fetch at all; the OddsPortal scrape otherwise runs from your host IP, which can be throttled and only lists your region's books. A rotating pool (`host|port|user|pass` quads, comma-separated) widens coverage and speeds a full slate. The dashboard's proxy-pool panel now flags dead/quarantined slots automatically and shows spare-capacity headroom against the active source's fetch concurrency. The same pool serves as egress for the free **Pinnacle ARCADIA close capture**, which rejects datacenter/direct IPs. Read-only either way; credentials never leave `.env`. On heavy slates, limited capture/proxy capacity can constrain coverage — the freshness gate then **discards** stale candidates rather than minting stale picks.
+**Scrape proxies.** The default OddsPortal scrape can run from the host IP; the optional **OddsChecker** source is Cloudflare-walled on datacenter-direct egress and therefore **requires** a rotating pool. A pool (`host|port|user|pass` quads, comma-separated) can widen coverage and speed a full slate. The dashboard flags dead/quarantined slots and shows headroom against active fetch concurrency. The same pool can serve the free **Pinnacle ARCADIA close capture**. Read-only either way; credentials never leave `.env`. On heavy slates, limited capture/proxy capacity can constrain coverage — the freshness gate then **discards** stale candidates rather than minting stale picks.
 
 **Betfair Exchange.** An off-by-default, read-only capture ([ADR-0015](docs/adr/adr-0015-betfair-exchange-back-odds-capture.md)) binds Betfair BACK odds inline on the same canonical event as the soft books. Exchange anchors are liquidity-gated. The separate Betfair API staleness comparison is **monitor-only** — it records verdicts and never demotes live picks.
 
@@ -169,7 +171,7 @@ The full key reference (scrape tuning, timeouts, results-settlement cadence) is 
 
 Proven open-source engines bound into one pipeline:
 
-- **Ingestion** — pluggable odds provider (`ODDS_SOURCE`): the default **OddsChecker** reader (`app/ingestion/oddschecker.py`, read-only `curl_cffi`/Hypernova-JSON, GET-only — football/basketball/tennis/American football, all devig-sound markets, with Betfair Exchange + Sportsbook inline so the sharp anchor travels with the provider; sharp-anchored props/period captured as odds history), or the OddsHarvester-based **OddsPortal** scrape (`app/ingestion/oddsportal.py`, Playwright render or `curl_cffi` JSON feed), or **The Odds API**; free Pinnacle ARCADIA close capture (`app/ingestion/pinnacle_arcadia.py`); optional dedicated Betfair Exchange BACK odds (OddsPortal source only); Betfair BSP archive tooling for validation. All read-only. **OddsChecker is Cloudflare-walled on datacenter-direct egress, so it requires `SCRAPER_PROXY_POOL`.**
+- **Ingestion** — pluggable odds provider (`ODDS_SOURCE`): the default OddsHarvester-based **OddsPortal** scrape (`app/ingestion/oddsportal.py`, Playwright render or `curl_cffi` JSON feed), the optional **OddsChecker** reader (`app/ingestion/oddschecker.py`, read-only `curl_cffi`/Hypernova JSON, GET-only, with Betfair Exchange + Sportsbook inline), or **The Odds API**; free Pinnacle ARCADIA close capture (`app/ingestion/pinnacle_arcadia.py`); optional dedicated Betfair Exchange BACK odds (OddsPortal source only); Betfair BSP archive tooling for validation. All read-only. **OddsChecker requires `SCRAPER_PROXY_POOL`.**
 - **Pricing** — penaltyblog Dixon-Coles for football (`app/models/football_dc.py`); an 8-method devig (`app/probabilities/devig.py` — multiplicative, additive, power, Shin closed-form, probit, odds-ratio, logarithmic, differential-margin; 6 distinct estimators once proven equivalences are collapsed; parity-tested, with cross-library golden vectors).
 - **Edge & risk** — edge/EV gating (`app/edge/value.py`) with sharp/consensus anchor grading and an exchange-liquidity floor; fractional-Kelly sizing (informational) with per-pick and daily exposure caps (`app/risk/`).
 - **Resolution / matching** — a precision-hardened cross-source matcher (`app/resolution/`): marker-aware (women/youth/reserve/B sides never collapse onto the senior team), two-tier Jaro-Winkler over a curated alias seed, tennis surname-initial veto, tight kickoff windows, fail-closed on ambiguity, plus a read-only wrong-game self-audit each cycle. **Aliases are applied only through a sanctioned evidence process**: distinct-fixture co-occurrence evidence, dry-run patch review, regression tests, and a matcher differential proving zero unintended merges — generic-base aliases are never forced.

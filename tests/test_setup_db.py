@@ -13,10 +13,11 @@ from app.storage.repositories import (
     create_dashboard_credentials,
     load_dashboard_credentials,
 )
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 _HASH = "pbkdf2_sha256$600000$abcd1234abcd1234$deadbeefdeadbeefdeadbeefdeadbeef"
-_SECRET = "synthetic-test-session-secret"
+_SECRET = "test-session-" + "x" * 32
 
 
 @pytest.fixture

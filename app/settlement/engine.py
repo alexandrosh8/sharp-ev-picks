@@ -18,11 +18,12 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.edge.value import effective_odds
 from app.edge.value_policy import ValuePolicy
 from app.probabilities.devig import DevigMethod
 from app.resolution.matching import fixture_pair_key, normalize_name, strip_live_status
@@ -142,7 +143,7 @@ async def void_stale_null_kickoff_picks(
     )
     voided = 0
     for pick in rows:
-        stake, odds = await _stake_and_odds(session, pick)
+        stake, odds, payout_bookmaker = await _stake_and_odds(session, pick)
         pnl = pick_pnl(Outcome.VOID, stake, odds)  # stake returned -> 0.00
         inserted = await session.execute(
             pg_insert(ResultTracking)
@@ -151,6 +152,8 @@ async def void_stale_null_kickoff_picks(
                 outcome=str(Outcome.VOID),
                 pnl=pnl,
                 roi=pick_roi(pnl, stake),
+                settled_stake_amount=stake,
+                settled_effective_odds=_effective_settlement_odds(odds, payout_bookmaker),
                 settled_at=now,
             )
             .on_conflict_do_nothing(constraint="uq_result_tracking_pick")
@@ -195,25 +198,66 @@ async def void_unsettleable_known_kickoff_picks(
     A pick still inside the scrape window, or one that already carries a scraped
     score (it settles by score), is left alone. Caller owns the transaction."""
     cutoff = now - max_age
+    home, away = aliased(Team), aliased(Team)
     rows = (
-        (
-            await session.execute(
-                select(Pick)
-                .join(Event, Pick.event_id == Event.id)
-                .where(
-                    Pick.status == "alerted",
-                    Event.starts_at.is_not(None),
-                    Event.starts_at < cutoff,
-                    Event.scraped_home_score.is_(None),
-                )
+        await session.execute(
+            select(
+                Pick,
+                home.name,
+                away.name,
+                Event.starts_at,
+                Event.sport_id,
+                Sport.key,
+            )
+            .join(Event, Pick.event_id == Event.id)
+            .join(home, Event.home_team_id == home.id)
+            .join(away, Event.away_team_id == away.id)
+            .join(Sport, Event.sport_id == Sport.id)
+            .where(
+                Pick.status == "alerted",
+                Event.starts_at.is_not(None),
+                Event.starts_at < cutoff,
+                Event.scraped_home_score.is_(None),
             )
         )
-        .scalars()
-        .all()
-    )
+    ).all()
     voided = 0
-    for pick in rows:
-        stake, odds = await _stake_and_odds(session, pick)
+    superseded = 0
+    for pick, home_name, away_name, starts_at, sport_id, sport_key in rows:
+        pair = fixture_pair_key(home_name, away_name)
+        if pair is not None:
+            await _lock_settlement_instrument(
+                session,
+                sport_id=sport_id,
+                market=pick.market,
+                market_detail=pick.market_detail,
+                selection=pick.selection,
+                model_version_id=pick.model_version_id,
+                target_pair=pair,
+            )
+        if pair is not None and await _settled_sibling_exists(
+            session,
+            pick_id=pick.id,
+            event_id=pick.event_id,
+            sport_id=sport_id,
+            starts_at=starts_at,
+            market=pick.market,
+            market_detail=pick.market_detail,
+            selection=pick.selection,
+            model_version_id=pick.model_version_id,
+            target_pair=pair,
+            sport_key=sport_key,
+        ):
+            pick.status = "superseded"
+            superseded += 1
+            logger.info(
+                "stale-known settlement: superseded duplicate pick %d (%s %s)",
+                pick.id,
+                pick.market,
+                pick.selection,
+            )
+            continue
+        stake, odds, payout_bookmaker = await _stake_and_odds(session, pick)
         pnl = pick_pnl(Outcome.VOID, stake, odds)  # stake returned -> 0.00
         inserted = await session.execute(
             pg_insert(ResultTracking)
@@ -222,6 +266,8 @@ async def void_unsettleable_known_kickoff_picks(
                 outcome=str(Outcome.VOID),
                 pnl=pnl,
                 roi=pick_roi(pnl, stake),
+                settled_stake_amount=stake,
+                settled_effective_odds=_effective_settlement_odds(odds, payout_bookmaker),
                 settled_at=now,
             )
             .on_conflict_do_nothing(constraint="uq_result_tracking_pick")
@@ -239,9 +285,14 @@ async def void_unsettleable_known_kickoff_picks(
             max_age.days,
         )
         voided += 1
-    if voided:
+    if voided or superseded:
         await session.flush()
-        logger.info("settlement cycle: %d unsettleable known-kickoff picks voided", voided)
+        logger.info(
+            "settlement cycle: %d unsettleable known-kickoff picks voided, "
+            "%d duplicates superseded",
+            voided,
+            superseded,
+        )
     return voided
 
 
@@ -296,12 +347,13 @@ async def _settled_sibling_exists(
     sport_id: int,
     starts_at: datetime,
     market: str,
+    market_detail: str | None,
     selection: str,
     model_version_id: int,
     target_pair: frozenset[str],
     sport_key: str | None = None,
 ) -> bool:
-    """True when an equivalent pick (same market+selection+model_version) on a
+    """True when an equivalent pick (same instrument+model_version) on a
     DIFFERENT event of the SAME real fixture is ALREADY settled — so settling
     this pick again would double-count real-money pnl/ROI/CLV.
 
@@ -309,13 +361,15 @@ async def _settled_sibling_exists(
     _dedup_tolerance (tennis wider — a 1v1 pair meets once/day; team sports keep
     the tight 2h), and the same UNORDERED fixture_pair_key (which folds a
     ``[In Running]`` live-fork onto its clean twin and preserves women's/youth
-    markers). Selections are compared via _selection_dedup_key, NOT raw string
-    equality — a cross-source twin spells the same team differently ("Arsenal"
-    vs "Arsenal FC"), while distinct lines/handicaps stay distinct. Only rows
-    that already carry a result_tracking row are considered (the settled
-    sibling). Fail-safe: the same-teams + bounded-time match cannot hit a
-    genuinely distinct fixture, so a match is only ever a cross-source
-    duplicate."""
+    markers). ``market_detail`` is compared NULL-safely because it identifies
+    the canonical submarket/line; two selections with the same display label
+    but different details are distinct instruments. Selections are compared
+    via _selection_dedup_key, NOT raw string equality — a cross-source twin
+    spells the same team differently ("Arsenal" vs "Arsenal FC"), while
+    distinct lines/handicaps stay distinct. Only rows that already carry a
+    result_tracking row are considered (the settled sibling). Fail-safe: the
+    same-teams + bounded-time match cannot hit a genuinely distinct fixture,
+    so a match is only ever a cross-source duplicate."""
     tol = _dedup_tolerance(sport_key)
     home_t, away_t = aliased(Team), aliased(Team)
     rows = (
@@ -330,6 +384,7 @@ async def _settled_sibling_exists(
                 Pick.id != pick_id,
                 Pick.event_id != event_id,
                 Pick.market == market,
+                Pick.market_detail.is_not_distinct_from(market_detail),
                 Pick.model_version_id == model_version_id,
                 Event.sport_id == sport_id,
                 Event.starts_at.is_not(None),
@@ -342,6 +397,47 @@ async def _settled_sibling_exists(
     return any(
         _selection_dedup_key(sib_sel) == sel_key and fixture_pair_key(h, a) == target_pair
         for sib_sel, h, a in rows
+    )
+
+
+async def _lock_settlement_instrument(
+    session: AsyncSession,
+    *,
+    sport_id: int,
+    market: str,
+    market_detail: str | None,
+    selection: str,
+    model_version_id: int,
+    target_pair: frozenset[str],
+) -> None:
+    """Serialize settlement of one canonical cross-source instrument.
+
+    The settled-sibling check and result insert must be one atomic decision.
+    A row lock cannot provide that invariant because sibling picks live on
+    different rows, so concurrent workers could both observe "no result" and
+    insert. A PostgreSQL transaction-scoped advisory lock gives every source
+    twin the same mutex until commit; the second worker then observes the first
+    worker's committed result and supersedes its duplicate.
+
+    Kickoff is deliberately absent from the key: source forks can disagree on
+    kickoff while still describing the same fixture. The bounded kickoff test
+    remains in ``_settled_sibling_exists`` and prevents rematches from merging;
+    omitting it here can only over-serialize unrelated rematches briefly.
+    """
+    identity = repr(
+        (
+            "settlement-instrument-v1",
+            sport_id,
+            tuple(sorted(target_pair)),
+            market,
+            market_detail,
+            _selection_dedup_key(selection),
+            model_version_id,
+        )
+    )
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:identity, 0))"),
+        {"identity": identity},
     )
 
 
@@ -415,6 +511,16 @@ async def settle_open_picks(
         # settled sibling already proves the fixture finished. Fail-safe (see
         # DEDUP_FIXTURE_TOLERANCE): only supersedes a true duplicate.
         pair = fixture_pair_key(home_name, away_name)
+        if pair is not None:
+            await _lock_settlement_instrument(
+                session,
+                sport_id=sport_id,
+                market=pick.market,
+                market_detail=pick.market_detail,
+                selection=pick.selection,
+                model_version_id=pick.model_version_id,
+                target_pair=pair,
+            )
         if pair is not None and await _settled_sibling_exists(
             session,
             pick_id=pick.id,
@@ -422,6 +528,7 @@ async def settle_open_picks(
             sport_id=sport_id,
             starts_at=starts_at,
             market=pick.market,
+            market_detail=pick.market_detail,
             selection=pick.selection,
             model_version_id=pick.model_version_id,
             target_pair=pair,
@@ -544,6 +651,16 @@ async def settle_event_picks(
         # NULL starts_at cannot bound the fixture window -> guard skipped (the
         # manual path stays available for TBD-kickoff events, as before).
         pair = fixture_pair_key(home_name, away_name)
+        if pair is not None and starts_at is not None:
+            await _lock_settlement_instrument(
+                session,
+                sport_id=sport_id,
+                market=pick.market,
+                market_detail=pick.market_detail,
+                selection=pick.selection,
+                model_version_id=pick.model_version_id,
+                target_pair=pair,
+            )
         if (
             pair is not None
             and starts_at is not None
@@ -554,6 +671,7 @@ async def settle_event_picks(
                 sport_id=sport_id,
                 starts_at=starts_at,
                 market=pick.market,
+                market_detail=pick.market_detail,
                 selection=pick.selection,
                 model_version_id=pick.model_version_id,
                 target_pair=pair,
@@ -675,8 +793,8 @@ async def _settle_one(
         logger.warning("pick %d not settleable: %s", pick.id, exc)
         return False
 
-    stake, odds = await _stake_and_odds(session, pick)
-    pnl = pick_pnl(outcome, stake, odds, bookmaker=pick.bookmaker)
+    stake, odds, payout_bookmaker = await _stake_and_odds(session, pick)
+    pnl = pick_pnl(outcome, stake, odds, bookmaker=payout_bookmaker)
     inserted = await session.execute(
         pg_insert(ResultTracking)
         .values(
@@ -684,6 +802,8 @@ async def _settle_one(
             outcome=str(outcome),
             pnl=pnl,
             roi=pick_roi(pnl, stake),
+            settled_stake_amount=stake,
+            settled_effective_odds=_effective_settlement_odds(odds, payout_bookmaker),
             # A walkover/abandonment has no meaningful score — leave NULL
             # (same shape as the stale-void paths) rather than persist 0-0.
             home_score=None if completion == "void" else home_score,
@@ -931,7 +1051,34 @@ async def run_settlement_cycle(
     return settled
 
 
-async def _stake_and_odds(session: AsyncSession, pick: Pick) -> tuple[Decimal, Decimal]:
+def _recommended_settlement_basis(pick: Pick) -> tuple[Decimal, Decimal, str | None]:
+    """Cap-adjusted recommended stake and its blended executable price.
+
+    The accumulated effective-odds term is already commission-netted, so its
+    bookmaker is ``None``: passing a book to ``pick_pnl`` would charge exchange
+    commission twice. Legacy/unmigrated zero-basis rows retain the old latest-
+    recommendation fallback.
+    """
+    stake = pick.settlement_stake_amount or Decimal("0")
+    effective_term = pick.settlement_effective_odds_stake or Decimal("0")
+    if stake > 0 and effective_term > 0:
+        return stake, effective_term / stake, None
+    return pick.recommended_stake_amount, pick.decimal_odds, pick.bookmaker
+
+
+def _effective_settlement_odds(odds: Decimal, bookmaker: str | None) -> Decimal:
+    """Return the exact commission-net price represented by a settlement row.
+
+    Blended recommendation prices already carry exchange commission and signal
+    that with ``bookmaker=None``. Explicit/manual raw fills carry their book and
+    are netted once here, matching ``pick_pnl``'s winning-return calculation.
+    """
+    if bookmaker is None:
+        return odds
+    return Decimal(str(effective_odds(bookmaker, float(odds))))
+
+
+async def _stake_and_odds(session: AsyncSession, pick: Pick) -> tuple[Decimal, Decimal, str | None]:
     """The user's actual stake/odds when they logged the bet, else the
     recommendation — result_tracking.pnl is 'vs actual or recommended stake'."""
     log = await session.scalar(
@@ -945,6 +1092,8 @@ async def _stake_and_odds(session: AsyncSession, pick: Pick) -> tuple[Decimal, D
         .limit(1)
     )
     if log is not None and log.actual_stake is not None:
-        odds = log.actual_odds if log.actual_odds is not None else pick.decimal_odds
-        return log.actual_stake, odds
-    return pick.recommended_stake_amount, pick.decimal_odds
+        if log.actual_odds is not None:
+            return log.actual_stake, log.actual_odds, log.bookmaker_used or pick.bookmaker
+        _, blended_odds, blended_book = _recommended_settlement_basis(pick)
+        return log.actual_stake, blended_odds, blended_book
+    return _recommended_settlement_basis(pick)

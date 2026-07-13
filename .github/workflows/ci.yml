@@ -66,17 +66,34 @@ jobs:
           uv run alembic upgrade head
           uv run alembic check
 
+      - name: Dashboard build integrity
+        run: |
+          uv run python tools/build_dashboard.py --check
+          node --check app/api/dashboard_src/app.js
+
+      - name: Install Chromium for dashboard QA
+        run: uv run playwright install --with-deps chromium
+
+      - name: Dashboard browser regression
+        env:
+          DASHQA_HTML: ${{ github.workspace }}/app/api/dashboard.html
+          DASHQA_MOCK_ONLY: "1"
+          DASHQA_OUT: ${{ runner.temp }}/sharp-dashboard-qa
+        run: uv run python scripts/dashboard_qa.py
+
       - name: Tests and coverage
-        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=85
+        run: >-
+          uv run pytest -n 2 --dist loadfile
+          --cov=app --cov-report=term-missing --cov-fail-under=85
 
       # Pin ruff so CI formatting matches local exactly — an unpinned `uvx ruff`
       # resolves whatever version the runner cached, which silently drifts from
       # the dev's ruff and fails format-check on identical code.
       - name: Lint
-        run: uvx ruff@0.15.18 check app tests scripts alembic
+        run: uvx ruff@0.15.18 check app tests scripts alembic tools
 
       - name: Format check
-        run: uvx ruff@0.15.18 format --check app tests scripts alembic
+        run: uvx ruff@0.15.18 format --check app tests scripts alembic tools
 
       - name: Types
         run: uv run mypy app tests

@@ -46,6 +46,7 @@ from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.models import Pick
 from app.storage.repositories import persist_pick
+from tests.database import TEST_DATABASE_URL
 
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATION_PATH = ROOT / "alembic" / "versions" / "a9d2c4e6f8b1_picks_anchor_book_count.py"
@@ -123,7 +124,7 @@ def test_alembic_graph_has_single_head() -> None:
 
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["a9d2c4e6f8b1"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["e7f1a9c3b5d2"]
 
 
 # --------------------------------------------------------------------------- #
@@ -161,7 +162,14 @@ class _Sink:
 
 def _deps(snapshots: list[OddsSnapshotIn]) -> PipelineDeps:
     directory = EventDirectory()
-    directory.register("evt-1", EventTeams(home="Home FC", away="Away FC"))
+    directory.register(
+        "evt-1",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+        ),
+    )
     return PipelineDeps(
         loader=_FakeLoader(snapshots),
         model=NullModel(),
@@ -209,7 +217,7 @@ async def test_minted_value_pick_carries_soft_book_count() -> None:
 # persist_pick round-trip (DB-gated — skips when compose Postgres is absent)
 # --------------------------------------------------------------------------- #
 
-_DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+_DB_URL = TEST_DATABASE_URL
 
 
 @pytest.fixture

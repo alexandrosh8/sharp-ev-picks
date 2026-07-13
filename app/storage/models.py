@@ -25,9 +25,22 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from app.identity import (
+    BOOKMAKER_MAX_BYTES,
+    COUNTRY_MAX_BYTES,
+    EVENT_REF_MAX_BYTES,
+    LEAGUE_KEY_MAX_BYTES,
+    MARKET_DETAIL_MAX_BYTES,
+    SELECTION_MAX_BYTES,
+    SPORT_KEY_MAX_BYTES,
+    SPORT_NAME_MAX_BYTES,
+    TEAM_NAME_MAX_BYTES,
+)
 
 ODDS = Numeric(10, 4)
 PROB = Numeric(8, 6)
@@ -46,8 +59,8 @@ class Sport(Base):
     __tablename__ = "sports"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    key: Mapped[str] = mapped_column(String(64), unique=True)  # e.g. "soccer", "basketball_nba"
-    name: Mapped[str] = mapped_column(String(128))
+    key: Mapped[str] = mapped_column(String(SPORT_KEY_MAX_BYTES), unique=True)  # e.g. "soccer"
+    name: Mapped[str] = mapped_column(String(SPORT_NAME_MAX_BYTES))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -64,9 +77,11 @@ class League(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     sport_id: Mapped[int] = mapped_column(ForeignKey("sports.id"))
-    key: Mapped[str] = mapped_column(String(64))  # e.g. "soccer_epl"
-    name: Mapped[str] = mapped_column(String(128))
-    country: Mapped[str] = mapped_column(String(64), nullable=False, server_default="")
+    key: Mapped[str] = mapped_column(String(LEAGUE_KEY_MAX_BYTES))  # e.g. "soccer_epl"
+    name: Mapped[str] = mapped_column(String(LEAGUE_KEY_MAX_BYTES))
+    country: Mapped[str] = mapped_column(
+        String(COUNTRY_MAX_BYTES), nullable=False, server_default=""
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -79,8 +94,8 @@ class Team(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     sport_id: Mapped[int] = mapped_column(ForeignKey("sports.id"))
     league_id: Mapped[int | None] = mapped_column(ForeignKey("leagues.id"))
-    name: Mapped[str] = mapped_column(String(128))
-    normalized_name: Mapped[str] = mapped_column(String(128))
+    name: Mapped[str] = mapped_column(String(TEAM_NAME_MAX_BYTES))
+    normalized_name: Mapped[str] = mapped_column(String(TEAM_NAME_MAX_BYTES))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -97,7 +112,7 @@ class Event(Base):
     league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"))
     home_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
     away_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
-    external_ref: Mapped[str] = mapped_column(String(128))  # provider event key
+    external_ref: Mapped[str] = mapped_column(String(EVENT_REF_MAX_BYTES))  # provider event key
     status: Mapped[str] = mapped_column(String(32), server_default="scheduled")
     # NULL = the source never reported a kickoff ("TBD" on the dashboard:
     # no countdown, no settle button). Healed by refresh_event_kickoffs /
@@ -134,12 +149,12 @@ class OddsSnapshot(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
-    bookmaker: Mapped[str] = mapped_column(String(64))
-    # 64, not 32: a 33-char quarter-line handicap-games key
-    # ("asian_handicap_games_-10_25_games") was truncated under the old width,
-    # merging distinct lines into one devig group (see snapshot_market_key).
-    market: Mapped[str] = mapped_column(String(64))
-    selection: Mapped[str] = mapped_column(String(64))
+    bookmaker: Mapped[str] = mapped_column(String(BOOKMAKER_MAX_BYTES))
+    # Wide identity columns preserve provider keys and long selections
+    # verbatim. Truncation can alias distinct instruments under the observation
+    # unique key; repository boundaries reject only values beyond these bounds.
+    market: Mapped[str] = mapped_column(String(MARKET_DETAIL_MAX_BYTES))
+    selection: Mapped[str] = mapped_column(String(SELECTION_MAX_BYTES))
     decimal_odds: Mapped[Decimal] = mapped_column(ODDS)
     liquidity: Mapped[Decimal | None] = mapped_column(MONEY)
     captured_at: Mapped[datetime]  # provider-reported price time
@@ -232,9 +247,11 @@ class Pick(Base):
         UniqueConstraint(
             "event_id",
             "market",
+            "market_detail",
             "selection",
             "model_version_id",
             name="uq_picks_event_market_selection_model",
+            postgresql_nulls_not_distinct=True,
         ),
         Index("idx_picks_created", "created_at"),
         Index("idx_picks_status", "status"),
@@ -245,7 +262,7 @@ class Pick(Base):
     model_version_id: Mapped[int] = mapped_column(ForeignKey("model_versions.id"))
     detected_edge_id: Mapped[int | None] = mapped_column(ForeignKey("detected_edges.id"))
     market: Mapped[str] = mapped_column(String(32))
-    selection: Mapped[str] = mapped_column(String(64))
+    selection: Mapped[str] = mapped_column(String(SELECTION_MAX_BYTES))
     # CANONICAL devig-group detail at mint (app/pipeline.py::
     # canonical_market_detail, e.g. "totals_2_5", "asian_handicap_-1_0"): the
     # CLV true-up matches the close on this EXACT group, bypassing the
@@ -253,7 +270,7 @@ class Pick(Base):
     # market (h2h/1x2/btts canonicalize to None) or a pre-column row — those
     # keep the legacy fail-closed line-blind behavior.
     market_detail: Mapped[str | None] = mapped_column(Text)
-    bookmaker: Mapped[str] = mapped_column(String(64))
+    bookmaker: Mapped[str] = mapped_column(String(BOOKMAKER_MAX_BYTES))
     decimal_odds: Mapped[Decimal] = mapped_column(ODDS)
     model_probability: Mapped[Decimal] = mapped_column(PROB)
     fair_probability: Mapped[Decimal] = mapped_column(PROB)
@@ -262,6 +279,36 @@ class Pick(Base):
     confidence: Mapped[Decimal] = mapped_column(PROB)
     recommended_stake_fraction: Mapped[Decimal] = mapped_column(PROB)
     recommended_stake_amount: Mapped[Decimal] = mapped_column(MONEY)
+    # Immutable-in-effect settlement basis for an incrementally re-priced
+    # recommendation. ``recommended_stake_amount``/``decimal_odds`` describe
+    # the latest alert state and may be overwritten; these accumulators retain
+    # the cap-adjusted amount actually recommended at every price. The raw
+    # weighted sum grades P&L, while the commission-net effective sum keeps CLV
+    # on the same blended fill. ``settlement_basis_bookmaker`` is populated
+    # only while every tranche used the same book; NULL with a positive basis
+    # means mixed books and is conservatively excluded from trusted CLV.
+    settlement_stake_amount: Mapped[Decimal] = mapped_column(
+        MONEY, nullable=False, server_default="0"
+    )
+    settlement_raw_odds_stake: Mapped[Decimal] = mapped_column(
+        Numeric(22, 6), nullable=False, server_default="0"
+    )
+    settlement_effective_odds_stake: Mapped[Decimal] = mapped_column(
+        Numeric(22, 6), nullable=False, server_default="0"
+    )
+    settlement_basis_bookmaker: Mapped[str | None] = mapped_column(String(BOOKMAKER_MAX_BYTES))
+    # True once persist_pick has rewritten the alert state for a price/venue
+    # move. The basis still grades P&L exactly, but mint fair/anchor provenance
+    # on the mutable row now describes the latest observation rather than every
+    # tranche, so trusted CLV excludes it conservatively.
+    settlement_basis_repriced: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    # Durable amount charged to the in-memory exposure ledger on a given day.
+    # Price moves can increase a long-lived pick on a later day; created_at is
+    # therefore not a faithful restart seed for incremental exposure.
+    exposure_reserved_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    exposure_reserved_fraction: Mapped[Decimal | None] = mapped_column(PROB, nullable=True)
     stake_breakdown: Mapped[dict[str, Any] | None]
     reason_summary: Mapped[str] = mapped_column(Text, server_default="")
     status: Mapped[str] = mapped_column(String(32), server_default="pending")
@@ -287,7 +334,7 @@ class Pick(Base):
     # actual book so per-book anchor analysis (which sharp book sourced the fair,
     # finding CLV-3) is possible without re-deriving it. NULL = model-strategy
     # pick or pre-column row.
-    anchor_book: Mapped[str | None] = mapped_column(String(64))
+    anchor_book: Mapped[str | None] = mapped_column(String(BOOKMAKER_MAX_BYTES))
     # MATCH-CONFIDENCE provenance of the pick-time sharp anchor (observability
     # only — never gates minting). For a Pinnacle (cross-source, fuzzy-matched)
     # anchor: min per-side Jaro-Winkler of the accepted candidate in [0,1] with
@@ -363,7 +410,7 @@ class Pick(Base):
     # only for now — the tautology guard is NOT rekeyed on these until the
     # deferred single-shot validation (ADR-0019 discipline). NULL = pre-column
     # row / no close computed yet. Additive + nullable.
-    close_anchor_book: Mapped[str | None] = mapped_column(String(64))
+    close_anchor_book: Mapped[str | None] = mapped_column(String(BOOKMAKER_MAX_BYTES))
     close_snapshot_captured_at: Mapped[datetime | None]
     # A4 CLOSE-EXCLUSION REASON (closed vocabulary — app/edge/value.py
     # CLOSE_EXCLUSION_REASONS): WHY this pick's close is excluded from trusted
@@ -416,7 +463,7 @@ class Pick(Base):
     # bookmaker (re-priced in place); differs ONLY in the fallback case where
     # the original book dropped the selection and the best remaining book is
     # shown instead — so the dashboard can label "now at <book>" honestly.
-    current_bookmaker: Mapped[str | None] = mapped_column(String(64))
+    current_bookmaker: Mapped[str | None] = mapped_column(String(BOOKMAKER_MAX_BYTES))
     # revalidated_at is SUCCESS-only (the dashboard "verified" badge: the pick
     # actually re-priced). revalidation_attempted_at advances on EVERY fetch
     # of the event's match page — priced or not — and drives the off-window
@@ -455,6 +502,12 @@ class ResultTracking(Base):
     outcome: Mapped[str] = mapped_column(String(16))  # won | lost | void | push
     pnl: Mapped[Decimal | None] = mapped_column(MONEY)  # vs actual or recommended stake
     roi: Mapped[Decimal | None] = mapped_column(METRIC)
+    # Exact denominator/fill used to compute pnl. Manual bets may use an
+    # operator-entered stake while strategy rows use the blended recommendation;
+    # persisting both prevents reports from dividing an actual-stake numerator
+    # by a recommended-stake denominator. Odds are already commission-net.
+    settled_stake_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    settled_effective_odds: Mapped[Decimal | None] = mapped_column(ODDS, nullable=True)
     # Final score of the game that settled this pick (HOME, AWAY). Plain ints —
     # not money/odds, so no NUMERIC. Nullable: void settlements (no score known)
     # and rows persisted before this column stay NULL.
@@ -567,9 +620,9 @@ class EventSourceLink(Base):
     a canonical (OddsPortal) event and a per-source stable id (Pinnacle arcadia
     matchup id, Betfair API event id). Seeded from live matcher confirmations —
     the matcher itself stays authoritative and is NOT gated by this table
-    (observability: makes matches stable, auditable, and reviewable). Re-links
-    upsert in place (matched_at/confidence refresh); ``active`` is a soft-delete
-    for a human reviewer to retire a wrong link without losing the audit trail.
+    (observability: makes matches stable, auditable, and reviewable). Same-
+    target confirmations refresh in place; a changed target retires the old row
+    as inactive audit history. ``active`` is also the reviewer soft-delete flag.
     Never breaks anchor resolution: writers wrap failures and log type-only."""
 
     __tablename__ = "event_source_links"
@@ -586,22 +639,34 @@ class EventSourceLink(Base):
         # composite unique key leads on `source`, so without this dedicated
         # index every event upsert seq-scans a monotonically growing table.
         Index("idx_event_source_links_source_event_id", "source_event_id"),
+        # One live identity per provider event. Retired links remain as audit
+        # history, but two ACTIVE rows may never redirect the same source id to
+        # different canonical fixtures.
+        Index(
+            "uq_event_source_links_active_source_event",
+            "source",
+            "source_event_id",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     canonical_event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
     source: Mapped[str] = mapped_column(String(32))  # 'pinnacle_arcadia' | 'betfair_api'
-    source_event_id: Mapped[str] = mapped_column(String(128))  # per-source stable id
+    source_event_id: Mapped[str] = mapped_column(
+        String(EVENT_REF_MAX_BYTES)
+    )  # per-source stable id
     source_market_id: Mapped[str | None] = mapped_column(String(64))  # e.g. Betfair market_id
     confidence_score: Mapped[Decimal] = mapped_column(PROB)  # matcher min-side JW in [0,1]
     match_method: Mapped[str] = mapped_column(String(32))  # exact_canonical/jw_two_tier/slug_*
     matched_at: Mapped[datetime]  # last time the live matcher confirmed this link
     active: Mapped[bool] = mapped_column(Boolean, server_default="true")
     # Raw source-side identity at match time (audit trail for a human reviewer).
-    raw_sport: Mapped[str | None] = mapped_column(String(64))
-    raw_league: Mapped[str | None] = mapped_column(String(128))
-    raw_home: Mapped[str | None] = mapped_column(String(128))
-    raw_away: Mapped[str | None] = mapped_column(String(128))
+    raw_sport: Mapped[str | None] = mapped_column(String(SPORT_KEY_MAX_BYTES))
+    raw_league: Mapped[str | None] = mapped_column(String(LEAGUE_KEY_MAX_BYTES))
+    raw_home: Mapped[str | None] = mapped_column(String(TEAM_NAME_MAX_BYTES))
+    raw_away: Mapped[str | None] = mapped_column(String(TEAM_NAME_MAX_BYTES))
     raw_start_time_utc: Mapped[datetime | None]
     evidence_json: Mapped[dict[str, Any] | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
@@ -630,7 +695,7 @@ class MatchReviewQueue(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     source: Mapped[str] = mapped_column(String(32))
-    source_event_id: Mapped[str] = mapped_column(String(128))
+    source_event_id: Mapped[str] = mapped_column(String(EVENT_REF_MAX_BYTES))
     source_market_id: Mapped[str | None] = mapped_column(String(64))
     candidate_canonical_event_id: Mapped[int | None] = mapped_column(ForeignKey("events.id"))
     confidence_score: Mapped[Decimal] = mapped_column(PROB)  # rejected candidate's min-side JW
@@ -673,7 +738,7 @@ class BetfairAnchorVerdict(Base):
     # Canonical OddsPortal match URL — same width as events.external_ref (the
     # value it references by name; deliberately NOT an FK so a verdict write can
     # never fail on event churn and the sink stays a tap).
-    event_ref: Mapped[str] = mapped_column(String(128))
+    event_ref: Mapped[str] = mapped_column(String(EVENT_REF_MAX_BYTES))
     market: Mapped[str] = mapped_column(String(64), server_default="h2h")
     selection_role: Mapped[str] = mapped_column(String(16))  # home | draw | away
     inline_price: Mapped[Decimal | None] = mapped_column(ODDS)  # scrape reference back
@@ -747,11 +812,13 @@ class CandidateEvaluation(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
-    sport_key: Mapped[str] = mapped_column(String(64))  # sports.key form, e.g. "soccer"
-    market: Mapped[str] = mapped_column(String(64))  # matches odds_snapshots.market width
+    sport_key: Mapped[str] = mapped_column(String(SPORT_KEY_MAX_BYTES))  # sports.key form
+    market: Mapped[str] = mapped_column(String(64))
     # '' when the market has no line suffix (NOT NULL — see class docstring).
-    market_detail: Mapped[str] = mapped_column(String(64), nullable=False, server_default="")
-    selection: Mapped[str] = mapped_column(String(64))
+    market_detail: Mapped[str] = mapped_column(
+        String(MARKET_DETAIL_MAX_BYTES), nullable=False, server_default=""
+    )
+    selection: Mapped[str] = mapped_column(String(SELECTION_MAX_BYTES))
     # Decision tier: 'premium' (kept — alerted, reserves exposure) or 'volume'
     # (demoted/shadow — persisted + CLV-tracked only). Same vocabulary as picks.tier.
     tier: Mapped[str] = mapped_column(String(16))
@@ -759,11 +826,11 @@ class CandidateEvaluation(Base):
     # shape). NULL/absent = a clean premium keep (no gate tripped).
     reasons: Mapped[dict[str, Any] | None]
     # --- anchor + fill provenance behind the decision (all nullable) ------------
-    anchor_book: Mapped[str | None] = mapped_column(String(64))
+    anchor_book: Mapped[str | None] = mapped_column(String(BOOKMAKER_MAX_BYTES))
     anchor_type: Mapped[str | None] = mapped_column(String(16))  # pinnacle|sharp|consensus
     anchor_age_seconds: Mapped[Decimal | None] = mapped_column(METRIC)
     anchor_liquidity: Mapped[Decimal | None] = mapped_column(MONEY)
-    best_book: Mapped[str | None] = mapped_column(String(64))  # best fill book
+    best_book: Mapped[str | None] = mapped_column(String(BOOKMAKER_MAX_BYTES))  # best fill book
     best_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     edge: Mapped[Decimal | None] = mapped_column(METRIC)
     fair_probability: Mapped[Decimal | None] = mapped_column(PROB)

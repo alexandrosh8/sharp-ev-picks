@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -55,6 +56,7 @@ from app.edge.betfair_ticks import (
     within_one_tick,
 )
 from app.ingestion.base import EventTeams
+from app.ingestion.http_safety import UpstreamBodyTooLarge, request_httpx_bounded
 from app.resolution.matching import (
     AliasTable,
     EventCandidate,
@@ -62,7 +64,7 @@ from app.resolution.matching import (
     match_event_hardened_scored,
 )
 from app.schemas.base import Market
-from app.schemas.odds import OddsSnapshotIn
+from app.schemas.odds import MAX_LIQUIDITY, OddsSnapshotIn
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,8 @@ SHADOW_BOOKMAKER = "betfair exchange (api-shadow)"
 PROMOTED_BOOKMAKER = "betfair exchange"
 
 _TIMEOUT = 20.0
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_MARKETS_PER_FETCH = 1_000
 
 
 # --- price-comparison math (PURE — lives in app/edge/betfair_ticks) ---------- #
@@ -317,10 +321,22 @@ def _best_back_level(available_to_back: Any) -> tuple[float, float] | None:
         if not isinstance(level, Mapping):
             continue
         price = level.get("price")
-        if not isinstance(price, int | float) or price <= 1.0:
+        if (
+            not isinstance(price, int | float)
+            or isinstance(price, bool)
+            or not math.isfinite(float(price))
+            or not 1.0 < float(price) <= 1_000.0
+        ):
             continue
         size = level.get("size")
-        size_f = float(size) if isinstance(size, int | float) and size >= 0 else 0.0
+        size_f = (
+            float(size)
+            if isinstance(size, int | float)
+            and not isinstance(size, bool)
+            and math.isfinite(float(size))
+            and 0 <= size <= MAX_LIQUIDITY
+            else 0.0
+        )
         if best is None or float(price) > best[0]:
             best = (float(price), size_f)
     return best
@@ -423,14 +439,20 @@ def parse_market_book_backs(
     payload: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[int, tuple[float, float]]]:
     """Pure parser for a ``listMarketBook`` result array (EX_BEST_OFFERS) ->
-    ``{market_id: {selection_id: (best_back_price, size@best)}}``. Runners with no
-    backable price are omitted (never invented)."""
+    ``{market_id: {selection_id: (best_back_price, size@best)}}``. Only an
+    explicitly OPEN, non-in-play book is eligible; missing status fields fail
+    closed because Betfair can return a book while a market transitions at
+    kickoff. Runners with no backable price are omitted (never invented)."""
     books: dict[str, dict[int, tuple[float, float]]] = {}
     for market in payload:
         if not isinstance(market, Mapping):
             continue
         market_id = str(market.get("marketId", "")).strip()
         if not market_id:
+            continue
+        if str(market.get("status", "")).upper() != "OPEN":
+            continue
+        if market.get("inplay") is not False:
             continue
         per_runner: dict[int, tuple[float, float]] = {}
         for runner in market.get("runners") or []:
@@ -482,7 +504,11 @@ def join_match_odds(
         home, away, draw = _roles(market.runners)
         if home is None or away is None:
             continue
-        per_runner = backs.get(market.market_id, {})
+        # Absence means the book was non-open/in-play/malformed and was rejected
+        # by parse_market_book_backs.  Do not manufacture a price-less match.
+        if market.market_id not in backs:
+            continue
+        per_runner = backs[market.market_id]
         home_ps = per_runner.get(home.selection_id)
         away_ps = per_runner.get(away.selection_id)
         draw_ps = per_runner.get(draw.selection_id) if draw is not None else None
@@ -549,7 +575,19 @@ class BetfairApiClient:
         data: Any | None = None,
         headers: dict[str, str],
     ) -> httpx.Response:
-        return await self._client.post(url, json=json, data=data, headers=headers, timeout=_TIMEOUT)
+        try:
+            return await request_httpx_bounded(
+                self._client,
+                "POST",
+                url,
+                max_bytes=MAX_RESPONSE_BYTES,
+                json=json,
+                data=data,
+                headers=headers,
+                timeout=_TIMEOUT,
+            )
+        except UpstreamBodyTooLarge:
+            raise BetfairApiError("betfair response exceeded byte ceiling") from None
 
     @retry(
         retry=retry_if_exception_type(httpx.TransportError),
@@ -558,7 +596,17 @@ class BetfairApiClient:
         reraise=True,
     )
     async def _get(self, url: str, *, headers: dict[str, str]) -> httpx.Response:
-        return await self._client.get(url, headers=headers, timeout=_TIMEOUT)
+        try:
+            return await request_httpx_bounded(
+                self._client,
+                "GET",
+                url,
+                max_bytes=MAX_RESPONSE_BYTES,
+                headers=headers,
+                timeout=_TIMEOUT,
+            )
+        except UpstreamBodyTooLarge:
+            raise BetfairApiError("betfair response exceeded byte ceiling") from None
 
     # --- session ------------------------------------------------------------- #
     async def login(self) -> None:
@@ -682,6 +730,8 @@ class BetfairApiClient:
         market_type_codes: Sequence[str] = (MARKET_TYPE_MATCH_ODDS,),
         max_results: int = 200,
     ) -> list[BetfairMarketCatalogue]:
+        if isinstance(max_results, bool) or not 1 <= max_results <= MAX_MARKETS_PER_FETCH:
+            raise BetfairApiError(f"betfair max_results must be within 1..{MAX_MARKETS_PER_FETCH}")
         result = await self._rpc(
             _OP_LIST_MARKET_CATALOGUE,
             {
@@ -698,7 +748,11 @@ class BetfairApiClient:
                 "sort": "FIRST_TO_START",
             },
         )
-        return parse_market_catalogue(result if isinstance(result, list) else [])
+        if not isinstance(result, list):
+            raise BetfairApiError("betfair listMarketCatalogue returned invalid result container")
+        if len(result) > max_results or len(result) > MAX_MARKETS_PER_FETCH:
+            raise BetfairApiError("betfair listMarketCatalogue exceeded result ceiling")
+        return parse_market_catalogue(result)
 
     async def list_market_book_backs(
         self, market_ids: Sequence[str]
@@ -709,6 +763,8 @@ class BetfairApiClient:
         if not market_ids:
             return {}
         ids = list(market_ids)
+        if len(ids) > MAX_MARKETS_PER_FETCH:
+            raise BetfairApiError("betfair listMarketBook exceeded market-id ceiling")
         out: dict[str, dict[int, tuple[float, float]]] = {}
         for start in range(0, len(ids), _MARKET_BOOK_BATCH):
             batch = ids[start : start + _MARKET_BOOK_BATCH]
@@ -719,7 +775,11 @@ class BetfairApiClient:
                     "priceProjection": {"priceData": ["EX_BEST_OFFERS"]},
                 },
             )
-            out.update(parse_market_book_backs(result if isinstance(result, list) else []))
+            if not isinstance(result, list):
+                raise BetfairApiError("betfair listMarketBook returned invalid result container")
+            if len(result) > len(batch):
+                raise BetfairApiError("betfair listMarketBook exceeded batch result ceiling")
+            out.update(parse_market_book_backs(result))
         return out
 
     async def fetch_match_odds(
@@ -1003,12 +1063,16 @@ class BetfairApiShadowCapture:
         delta + freshness gap) and the per-cycle roll-up is logged. When the
         default-OFF promotion flag is enabled, the sharp-tagged rows are routed to
         the anchor sink; otherwise nothing is persisted (measurement only)."""
-        now = self._now_fn()
+        query_now = self._now_fn()
         odds = await self._client.fetch_match_odds(
-            market_start_from=now,
-            market_start_to=now + self._window,
+            market_start_from=query_now,
+            market_start_to=query_now + self._window,
             event_type_ids=self._event_type_ids,
         )
+        # Capture only after the complete catalogue/book response sequence.
+        # This is conservative: a slow request that crosses kickoff can never be
+        # stamped with its pre-request time and promoted as a pre-match anchor.
+        observed_at = self._now_fn()
         candidates = list(await self._candidates())
         matched = 0
         unmatched = 0
@@ -1018,6 +1082,9 @@ class BetfairApiShadowCapture:
         link_observations: list[SourceLinkObservation] = []
         for market in odds:
             if not market.home or not market.away or market.kickoff is None:
+                unmatched += 1
+                continue
+            if market.kickoff <= observed_at:
                 unmatched += 1
                 continue
             # REUSE the hardened matcher verbatim (the SCORED variant — identical
@@ -1041,7 +1108,7 @@ class BetfairApiShadowCapture:
                 continue
             hit = outcome.candidate
             matched += 1
-            snapshots.extend(self._snapshots_for(market, hit.home, hit.away, hit.ref, now))
+            snapshots.extend(self._snapshots_for(market, hit.home, hit.away, hit.ref, observed_at))
             # Teams for the (only-when-promoting) attach-only persist; sourced from
             # the matched canonical candidate, never the Betfair competition name.
             teams_by_event[hit.ref] = EventTeams(
@@ -1059,7 +1126,7 @@ class BetfairApiShadowCapture:
                         canonical_external_ref=hit.ref,
                         confidence=outcome.confidence,
                         method=outcome.method,
-                        matched_at=now,
+                        matched_at=observed_at,
                         raw_league=market.competition,
                         raw_home=market.home,
                         raw_away=market.away,
@@ -1068,7 +1135,7 @@ class BetfairApiShadowCapture:
                 )
 
         await self._record_links(link_observations)
-        comparison = await self._compare(matched_pairs, now)
+        comparison = await self._compare(matched_pairs, observed_at)
         report = BetfairApiShadowReport(
             markets_fetched=len(odds),
             matched=matched,

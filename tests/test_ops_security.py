@@ -10,11 +10,14 @@
   non-loopback peer gets 404, and X-Forwarded-For can never spoof access.
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from pydantic import SecretStr
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 import app.api.routes as routes_mod
@@ -29,6 +32,7 @@ from app.api.routes import reset_login_throttle, router
 from app.config import Settings
 
 _LOOPBACK = ("127.0.0.1", 50000)
+_SESSION_SECRET = "ops-test-session-" + ("z" * 32)
 
 
 async def _no_session() -> AsyncIterator[None]:
@@ -68,7 +72,7 @@ def _make_app(monkeypatch, settings: Settings):  # type: ignore[no-untyped-def]
 
 def test_login_throttled_after_max_failures_and_pbkdf2_skipped(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     settings = _auth_enabled_settings()
-    set_active_credentials("admin", "not-a-real-hash", "session-secret")
+    set_active_credentials("admin", "not-a-real-hash", _SESSION_SECRET)
     app = _make_app(monkeypatch, settings)
     calls = {"n": 0}
 
@@ -93,7 +97,7 @@ def test_login_throttled_after_max_failures_and_pbkdf2_skipped(monkeypatch) -> N
 
 def test_login_success_clears_the_failure_window(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     settings = _auth_enabled_settings()
-    set_active_credentials("admin", "not-a-real-hash", "session-secret")
+    set_active_credentials("admin", "not-a-real-hash", _SESSION_SECRET)
     app = _make_app(monkeypatch, settings)
     outcomes = iter([False, False, True, False])
     monkeypatch.setattr(routes_mod, "authenticate", lambda u, p: next(outcomes))
@@ -107,7 +111,7 @@ def test_login_success_clears_the_failure_window(monkeypatch) -> None:  # type: 
 
 def test_login_throttle_is_per_ip(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     settings = _auth_enabled_settings()
-    set_active_credentials("admin", "not-a-real-hash", "session-secret")
+    set_active_credentials("admin", "not-a-real-hash", _SESSION_SECRET)
     app = _make_app(monkeypatch, settings)
     monkeypatch.setattr(routes_mod, "authenticate", lambda u, p: False)
     hammering = TestClient(app, client=("203.0.113.7", 40000))
@@ -117,6 +121,32 @@ def test_login_throttle_is_per_ip(monkeypatch) -> None:  # type: ignore[no-untyp
     # a different source address is not collateral damage
     other = TestClient(app, client=_LOOPBACK)
     assert other.post("/login", json={"username": "admin", "password": "bad"}).status_code == 401
+
+
+async def test_login_hash_is_singleflight_per_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _auth_enabled_settings()
+    set_active_credentials("admin", "not-a-real-hash", _SESSION_SECRET)
+    app = _make_app(monkeypatch, settings)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_to_thread(fn, *args):  # type: ignore[no-untyped-def]
+        started.set()
+        await release.wait()
+        return False
+
+    monkeypatch.setattr(routes_mod.asyncio, "to_thread", blocked_to_thread)
+    transport = httpx.ASGITransport(app=app, client=_LOOPBACK)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = asyncio.create_task(
+            client.post("/login", json={"username": "admin", "password": "bad"})
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        concurrent = await client.post("/login", json={"username": "admin", "password": "also-bad"})
+        assert concurrent.status_code == 429
+        assert concurrent.headers["Retry-After"] == "1"
+        release.set()
+        assert (await first).status_code == 401
 
 
 def test_login_throttle_window_expires(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -137,7 +167,7 @@ _DETAIL_KEYS = ("upstream", "polls", "value_min_edge", "poll_interval_seconds")
 
 def test_health_hides_detail_from_anonymous_when_auth_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     settings = _auth_enabled_settings()
-    set_active_credentials("admin", "not-a-real-hash", "session-secret")
+    set_active_credentials("admin", "not-a-real-hash", _SESSION_SECRET)
     app = _make_app(monkeypatch, settings)
     body = TestClient(app, client=_LOOPBACK).get("/health").json()
     assert body["status"] in ("ok", "degraded")  # liveness stays public
@@ -148,7 +178,7 @@ def test_health_hides_detail_from_anonymous_when_auth_enabled(monkeypatch) -> No
 
 def test_health_shows_detail_to_authenticated_session(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     settings = _auth_enabled_settings()
-    secret = "session-secret"
+    secret = _SESSION_SECRET
     set_active_credentials("admin", "not-a-real-hash", secret)
     app = _make_app(monkeypatch, settings)
     client = TestClient(app, client=_LOOPBACK)
@@ -165,6 +195,43 @@ def test_health_shows_detail_when_auth_disabled(monkeypatch) -> None:  # type: i
     body = TestClient(app, client=_LOOPBACK).get("/health").json()
     for key in _DETAIL_KEYS:
         assert key in body
+
+
+def test_ready_hides_component_state_from_anonymous_when_auth_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    settings = _auth_enabled_settings()
+    set_active_credentials("admin", "not-a-real-hash", _SESSION_SECRET)
+    app = _make_app(monkeypatch, settings)
+
+    response = TestClient(app, client=_LOOPBACK).get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready", "mode": "picks-only"}
+
+
+def test_ready_shows_component_state_to_authenticated_session(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    settings = _auth_enabled_settings()
+    set_active_credentials("admin", "not-a-real-hash", _SESSION_SECRET)
+    app = _make_app(monkeypatch, settings)
+    client = TestClient(app, client=_LOOPBACK)
+    client.cookies.set(
+        SESSION_COOKIE,
+        sign_session("admin", _SESSION_SECRET, 3600),
+    )
+
+    body = client.get("/ready").json()
+
+    assert "checks" in body
+    assert "newest_poll_age_seconds" in body
+
+
+def test_ready_shows_component_state_when_auth_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    settings = Settings.model_construct(dashboard_auth_enabled=False, app_env="local")
+    app = _make_app(monkeypatch, settings)
+
+    body = TestClient(app, client=_LOOPBACK).get("/ready").json()
+
+    assert "checks" in body
+    assert "newest_poll_age_seconds" in body
 
 
 # --- fix 5b: /setup answers only direct loopback connections ------------------ #
@@ -209,7 +276,12 @@ def test_setup_denied_for_proxied_request_even_from_loopback_peer(monkeypatch) -
     # connection LOOKS local — but a Forwarded header proves a proxied (public)
     # origin, so the first-run screen must refuse it.
     app, calls = _setup_app(monkeypatch)
-    local_proxy = TestClient(app, client=_LOOPBACK, follow_redirects=False)
+    local_proxy = TestClient(
+        app,
+        base_url="http://localhost",
+        client=_LOOPBACK,
+        follow_redirects=False,
+    )
     headers = {"X-Forwarded-For": "198.51.100.20"}
     assert local_proxy.get("/setup", headers=headers).status_code == 404
     res = local_proxy.post(
@@ -221,8 +293,99 @@ def test_setup_denied_for_proxied_request_even_from_loopback_peer(monkeypatch) -
 
 def test_setup_still_served_to_direct_loopback(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app, calls = _setup_app(monkeypatch)
-    local = TestClient(app, client=_LOOPBACK, follow_redirects=False)
+    local = TestClient(
+        app,
+        base_url="http://localhost",
+        client=_LOOPBACK,
+        follow_redirects=False,
+    )
     assert local.get("/setup").status_code == 200
     res = local.post("/setup", json={"username": "admin", "password": "long-enough-pw"})
     assert res.status_code == 200
     assert calls == ["admin"]
+
+
+def test_setup_rejects_dns_rebinding_host_and_cross_origin(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    app, calls = _setup_app(monkeypatch)
+    rebound = TestClient(
+        app,
+        base_url="http://attacker.example",
+        client=_LOOPBACK,
+        follow_redirects=False,
+    )
+    assert rebound.get("/setup").status_code == 404
+
+    local = TestClient(
+        app,
+        base_url="http://localhost",
+        client=_LOOPBACK,
+        follow_redirects=False,
+    )
+    assert (
+        local.post(
+            "/setup",
+            json={"username": "admin", "password": "long-enough-pw"},
+            headers={"Origin": "http://attacker.example"},
+        ).status_code
+        == 404
+    )
+    assert calls == []
+
+
+def test_setup_locality_fails_closed_without_peer_or_with_malformed_authority() -> None:
+    def request(
+        *, client: tuple[str, int] | None, host: bytes, origin: bytes | None = None
+    ) -> Request:
+        headers = [(b"host", host)]
+        if origin is not None:
+            headers.append((b"origin", origin))
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/setup",
+                "headers": headers,
+                "client": client,
+                "server": ("localhost", 80),
+                "scheme": "http",
+                "query_string": b"",
+            }
+        )
+
+    assert routes_mod._setup_request_is_local(request(client=None, host=b"localhost")) is False
+    assert (
+        routes_mod._setup_request_is_local(request(client=_LOOPBACK, host=b"localhost:bad"))
+        is False
+    )
+    assert (
+        routes_mod._setup_request_is_local(
+            request(client=_LOOPBACK, host=b"localhost", origin=b"http://localhost:bad")
+        )
+        is False
+    )
+
+
+def test_setup_is_disabled_in_production_even_on_loopback(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    settings = Settings.model_construct(
+        dashboard_auth_enabled=True,
+        dashboard_auth_username="admin",
+        dashboard_auth_password_hash=SecretStr("runtime-hash"),
+        dashboard_session_secret=SecretStr(_SESSION_SECRET),
+        dashboard_session_ttl_seconds=3600,
+        app_env="production",
+    )
+    app = _make_app(monkeypatch, settings)
+    local = TestClient(
+        app,
+        base_url="http://localhost",
+        client=_LOOPBACK,
+        follow_redirects=False,
+    )
+    assert local.get("/setup").status_code == 404
+    assert (
+        local.post(
+            "/setup",
+            json={"username": "admin", "password": "long-enough-pw"},
+        ).status_code
+        == 404
+    )

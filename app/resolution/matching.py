@@ -421,9 +421,15 @@ def marker_safe_slug_names(external_ref: str, home: str, away: str) -> tuple[str
     slug = slug_names(external_ref)
     if slug is None:
         return None
-    display_markers = distinguishing_markers(home) | distinguishing_markers(away)
-    slug_markers = distinguishing_markers(slug[0]) | distinguishing_markers(slug[1])
-    if display_markers <= slug_markers:
+    # Markers are properties of a SIDE, not of the fixture as a whole.  Set
+    # aggregation lets a marker dropped from home and spuriously added to away
+    # cancel out, admitting a different event.  Preserve the URL orientation
+    # and require each display side's categorical markers independently.
+    home_markers = distinguishing_markers(home)
+    away_markers = distinguishing_markers(away)
+    slug_home_markers = distinguishing_markers(slug[0])
+    slug_away_markers = distinguishing_markers(slug[1])
+    if home_markers <= slug_home_markers and away_markers <= slug_away_markers:
         return slug
     return None
 
@@ -527,12 +533,14 @@ def match_event(
     *,
     aliases: AliasTable,
     max_day_drift: int = 1,
+    max_minute_drift: int = 360,
     ordered: bool = True,
 ) -> EventCandidate | None:
     """The UNIQUE candidate that is the same fixture, or None.
 
     Strict rule: canonical home/away equality (after the alias table) AND
-    kickoff date within ``max_day_drift`` days. ``ordered=True`` (soccer/NBA —
+    kickoff date within ``max_day_drift`` days AND absolute kickoff drift within
+    ``max_minute_drift``. ``ordered=True`` (soccer/NBA —
     home vs away is meaningful) requires home->home and away->away; a swapped
     orientation does NOT match. ``ordered=False`` (tennis — two players, no
     home/away meaning) matches the unordered pair. If zero or >1 candidates
@@ -549,6 +557,8 @@ def match_event(
     for candidate in candidates:
         if not _same_day_window(kickoff, candidate.kickoff, max_day_drift):
             continue
+        if abs((candidate.kickoff - kickoff).total_seconds()) > max_minute_drift * 60:
+            continue
         cand_home = aliases.canonical(candidate.home)
         cand_away = aliases.canonical(candidate.away)
         if not cand_home or not cand_away:
@@ -560,16 +570,12 @@ def match_event(
             matched.append(candidate)
     if not matched:
         return None
-    # Every entry in `matched` shares the canonical (target_home, target_away)
-    # by construction AND falls inside the day window — so >1 means DUPLICATE
-    # captures of ONE fixture (a team plays once per day in soccer/NBA; tennis
-    # is the same player pair), never two DISTINCT games. The old
-    # "len != 1 -> None" rule therefore rejected fixtures purely because the
-    # Pinnacle archive held the same game under two kickoff times. Pick the
-    # capture NEAREST the pick's kickoff (deterministic tie-break on ref): this
-    # cannot attach a wrong close — all candidates are the same canonical
-    # fixture — and recovers those matches. A genuinely different game has a
-    # different canonical name and never enters `matched`.
+    # More than one DISTINCT source reference is ambiguous even when the
+    # published kickoffs are byte-identical: doubleheaders/rematches can share
+    # a scheduled time, and equal timestamps are not a provenance identity.
+    # Repeated copies of the same reference are harmless and collapse below.
+    if len({candidate.ref for candidate in matched}) > 1:
+        return None
     return min(matched, key=lambda c: (abs((c.kickoff - kickoff).total_seconds()), c.ref))
 
 

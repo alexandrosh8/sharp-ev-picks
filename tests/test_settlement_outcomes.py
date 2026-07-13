@@ -365,6 +365,27 @@ def test_provisional_fields_graded_for_alerted_pick_with_score() -> None:
     assert fields["provisional_pnl"] == "9.00"
 
 
+def test_provisional_fields_use_blended_repricing_basis() -> None:
+    from app.storage.models import Pick
+    from app.storage.repositories import _provisional_result_fields
+
+    pick = Pick(
+        market="totals",
+        selection="Under 170.5",
+        status="alerted",
+        bookmaker="Betfair",
+        recommended_stake_amount=Decimal("10.00"),
+        decimal_odds=Decimal("1.90"),
+        settlement_stake_amount=Decimal("30.00"),
+        settlement_effective_odds_stake=Decimal("66.000000"),
+    )
+
+    fields = _provisional_result_fields(pick, HOME, AWAY, 80, 87)
+
+    assert fields["provisional_outcome"] == "won"
+    assert fields["provisional_pnl"] == "36.00"  # 30 @ blended/net 2.20
+
+
 # --- football Asian Handicap (visibility-only volume market, commit 706f87e) ---
 #
 # A football AH pick persists with market=spreads and the human-readable

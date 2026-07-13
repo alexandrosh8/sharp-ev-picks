@@ -129,4 +129,4 @@ def test_alembic_graph_has_single_head() -> None:
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["a9d2c4e6f8b1"]  # picks.anchor_book_count telemetry (2026-07-11)
+    assert heads == ["e7f1a9c3b5d2"]  # provider-identity coherence (2026-07-13)

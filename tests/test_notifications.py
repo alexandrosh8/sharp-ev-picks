@@ -1,9 +1,14 @@
 """Notifications: idempotency, fan-out, never-raise sinks, reminder presence."""
 
+import asyncio
+import hashlib
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import fakeredis.aioredis
+import httpx
+import pytest
 
 from app.notifications.base import CORRELATED_EXPOSURE_WARNING, Alert, build_pick_alert
 from app.notifications.dedupe import (
@@ -12,6 +17,7 @@ from app.notifications.dedupe import (
     RedisIdempotencyStore,
 )
 from app.notifications.dispatcher import AlertDispatcher
+from app.notifications.telegram import TELEGRAM_MESSAGE_LIMIT, TelegramSink
 from app.schemas.base import Market
 from app.schemas.picks import ALERT_FOOTER, PickOut, StakeBreakdownOut
 
@@ -84,6 +90,19 @@ def test_pick_alert_dedupe_key_differs_by_tier() -> None:
     premium = make_pick()  # tier="premium"
     volume = make_pick().model_copy(update={"tier": "volume"})
     assert build_pick_alert(premium).dedupe_key != build_pick_alert(volume).dedupe_key
+
+
+def test_pick_alert_dedupe_key_distinguishes_market_detail() -> None:
+    line_a = make_pick().model_copy(update={"market_detail": "totals_2_5"})
+    line_b = make_pick().model_copy(update={"market_detail": "totals_3_5"})
+    assert build_pick_alert(line_a).dedupe_key != build_pick_alert(line_b).dedupe_key
+
+
+def test_repriced_alert_states_total_target_not_increment() -> None:
+    alert = build_pick_alert(make_pick(), repriced=True)
+    assert "Updated TOTAL target 2.0%" in alert.body
+    assert "do not add this total again" in alert.body
+    assert "💰 Stake 2.0%" not in alert.body
 
 
 def test_pick_alert_correlation_warning_appended_when_passed() -> None:
@@ -183,14 +202,17 @@ async def test_failed_dispatch_releases_claim_so_next_cycle_retries() -> None:
     assert len(sink.sent) == 1
 
 
-async def test_partial_delivery_keeps_claim() -> None:
-    # One channel delivered: releasing would duplicate the alert to the
-    # healthy channel on the next cycle.
+async def test_partial_delivery_retries_only_failed_sink() -> None:
+    # Per-sink claims keep the successful channel quiet while the failed channel
+    # remains independently retryable.
     recording = RecordingSink()
     dispatcher = AlertDispatcher([ExplodingSink(), recording], InMemoryIdempotencyStore())
-    await dispatcher.dispatch(make_alert())
+    first = await dispatcher.dispatch(make_alert())
+    assert first.sink_results == (("exploding", False), ("recording", True))
+
     second = await dispatcher.dispatch(make_alert())
-    assert second.skipped_duplicate is True
+    assert second.skipped_duplicate is False
+    assert second.sink_results == (("exploding", False), ("recording", True))
     assert len(recording.sent) == 1
 
 
@@ -203,6 +225,77 @@ async def test_unconfigured_sinks_do_not_release_claim() -> None:
     assert first.skipped_duplicate is False
     second = await dispatcher.dispatch(make_alert())
     assert second.skipped_duplicate is True
+
+
+class CancellableSink:
+    name = "cancellable"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = asyncio.Event()
+
+    async def send(self, alert: Alert) -> bool:
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            await asyncio.Event().wait()
+        return True
+
+
+async def test_cancellation_releases_sink_claim_for_retry() -> None:
+    sink = CancellableSink()
+    dispatcher = AlertDispatcher([sink], InMemoryIdempotencyStore())
+    task = asyncio.create_task(dispatcher.dispatch(make_alert()))
+    await asyncio.wait_for(sink.started.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    retried = await dispatcher.dispatch(make_alert())
+    assert retried.skipped_duplicate is False
+    assert retried.sink_results == (("cancellable", True),)
+    assert sink.calls == 2
+
+
+class RepeatedCancellationStore:
+    def __init__(self) -> None:
+        self.claim_started = asyncio.Event()
+        self.allow_claim = asyncio.Event()
+        self.release_started = asyncio.Event()
+        self.allow_release = asyncio.Event()
+        self.keys: set[str] = set()
+
+    async def claim(self, key: str, *, legacy_key: str | None = None) -> bool:
+        self.claim_started.set()
+        await self.allow_claim.wait()
+        self.keys.add(key)
+        return True
+
+    async def release(self, key: str) -> None:
+        self.release_started.set()
+        await self.allow_release.wait()
+        self.keys.discard(key)
+
+
+async def test_repeated_cancellation_cannot_leak_inflight_claim() -> None:
+    store = RepeatedCancellationStore()
+    dispatcher = AlertDispatcher([RecordingSink()], store)
+    task = asyncio.create_task(dispatcher.dispatch(make_alert("repeat-cancel")))
+    await asyncio.wait_for(store.claim_started.wait(), timeout=1.0)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()  # cancel again while _claim is draining the protected SET NX
+    store.allow_claim.set()
+    await asyncio.wait_for(store.release_started.wait(), timeout=1.0)
+
+    task.cancel()  # and again while the compensating release is in flight
+    await asyncio.sleep(0)
+    assert not task.done()
+    store.allow_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert store.keys == set()
 
 
 async def test_redis_idempotency_store_claims_once() -> None:
@@ -221,6 +314,30 @@ async def test_redis_idempotency_store_release_reopens_key() -> None:
     assert await store.claim("key-1") is True  # claimable again after release
 
 
+async def test_legacy_global_claim_suppresses_and_seeds_per_sink_key() -> None:
+    redis = fakeredis.aioredis.FakeRedis()
+    store = RedisIdempotencyStore(redis)
+    sink = RecordingSink()
+    dispatcher = AlertDispatcher([sink], store)
+    alert = make_alert("pre-upgrade-hash")
+    await redis.set(f"alert:dedupe:{alert.dedupe_key}", "1", ex=DEFAULT_TTL_SECONDS)
+
+    result = await dispatcher.dispatch(alert)
+
+    assert result.skipped_duplicate is True
+    assert sink.sent == []
+    per_sink = f"alert:dedupe:{alert.dedupe_key}:sink:{sink.name}:0"
+    assert await redis.exists(per_sink) == 1
+    # The compatibility check only reads the legacy key; it never creates a
+    # global claim for brand-new alerts.
+    await redis.delete(f"alert:dedupe:{alert.dedupe_key}")
+    assert (await dispatcher.dispatch(alert)).skipped_duplicate is True
+
+    fresh = make_alert("brand-new-hash")
+    assert (await dispatcher.dispatch(fresh)).skipped_duplicate is False
+    assert await redis.exists(f"alert:dedupe:{fresh.dedupe_key}") == 0
+
+
 async def test_redis_idempotency_ttl_keeps_unchanged_odds_quiet_for_seven_days() -> None:
     # Unchanged odds on a still-open pick must NOT re-alert daily: the claim
     # TTL is 7 days by default (a price move mints a new key regardless).
@@ -236,9 +353,9 @@ async def test_redis_idempotency_ttl_keeps_unchanged_odds_quiet_for_seven_days()
     assert await redis.ttl("alert:dedupe:key-custom") == 3600
 
 
-def test_pick_alert_contains_required_fields_without_footer() -> None:
+def test_pick_alert_contains_required_fields_and_footer() -> None:
     alert = build_pick_alert(make_pick())
-    assert ALERT_FOOTER not in alert.body  # footer removed per operator request
+    assert alert.body.endswith(ALERT_FOOTER)
     for fragment in (
         "Alpha FC vs Beta United",
         "Alpha FC @ 2.10 · bookie_one",
@@ -251,6 +368,48 @@ def test_pick_alert_contains_required_fields_without_footer() -> None:
     ):
         assert fragment in alert.body, fragment
     assert len(alert.dedupe_key) == 32
+
+
+def test_lineless_pick_preserves_pre_market_detail_dedupe_hash() -> None:
+    pick = make_pick()
+    model_name = "value-sharp-vs-soft"
+    model_version = "v3"
+    old_raw_key = (
+        f"{pick.event_id}|{pick.bookmaker}|{pick.market}|{pick.selection}"
+        f"|{pick.decimal_odds}|{pick.tier}|{model_name}|{model_version}"
+    )
+    expected = hashlib.sha256(old_raw_key.encode()).hexdigest()[:32]
+    assert (
+        build_pick_alert(pick, model_name=model_name, model_version=model_version).dedupe_key
+        == expected
+    )
+    blank = pick.model_copy(update={"market_detail": ""})
+    assert (
+        build_pick_alert(blank, model_name=model_name, model_version=model_version).dedupe_key
+        == expected
+    )
+
+
+async def test_telegram_oversized_alert_preserves_footer_and_correlation_tail() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200)
+
+    pick = make_pick().model_copy(update={"reason_summary": "x" * 10_000})
+    alert = build_pick_alert(
+        pick,
+        correlation_warning=CORRELATED_EXPOSURE_WARNING,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await TelegramSink("runtime-token", "test-chat", client).send(alert) is True
+
+    text = captured["text"]
+    assert isinstance(text, str)
+    assert len(text) <= TELEGRAM_MESSAGE_LIMIT
+    assert CORRELATED_EXPOSURE_WARNING in text
+    assert text.endswith(ALERT_FOOTER)
 
 
 def test_same_pick_same_dedupe_key() -> None:

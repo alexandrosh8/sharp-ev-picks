@@ -321,7 +321,15 @@ class _Sink:
 
 def _ah_deps(sink: _Sink, loader: _Loader, policy: ValuePolicy) -> PipelineDeps:
     directory = EventDirectory()
-    directory.register("evt-ah", EventTeams(home="Home FC", away="Away FC", league="Test League"))
+    directory.register(
+        "evt-ah",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            league="Test League",
+            starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+        ),
+    )
     return PipelineDeps(
         loader=loader,
         model=NullModel(),

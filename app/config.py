@@ -5,11 +5,16 @@ below turns any attempt to enable betting execution into a fatal startup
 error. There is no code anywhere that reads these flags to enable anything.
 """
 
+import math
+from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 from app.edge.gates import GatePolicy
 from app.edge.steam import SteamPolicy
@@ -31,6 +36,12 @@ from app.risk.staking import StakePolicy, UncertaintyShrinkPolicy
 # (a cycle slower than the window starves picks — surfaced as the per-cycle
 # stale-drop ratio + a "picks starving" warning in app/pipeline.py).
 ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET = 4
+
+# Values commonly copied from examples/default images. They are acceptable for
+# a loopback-only local stack, never for APP_ENV=production.
+_INSECURE_PRODUCTION_DATABASE_PASSWORDS = frozenset(
+    {"betting_ai", "change-me", "changeme", "password", "postgres"}
+)
 
 
 def _parse_market_map(raw: str, env_name: str) -> tuple[tuple[str, str], ...]:
@@ -139,9 +150,10 @@ def parse_odds_bands(raw: str) -> tuple[tuple[float, float], ...]:
             raise ValueError(f"VALUE_ODDS_BANDS: bad band {entry!r} (expected 'lo-hi')") from None
         if not sep:
             raise ValueError(f"VALUE_ODDS_BANDS: bad band {entry!r} (expected 'lo-hi')")
-        if not 1.0 < lo <= hi:
+        if not (math.isfinite(lo) and math.isfinite(hi) and 1.0 < lo <= hi <= 1000.0):
             raise ValueError(
-                f"VALUE_ODDS_BANDS: band {entry!r} needs 1.0 < lo <= hi (decimal odds)"
+                f"VALUE_ODDS_BANDS: band {entry!r} needs finite "
+                "1.0 < lo <= hi <= 1000 (decimal odds)"
             )
         bands.append((lo, hi))
     return tuple(bands)
@@ -262,7 +274,7 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
 
-    app_env: str = "local"
+    app_env: Literal["local", "production", "test"] = "local"
     log_level: str = "INFO"
 
     database_url: str = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
@@ -340,7 +352,22 @@ class Settings(BaseSettings):
     dashboard_auth_username: str = "admin"
     dashboard_auth_password_hash: SecretStr = SecretStr("")  # pbkdf2_sha256$iters$salt$hash
     dashboard_session_secret: SecretStr = SecretStr("")  # HMAC key for the session cookie
-    dashboard_session_ttl_seconds: int = Field(default=12 * 60 * 60, ge=60)
+    dashboard_session_ttl_seconds: int = Field(
+        default=12 * 60 * 60,
+        ge=60,
+        le=7 * 24 * 60 * 60,
+    )
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env == "production"
+
+    @property
+    def secure_session_cookie(self) -> bool:
+        # Local is the only supported plaintext-HTTP environment. Production
+        # is reached through a TLS reverse proxy; test keeps the secure
+        # contract unless a test deliberately model_constructs local settings.
+        return self.app_env != "local"
 
     # --- Pick strategy --------------------------------------------------------
     # "value" = sharp-vs-soft line shopping (BACKTESTED, positive holdout CLV —
@@ -577,12 +604,11 @@ class Settings(BaseSettings):
     # EXCHANGE ANCHOR LIQUIDITY FLOOR (WP5) — £ matched best-back size, the
     # unit the dedicated Betfair capture writes into odds_snapshots.liquidity
     # (app/ingestion/betfair_api.py "best-back available £"). An exchange row
-    # whose KNOWN liquidity sits below this floor on any selection must NOT
+    # whose liquidity is missing OR below this floor on any selection must NOT
     # serve as the named sharp anchor (the market falls through to the next
-    # sharp book / consensus — fail-closed anchoring). UNKNOWN (NULL)
-    # liquidity stays anchor-eligible: the dominant main-scrape Betfair rows
-    # carry liquidity=NULL and provide 59/62 Betfair-anchored events, so the
-    # floor only rejects KNOWN-thin lines. Distinct from the CAPTURE-time
+    # sharp book / consensus — fail-closed anchoring). Main-scrape Betfair rows
+    # with NULL liquidity remain consensus/shadow evidence; only a measured
+    # exchange row can satisfy a positive minimum. Distinct from the CAPTURE-time
     # floor BETFAIR_EXCHANGE_MIN_LIQUIDITY (10.0 — gates £0/dust rows at
     # ingestion): 50.0 here demands a real, firmed market before an exchange
     # price is trusted as the SHARP fair-value anchor. 0 = gate off.
@@ -657,7 +683,7 @@ class Settings(BaseSettings):
     #                 Betfair Exchange + Sportsbook inline, so selecting it also
     #                 moves the Betfair anchor to this provider (the dedicated
     #                 Betfair Exchange capture stays gated to oddsportal).
-    odds_source: str = "oddschecker"
+    odds_source: str = "oddsportal"
 
     # --- OddsChecker (only when odds_source="oddschecker") ------------------------
     # PIPELINE sport keys to poll (csv). soccer is the only CLV-validated sport;
@@ -668,7 +694,7 @@ class Settings(BaseSettings):
     # today+tomorrow, matching the OddsChecker date picker default.
     oddschecker_days: int = Field(default=2, ge=1, le=4)
     # Max concurrent match-page fetches per sport poll (curl_cffi clients).
-    oddschecker_max_clients: int = Field(default=8, ge=1, le=32)
+    oddschecker_max_clients: int = Field(default=8, ge=1, le=8)
     # Capture-only: also persist every sharp-anchored (Betfair Exchange) unmapped
     # market (props / period / combo) as Market.OTHER odds history. These NEVER
     # mint picks/CLV (not in the devig whitelist, no settlement resolver) — pure
@@ -933,7 +959,7 @@ class Settings(BaseSettings):
     # sweep tries all 14 slots (betfair_exchange.py:325) with no cap").
     # Mirrors oddsportal.py's _MAX_PROXY_FAILOVER=3 pattern, wider because the
     # feed GET is far cheaper than a Chromium listing relaunch.
-    proxy_max_failover_betfair: int = Field(default=6, ge=1)
+    proxy_max_failover_betfair: int = Field(default=3, ge=1, le=3)
     # When true, the settlement-time snapshot close ALSO injects the STRICT
     # cross-source match's Pinnacle ARCHIVE close (app/resolution, ADR-0013), so
     # incremental CLV anchors on a real sharp close. OFF by default: it changes
@@ -1241,6 +1267,51 @@ class Settings(BaseSettings):
     nba_promotion_acknowledge_evidence: bool = False
 
     @model_validator(mode="after")
+    def _enforce_finite_numeric_domains(self) -> "Settings":
+        """Reject non-finite floats and DB-unsafe core money/gate values."""
+        for field_name in type(self).model_fields:
+            value = getattr(self, field_name)
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"{field_name.upper()} must be finite")
+
+        unit_interval = {
+            "MIN_EDGE": self.min_edge,
+            "VALUE_MIN_EDGE": self.value_min_edge,
+            "MIN_CONFIDENCE": self.min_confidence,
+            "MODEL_CONFIDENCE": self.model_confidence,
+        }
+        for field_name, value in unit_interval.items():
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be in [0, 1]")
+        if self.max_odds_age_seconds <= 0.0:
+            raise ValueError("MAX_ODDS_AGE_SECONDS must be > 0")
+        if self.min_liquidity < 0.0:
+            raise ValueError("MIN_LIQUIDITY must be >= 0")
+        if not 1.0 < self.value_min_odds <= 1000.0:
+            raise ValueError("VALUE_MIN_ODDS must be in (1, 1000]")
+
+        # MONEY is NUMERIC(12,2): ten integer digits. At the largest accepted
+        # decimal odds (1000), a win earns 999x the stake. Validate the worst
+        # recommendation and the optional ledger seed before asyncpg can turn a
+        # configuration typo into a runtime NumericValueOutOfRange failure.
+        money_max = Decimal("9999999999.99")
+        worst_case_pnl = (
+            Decimal(str(self.bankroll_base))
+            * Decimal(str(self.max_recommended_stake_percent))
+            * Decimal("999")
+        )
+        if worst_case_pnl > money_max:
+            raise ValueError(
+                "BANKROLL_BASE * MAX_RECOMMENDED_STAKE_PERCENT * 999 must fit NUMERIC(12,2)"
+            )
+        if (
+            self.bankroll_starting_balance is not None
+            and Decimal(str(self.bankroll_starting_balance)) > money_max
+        ):
+            raise ValueError("BANKROLL_STARTING_BALANCE must fit NUMERIC(12,2)")
+        return self
+
+    @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":
         if self.auto_betting or self.bet_execution_enabled:
             raise ValueError(
@@ -1298,7 +1369,16 @@ class Settings(BaseSettings):
                     "it in the database)."
                 )
             if has_hash:
-                hash_parts = self.dashboard_auth_password_hash.get_secret_value().split("$")
+                secret = self.dashboard_session_secret.get_secret_value()
+                if not 32 <= len(secret.encode("utf-8")) <= 512:
+                    raise ValueError("DASHBOARD_SESSION_SECRET must contain 32..512 UTF-8 bytes")
+                username = self.dashboard_auth_username
+                if not username or len(username.encode("utf-8")) > 128:
+                    raise ValueError("DASHBOARD_AUTH_USERNAME must contain 1..128 UTF-8 bytes")
+                password_hash = self.dashboard_auth_password_hash.get_secret_value()
+                if len(password_hash) > 1024:
+                    raise ValueError("DASHBOARD_AUTH_PASSWORD_HASH must not exceed 1024 characters")
+                hash_parts = password_hash.split("$")
                 if len(hash_parts) != 4 or hash_parts[0] != "pbkdf2_sha256":
                     raise ValueError(
                         "DASHBOARD_AUTH_PASSWORD_HASH must look like "
@@ -1306,28 +1386,86 @@ class Settings(BaseSettings):
                         "wrap it in single quotes so Docker Compose does not "
                         "interpolate the $ separators."
                     )
+                try:
+                    iterations = int(hash_parts[1])
+                    salt = bytes.fromhex(hash_parts[2])
+                    digest = bytes.fromhex(hash_parts[3])
+                except ValueError as exc:
+                    raise ValueError(
+                        "DASHBOARD_AUTH_PASSWORD_HASH has invalid numeric/hex fields"
+                    ) from exc
+                if not 100_000 <= iterations <= 2_000_000:
+                    raise ValueError(
+                        "DASHBOARD_AUTH_PASSWORD_HASH iterations must be 100000..2000000"
+                    )
+                if not 16 <= len(salt) <= 64 or len(digest) != 32:
+                    raise ValueError(
+                        "DASHBOARD_AUTH_PASSWORD_HASH requires a 16..64-byte salt "
+                        "and 32-byte SHA-256 digest"
+                    )
         bind = self.app_host_bind.strip().lower().strip("[]")
         # Empty/unset counts as loopback: the field DEFAULTS to 127.0.0.1 and only
         # DECLARES the compose host-side bind (which maps to loopback), so a blank
         # value is "not publicly host-bound", not "bind all interfaces".
         loopback = bind in ("", "localhost", "::1") or bind.startswith("127.")
-        if not loopback:
-            # A PUBLIC host bind must NOT expose the unauthenticated first-run
-            # /setup screen — on a public interface the FIRST visitor could create
-            # the admin credential (app/api/routes.py /setup). Require auth ENABLED
-            # with BOTH a pre-provisioned password hash AND session secret; the
-            # blank-credential /setup path is permitted ONLY on a loopback bind.
-            has_hash = bool(self.dashboard_auth_password_hash.get_secret_value())
-            has_secret = bool(self.dashboard_session_secret.get_secret_value())
-            if not (self.dashboard_auth_enabled and has_hash and has_secret):
+        has_hash = bool(self.dashboard_auth_password_hash.get_secret_value())
+        has_secret = bool(self.dashboard_session_secret.get_secret_value())
+        if self.app_env != "local" and not self.dashboard_auth_enabled:
+            raise ValueError(
+                "DASHBOARD_AUTH_ENABLED must be true outside APP_ENV=local; "
+                "non-local deployments may not expose anonymous dashboard or "
+                "manual-settlement routes."
+            )
+        if self.is_production:
+            if not (has_hash and has_secret):
                 raise ValueError(
-                    "APP_HOST_BIND binds the dashboard to a PUBLIC interface; that "
-                    "requires DASHBOARD_AUTH_ENABLED=true with BOTH a pre-provisioned "
-                    "DASHBOARD_AUTH_PASSWORD_HASH and DASHBOARD_SESSION_SECRET. The "
-                    "blank-credential first-run /setup screen (where the first "
-                    "visitor claims the admin password) is allowed only on a loopback "
-                    "bind — provision the hash/secret before binding publicly."
+                    "APP_ENV=production requires pre-provisioned "
+                    "DASHBOARD_AUTH_PASSWORD_HASH and DASHBOARD_SESSION_SECRET; "
+                    "HTTP /setup is disabled in production."
                 )
+            if not loopback:
+                raise ValueError(
+                    "APP_ENV=production requires APP_HOST_BIND to stay loopback; "
+                    "the TLS reverse proxy or SSH tunnel owns the public interface."
+                )
+        # A PUBLIC host bind must NOT expose the unauthenticated first-run
+        # /setup screen — on a public interface the FIRST visitor could create
+        # the admin credential (app/api/routes.py /setup). Require auth ENABLED
+        # with BOTH a pre-provisioned password hash AND session secret; the
+        # blank-credential /setup path is permitted ONLY on a loopback bind.
+        if not loopback and not (self.dashboard_auth_enabled and has_hash and has_secret):
+            raise ValueError(
+                "APP_HOST_BIND binds the dashboard to a PUBLIC interface; that "
+                "requires DASHBOARD_AUTH_ENABLED=true with BOTH a pre-provisioned "
+                "DASHBOARD_AUTH_PASSWORD_HASH and DASHBOARD_SESSION_SECRET. The "
+                "blank-credential first-run /setup screen (where the first "
+                "visitor claims the admin password) is allowed only on a loopback "
+                "bind — provision the hash/secret before binding publicly."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_production_database_credentials(self) -> "Settings":
+        """Reject missing/example PostgreSQL passwords before production starts."""
+
+        if not self.is_production:
+            return self
+        try:
+            database_url = make_url(self.database_url)
+        except (ArgumentError, ValueError):
+            # Do not chain or echo the URL: it normally contains the password.
+            raise ValueError("DATABASE_URL is not a valid SQLAlchemy database URL") from None
+        if database_url.get_backend_name() != "postgresql":
+            raise ValueError("APP_ENV=production requires a PostgreSQL DATABASE_URL")
+        password = database_url.password
+        if (
+            password is None
+            or not password.strip()
+            or password.strip().casefold() in _INSECURE_PRODUCTION_DATABASE_PASSWORDS
+        ):
+            raise ValueError(
+                "production DATABASE_URL password must be non-blank and not a known default"
+            )
         return self
 
     @model_validator(mode="after")
@@ -1373,6 +1511,18 @@ class Settings(BaseSettings):
                 f"ceiling {cap}: above 5 you need >=1 proxy per concurrent request, but "
                 f"SCRAPER_PROXY_POOL has {len(self.scraper_proxies())}. Add proxies or "
                 "lower the concurrency so each request exits a distinct IP."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_odds_source_is_runnable(self) -> "Settings":
+        supported = {"oddsportal", "odds_api", "oddschecker"}
+        if self.odds_source not in supported:
+            raise ValueError("ODDS_SOURCE must be oddsportal, odds_api, or oddschecker")
+        if self.odds_source == "oddschecker" and not self.scraper_proxies():
+            raise ValueError(
+                "ODDS_SOURCE=oddschecker requires SCRAPER_PROXY_POOL; "
+                "datacenter-direct polling is disabled upstream"
             )
         return self
 

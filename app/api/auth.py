@@ -21,6 +21,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import json
 import secrets
 import time
 from dataclasses import dataclass
@@ -30,6 +31,21 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 SESSION_COOKIE = "bp_session"
 _PBKDF2_ITERATIONS = 600_000  # OWASP 2023 floor for PBKDF2-SHA256
+_PBKDF2_MIN_ITERATIONS = 100_000
+_PBKDF2_MAX_ITERATIONS = 2_000_000
+MAX_USERNAME_BYTES = 128
+MAX_PASSWORD_BYTES = 1024
+MAX_SESSION_SECRET_BYTES = 512
+MIN_SESSION_SECRET_BYTES = 32
+MAX_SESSION_TOKEN_BYTES = 4096
+MAX_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
+def _bounded_utf8(value: str, maximum: int) -> bool:
+    try:
+        return len(value.encode("utf-8")) <= maximum
+    except UnicodeEncodeError:
+        return False
 
 
 class AuthRequired(Exception):
@@ -44,12 +60,18 @@ class SetupRequired(Exception):
 
 
 def hash_password(password: str, *, iterations: int = _PBKDF2_ITERATIONS) -> str:
+    if not password or not _bounded_utf8(password, MAX_PASSWORD_BYTES):
+        raise ValueError("password length is outside supported bounds")
+    if not _PBKDF2_MIN_ITERATIONS <= iterations <= _PBKDF2_MAX_ITERATIONS:
+        raise ValueError("PBKDF2 iteration count is outside supported bounds")
     salt = secrets.token_bytes(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
     return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
 
 
 def verify_password(password: str, stored: str) -> bool:
+    if not password or not _bounded_utf8(password, MAX_PASSWORD_BYTES) or len(stored) > 1024:
+        return False
     parts = stored.split("$")
     if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
         return False
@@ -58,6 +80,12 @@ def verify_password(password: str, stored: str) -> bool:
         salt = bytes.fromhex(parts[2])
         expected = bytes.fromhex(parts[3])
     except ValueError:
+        return False
+    # Never let an attacker-controlled/legacy hash trigger an effectively
+    # unbounded CPU job or weaken verification below the accepted floor.
+    if not _PBKDF2_MIN_ITERATIONS <= iterations <= _PBKDF2_MAX_ITERATIONS:
+        return False
+    if not 16 <= len(salt) <= 64 or len(expected) != hashlib.sha256().digest_size:
         return False
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
     return hmac.compare_digest(dk, expected)
@@ -72,13 +100,27 @@ def _b64d(s: str) -> bytes:
 
 
 def sign_session(username: str, secret: str, ttl_seconds: int, *, now: int | None = None) -> str:
+    if not username or not _bounded_utf8(username, MAX_USERNAME_BYTES):
+        raise ValueError("username length is outside supported bounds")
+    if not MIN_SESSION_SECRET_BYTES <= len(secret.encode("utf-8")) <= MAX_SESSION_SECRET_BYTES:
+        raise ValueError("session secret length is outside supported bounds")
+    if not 1 <= ttl_seconds <= MAX_SESSION_TTL_SECONDS:
+        raise ValueError("session TTL is outside supported bounds")
     issued = int(time.time()) if now is None else now
-    body = _b64e(f"{username}|{issued + ttl_seconds}".encode())
+    # Structured payload removes delimiter ambiguity (a username containing
+    # '|' previously produced a cookie that sign_session emitted but
+    # verify_session could never parse).
+    payload = {"u": username, "iat": issued, "exp": issued + ttl_seconds}
+    body = _b64e(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode())
     sig = hmac.new(secret.encode(), body.encode(), hashlib.sha256).digest()
     return f"{body}.{_b64e(sig)}"
 
 
 def verify_session(token: str, secret: str, *, now: int | None = None) -> str | None:
+    if len(token) > MAX_SESSION_TOKEN_BYTES:
+        return None
+    if not MIN_SESSION_SECRET_BYTES <= len(secret.encode("utf-8")) <= MAX_SESSION_SECRET_BYTES:
+        return None
     parts = token.split(".")
     if len(parts) != 2:
         return None
@@ -91,12 +133,26 @@ def verify_session(token: str, secret: str, *, now: int | None = None) -> str | 
     if not hmac.compare_digest(expected, got):
         return None
     try:
-        username, exp_s = _b64d(body).decode().split("|")
-        exp = int(exp_s)
-    except (ValueError, UnicodeDecodeError):
+        decoded = json.loads(_b64d(body).decode())
+        username = decoded["u"]
+        issued = decoded["iat"]
+        exp = decoded["exp"]
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+    if (
+        not isinstance(username, str)
+        or not username
+        or not _bounded_utf8(username, MAX_USERNAME_BYTES)
+        or not isinstance(issued, int)
+        or isinstance(issued, bool)
+        or not isinstance(exp, int)
+        or isinstance(exp, bool)
+        or exp <= issued
+        or exp - issued > MAX_SESSION_TTL_SECONDS
+    ):
         return None
     current = int(time.time()) if now is None else now
-    if current >= exp:
+    if issued > current + 60 or current >= exp:
         return None
     return username
 
@@ -117,6 +173,16 @@ _active: DashboardCredentials | None = None
 def set_active_credentials(username: str, password_hash: str, session_secret: str) -> None:
     """Install the live admin credential. Called at startup from the DB row and
     again right after first-run /setup writes one. Takes precedence over .env."""
+    if not username or not _bounded_utf8(username, MAX_USERNAME_BYTES):
+        raise ValueError("username length is outside supported bounds")
+    if len(password_hash) > 1024:
+        raise ValueError("password hash length is outside supported bounds")
+    if (
+        not MIN_SESSION_SECRET_BYTES
+        <= len(session_secret.encode("utf-8"))
+        <= MAX_SESSION_SECRET_BYTES
+    ):
+        raise ValueError("session secret length is outside supported bounds")
     global _active
     _active = DashboardCredentials(username, password_hash, session_secret)
 
@@ -187,7 +253,14 @@ def authenticate(username: str, password: str) -> bool:
     creds = _current_credentials()
     if creds is None:
         return False
-    user_ok = hmac.compare_digest(username, creds.username)
+    if not _bounded_utf8(username, MAX_USERNAME_BYTES) or not _bounded_utf8(
+        password, MAX_PASSWORD_BYTES
+    ):
+        return False
+    # ``compare_digest(str, str)`` rejects non-ASCII text with TypeError. Both
+    # setup/config intentionally allow UTF-8 usernames, so compare their bytes
+    # instead and keep Unicode login attempts fail-closed rather than 500ing.
+    user_ok = hmac.compare_digest(username.encode("utf-8"), creds.username.encode("utf-8"))
     pass_ok = verify_password(password, creds.password_hash)
     return user_ok and pass_ok
 

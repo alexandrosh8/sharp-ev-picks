@@ -16,11 +16,13 @@ import asyncio
 import contextlib
 import importlib.metadata
 import logging
+import math
+import random
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from app.ingestion.base import (
     EventDirectory,
@@ -36,7 +38,7 @@ from app.ingestion.base import (
 from app.ingestion.oddsportal_json_session import PINNED_IMPERSONATE as _JSON_IMPERSONATE
 from app.ingestion.proxy_health import ProxyHealthRegistry, get_registry
 from app.schemas.base import Market
-from app.schemas.odds import OddsSnapshotIn
+from app.schemas.odds import MAX_DECIMAL_ODDS, OddsSnapshotIn
 
 if TYPE_CHECKING:
     # Imported under TYPE_CHECKING only — app.ingestion.oddsportal_json imports
@@ -603,6 +605,231 @@ _upstream_patched = False
 # patch target — see .claude/memory/pitfalls.md.
 _PATCHED_UPSTREAM_VERSION = "0.4.0"
 
+_BROWSER_ARGUMENT_LIST_NAMES: Final = (
+    "PLAYWRIGHT_BROWSER_ARGS",
+    "PLAYWRIGHT_BROWSER_ARGS_DOCKER",
+)
+_FORBIDDEN_BROWSER_SWITCHES: Final = frozenset(
+    {
+        "--disable-setuid-sandbox",
+        "--disable-site-isolation-trials",
+        "--disable-web-security",
+        "--no-sandbox",
+        "--no-zygote",
+        "--single-process",
+    }
+)
+_DISABLED_SITE_ISOLATION_FEATURES: Final = frozenset({"isolateorigins", "siteperprocess"})
+_SITE_PER_PROCESS_SWITCH: Final = "--site-per-process"
+
+
+def _browser_switch(argument: str) -> str:
+    before_equals = argument.strip().partition("=")[0]
+    # Chromium accepts both ``--switch=value`` and ``--switch value`` forms.
+    # Inspect only the switch token so a whitespace-form sandbox bypass cannot
+    # slip past a guard written for equals-form constants.
+    return before_equals.split(maxsplit=1)[0].casefold()
+
+
+def _browser_switch_value(argument: str) -> str:
+    stripped = argument.strip()
+    _switch, equals, equals_value = stripped.partition("=")
+    if equals:
+        return equals_value
+    tokens = stripped.split(maxsplit=1)
+    return tokens[1] if len(tokens) == 2 else ""
+
+
+def _browser_feature_key(feature: str) -> str:
+    base = feature.strip().partition("<")[0].partition(":")[0]
+    return base.replace("-", "").replace("_", "").casefold()
+
+
+def _harden_browser_args(arguments: Sequence[str]) -> list[str]:
+    """Return Chromium arguments with its sandbox and site isolation enforced."""
+
+    hardened: list[str] = []
+    for raw_argument in arguments:
+        if not isinstance(raw_argument, str):
+            raise RuntimeError("oddsharvester Chromium arguments must all be strings")
+        argument = raw_argument.strip()
+        switch = _browser_switch(argument)
+        if switch in _FORBIDDEN_BROWSER_SWITCHES:
+            continue
+        if switch == "--disable-features":
+            raw_features = _browser_switch_value(argument)
+            enabled_features = [
+                feature.strip()
+                for feature in raw_features.split(",")
+                if _browser_feature_key(feature) not in _DISABLED_SITE_ISOLATION_FEATURES
+            ]
+            if enabled_features:
+                hardened.append(f"--disable-features={','.join(enabled_features)}")
+            continue
+        # Normalize all variants (including a misleading '=false') to one
+        # explicit, auditable switch appended below.
+        if switch == _SITE_PER_PROCESS_SWITCH:
+            continue
+        hardened.append(argument)
+
+    hardened.append(_SITE_PER_PROCESS_SWITCH)
+    return hardened
+
+
+def _assert_browser_args_hardened(arguments: Sequence[str], *, name: str) -> None:
+    """Fail closed if Chromium could launch without sandbox/site isolation."""
+
+    normalized: list[str] = []
+    for raw_argument in arguments:
+        if not isinstance(raw_argument, str):
+            raise RuntimeError(f"oddsharvester {name} contains a non-string argument")
+        argument = raw_argument.strip()
+        switch = _browser_switch(argument)
+        if switch in _FORBIDDEN_BROWSER_SWITCHES:
+            raise RuntimeError(f"oddsharvester {name} contains forbidden switch {switch}")
+        if switch == "--disable-features":
+            raw_features = _browser_switch_value(argument)
+            disabled_features = {
+                _browser_feature_key(feature) for feature in raw_features.split(",")
+            }
+            unsafe = sorted(disabled_features & _DISABLED_SITE_ISOLATION_FEATURES)
+            if unsafe:
+                raise RuntimeError(
+                    f"oddsharvester {name} disables site isolation: {', '.join(unsafe)}"
+                )
+        normalized.append(argument.casefold())
+
+    if _SITE_PER_PROCESS_SWITCH not in normalized:
+        raise RuntimeError(f"oddsharvester {name} must enable {_SITE_PER_PROCESS_SWITCH}")
+
+
+def _harden_upstream_browser_launch_args() -> None:
+    """Patch imported list objects so PlaywrightManager sees hardened args."""
+
+    from oddsharvester.utils import constants
+
+    for name in _BROWSER_ARGUMENT_LIST_NAMES:
+        arguments = getattr(constants, name, None)
+        if not isinstance(arguments, list):
+            raise RuntimeError(f"oddsharvester {name} is not a mutable argument list")
+        # PlaywrightManager imports these lists by name. Mutating in place is
+        # required; rebinding constants.<name> would leave its cached reference
+        # pointing at the unsafe upstream list.
+        arguments[:] = _harden_browser_args(arguments)
+        _assert_browser_args_hardened(arguments, name=name)
+
+
+async def _cleanup_failed_playwright_initialize(self: Any) -> None:
+    """Best-effort teardown for partial initialization, including cancellation."""
+
+    cleanup_steps: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
+    if self.page is not None:
+        cleanup_steps.append(("page", self.page.close))
+    cleanup_steps.extend(
+        (f"context #{index}", context.close)
+        for index, context in enumerate(tuple(self.contexts.values()), start=1)
+    )
+    if self.browser is not None:
+        cleanup_steps.append(("browser", self.browser.close))
+    if self.playwright is not None:
+        cleanup_steps.append(("playwright", self.playwright.stop))
+
+    for label, cleanup in cleanup_steps:
+        try:
+            await cleanup()
+        except BaseException as exc:
+            # Continue through every layer: a broken page/context close must
+            # not prevent the browser process and Playwright driver from being
+            # reaped. Never stringify an exception that may contain proxy data.
+            self.logger.warning(
+                "Failed Playwright initialization cleanup (%s): %s",
+                label,
+                type(exc).__name__,
+            )
+    self.page = None
+    self.context = None
+    self.contexts.clear()
+    self.browser = None
+    self.playwright = None
+
+
+async def _patched_playwright_initialize(
+    self: Any,
+    headless: bool,
+    user_agent: str | None = None,
+    locale: str | None = None,
+    timezone_id: str | None = None,
+    proxy_manager: Any = None,
+) -> None:
+    """OddsHarvester initializer with Playwright's Chromium sandbox enabled.
+
+    Removing an explicit ``--no-sandbox`` argument is insufficient: Playwright
+    itself defaults ``chromium_sandbox`` to false. This version-pinned upstream
+    patch preserves 0.4.0's initialization flow while forcing the API option
+    that prevents Playwright from adding its own sandbox-disabling switch.
+    """
+
+    from oddsharvester.core import playwright_manager as upstream
+
+    try:
+        self.logger.info("Starting Playwright with Chromium sandboxing...")
+        self.timezone_id = timezone_id
+        self._proxy_manager = proxy_manager
+        self.playwright = await upstream.async_playwright().start()
+
+        browser_args = (
+            upstream.PLAYWRIGHT_BROWSER_ARGS_DOCKER
+            if upstream.is_running_in_docker()
+            else upstream.PLAYWRIGHT_BROWSER_ARGS
+        )
+        _assert_browser_args_hardened(browser_args, name="active Chromium arguments")
+        launch_proxy = proxy_manager.launch_proxy() if proxy_manager else None
+        self.browser = await self.playwright.chromium.launch(
+            headless=headless,
+            args=browser_args,
+            proxy=launch_proxy,
+            chromium_sandbox=True,
+        )
+
+        effective_user_agent = user_agent or random.choice(upstream.DEFAULT_USER_AGENTS)
+        if proxy_manager and proxy_manager.is_multi_proxy():
+            context_specs = [(entry.key, entry.config) for entry in proxy_manager.entries]
+        elif proxy_manager:
+            context_specs = [(proxy_manager.entries[0].key, None)]
+        else:
+            context_specs = [("direct", None)]
+
+        self._default_key = context_specs[0][0]
+        for index, (key, context_proxy) in enumerate(context_specs):
+            self.contexts[key] = await self._create_context(
+                proxy=context_proxy,
+                user_agent=effective_user_agent,
+                locale=locale,
+                timezone_id=timezone_id,
+                enable_har=index == 0,
+            )
+
+        self.context = self.contexts[self._default_key]
+        self.page = await self.context.new_page()
+        if self.timezone_id is None:
+            try:
+                self.timezone_id = await self.page.evaluate(
+                    "() => Intl.DateTimeFormat().resolvedOptions().timeZone"
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Could not resolve browser timezone; assuming UTC: %s",
+                    type(exc).__name__,
+                )
+                self.timezone_id = "UTC"
+        self.logger.info("Playwright initialized with Chromium sandboxing.")
+    except BaseException as exc:
+        # Proxy settings can carry credentials. Never stringify Playwright
+        # launch exceptions because upstream messages may echo the launch data.
+        self.logger.error("Failed to initialize Playwright: %s", type(exc).__name__)
+        await _cleanup_failed_playwright_initialize(self)
+        raise
+
 
 def _patch_upstream_quirks() -> None:
     """Apply the quirk fixes in place (idempotent; lazy oddsharvester import)."""
@@ -617,6 +844,11 @@ def _patch_upstream_quirks() -> None:
             f"target {_PATCHED_UPSTREAM_VERSION} internals — re-verify each patch against "
             "the new version (see .claude/memory/pitfalls.md), then update this guard"
         )
+    # This guard runs on every scrape admission, even after the remaining
+    # upstream monkey-patches are installed. It both repairs known 0.4.0
+    # defaults (`--no-sandbox` and disabled site isolation) and fails closed if
+    # a future/import-time mutation changes the argument-list contract.
+    _harden_upstream_browser_launch_args()
     if _upstream_patched:
         return
     from oddsharvester.core.base_scraper import BaseScraper
@@ -625,6 +857,7 @@ def _patch_upstream_quirks() -> None:
     from oddsharvester.core.market_extraction.navigation_manager import NavigationManager
     from oddsharvester.core.market_extraction.odds_parser import OddsParser
     from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
+    from oddsharvester.core.playwright_manager import PlaywrightManager
 
     OddsPortalSelectors.MARKET_TAB_SELECTORS = _patched_tab_selectors(
         OddsPortalSelectors.MARKET_TAB_SELECTORS
@@ -637,6 +870,7 @@ def _patch_upstream_quirks() -> None:
     MarketTabNavigator._wait_and_click = _patched_wait_and_click
     MarketTabNavigator._click_more_if_market_hidden = _patched_click_more_if_market_hidden
     OddsParser._extract_bookmaker_name = _patched_extract_bookmaker_name
+    PlaywrightManager.initialize = _patched_playwright_initialize
     # Wait for the active period element to re-attach after a market switch so
     # the already-selected short-circuit fires — kills the benign per-market
     # "Failed to set period to: Full Time" ERROR at its source (no false click).
@@ -943,8 +1177,8 @@ _MAX_PROXY_FAILOVER = 3
 # curl_cffi 0.15.0, requests/utils.py): (connect, read) maps to
 # CONNECTTIMEOUT_MS=connect and TIMEOUT_MS=connect+read TOTAL — so a dead
 # proxy (connect refused/blackholed) now costs 8s, and a stalled transfer at
-# most 33s total. The JSON path's tenacity budget (4 attempts, backoff <=8s)
-# stays coherent: worst case per match stays bounded at ~2.5 min.
+# most 33s total. The JSON path's tenacity budget (3 attempts, Retry-After
+# capped at 30s) stays coherent: worst case per match remains under 3 min.
 _JSON_FEED_TIMEOUT: tuple[float, float] = (8.0, 25.0)
 
 
@@ -974,6 +1208,7 @@ class OddsPortalLoader:
         json_concurrency: int = 8,
         listing_concurrency: int = 1,
         proxy_health: ProxyHealthRegistry | None = None,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -998,6 +1233,7 @@ class OddsPortalLoader:
                         "leagues=['all'] needs dated scraping — set days_ahead (or date)"
                     )
         self._directory = directory
+        self._now_fn = now_fn or (lambda: datetime.now(tz=UTC))
         self._config = dict(leagues_by_sport_key)
         self._markets = tuple(markets)
         self._scrape = scrape_fn or _default_scrape
@@ -1037,6 +1273,11 @@ class OddsPortalLoader:
         # surfaces it as a degraded poll on /health.
         self.last_fetch_matches: dict[str, int] = {}
         self.last_fetch_event_ids: dict[str, tuple[str, ...]] = {}
+        # Per-sport actionability contract for the pipeline. Partial JSON rows
+        # remain append-only/persistable, but picks must be withheld whenever
+        # this verdict is False; the companion reason is safe for health output.
+        self.last_fetch_complete: dict[str, bool] = {}
+        self.last_fetch_completeness_reason: dict[str, str] = {}
         # Apply the wider match-page navigation timeout once, at the loader
         # boundary (None = keep OddsHarvester's too-tight 15s default). Guarded
         # and read-only; see _apply_nav_timeout_override.
@@ -1186,7 +1427,6 @@ class OddsPortalLoader:
     async def _json_odds_for_url(
         self,
         match_url: str,
-        now: datetime,
         markets: Sequence[str],
         registry: BookmakerRegistry | None = None,
     ) -> list[OddsSnapshotIn] | None:
@@ -1208,11 +1448,12 @@ class OddsPortalLoader:
             return None
         picked = self._next_proxy_indexed()
         try:
+            observed_at = self._now_fn()
             snaps = await self._json_scrape(
                 match_url,
                 markets=markets,
                 directory=self._directory,
-                now=now,
+                now=observed_at,
                 proxy=picked[1] if picked is not None else None,
                 registry=registry,
             )
@@ -1325,7 +1566,6 @@ class OddsPortalLoader:
     async def _json_cycle_snapshots(
         self,
         matches: list[dict[str, Any]],
-        now: datetime,
         markets: Sequence[str],
         sport_key: str,
     ) -> list[OddsSnapshotIn]:
@@ -1366,7 +1606,11 @@ class OddsPortalLoader:
         async with session_cm as session:
 
             async def scrape_one(url: str) -> list[OddsSnapshotIn]:
-                return await self._json_scrape_raw(url, now, markets, registry, session)
+                # The dated listing can take many minutes. Stamp each match at
+                # admission to its own network scrape instead of reusing the
+                # cycle-start clock, otherwise valid provider timestamps from
+                # the latter slate are rejected as >5 minutes in the future.
+                return await self._json_scrape_raw(url, self._now_fn(), markets, registry, session)
 
             outcome = await run_cycle(
                 match_urls,
@@ -1385,6 +1629,8 @@ class OddsPortalLoader:
                 outcome.permanent_failures,
                 outcome.unknown_failures,
             )
+        self.last_fetch_complete[sport_key] = outcome.complete
+        self.last_fetch_completeness_reason[sport_key] = outcome.reason
         # Track this cycle's row count as the next cycle's completeness baseline,
         # but ONLY when the cycle was COMPLETE — else a degraded cycle would lower
         # the floor and mask a continued degradation next time.
@@ -1580,7 +1826,7 @@ class OddsPortalLoader:
         # ["all"] -> league-less scrape: the dated daily page already lists
         # every league's games for that day.
         scrape_leagues: list[str] | None = None if leagues == ["all"] else leagues
-        now = datetime.now(tz=UTC)
+        now = self._now_fn()
         if self._days_ahead is not None:
             # Dated pages (UTC, matching browser_timezone_id below): today
             # through today+N — only the actionable slate, computed per fetch.
@@ -1710,11 +1956,16 @@ class OddsPortalLoader:
             # semaphore + tenacity retry orchestrator (F3/R1/R2) and gate the
             # cycle's completeness (R3). Team context is registered by the JSON
             # scrape itself (it reads each match-page HTML).
-            snapshots = await self._json_cycle_snapshots(matches, now, markets_for_sport, sport_key)
+            snapshots = await self._json_cycle_snapshots(matches, markets_for_sport, sport_key)
         else:
             snapshots = []
             for match in matches:
-                snapshots.extend(self._convert_match(match, now, markets_for_sport))
+                snapshots.extend(self._convert_match(match, self._now_fn(), markets_for_sport))
+            complete = not matches or bool(snapshots)
+            self.last_fetch_complete[sport_key] = complete
+            self.last_fetch_completeness_reason[sport_key] = (
+                "" if complete else f"0 rows from {len(matches)} listed match(es)"
+            )
         self.last_fetch_matches[sport_key] = len(matches)
         self.last_fetch_event_ids[sport_key] = tuple(dict.fromkeys(event_ids))
         # Per-market counts make scrape gaps visible: OddsPortal market-tab
@@ -1814,7 +2065,6 @@ class OddsPortalLoader:
                 trimmed = tuple(key for key in requested if key in wanted)
                 if trimmed:
                     requested = trimmed
-        now = datetime.now(tz=UTC)
         snapshots: list[OddsSnapshotIn] = []
         # SELECTABLE source on the off-window odds path: the per-match ODDS come
         # ONLY from the curl_cffi JSON feed when the flag is on — there is NO
@@ -1831,7 +2081,7 @@ class OddsPortalLoader:
                 # The JSON path derives team context from the match-page HTML
                 # itself, so only the URL is needed; a None result (failure /
                 # empty) means SKIP this link (no Playwright fallback).
-                match_snaps = await self._json_odds_for_url(link, now, requested, registry)
+                match_snaps = await self._json_odds_for_url(link, requested, registry)
                 if match_snaps:
                     snapshots.extend(match_snaps)
             logger.info(
@@ -1856,7 +2106,7 @@ class OddsPortalLoader:
             request_delay=self._request_delay,
         )
         for match in getattr(result, "success", None) or []:
-            snapshots.extend(self._convert_match(match, now, requested))
+            snapshots.extend(self._convert_match(match, self._now_fn(), requested))
         logger.info(
             "oddsportal %s match-link revalidation: %d links x %d markets -> %d snapshots",
             sport_key,
@@ -1909,7 +2159,14 @@ class OddsPortalLoader:
                 ),
             ),
         )
-        captured_at = _parse_ts(match.get("scraped_date")) or now
+        raw_captured_at = match.get("scraped_date")
+        if raw_captured_at is None or str(raw_captured_at).strip() == "":
+            captured_at = now
+        else:
+            parsed_captured_at = _parse_ts(raw_captured_at)
+            if parsed_captured_at is None or parsed_captured_at > now + timedelta(minutes=5):
+                return []
+            captured_at = parsed_captured_at
 
         snapshots: list[OddsSnapshotIn] = []
         for market_key in markets:
@@ -1921,7 +2178,10 @@ class OddsPortalLoader:
             for entry in entries:
                 if not isinstance(entry, dict):
                     continue
-                bookmaker = str(entry.get("bookmaker_name") or "unknown")
+                raw_bookmaker = entry.get("bookmaker_name")
+                if not isinstance(raw_bookmaker, str) or not raw_bookmaker.strip():
+                    continue
+                bookmaker = raw_bookmaker.strip()
                 # OddsHarvester can emit duplicate bookmaker rows (e.g. odds
                 # history); duplicates would corrupt devig (6-leg "markets").
                 if bookmaker in seen_books:
@@ -2023,7 +2283,7 @@ def _parse_odds(raw: Any) -> float | None:
         value = float(str(raw).strip())
     except ValueError:
         return None
-    return value if value > 1.0 else None
+    return value if math.isfinite(value) and 1.0 < value <= MAX_DECIMAL_ODDS else None
 
 
 def _parse_score(raw: Any) -> int | None:

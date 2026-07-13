@@ -10,10 +10,10 @@ name: betting-ai
 #               --build` includes the app. Runbook:
 #               docs/deployment/openclaw-ubuntu.md
 #
-# POSTGRES_PASSWORD interpolates from the project .env (default betting_ai
-# for local dev). Set a real value in the VPS .env BEFORE first boot —
-# pgdata is initialized with the first password; changing it later requires
-# ALTER USER inside postgres.
+# POSTGRES_PASSWORD must exist in the project .env for every compose shape.
+# .env.example carries the loopback-only local fixture that matches its host
+# DATABASE_URL; production Settings rejects that known default. Replace it in
+# the VPS .env BEFORE first boot — pgdata is initialized with the first password.
 
 x-logging: &default-logging
   # Docker's json-file driver is UNBOUNDED by default — a poll cycle every
@@ -28,13 +28,13 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: betting_ai
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-betting_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: betting_ai
       TZ: UTC
     ports:
       # host 5433 — 5432 is taken by the weatherbot project's postgres.
       # 127.0.0.1 binds on every service: nothing is reachable from outside
-      # the box (OpenClaw coexistence + the dashboard has no auth of its own).
+      # the box (OpenClaw coexistence + defense in depth).
       - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -96,12 +96,11 @@ services:
     environment:
       TZ: UTC
       APP_ENV: production
-      DATABASE_URL: postgresql+asyncpg://betting_ai:${POSTGRES_PASSWORD:-betting_ai}@postgres:5432/betting_ai
+      DATABASE_URL: postgresql+asyncpg://betting_ai:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/betting_ai
       REDIS_URL: redis://redis:6379/0
     ports:
-      # Default loopback is for SSH-tunnel/reverse-proxy deployments. Set
-      # APP_HOST_BIND=0.0.0.0 only after enabling DASHBOARD_AUTH_* in .env;
-      # app/config.py refuses public binds without dashboard auth.
+      # Production requires loopback. SSH or a same-host TLS reverse proxy owns
+      # the public interface; app/config.py rejects public APP_HOST_BIND values.
       - "${APP_HOST_BIND:-127.0.0.1}:8000:8000"
     depends_on:
       postgres:
@@ -111,15 +110,15 @@ services:
     # Entrypoint (scripts/docker_entrypoint.sh) runs `alembic upgrade head`
     # before uvicorn — migrations apply on every boot, idempotently.
     healthcheck:
-      # python:3.12-slim has no curl/wget — stdlib only. /health also exposes
-      # poll liveness (LAST_POLL), so an external watchdog can distinguish
-      # "process up" from "engine dead".
+      # python:3.12-slim has no curl/wget — stdlib only. Keep the container
+      # probe process-only: /ready and /health intentionally turn 503 while a
+      # dependency is down or before the first long scrape cycle completes.
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/live', timeout=5).status==200 else 1)",
         ]
       interval: 30s
       timeout: 10s
@@ -137,7 +136,26 @@ services:
     mem_limit: 3g
     shm_size: "1gb"
     cpus: 2
+    pids_limit: 512
     init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      # Chromium's namespace sandbox chroots its zygote after dropping the
+      # outer privileges. No broader SYS_ADMIN capability is granted.
+      - SYS_CHROOT
+    security_opt:
+      # Playwright's v1.60.0 default Docker profile plus clone/setns/unshare,
+      # required for Chromium's sandbox under a non-root user.
+      - seccomp:./docker/seccomp_profile.json
+      - no-new-privileges:true
+    # The image and venv remain immutable. Browser profiles/download scratch
+    # and the unprivileged home are the only writable runtime surfaces.
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=1024m,uid=1000,gid=1000,mode=1777
+      - /home/appuser:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000,mode=0700
     restart: unless-stopped
     logging: *default-logging
 

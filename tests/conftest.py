@@ -1,26 +1,18 @@
-"""Pytest bootstrap for the ISOLATED test database.
-
-DB-touching tests connect to a SEPARATE ``betting_ai_test`` database (the
-``DB_URL`` in each ``tests/test_*.py``), never the live ``betting_ai`` warehouse.
-This closes the isolation gap that let a fixture's ``commit()`` (e.g. the
-snapshot-close ``Snapclose``/``SoftBook`` pick) leak into the running app's
-Results view: a stray commit now lands in the throwaway test DB, never live.
-
-This session-scoped, autouse fixture creates that database once and rebuilds its
-schema from the ORM metadata (drop+create -> a clean slate each run, so
-committing tests can't accumulate across runs). If Postgres is unreachable it is
-a silent no-op — the per-test DB fixtures already ``pytest.skip`` on their own
-connection probe, and the majority of the suite needs no database at all.
-"""
+"""Hermetic pytest bootstrap, including one Postgres database per worker."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import os
+import re
+import socket
+from collections.abc import Iterator
+from dataclasses import dataclass
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 # HERMETIC .env OVERRIDE (ADR-0019 H4 guard): app.main constructs Settings() at
@@ -35,42 +27,157 @@ os.environ.setdefault("VALUE_DEVIG_PER_MARKET", "")
 
 from app.storage.models import Base  # noqa: E402
 
-_BASE = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433"
-_MAINTENANCE_URL = f"{_BASE}/betting_ai"  # existing DB, used only to CREATE the test DB
-_TEST_DB = "betting_ai_test"
-_TEST_URL = f"{_BASE}/{_TEST_DB}"
+_DEFAULT_TEST_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+_EXPLICIT_TEST_URL = os.environ.get("TEST_DB_URL")
+_DATABASE_NAME = re.compile(r"^[a-z0-9_]+$")
 
 
-async def _bootstrap() -> None:
-    # 1) Create the test database if absent (CREATE DATABASE cannot run inside a
-    #    transaction -> AUTOCOMMIT connection to the maintenance database).
-    admin = create_async_engine(_MAINTENANCE_URL, isolation_level="AUTOCOMMIT")
-    try:
-        async with admin.connect() as conn:
-            exists = await conn.scalar(
-                text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": _TEST_DB}
-            )
-            if not exists:
-                await conn.execute(text(f'CREATE DATABASE "{_TEST_DB}"'))
-    finally:
-        await admin.dispose()
-    # 2) Rebuild a clean schema in the test database from the ORM metadata.
-    engine = create_async_engine(_TEST_URL)
+@dataclass(frozen=True)
+class _DatabaseSpec:
+    test_url: str
+    maintenance_url: str
+    database_name: str
+    managed: bool
+
+
+def _database_spec(test_url: str, *, managed: bool) -> _DatabaseSpec:
+    parsed = make_url(test_url)
+    database_name = parsed.database or ""
+    if (
+        not database_name
+        or not _DATABASE_NAME.fullmatch(database_name)
+        or "test" not in database_name
+    ):
+        raise pytest.UsageError(
+            "TEST_DB_URL must name a lowercase alphanumeric database containing 'test'"
+        )
+    return _DatabaseSpec(
+        test_url=parsed.render_as_string(hide_password=False),
+        maintenance_url=parsed.set(database="postgres").render_as_string(hide_password=False),
+        database_name=database_name,
+        managed=managed,
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Select a unique managed DB before workers collect/import test modules."""
+    is_worker = hasattr(config, "workerinput")
+    processes = getattr(config.option, "numprocesses", None)
+    is_xdist_controller = not is_worker and processes not in (None, 0, "0")
+    if is_xdist_controller:
+        # Workers inherit the original shell environment and select their own
+        # database. Setting TEST_DB_URL here would make them share one DB.
+        return
+
+    worker_id = "main"
+    if is_worker:
+        worker_id = str(config.workerinput.get("workerid", "worker"))  # type: ignore[attr-defined]
+    safe_worker = re.sub(r"[^a-z0-9]+", "_", worker_id.lower()).strip("_")[:16] or "worker"
+
+    if _EXPLICIT_TEST_URL is not None and not is_worker:
+        # A serial developer run may target a pre-provisioned test DB. It is
+        # never dropped by the suite.
+        spec = _database_spec(_EXPLICIT_TEST_URL, managed=False)
+    else:
+        # Parallel workers always derive disposable sibling DBs. When a custom
+        # TEST_DB_URL is supplied it acts as the host/credential/name template;
+        # the explicitly named database itself remains untouched.
+        base = make_url(_EXPLICIT_TEST_URL or _DEFAULT_TEST_URL)
+        prefix = base.database or "betting_ai_test"
+        if _EXPLICIT_TEST_URL is None:
+            prefix = "betting_ai_test"
+        suffix = f"_{os.getpid()}_{safe_worker}"
+        database_name = f"{prefix[: 63 - len(suffix)]}{suffix}"
+        spec = _database_spec(
+            base.set(database=database_name).render_as_string(hide_password=False),
+            managed=True,
+        )
+
+    os.environ["TEST_DB_URL"] = spec.test_url
+    # Transitional alias for the historical second environment name.
+    os.environ["BETTING_AI_TEST_DB_URL"] = spec.test_url
+    config._betting_ai_database_spec = spec  # type: ignore[attr-defined]
+
+
+def _quote_database(name: str) -> str:
+    if not _DATABASE_NAME.fullmatch(name):
+        raise ValueError("unsafe generated test database name")
+    return f'"{name}"'
+
+
+async def _bootstrap(spec: _DatabaseSpec) -> None:
+    if spec.managed:
+        # CREATE DATABASE cannot run inside a transaction.
+        admin = create_async_engine(spec.maintenance_url, isolation_level="AUTOCOMMIT")
+        try:
+            async with admin.connect() as conn:
+                exists = await conn.scalar(
+                    text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                    {"name": spec.database_name},
+                )
+                if exists:
+                    await conn.execute(
+                        text(f"DROP DATABASE {_quote_database(spec.database_name)} WITH (FORCE)")
+                    )
+                await conn.execute(text(f"CREATE DATABASE {_quote_database(spec.database_name)}"))
+        finally:
+            await admin.dispose()
+
+    # Managed DBs are new. For an explicit developer URL, create missing tables
+    # without dropping the user-owned database or schema.
+    engine = create_async_engine(spec.test_url)
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
     finally:
         await engine.dispose()
 
 
+async def _drop_managed_database(spec: _DatabaseSpec) -> None:
+    admin = create_async_engine(spec.maintenance_url, isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(
+                text(f"DROP DATABASE IF EXISTS {_quote_database(spec.database_name)} WITH (FORCE)")
+            )
+    finally:
+        await admin.dispose()
+
+
+def _database_server_reachable(spec: _DatabaseSpec) -> bool:
+    parsed = make_url(spec.maintenance_url)
+    if parsed.host is None:
+        return False
+    try:
+        with socket.create_connection((parsed.host, parsed.port or 5432), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+
 @pytest.fixture(scope="session", autouse=True)
-def _ensure_test_database() -> None:
-    """Provision the isolated test DB before any DB-touching test runs."""
-    # Postgres absent/unreachable -> DB tests skip themselves; non-DB tests
-    # (the majority of the suite) are unaffected.
-    with contextlib.suppress(Exception):
-        asyncio.run(_bootstrap())
+def _ensure_test_database(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Provision and later remove this process/xdist worker's database."""
+    spec = getattr(request.config, "_betting_ai_database_spec", None)
+    provisioned = False
+    if isinstance(spec, _DatabaseSpec):
+        try:
+            asyncio.run(_bootstrap(spec))
+            provisioned = True
+        except Exception:
+            # DB tests retain their own probes and skip when compose is absent;
+            # the database-free majority of the suite remains runnable.
+            if spec.managed:
+                with contextlib.suppress(Exception):
+                    asyncio.run(_drop_managed_database(spec))
+            if _database_server_reachable(spec):
+                raise
+    try:
+        yield
+    finally:
+        if provisioned and isinstance(spec, _DatabaseSpec) and spec.managed:
+            with contextlib.suppress(Exception):
+                asyncio.run(_drop_managed_database(spec))
 
 
 @pytest.fixture(autouse=True)

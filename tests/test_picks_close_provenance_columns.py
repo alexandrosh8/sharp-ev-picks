@@ -1,7 +1,7 @@
 """Schema-level guards for the D3 close-provenance columns (close-evidence).
 
 Pure unit tests — no DB. Assert (a) the ``Pick`` ORM model carries the two new
-nullable columns (``close_anchor_book`` VARCHAR(64), ``close_snapshot_captured_at``
+nullable columns (``close_anchor_book`` VARCHAR(512), ``close_snapshot_captured_at``
 TIMESTAMPTZ), and (b) the Alembic migration imports cleanly, chains off the
 prior head, and is additive with a working downgrade. Mirrors
 tests/test_picks_devig_fallback_columns.py.
@@ -39,7 +39,7 @@ def test_pick_model_has_both_close_provenance_columns() -> None:
     book = Pick.__table__.columns["close_anchor_book"]
     assert book.nullable is True
     assert isinstance(book.type, sa.String)
-    assert book.type.length == 64
+    assert book.type.length == 512
     captured = Pick.__table__.columns["close_snapshot_captured_at"]
     assert captured.nullable is True
     assert isinstance(captured.type, sa.DateTime)

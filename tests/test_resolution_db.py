@@ -29,8 +29,9 @@ from app.storage.repositories import (
     resolve_pinnacle_close_snaps,
     shadow_match_rate_outcomes,
 )
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 KO = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
 CAPTURED = KO - timedelta(hours=2)
 

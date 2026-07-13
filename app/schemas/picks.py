@@ -5,6 +5,15 @@ from decimal import Decimal
 
 from pydantic import Field, field_validator
 
+from app.identity import (
+    BOOKMAKER_MAX_BYTES,
+    EVENT_REF_MAX_BYTES,
+    LEAGUE_KEY_MAX_BYTES,
+    MARKET_DETAIL_MAX_BYTES,
+    SELECTION_MAX_BYTES,
+    SPORT_KEY_MAX_BYTES,
+    require_bounded_identity,
+)
 from app.schemas.base import InternalModel, Market, to_utc
 
 # Formal safety statement. The literal "This system does not place bets" is
@@ -57,8 +66,8 @@ class PickOut(InternalModel):
     liquidity: float | None = None
     reason_summary: str
     # "premium" (edge >= VALUE_MIN_EDGE: alerted + exposure-reserved) or
-    # "volume" (shadow tier: persisted + CLV-tracked, alerted ONCE as 🔵 VOLUME
-    # on first detection but NEVER exposure-reserved — see app/pipeline.py).
+    # "volume" (shadow tier: persisted + CLV-tracked only, never alerted or
+    # exposure-reserved — see app/pipeline.py).
     tier: str = "premium"
     # Calibrated meta-model score P(candidate beats the vig-free Max close)
     # from app/models/value_filter.py — None when the artifact is absent or
@@ -135,5 +144,44 @@ class PickOut(InternalModel):
     created_at: datetime
     risk_warning: str = "Betting involves risk. Nothing here is guaranteed profit."
     manual_betting_reminder: str = MANUAL_BETTING_REMINDER
+
+    @field_validator("sport")
+    @classmethod
+    def _bounded_sport(cls, value: str) -> str:
+        return require_bounded_identity(value, maximum_bytes=SPORT_KEY_MAX_BYTES, field="sport")
+
+    @field_validator("league")
+    @classmethod
+    def _bounded_league(cls, value: str) -> str:
+        return require_bounded_identity(value, maximum_bytes=LEAGUE_KEY_MAX_BYTES, field="league")
+
+    @field_validator("event_id")
+    @classmethod
+    def _bounded_event_id(cls, value: str) -> str:
+        return require_bounded_identity(value, maximum_bytes=EVENT_REF_MAX_BYTES, field="event_id")
+
+    @field_validator("selection")
+    @classmethod
+    def _bounded_selection(cls, value: str) -> str:
+        return require_bounded_identity(value, maximum_bytes=SELECTION_MAX_BYTES, field="selection")
+
+    @field_validator("market_detail")
+    @classmethod
+    def _bounded_market_detail(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return require_bounded_identity(
+            value,
+            maximum_bytes=MARKET_DETAIL_MAX_BYTES,
+            field="market_detail",
+            allow_empty=True,
+        )
+
+    @field_validator("bookmaker", "anchor_book")
+    @classmethod
+    def _bounded_book(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return require_bounded_identity(value, maximum_bytes=BOOKMAKER_MAX_BYTES, field="bookmaker")
 
     _utc_created = field_validator("created_at")(to_utc)
