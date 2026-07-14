@@ -16,7 +16,6 @@ from app.ingestion.oddschecker import (
     OddsCheckerHTTPError,
     OddsCheckerLoader,
     OddsCheckerParseError,
-    OddsCheckerResult,
     OddsCheckerSecurityError,
     _find_match_payload,
     _line_bearing_selection,
@@ -28,7 +27,6 @@ from app.ingestion.oddschecker import (
     is_challenge_response,
     parse_competition_match_urls,
     parse_legacy_match_page,
-    parse_live_stats_results,
     parse_market_api_payloads,
     parse_match_page,
     parse_static_sport_match_urls,
@@ -332,103 +330,6 @@ def test_parse_match_page_empty_odds_propagates_empty_market() -> None:
             directory=EventDirectory(),
             now=datetime(2026, 7, 14, 12, 0, tzinfo=UTC),
         )
-
-
-def _live_stats_payload() -> dict[str, object]:
-    """Mirror of the OddsChecker /subevents/live-stats-results POST response shape
-    (captured 2026-07-14): a FINISHED match (inPlay False, hasResults True, a real
-    fullTime score), a LIVE match (inPlay True — fullTime is the CURRENT score, must
-    NEVER settle), and an UPCOMING match (hasResults False, no score)."""
-    return {
-        "subeventLiveStatsResults": [
-            {
-                "subeventId": 200,
-                "preMatchSubeventId": 199,
-                "inPlay": False,
-                "hasResults": True,
-                "homeName": "Alpha FC",
-                "awayName": "Beta FC",
-                "summary": {"period": "FULL_TIME", "scores": {"fullTime": {"home": 2, "away": 1}}},
-            },
-            {
-                "subeventId": 300,
-                "preMatchSubeventId": 299,
-                "inPlay": True,
-                "hasResults": False,
-                "homeName": "Live Home",
-                "awayName": "Live Away",
-                "summary": {
-                    "period": "SECOND_HALF",
-                    "scores": {"fullTime": {"home": 3, "away": 0}},
-                },
-            },
-            {
-                "subeventId": 400,
-                "preMatchSubeventId": None,
-                "inPlay": False,
-                "hasResults": False,
-                "homeName": "Future Home",
-                "awayName": "Future Away",
-                "summary": {"scores": {"fullTime": None}},
-            },
-        ]
-    }
-
-
-def test_parse_live_stats_returns_finished_only() -> None:
-    """Only a FINISHED row (not-in-play + hasResults + a real fullTime) becomes a
-    result; the live and upcoming rows are dropped. Both the live subeventId and the
-    preMatchSubeventId are surfaced so the caller can match our stored (pre-match) id."""
-    out = parse_live_stats_results(_live_stats_payload())
-    assert len(out) == 1
-    r = out[0]
-    assert isinstance(r, OddsCheckerResult)
-    assert r.subevent_id == 200 and r.prematch_subevent_id == 199
-    assert r.home_score == 2 and r.away_score == 1
-    assert r.home_name == "Alpha FC" and r.away_name == "Beta FC"
-
-
-def test_parse_live_stats_never_settles_in_play() -> None:
-    """SAFETY: an in-play row carries a fullTime score that is the CURRENT (partial)
-    score, not the final — it must never be returned as a settleable result."""
-    payload = {
-        "subeventLiveStatsResults": [
-            {
-                "subeventId": 1,
-                "preMatchSubeventId": 2,
-                "inPlay": True,
-                "hasResults": True,
-                "homeName": "A",
-                "awayName": "B",
-                "summary": {"scores": {"fullTime": {"home": 1, "away": 0}}},
-            },
-        ]
-    }
-    assert parse_live_stats_results(payload) == []
-
-
-def test_parse_live_stats_requires_full_time_score() -> None:
-    """A finished-flagged row with no usable fullTime score is dropped (never guess)."""
-    payload = {
-        "subeventLiveStatsResults": [
-            {
-                "subeventId": 1,
-                "preMatchSubeventId": 2,
-                "inPlay": False,
-                "hasResults": True,
-                "homeName": "A",
-                "awayName": "B",
-                "summary": {"scores": {"fullTime": None}},
-            },
-        ]
-    }
-    assert parse_live_stats_results(payload) == []
-
-
-def test_parse_live_stats_ignores_malformed() -> None:
-    """Malformed payloads yield no results rather than raising."""
-    assert parse_live_stats_results({}) == []
-    assert parse_live_stats_results({"subeventLiveStatsResults": "x"}) == []
 
 
 def test_match_parser_enforces_snapshot_ceiling_before_append() -> None:

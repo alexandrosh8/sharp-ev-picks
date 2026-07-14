@@ -1196,13 +1196,6 @@ class Settings(BaseSettings):
     # lives on the pick's OWN event so settlement matches it exactly (no
     # cross-source name risk). Feed/ESPN scores still take precedence. Default ON.
     settle_from_scraped_scores: bool = True
-    # SHADOW flag: capture FINAL scores from OddsChecker's own live-stats-results
-    # JSON feed (matched EXACTLY by our stored subevent id — no cross-source name
-    # risk), independent of odds_source, so OddsChecker-sourced picks settle by real
-    # result instead of the 15-day void fallback. Default OFF: flip to true only
-    # after verifying captured scores against known results on a live slate.
-    results_oddschecker_enabled: bool = False
-    results_oddschecker_interval_seconds: int = Field(default=300, ge=60)
     # Dedicated finished-score scrape job cadence (seconds). The finished-score
     # pass (capture_finished_scores) runs on its OWN light interval job —
     # SEPARATE from the heavy odds-polling pass — so results settle promptly even
