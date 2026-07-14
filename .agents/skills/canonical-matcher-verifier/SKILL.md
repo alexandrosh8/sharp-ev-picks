@@ -41,21 +41,21 @@ against match-rate alone. **Do not loosen a threshold to lift match rate.**
 
 ## Alias-batch process (the ONLY sanctioned recall lever)
 
-1. `uv run python -m tools.export_alias_candidates` → `docs/review/alias_candidates_<date>.csv`
+1. `.venv/bin/python -m tools.export_alias_candidates` → `docs/review/alias_candidates_<date>.csv`
    (probe-cascade replay + risk flags; `tools/review_queue_cli.py export` feeds the same CSV
    shape from match_review_queue).
 2. A HUMAN sets `human_decision=approve` per row; any risk-flagged approval requires
    `reviewer_notes`. Never approve on similarity alone — confirm same club via the
    fixture (same opponent, same kickoff) or an authoritative source.
-3. `uv run python -m tools.review_aliases <csv>` → patch + `test_alias_batch_<date>.py`
+3. `.venv/bin/python -m tools.review_aliases <csv>` → patch + `test_alias_batch_<date>.py`
    skeleton + rejected-pairs block. Seed is written ONLY with `--apply`.
-4. Bar to ship: `uv run pytest -q` green AND the wrong-game audit
+4. Bar to ship: `.venv/bin/python -m pytest -q` green AND the wrong-game audit
    (`app.maintenance.wrong_game_audit` / self-audit job) reports **0 new merges**, AND
    the golden `_NOT_ADDED` pairs in tests/test_resolution_nameform_aliases.py stay distinct.
 
 ## Verify pass for ANY matcher change
 
-- Run the resolution suites: `uv run pytest tests/test_resolution*.py tests/test_wrong_game_audit.py -q`.
+- Run the resolution suites: `.venv/bin/python -m pytest tests/test_resolution*.py tests/test_wrong_game_audit.py -q`.
 - **Differential fuzz** (the pattern from the last verify pass): drive the SAME inputs
   through the old and new decision paths and assert decision-identity where claimed —
   e.g. `match_event_hardened` vs `match_event_hardened_scored` (wrapper must be

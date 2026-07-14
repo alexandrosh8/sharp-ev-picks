@@ -27,8 +27,9 @@ developer_instructions = """
    automation and credential storage, must stay empty in `app/`. Betfair
    read-only market-data methods (listMarketCatalogue/listMarketBook etc.)
    are operator-authorized (commit 0e27433) and are NOT bet placement.
-6. All market-data clients are GET-only; Betfair credential slots are
-   read-only market data — no order-placement scopes, ever.
+6. Market-data operations are read-only. HTTP sources use GET by default;
+   Betfair uses POST only for its tested JSON-RPC read allowlist. No order or
+   account operations, ever.
 
 ## Forbidden actions
 

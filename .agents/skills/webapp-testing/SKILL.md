@@ -1,96 +1,74 @@
 ---
 name: webapp-testing
-description: Toolkit for interacting with and testing local web applications using Playwright. Supports verifying frontend functionality, debugging UI behavior, capturing browser screenshots, and viewing browser logs.
+description: "Repository-local Playwright workflow for deterministic dashboard QA, responsive interaction checks, screenshots, console/page errors, and optional managed local servers."
 license: Complete terms in LICENSE.txt
 ---
 
 # Web Application Testing
 
-To test local web applications, write native Python Playwright scripts.
+Use this skill for dashboard browser QA after loading
+`vanilla-dashboard-architecture`. Run every command from the repository root
+with the locked project environment.
 
-**Helper Scripts Available**:
-- `scripts/with_server.py` - Manages server lifecycle (supports multiple servers)
+## Primary project workflow
 
-**Always run scripts with `--help` first** to see usage. DO NOT read the source until you try running the script first and find that a customized solution is abslutely necessary. These scripts can be very large and thus pollute your context window. They exist to be called directly as black-box scripts rather than ingested into your context window.
+The committed dashboard is self-contained and the existing harness mocks API
+responses without a live server:
 
-## Decision Tree: Choosing Your Approach
-
-```
-User task → Is it static HTML?
-    ├─ Yes → Read HTML file directly to identify selectors
-    │         ├─ Success → Write Playwright script using selectors
-    │         └─ Fails/Incomplete → Treat as dynamic (below)
-    │
-    └─ No (dynamic webapp) → Is the server already running?
-        ├─ No → Run: python scripts/with_server.py --help
-        │        Then use the helper + write simplified Playwright script
-        │
-        └─ Yes → Reconnaissance-then-action:
-            1. Navigate and wait for networkidle
-            2. Take screenshot or inspect DOM
-            3. Identify selectors from rendered state
-            4. Execute actions with discovered selectors
-```
-
-## Example: Using with_server.py
-
-To start a server, run `--help` first, then use the helper:
-
-**Single server:**
 ```bash
-python scripts/with_server.py --server "npm run dev" --port 5173 -- python your_automation.py
+.venv/bin/python tools/build_dashboard.py --check
+node --check app/api/dashboard_src/app.js
+DASHQA_HTML="$PWD/app/api/dashboard.html" \
+DASHQA_MOCK_ONLY=1 \
+DASHQA_OUT="${TMPDIR:-/tmp}/sharp-dashboard-qa" \
+  .venv/bin/python scripts/dashboard_qa.py
 ```
 
-**Multiple servers (e.g., backend + frontend):**
+`bash scripts/verify_codex_workspace.sh` runs this browser regression plus the
+full test/coverage, lint, type, dependency, safety, and secret gates.
+
+## Managed-server helper
+
+The optional helper is versioned inside this skill, not at repository-root
+`scripts/`:
+
 ```bash
-python scripts/with_server.py \
-  --server "cd backend && python server.py" --port 3000 \
-  --server "cd frontend && npm run dev" --port 5173 \
-  -- python your_automation.py
+.venv/bin/python .agents/skills/webapp-testing/scripts/with_server.py --help
 ```
 
-To create an automation script, include only Playwright logic (servers are managed automatically):
-```python
-from playwright.sync_api import sync_playwright
+It accepts argument-vector server commands (no shell evaluation) and a separate
+absolute working directory. Example:
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True) # Always launch chromium in headless mode
-    page = browser.new_page()
-    page.goto('http://localhost:5173') # Server already running and ready
-    page.wait_for_load_state('networkidle') # CRITICAL: Wait for JS to execute
-    # ... your automation logic
-    browser.close()
+```bash
+.venv/bin/python .agents/skills/webapp-testing/scripts/with_server.py \
+  --server ".venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000" \
+  --server-cwd "$PWD" \
+  --port 8000 \
+  -- .venv/bin/python /tmp/sharp-dashboard-custom-qa.py
 ```
 
-## Reconnaissance-Then-Action Pattern
+For multiple servers, repeat `--server`, `--server-cwd`, and `--port` in the
+same order. Never embed directory changes or chained shell commands in a server
+string.
 
-1. **Inspect rendered DOM**:
-   ```python
-   page.screenshot(path='/tmp/inspect.png', full_page=True)
-   content = page.content()
-   page.locator('button').all()
-   ```
+## Reconnaissance then assertions
 
-2. **Identify selectors** from inspection results
+1. Wait for the required load state and explicit application-ready marker.
+2. Record console errors, page errors, failed requests, status codes, and
+   unexpected external requests.
+3. Inspect semantic roles/labels and rendered text before choosing selectors.
+4. Exercise keyboard, focus, mobile sheet/navigation, authentication, loading,
+   empty, degraded, and error states.
+5. Measure width/overflow, CLS, payload bytes, requests, and interaction timing.
+6. Save screenshots and machine-readable results outside the repository.
 
-3. **Execute actions** using discovered selectors
+Prefer role/label/test-id selectors over visual coordinates. Untrusted values
+must enter the DOM through text nodes or validated properties, never unsafe
+HTML sinks.
 
-## Common Pitfall
+## References
 
-❌ **Don't** inspect the DOM before waiting for `networkidle` on dynamic apps
-✅ **Do** wait for `page.wait_for_load_state('networkidle')` before inspection
-
-## Best Practices
-
-- **Use bundled scripts as black boxes** - To accomplish a task, consider whether one of the scripts available in `scripts/` can help. These scripts handle common, complex workflows reliably without cluttering the context window. Use `--help` to see usage, then invoke directly. 
-- Use `sync_playwright()` for synchronous scripts
-- Always close the browser when done
-- Use descriptive selectors: `text=`, `role=`, CSS selectors, or IDs
-- Add appropriate waits: `page.wait_for_selector()` or `page.wait_for_timeout()`
-
-## Reference Files
-
-- **examples/** - Examples showing common patterns:
-  - `element_discovery.py` - Discovering buttons, links, and inputs on a page
-  - `static_html_automation.py` - Using file:// URLs for local HTML
-  - `console_logging.py` - Capturing console logs during automation
+- Project harness: `scripts/dashboard_qa.py`
+- Dashboard contract: `tests/test_dashboard_contract.py`
+- Frontend checklist: `docs/frontend-qa-checklist.md`
+- Skill examples: `.agents/skills/webapp-testing/examples/`

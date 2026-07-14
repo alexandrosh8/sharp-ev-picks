@@ -1,8 +1,11 @@
 # ADR-0003: Project Hooks Design
 
-- **Status:** accepted
+- **Status:** superseded by ADR-0026
 - **Date:** 2026-06-10
 - **Deciders:** GodFather (Alexis) + Claude
+
+> Historical Claude-era design. Do not use it for current Codex hook paths,
+> payload fields, failure modes, or device setup.
 
 ## Context
 

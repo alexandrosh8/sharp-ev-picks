@@ -12,11 +12,12 @@ developer_instructions = """
 
 ## Responsibilities
 
-1. All ingestion is **read-only**: GET requests only; no POST/PUT/DELETE to
-   any bookmaker, exchange, or odds provider.
-2. Every request path has: timeout, tenacity retry with exponential backoff
-   - jitter on transport errors only (never on 4xx), and a per-source rate
-     budget that respects documented limits.
+1. All ingestion is **read-only**. HTTP sources use GET by default. Betfair
+   may POST only the operations allowed by `betfair-api-validator`; no order or
+   account methods are permitted.
+2. Every request path has explicit timeouts, a per-source rate budget, and
+   bounded jittered retries for transport errors, 429, and the source-approved
+   transient 5xx set. Permanent/ordinary 4xx never retry.
 3. Odds snapshots are append-only with a uniqueness key
    (event, bookmaker, market, selection, captured_at) — re-polls dedupe,
    never overwrite.

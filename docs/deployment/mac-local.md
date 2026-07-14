@@ -1,48 +1,43 @@
-# Mac Local Development
+# Mac local development
 
-Prereqs: uv, Docker (colima or Docker Desktop), gitleaks.
+Run from the repository root. Prerequisites: current Codex, uv, Docker Desktop
+or Colima, jq, Node.js, and gitleaks.
 
 ```bash
-cd "/Users/alexis/code/Betting Picks Bot"
-cp .env.example .env
-chmod 600 .env
+bash scripts/bootstrap_codex.sh --check
+test -e .env || install -m 0600 .env.example .env
+bash scripts/bootstrap_codex.sh
 ```
 
-Start infrastructure (host ports 5433/6380 — 5432/6379 belong to the
-weatherbot project):
+The `.env.example` values are loopback-only local fixtures. Add optional private
+API/alert values out of band; never copy a production `.env` to the development
+workspace or Git.
+
+The bootstrap installs the exact lock (`--frozen --all-extras --all-groups`),
+installs Playwright Chromium, starts PostgreSQL/Redis on loopback ports
+5433/6380 when `.env` exists, and applies Alembic migrations.
+
+Run the app:
 
 ```bash
-colima start
-docker compose up -d postgres redis
+bash scripts/run_app.sh
 ```
 
-Install and migrate:
+Or with reload:
 
 ```bash
-uv sync
-uv run alembic upgrade head
-```
-
-Run:
-
-```bash
-uv run uvicorn app.main:app --reload
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 Verify:
 
 ```bash
-curl -s http://127.0.0.1:8000/health
-uv run pytest
-uvx ruff check app tests
-uv run mypy app
-bash scripts/safety_audit.sh
-gitleaks dir . --no-banner
+curl -s http://127.0.0.1:8000/live
+bash scripts/verify_codex_workspace.sh
 ```
 
 Notes:
 
-- The app runs on the host in dev; only postgres/redis are containerized.
-- Without Odds API keys in `.env` the poll job does not schedule (logged) —
-  everything else works.
-- The project path contains a space: quote it in every shell command.
+- The app runs on the host; PostgreSQL and Redis run in containers.
+- Free OddsPortal ingestion is the default and needs no Odds API key.
+- Quote paths. Project scripts derive and use their absolute repository root.
