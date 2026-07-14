@@ -21,7 +21,7 @@ from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
-from app.storage.models import Event, EventSourceLink, MatchReviewQueue
+from app.storage.models import Event, EventSourceLink, MatchReviewQueue, Sport
 from app.storage.repositories import (
     MatchReviewIn,
     SourceLinkByRef,
@@ -33,8 +33,9 @@ from app.storage.repositories import (
     source_link_metrics,
     upsert_event_source_links,
 )
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 KO = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
 CAPTURED = KO - timedelta(hours=2)
 
@@ -172,6 +173,110 @@ async def test_upsert_event_source_links_is_idempotent_and_refreshes(factory) ->
         assert rows[0].matched_at == second  # refreshed
         assert rows[0].confidence_score == Decimal("0.990000")
         assert rows[0].active is True
+
+
+async def test_relink_retires_old_target_and_keeps_one_active_identity(factory) -> None:  # type: ignore[no-untyped-def]
+    await _persist(factory, _pick("evt-link-old", "Old Home"), "Old Home", "Old Away")
+    await _persist(factory, _pick("evt-link-new", "New Home"), "New Home", "New Away")
+    first = datetime(2026, 11, 30, 10, 0, tzinfo=UTC)
+
+    def link(target: str, matched_at: datetime) -> SourceLinkByRef:
+        return SourceLinkByRef(
+            source="pinnacle_arcadia",
+            source_event_id="arc-relinked-1",
+            canonical_external_ref=target,
+            confidence=0.98,
+            method="jw_two_tier",
+            matched_at=matched_at,
+        )
+
+    async with factory() as session:
+        assert await upsert_event_source_links(session, [link("evt-link-old", first)]) == 1
+        assert (
+            await upsert_event_source_links(
+                session,
+                [link("evt-link-new", first + timedelta(hours=1))],
+            )
+            == 1
+        )
+        await session.commit()
+
+    async with factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(EventSourceLink).where(
+                        EventSourceLink.source_event_id == "arc-relinked-1"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        event_refs = dict(
+            (
+                await session.execute(
+                    select(Event.id, Event.external_ref).where(
+                        Event.external_ref.in_(["evt-link-old", "evt-link-new"])
+                    )
+                )
+            ).all()
+        )
+        metrics = await source_link_metrics(session)
+
+    assert len(rows) == 2
+    assert sum(row.active for row in rows) == 1
+    active = next(row for row in rows if row.active)
+    assert event_refs[active.canonical_event_id] == "evt-link-new"
+    assert metrics["auto_linked"] == 1  # inactive audit history is not live coverage
+
+
+async def test_event_link_fast_path_is_source_and_sport_fenced(factory) -> None:  # type: ignore[no-untyped-def]
+    incoming_ref = "oddschecker:fenced-event-1"
+    await _persist(
+        factory,
+        _pick("evt-wrong-source-target", "Wrong Source Home"),
+        "Wrong Source Home",
+        "Wrong Source Away",
+    )
+    basketball = _pick("evt-wrong-sport-target", "Court Home").model_copy(
+        update={"sport": "basketball", "league": "basketball-links"}
+    )
+    await _persist(factory, basketball, "Court Home", "Court Away")
+
+    async with factory() as session:
+        await upsert_event_source_links(
+            session,
+            [
+                SourceLinkByRef(
+                    source="pinnacle_arcadia",  # wrong source, correct sport
+                    source_event_id=incoming_ref,
+                    canonical_external_ref="evt-wrong-source-target",
+                    confidence=1.0,
+                    method="exact_canonical",
+                    matched_at=KO,
+                ),
+                SourceLinkByRef(
+                    source="oddschecker",  # correct source, wrong sport
+                    source_event_id=incoming_ref,
+                    canonical_external_ref="evt-wrong-sport-target",
+                    confidence=1.0,
+                    method="exact_canonical",
+                    matched_at=KO,
+                ),
+            ],
+        )
+        await session.commit()
+
+    incoming = _pick(incoming_ref, "Fresh Soccer Home")
+    await _persist(factory, incoming, "Fresh Soccer Home", "Fresh Soccer Away")
+    async with factory() as session:
+        sport = await session.scalar(
+            select(Sport.key)
+            .join(Event, Event.sport_id == Sport.id)
+            .where(Event.external_ref == incoming_ref)
+        )
+    assert sport == "soccer"  # neither unsafe redirect target won
 
 
 async def test_upsert_skips_unknown_canonical_ref(factory) -> None:  # type: ignore[no-untyped-def]

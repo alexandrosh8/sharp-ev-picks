@@ -9,10 +9,28 @@ import logging
 import httpx
 
 from app.notifications.base import Alert
+from app.schemas.picks import ALERT_FOOTER
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+
+
+def _bounded_message(body: str) -> str:
+    """Fit Telegram's limit while preserving safety/correlation tail text."""
+    if len(body) <= TELEGRAM_MESSAGE_LIMIT:
+        return body
+    marker = "\n…\n"
+    available = TELEGRAM_MESSAGE_LIMIT - len(marker)
+    # Keep most of the actionable header and a substantial tail. The tail
+    # contains the optional correlation warning and mandatory ALERT_FOOTER.
+    head_len = (available * 2) // 3
+    tail_len = available - head_len
+    bounded = f"{body[:head_len].rstrip()}{marker}{body[-tail_len:].lstrip()}"
+    if not bounded.endswith(ALERT_FOOTER):
+        suffix = f"{marker}{ALERT_FOOTER}"
+        bounded = f"{bounded[: TELEGRAM_MESSAGE_LIMIT - len(suffix)].rstrip()}{suffix}"
+    return bounded
 
 
 class TelegramSink:
@@ -31,7 +49,7 @@ class TelegramSink:
         if not self.configured:
             logger.info("telegram sink not configured; skipping alert %s", alert.pick_id)
             return False
-        text = alert.body[:TELEGRAM_MESSAGE_LIMIT]
+        text = _bounded_message(alert.body)
         try:
             response = await self._client.post(
                 f"https://api.telegram.org/bot{self._token}/sendMessage",

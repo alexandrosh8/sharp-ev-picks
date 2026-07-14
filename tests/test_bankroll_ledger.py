@@ -37,10 +37,11 @@ from app.storage.models import (
     Team,
 )
 from app.storage.repositories import bankroll_ledger_report
+from tests.database import TEST_DATABASE_URL
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATH = ROOT / "alembic" / "versions" / "b8e5d2f7a4c1_bankroll_ledger.py"
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 
 
@@ -58,7 +59,7 @@ def test_migration_chains_off_prior_head_single_head() -> None:
     assert callable(mod.downgrade)
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["a9d2c4e6f8b1"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["e7f1a9c3b5d2"]
 
 
 def test_setting_ships_off_by_default() -> None:
@@ -300,7 +301,7 @@ def test_bankroll_endpoint_requires_auth(monkeypatch: pytest.MonkeyPatch) -> Non
         dashboard_auth_enabled=True,
         dashboard_auth_username="admin",
         dashboard_auth_password_hash=SecretStr(hash_password("pw-test-only")),
-        dashboard_session_secret=SecretStr("test-secret-key"),
+        dashboard_session_secret=SecretStr("0123456789abcdef0123456789abcdef"),
         dashboard_session_ttl_seconds=12 * 60 * 60,
         app_env="local",
     )

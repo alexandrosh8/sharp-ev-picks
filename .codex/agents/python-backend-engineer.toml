@@ -45,6 +45,6 @@ by boundary violation, async hazard, or typing gap.
 
 ```
 .venv/bin/python -m pytest -q
-uvx ruff check app tests
+.venv/bin/python -m ruff check app tests
 .venv/bin/python -m mypy app
 ```"""

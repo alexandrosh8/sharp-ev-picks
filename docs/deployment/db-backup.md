@@ -35,9 +35,9 @@ Defaults (override via environment):
 
 | Variable                | Default                         |
 | ----------------------- | ------------------------------- |
-| `BACKUP_DIR`            | `/workspace/backups`            |
+| `BACKUP_DIR`            | `<repository>/backups`            |
 | `RETENTION_DAYS`        | `14`                            |
-| `COMPOSE_FILE`          | `/workspace/docker-compose.yml` |
+| `COMPOSE_FILE`          | `<repository>/docker-compose.yml` |
 | `OFFHOST_BACKUP_TARGET` | unset (off-host copy disabled)  |
 
 `backups/` is gitignored — dumps must never enter the repo.
@@ -45,11 +45,11 @@ Defaults (override via environment):
 ## Manual run
 
 ```bash
-bash /workspace/scripts/backup_db.sh
+bash /opt/sharp-ev-picks/scripts/backup_db.sh
 ```
 
 ```bash
-bash /workspace/scripts/backup_db.sh --verify
+bash /opt/sharp-ev-picks/scripts/backup_db.sh --verify
 ```
 
 A dump is read-only for the database; it is safe while the app is live.
@@ -59,7 +59,7 @@ A dump is read-only for the database; it is safe while the app is live.
 `crontab -e` on the host that runs the compose stack:
 
 ```cron
-17 3 * * * /usr/bin/env bash /workspace/scripts/backup_db.sh >> /workspace/backups/backup.log 2>&1
+17 3 * * * /usr/bin/env bash /opt/sharp-ev-picks/scripts/backup_db.sh >> /opt/sharp-ev-picks/backups/backup.log 2>&1
 ```
 
 Notes:
@@ -69,17 +69,17 @@ Notes:
 - The script uses `compose exec -T` internally (cron has no TTY).
 - `backup.log` lives inside the backup dir but does not match the
   `betting_*.dump` rotation pattern, so it is never pruned.
-- If the repo lives elsewhere on your host (e.g. `/opt/betting-ai`), set the
-  overrides on the cron line:
+- The defaults are resolved from the script location. To keep backups outside
+  the repository, set the overrides on the cron line:
 
 ```cron
-17 3 * * * BACKUP_DIR=/opt/backups COMPOSE_FILE=/opt/betting-ai/docker-compose.yml /usr/bin/env bash /opt/betting-ai/scripts/backup_db.sh >> /opt/backups/backup.log 2>&1
+17 3 * * * BACKUP_DIR=/opt/backups COMPOSE_FILE=/opt/sharp-ev-picks/docker-compose.yml /usr/bin/env bash /opt/sharp-ev-picks/scripts/backup_db.sh >> /opt/backups/backup.log 2>&1
 ```
 
 Optionally add a weekly verification pass:
 
 ```cron
-47 3 * * 0 /usr/bin/env bash /workspace/scripts/backup_db.sh --verify >> /workspace/backups/backup.log 2>&1
+47 3 * * 0 /usr/bin/env bash /opt/sharp-ev-picks/scripts/backup_db.sh --verify >> /opt/sharp-ev-picks/backups/backup.log 2>&1
 ```
 
 ## Off-host copy (`OFFHOST_BACKUP_TARGET`)
@@ -94,7 +94,7 @@ Enable it on the cron line (cron does **not** read your shell profile, so the
 variable must be set inline or in a wrapper):
 
 ```cron
-17 3 * * * OFFHOST_BACKUP_TARGET=backup@offhost.example:/srv/betting-backups /usr/bin/env bash /workspace/scripts/backup_db.sh >> /workspace/backups/backup.log 2>&1
+17 3 * * * OFFHOST_BACKUP_TARGET=backup@offhost.example:/srv/betting-backups /usr/bin/env bash /opt/sharp-ev-picks/scripts/backup_db.sh >> /opt/sharp-ev-picks/backups/backup.log 2>&1
 ```
 
 Crontab implications:
@@ -112,7 +112,7 @@ Crontab implications:
   re-dumping via the manual entry:
 
 ```bash
-OFFHOST_BACKUP_TARGET=backup@offhost.example:/srv/betting-backups bash /workspace/scripts/backup_db.sh --offhost-copy
+OFFHOST_BACKUP_TARGET=backup@offhost.example:/srv/betting-backups bash /opt/sharp-ev-picks/scripts/backup_db.sh --offhost-copy
 ```
 
 - The local dump always lands and rotates BEFORE the copy step — a broken
@@ -129,14 +129,14 @@ below from step 1:
 
 ```bash
 # rsync form
-rsync -e ssh backup@offhost.example:/srv/betting-backups/betting_<stamp>.dump /workspace/backups/
+rsync -e ssh backup@offhost.example:/srv/betting-backups/betting_<stamp>.dump /opt/sharp-ev-picks/backups/
 
 # rclone form
-rclone copyto offsite:betting-backups/betting_<stamp>.dump /workspace/backups/betting_<stamp>.dump
+rclone copyto offsite:betting-backups/betting_<stamp>.dump /opt/sharp-ev-picks/backups/betting_<stamp>.dump
 ```
 
 Verify the fetched file before restoring:
-`bash /workspace/scripts/backup_db.sh --verify` (it picks the newest dump in
+`bash /opt/sharp-ev-picks/scripts/backup_db.sh --verify` (it picks the newest dump in
 `BACKUP_DIR`, which is the one you just fetched).
 
 ## Restore procedure
@@ -147,19 +147,19 @@ at the live `betting_ai` database as the first step.
 1. Create a scratch database (inside the running container):
 
    ```bash
-   docker compose -f /workspace/docker-compose.yml exec -T postgres sh -c 'createdb -U "$POSTGRES_USER" betting_ai_restore_check'
+   docker compose -f /opt/sharp-ev-picks/docker-compose.yml exec -T postgres sh -c 'createdb -U "$POSTGRES_USER" betting_ai_restore_check'
    ```
 
 2. Restore the dump into it:
 
    ```bash
-   docker compose -f /workspace/docker-compose.yml exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d betting_ai_restore_check' < /workspace/backups/betting_<stamp>.dump
+   docker compose -f /opt/sharp-ev-picks/docker-compose.yml exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d betting_ai_restore_check' < /opt/sharp-ev-picks/backups/betting_<stamp>.dump
    ```
 
 3. Sanity-check the restored data (row counts on the critical tables):
 
    ```bash
-   docker compose -f /workspace/docker-compose.yml exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d betting_ai_restore_check -c "SELECT count(*) FROM odds_snapshots;"'
+   docker compose -f /opt/sharp-ev-picks/docker-compose.yml exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d betting_ai_restore_check -c "SELECT count(*) FROM odds_snapshots;"'
    ```
 
 4. **Swap guidance** (only after step 3 looks right): stop the app
@@ -178,7 +178,7 @@ at the live `betting_ai` database as the first step.
 5. Drop the scratch DB when done:
 
    ```bash
-   docker compose -f /workspace/docker-compose.yml exec -T postgres sh -c 'dropdb -U "$POSTGRES_USER" betting_ai_restore_check'
+   docker compose -f /opt/sharp-ev-picks/docker-compose.yml exec -T postgres sh -c 'dropdb -U "$POSTGRES_USER" betting_ai_restore_check'
    ```
 
 ## Retention

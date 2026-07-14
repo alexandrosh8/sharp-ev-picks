@@ -27,8 +27,9 @@ from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.storage.repositories import persist_odds_snapshots, select_betfair_targets
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 NOW = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
 
 

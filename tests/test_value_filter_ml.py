@@ -323,7 +323,13 @@ def _deps(sink: RecordingSink, vf: ValueFilterModel | None, enabled: bool) -> Pi
     directory = EventDirectory()
     # league must map to the trained vocabulary (Premier League -> E0)
     directory.register(
-        "evt-ml", EventTeams(home="Home FC", away="Away FC", league="Premier League")
+        "evt-ml",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            league="Premier League",
+            starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+        ),
     )
     return PipelineDeps(
         loader=FakeLoader(_snapshots()),

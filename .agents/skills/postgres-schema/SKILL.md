@@ -14,8 +14,8 @@ allowed_tools:
 
 ## Purpose
 
-Keep the 14-table warehouse (docs/db-schema.md) consistent, migration-safe,
-and free of precision/timezone bugs.
+Keep the migrated warehouse (`docs/db-schema.md` plus Alembic head)
+consistent, migration-safe, and free of precision/timezone bugs.
 
 ## Procedure
 
@@ -28,9 +28,9 @@ and free of precision/timezone bugs.
 3. Append-only tables (odds_snapshots): UNIQUE
    (event_id, bookmaker, market, selection, captured_at); ingestion uses
    ON CONFLICT DO NOTHING; no UPDATE/DELETE paths in code.
-4. picks: UNIQUE (event_id, market, selection, model_version_id); CLV
-   columns (closing_odds, closing_fair_prob, clv_log, beat_close) nullable
-   until settlement.
+4. picks: UNIQUE NULLS NOT DISTINCT (event_id, market, market_detail,
+   selection, model_version_id); CLV columns (closing_odds,
+   closing_fair_prob, clv_log, beat_close) stay nullable until true-up.
 5. Every change = Alembic migration with downgrade; autogenerate then
    hand-review the diff (server defaults and constraint names drift).
 6. Hot-path inserts via SQLAlchemy Core bulk `insert().values([...])`.

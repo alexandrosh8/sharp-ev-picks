@@ -33,8 +33,9 @@ from app.risk.staking import StakePolicy
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.storage.models import CandidateEvaluation, Event
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 
 POLICY = GatePolicy(
     min_edge=0.0,
@@ -125,8 +126,22 @@ async def factory():  # type: ignore[no-untyped-def]
 
 def _make_deps(sink: _Sink, factory: async_sessionmaker) -> PipelineDeps:
     directory = EventDirectory()
-    directory.register("evt-prem", EventTeams(home="Home FC", away="Away FC", league="Premier"))
-    directory.register("evt-demo", EventTeams(home="Home FC", away="Away FC", league="GFA League"))
+    kickoff = datetime.now(tz=UTC) + timedelta(hours=6)
+    directory.register(
+        "evt-prem",
+        EventTeams(home="Home FC", away="Away FC", league="Premier", starts_at=kickoff),
+    )
+    directory.register(
+        "evt-demo",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            league="GFA League",
+            # Same clubs can play twice; keep this synthetic fixture outside
+            # soccer's 2-hour canonical-event merge window.
+            starts_at=kickoff + timedelta(hours=6),
+        ),
+    )
     return PipelineDeps(
         loader=_FakeLoader(_slate()),
         model=NullModel(),

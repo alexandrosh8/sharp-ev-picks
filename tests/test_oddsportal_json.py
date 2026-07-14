@@ -24,8 +24,11 @@ from app.ingestion.oddsportal_bookmakers import static_bookmaker_map
 from app.ingestion.oddsportal_json import (
     _FEED_MARKETS,
     FeedDecryptError,
+    FeedEnvelopeError,
     FeedOffWindow,
+    FeedResourceLimitError,
     FeedToken,
+    _bounded_gzip_decompress,
     build_feed_url,
     build_feed_urls,
     decrypt_feed_body,
@@ -86,6 +89,14 @@ def test_decrypt_handles_gzip_inner_envelope() -> None:
     """Some feed bodies gzip the plaintext before AES; the decrypt must
     transparently gunzip and return the same JSON."""
     assert decrypt_feed_body(_FEED_GZIP.read_text()) == _decrypted_ref()
+
+
+def test_bounded_gzip_rejects_small_compressed_bomb_before_full_inflate() -> None:
+    import gzip
+
+    compressed = gzip.compress(b"x" * 100_000)
+    with pytest.raises(FeedResourceLimitError, match="ceiling"):
+        _bounded_gzip_decompress(compressed, max_bytes=1024)
 
 
 def test_parse_feed_yields_playwright_identical_snapshots() -> None:
@@ -219,6 +230,24 @@ def test_parse_feed_skips_unparseable_and_sub_1_odds() -> None:
     # bet365 (id 16) had only invalid odds -> no rows; no numeric id ever leaks.
     assert all(s.bookmaker != "bet365" for s in snaps)
     assert not any(s.bookmaker.isdigit() for s in snaps)
+
+
+def test_parse_feed_enforces_snapshot_ceiling_before_append() -> None:
+    payload = decrypt_feed_body(_FEED.read_text())
+    with pytest.raises(FeedResourceLimitError, match="snapshot ceiling"):
+        parse_feed_payload(
+            payload,
+            event_url=EVENT_URL,
+            home="England",
+            away="Ghana",
+            league="International Friendly",
+            starts_at=NOW,
+            markets=("1x2",),
+            directory=EventDirectory(),
+            now=NOW,
+            bookmakers=REGISTRY,
+            max_snapshots=2,
+        )
 
 
 def test_extract_bootstrap_tokens_from_match_page_html() -> None:
@@ -385,6 +414,7 @@ class _FakeResponse:
     def __init__(self, *, text: str = "", status_code: int = 200) -> None:
         self.text = text
         self.status_code = status_code
+        self.url = ""
 
 
 class _FakeSession:
@@ -405,6 +435,55 @@ class _FakeSession:
 
     async def close(self) -> None:
         self.closed = True
+
+
+async def test_scrape_rejects_non_https_or_non_oddsportal_match_url_before_get() -> None:
+    from app.ingestion.http_safety import UnsafeUpstreamURL
+
+    session = _FakeSession({})
+    with pytest.raises(UnsafeUpstreamURL):
+        await scrape_match_odds(
+            "http://169.254.169.254/latest/meta-data",
+            markets=("1x2",),
+            directory=EventDirectory(),
+            now=NOW,
+            session=session,
+        )
+    assert session.requests == []
+
+
+async def test_scrape_validates_final_redirect_host() -> None:
+    from app.ingestion.http_safety import UnsafeUpstreamURL
+
+    response = _FakeResponse(text=_MATCH_PAGE.read_text())
+    response.url = "https://evil.invalid/redirected"
+    session = _FakeSession({EVENT_URL: response})
+    with pytest.raises(UnsafeUpstreamURL):
+        await scrape_match_odds(
+            EVENT_URL,
+            markets=("1x2",),
+            directory=EventDirectory(),
+            now=NOW,
+            session=session,
+        )
+
+
+async def test_scrape_match_html_byte_ceiling_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddsportal_json as oj
+    from app.ingestion.http_safety import UpstreamBodyTooLarge
+
+    monkeypatch.setattr(oj, "MAX_MATCH_HTML_BYTES", 8)
+    session = _FakeSession({EVENT_URL: _FakeResponse(text="x" * 9)})
+    with pytest.raises(UpstreamBodyTooLarge):
+        await scrape_match_odds(
+            EVENT_URL,
+            markets=("1x2",),
+            directory=EventDirectory(),
+            now=NOW,
+            session=session,
+        )
 
 
 async def test_fetch_match_feed_is_get_only_and_yields_snapshots() -> None:
@@ -480,11 +559,37 @@ async def test_fetch_match_feed_treats_off_window_envelope_as_no_odds() -> None:
     assert directory.lookup(EVENT_URL) is not None  # event still registered
 
 
+async def test_fetch_match_feed_propagates_http_200_challenge_body() -> None:
+    token = FeedToken(
+        event_id="KhgvzGjJ",
+        sport_id=1,
+        feed_urls={"1x2": "https://www.oddsportal.com/match-event/x.dat"},
+        home="England",
+        away="Ghana",
+        league="International Friendly",
+        starts_at=NOW,
+    )
+    session = _FakeSession(
+        {"match-event/": _FakeResponse(text="<html><title>challenge</title></html>")}
+    )
+    with pytest.raises(FeedEnvelopeError):
+        await fetch_match_feed(
+            EVENT_URL,
+            token=token,
+            markets=("1x2",),
+            directory=EventDirectory(),
+            now=NOW,
+            session=session,
+            bookmakers=REGISTRY,
+        )
+
+
 async def test_fetch_match_feed_handles_non_200_gracefully() -> None:
     """Audit 2026-07-10 (R2): a TRANSIENT non-200 (503/429) now RAISES
     TransientHTTPStatusError so the per-match tenacity retry actually fires
     (the old return-a-gap behaviour made the documented retry dead code).
-    A PERMANENT non-200 (404) stays a graceful scrape gap: no snapshots."""
+    A missing optional market is a benign per-market absence; cycle-level
+    completeness decides whether the resulting slate is actionable."""
     from app.ingestion.oddsportal_json_session import TransientHTTPStatusError
 
     token = FeedToken(
@@ -509,16 +614,18 @@ async def test_fetch_match_feed_handles_non_200_gracefully() -> None:
         )
 
     session_404 = _FakeSession({"match-event/": _FakeResponse(status_code=404, text="")})
-    snaps = await fetch_match_feed(
-        EVENT_URL,
-        token=token,
-        markets=("1x2",),
-        directory=EventDirectory(),
-        now=NOW,
-        session=session_404,
-        bookmakers=REGISTRY,
+    assert (
+        await fetch_match_feed(
+            EVENT_URL,
+            token=token,
+            markets=("1x2",),
+            directory=EventDirectory(),
+            now=NOW,
+            session=session_404,
+            bookmakers=REGISTRY,
+        )
+        == []
     )
-    assert snaps == []
 
 
 async def test_fetch_match_feed_logs_loud_rotation_alert_on_constant_drift(
@@ -528,7 +635,7 @@ async def test_fetch_match_feed_logs_loud_rotation_alert_on_constant_drift(
     version-guard RuntimeError (KDF-constant drift / a half-applied bundle
     rotation) is the highest-signal failure — it must surface at WARNING naming
     the bundle, NOT be swallowed quietly. fetch_match_feed catches it, keeps the
-    scrape a gap (fail-closed), and logs the rotation alert."""
+    scrape a typed failure (fail-closed), and logs the rotation alert."""
     import logging
 
     import app.ingestion.oddsportal_json as mod
@@ -546,8 +653,11 @@ async def test_fetch_match_feed_logs_loud_rotation_alert_on_constant_drift(
         starts_at=NOW,
     )
     session = _FakeSession({"match-event/": _FakeResponse(text=_FEED.read_text())})
-    with caplog.at_level(logging.WARNING, logger="app.ingestion.oddsportal_json"):
-        snaps = await fetch_match_feed(
+    with (
+        caplog.at_level(logging.WARNING, logger="app.ingestion.oddsportal_json"),
+        pytest.raises(RuntimeError),
+    ):
+        await fetch_match_feed(
             EVENT_URL,
             token=token,
             markets=("1x2",),
@@ -556,7 +666,6 @@ async def test_fetch_match_feed_logs_loud_rotation_alert_on_constant_drift(
             session=session,
             bookmakers=REGISTRY,
         )
-    assert snaps == []  # fail-closed: never a wrong price
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, "a constant-drift/rotation failure must log at WARNING (no fallback now)"
     assert any(
@@ -626,6 +735,83 @@ async def test_fetch_match_feed_dedupes_shared_feed_url_across_markets(
     assert ("Under 225.5", "over_under_games_225_5") in got
     assert ("Lakers", "home_away") in got
     assert ("Celtics", "home_away") in got
+
+
+async def test_fetch_match_feed_enforces_aggregate_snapshot_ceiling_across_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.ingestion.oddsportal_json as oj
+
+    moneyline_url = "https://www.oddsportal.com/match-event/moneyline.dat"
+    totals_url = "https://www.oddsportal.com/match-event/totals.dat"
+    token = FeedToken(
+        event_id="EVT",
+        sport_id=3,
+        feed_urls={
+            "home_away": moneyline_url,
+            "over_under_games_220_5": totals_url,
+        },
+        default_bet_id=3,
+        default_scope_id=1,
+        home="Lakers",
+        away="Celtics",
+    )
+
+    def fake_decrypt(body: str) -> dict[str, object]:
+        key = "E-3-1-0-0-0" if body == "ML" else "E-2-1-0-220.5-0"
+        return {"d": {"oddsdata": {"back": {key: {"odds": {"707": [1.9, 1.95]}}}}}}
+
+    monkeypatch.setattr(oj, "decrypt_feed_body", fake_decrypt)
+    monkeypatch.setattr(oj, "MAX_SNAPSHOTS_PER_MATCH", 2)
+    session = _FakeSession(
+        {
+            moneyline_url: _FakeResponse(text="ML"),
+            totals_url: _FakeResponse(text="OU"),
+        }
+    )
+    with pytest.raises(FeedResourceLimitError, match="snapshot ceiling"):
+        await fetch_match_feed(
+            EVENT_URL,
+            token=token,
+            markets=("home_away", "over_under_games_220_5"),
+            directory=EventDirectory(),
+            now=NOW,
+            session=session,
+            bookmakers=REGISTRY,
+        )
+
+
+async def test_missing_optional_feed_preserves_valid_sibling_rows() -> None:
+    valid_url = "https://www.oddsportal.com/match-event/valid.dat"
+    missing_url = "https://www.oddsportal.com/match-event/missing.dat"
+    token = FeedToken(
+        event_id="KhgvzGjJ",
+        sport_id=1,
+        feed_urls={"1x2": valid_url, "over_under_2_5": missing_url},
+        home="England",
+        away="Ghana",
+        league="International Friendly",
+        starts_at=NOW,
+    )
+    session = _FakeSession(
+        {
+            valid_url: _FakeResponse(text=_FEED.read_text()),
+            missing_url: _FakeResponse(status_code=404),
+        }
+    )
+
+    snapshots = await fetch_match_feed(
+        EVENT_URL,
+        token=token,
+        markets=("1x2", "over_under_2_5"),
+        directory=EventDirectory(),
+        now=NOW,
+        session=session,
+        bookmakers=REGISTRY,
+    )
+
+    assert snapshots
+    assert {snapshot.market for snapshot in snapshots} == {Market.H2H}
 
 
 def test_pytest_imported_marker() -> None:
@@ -765,6 +951,11 @@ def test_off_window_envelope_raises_feed_off_window() -> None:
     assert issubclass(FeedDecryptError, ValueError)
 
 
+def test_http_200_html_body_is_not_misclassified_as_off_window() -> None:
+    with pytest.raises(FeedEnvelopeError):
+        decrypt_feed_body("<html><title>challenge</title></html>")
+
+
 # --- full pure-Python end-to-end scrape -------------------------------------
 
 
@@ -825,15 +1016,17 @@ async def test_scrape_match_odds_get_failure_logs_type_only_never_url(
         async def get(self, url: str, **kwargs: object) -> _FakeResponse:
             raise TimeoutError("proxy down")
 
-    with caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal_json"):
-        snaps = await scrape_match_odds(
+    with (
+        caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal_json"),
+        pytest.raises(TimeoutError),
+    ):
+        await scrape_match_odds(
             EVENT_URL,
             markets=MARKETS,
             directory=EventDirectory(),
             now=NOW,
             session=_Sess(),
         )
-    assert snaps == []
     assert "TimeoutError" in caplog.text  # the exception TYPE is still surfaced
     assert EVENT_URL not in caplog.text
     assert "oddsportal.com" not in caplog.text  # no normalized-link form either
@@ -849,22 +1042,25 @@ async def test_scrape_match_odds_bootstrap_parse_skip_logs_type_only_never_url(
         async def get(self, url: str, **kwargs: object) -> _FakeResponse:
             return _FakeResponse(status_code=200, text="<html><body>no header</body></html>")
 
-    with caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal_json"):
-        snaps = await scrape_match_odds(
+    with (
+        caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal_json"),
+        pytest.raises(RuntimeError, match="bootstrap identity"),
+    ):
+        await scrape_match_odds(
             EVENT_URL,
             markets=MARKETS,
             directory=EventDirectory(),
             now=NOW,
             session=_Sess(),
         )
-    assert snaps == []
     assert "ValueError" in caplog.text
     assert EVENT_URL not in caplog.text
     assert "oddsportal.com" not in caplog.text
 
 
-async def test_scrape_match_odds_non_200_html_is_gap() -> None:
-    """A non-200 match page is a scrape gap (no rows, no crash) — no feed GET."""
+async def test_scrape_match_odds_non_200_html_is_typed_failure() -> None:
+    """A non-200 listed page is a failure and must not heal a proxy."""
+    from app.ingestion.oddsportal_json_session import PermanentHTTPStatusError
 
     class _Sess:
         def __init__(self) -> None:
@@ -875,12 +1071,12 @@ async def test_scrape_match_odds_non_200_html_is_gap() -> None:
             return _FakeResponse(status_code=403, text="")
 
     session = _Sess()
-    snaps = await scrape_match_odds(
-        EVENT_URL,
-        markets=MARKETS,
-        directory=EventDirectory(),
-        now=NOW,
-        session=session,
-    )
-    assert snaps == []
+    with pytest.raises(PermanentHTTPStatusError):
+        await scrape_match_odds(
+            EVENT_URL,
+            markets=MARKETS,
+            directory=EventDirectory(),
+            now=NOW,
+            session=session,
+        )
     assert len(session.requests) == 1  # only the HTML GET, no feed GETs

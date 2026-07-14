@@ -25,6 +25,7 @@ bet-placement, bookmaker-login, or credential-storage code (ADR-0002).
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -40,8 +41,14 @@ from tenacity import (
 )
 
 from app.ingestion.base import EventTeams
+from app.ingestion.http_safety import (
+    UnsafeUpstreamURL,
+    UpstreamBodyTooLarge,
+    request_httpx_bounded,
+    validate_https_url,
+)
 from app.schemas.base import Market
-from app.schemas.odds import OddsSnapshotIn
+from app.schemas.odds import MAX_DECIMAL_ODDS, OddsSnapshotIn
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -59,6 +66,11 @@ BOOKMAKER = "Pinnacle"  # contains "pinnacle" -> top-priority sharp anchor (valu
 # site Referer present; it is NOT an anti-bot bypass (GET-only, no challenge
 # solving) and carries no credential, so it is a plain public constant.
 _PINNACLE_REFERER = "https://www.pinnacle.com/"
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_RESPONSE_ROWS = 25_000
+MAX_SPORT_ROWS = 1_000
+ARCADIA_ALLOWED_HOSTS: frozenset[str] = frozenset({"guest.api.arcadia.pinnacle.com"})
+ARCADIA_CONFIG_ALLOWED_HOSTS: frozenset[str] = frozenset({"www.pinnacle.com"})
 
 # arcadia numeric sport ids (verified live against /0.1/sports). "american_
 # football" is id 15 ("Football" upstream); soccer is the distinct id 29.
@@ -99,6 +111,14 @@ _GAMES_DETAIL_SPORTS: frozenset[str] = frozenset({"basketball"})
 
 class PinnacleArcadiaError(Exception):
     """Non-retryable fetch failure. Message never contains the URL or key."""
+
+
+class PinnacleArcadiaSchemaError(PinnacleArcadiaError):
+    """Upstream JSON has the wrong top-level shape.
+
+    Kept distinct so capture metrics can separate schema drift from a genuine
+    empty slate without ever logging the response body.
+    """
 
 
 # Transient upstream HTTP statuses worth one or two retries before giving up: a
@@ -188,8 +208,12 @@ async def discover_arcadia_config(
     never the URL (which identifies the source) or the key.
     """
     try:
-        response = await client.get(
-            url,
+        safe_url = validate_https_url(url, allowed_hosts=ARCADIA_CONFIG_ALLOWED_HOSTS)
+        response = await request_httpx_bounded(
+            client,
+            "GET",
+            safe_url,
+            max_bytes=MAX_RESPONSE_BYTES,
             headers={"accept": "application/json", "referer": _PINNACLE_REFERER},
             timeout=timeout,
         )
@@ -200,15 +224,37 @@ async def discover_arcadia_config(
             )
             return None
         data = response.json()
-        api_key = (((data.get("api") or {}).get("haywire") or {}).get("apiKey")) or ""
-        guest_root = (((data.get("routes") or {}).get("curacao") or {}).get("guestRoot")) or ""
+        if not isinstance(data, Mapping):
+            return None
+        api = data.get("api")
+        routes = data.get("routes")
+        if not isinstance(api, Mapping) or not isinstance(routes, Mapping):
+            return None
+        haywire = api.get("haywire")
+        curacao = routes.get("curacao")
+        if not isinstance(haywire, Mapping) or not isinstance(curacao, Mapping):
+            return None
+        api_key = haywire.get("apiKey") or ""
+        guest_root = curacao.get("guestRoot") or ""
         if not isinstance(api_key, str) or not api_key:
             logger.info("arcadia config discovery: no apiKey present; using fallback")
             return None
-        base_url = guest_root if isinstance(guest_root, str) and guest_root else DEFAULT_BASE_URL
+        candidate = guest_root if isinstance(guest_root, str) and guest_root else DEFAULT_BASE_URL
+        try:
+            base_url = validate_https_url(candidate, allowed_hosts=ARCADIA_ALLOWED_HOSTS)
+        except UnsafeUpstreamURL:
+            logger.info("arcadia config discovery: invalid guestRoot origin; using fallback")
+            return None
         logger.info("arcadia config discovery: succeeded; refreshed guest key/base")
         return ArcadiaConfig(guest_key=SecretStr(api_key), base_url=base_url)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+    except (
+        httpx.HTTPError,
+        UnsafeUpstreamURL,
+        UpstreamBodyTooLarge,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as exc:
         # type-only — never the URL (identifies the source) or the key.
         logger.info("arcadia config discovery failed: %s; using fallback", type(exc).__name__)
         return None
@@ -256,22 +302,37 @@ def parse_matchups(
     """
     out: dict[str, _Matchup] = {}
     for matchup in raw:
+        if not isinstance(matchup, Mapping):
+            continue
         if matchup.get("type") != "matchup":
             continue
         if matchup.get("parent") is not None or matchup.get("parentId") is not None:
             continue
-        participants = matchup.get("participants") or []
+        participants_raw = matchup.get("participants")
+        if not isinstance(participants_raw, Sequence) or isinstance(
+            participants_raw, (str, bytes, bytearray)
+        ):
+            continue
+        participants = [p for p in participants_raw if isinstance(p, Mapping)]
         home = next((p.get("name") for p in participants if p.get("alignment") == "home"), None)
         away = next((p.get("name") for p in participants if p.get("alignment") == "away"), None)
-        if not home or not away:
+        if not isinstance(home, str) or not home.strip():
+            continue
+        if not isinstance(away, str) or not away.strip():
             continue
         starts_at = _parse_ts(str(matchup.get("cutoffAt") or "")) or _parse_ts(
             str(matchup.get("startTime", ""))
         )
         if starts_at is None or starts_at <= now or starts_at > horizon_end:
             continue
-        league = str((matchup.get("league") or {}).get("name") or "")
-        event_id = str(matchup.get("id"))
+        league_raw = matchup.get("league")
+        league = str(league_raw.get("name") or "") if isinstance(league_raw, Mapping) else ""
+        raw_event_id = matchup.get("id")
+        if not isinstance(raw_event_id, (str, int)) or isinstance(raw_event_id, bool):
+            continue
+        event_id = str(raw_event_id).strip()
+        if not event_id:
+            continue
         out[event_id] = _Matchup(
             event_id=event_id,
             home=str(home),
@@ -330,8 +391,105 @@ def _is_int_price(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def _is_number(value: object) -> TypeGuard[int | float]:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _american_decimal_or_none(value: object) -> float | None:
+    if not _is_int_price(value):
+        return None
+    try:
+        decimal_odds = american_to_decimal(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(decimal_odds) or not 1.0 < decimal_odds <= MAX_DECIMAL_ODDS:
+        return None
+    return decimal_odds
+
+
+def _mapping_rows(value: object) -> tuple[Mapping[str, Any], ...]:
+    """Return only mapping rows from an upstream array-like container.
+
+    A malformed row is isolated instead of aborting every valid sibling.  A
+    scalar/dict container is treated as empty schema drift, never iterated as
+    characters or mapping keys.
+    """
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    return tuple(row for row in value if isinstance(row, Mapping))
+
+
+def _valid_matchup_response_row(row: Mapping[str, Any]) -> bool:
+    row_type = row.get("type")
+    if not isinstance(row_type, str) or not row_type:
+        return False
+    # Props/specials are valid siblings that the business parser deliberately
+    # ignores. Validate the fields needed only for actual matchup rows.
+    if row_type != "matchup":
+        return True
+    event_id = row.get("id")
+    participants = row.get("participants")
+    starts_at = row.get("cutoffAt") or row.get("startTime")
+    return (
+        isinstance(event_id, (str, int))
+        and not isinstance(event_id, bool)
+        and isinstance(participants, Sequence)
+        and not isinstance(participants, (str, bytes, bytearray))
+        and isinstance(starts_at, str)
+        and bool(starts_at)
+    )
+
+
+def _valid_market_response_row(row: Mapping[str, Any]) -> bool:
+    matchup_id = row.get("matchupId")
+    prices = row.get("prices")
+    return (
+        isinstance(matchup_id, (str, int))
+        and not isinstance(matchup_id, bool)
+        and isinstance(row.get("key"), str)
+        and bool(row.get("key"))
+        and isinstance(row.get("type"), str)
+        and isinstance(row.get("period"), int)
+        and not isinstance(row.get("period"), bool)
+        and isinstance(row.get("status"), str)
+        and _is_int_price(row.get("version"))
+        and isinstance(prices, Sequence)
+        and not isinstance(prices, (str, bytes, bytearray))
+    )
+
+
+def _validated_response_rows(
+    data: Sequence[object], *, what: str, sport_id: int
+) -> list[dict[str, Any]]:
+    if len(data) > MAX_RESPONSE_ROWS:
+        raise PinnacleArcadiaSchemaError(
+            f"pinnacle {what} exceeded row ceiling for sport={sport_id}"
+        )
+    rows: list[dict[str, Any]] = []
+    for row in data:
+        if not isinstance(row, dict):
+            raise PinnacleArcadiaSchemaError(
+                f"pinnacle {what} returned malformed rows for sport={sport_id}"
+            )
+        valid = (
+            _valid_matchup_response_row(row)
+            if what == "matchups"
+            else _valid_market_response_row(row)
+        )
+        if not valid:
+            raise PinnacleArcadiaSchemaError(
+                f"pinnacle {what} returned malformed rows for sport={sport_id}"
+            )
+        rows.append(row)
+    if what == "matchups" and rows and not any(row.get("type") == "matchup" for row in rows):
+        raise PinnacleArcadiaSchemaError(
+            f"pinnacle matchups returned no matchup rows for sport={sport_id}"
+        )
+    return rows
 
 
 def _finalize_quote(
@@ -367,6 +525,8 @@ def extract_moneyline_quotes(
     """
     quotes: list[MarketQuote] = []
     for market in markets:
+        if not isinstance(market, Mapping):
+            continue
         if market.get("key") != _MONEYLINE_KEY:
             continue
         if market.get("type") != "moneyline" or market.get("period") != 0:
@@ -378,18 +538,16 @@ def extract_moneyline_quotes(
         if matchup is None:
             continue
         snapshots: list[OddsSnapshotIn] = []
-        for price in market.get("prices") or []:
+        for price in _mapping_rows(market.get("prices")):
             designation = price.get("designation")
             raw_price = price.get("price")
             if designation is None:
                 continue  # participantId-keyed multiway leg
-            if not _is_int_price(raw_price):
+            decimal_odds = _american_decimal_or_none(raw_price)
+            if decimal_odds is None:
                 continue
             selection = _selection_for(str(designation), matchup)
             if selection is None:
-                continue
-            decimal_odds = american_to_decimal(raw_price)
-            if decimal_odds <= 1.0:
                 continue
             snapshots.append(
                 OddsSnapshotIn(
@@ -429,6 +587,8 @@ def extract_total_quotes(
     games_ns = sport in _GAMES_DETAIL_SPORTS
     quotes: list[MarketQuote] = []
     for market in markets:
+        if not isinstance(market, Mapping):
+            continue
         if not str(market.get("key") or "").startswith(_TOTAL_PREFIX):
             continue
         if market.get("type") != "total" or market.get("period") != 0:
@@ -439,16 +599,16 @@ def extract_total_quotes(
         if matchups.get(event_id) is None:
             continue
         snapshots: list[OddsSnapshotIn] = []
-        for price in market.get("prices") or []:
+        for price in _mapping_rows(market.get("prices")):
             designation = price.get("designation")
             raw_price = price.get("price")
             points = price.get("points")
-            if designation not in ("over", "under") or not _is_int_price(raw_price):
+            if designation not in ("over", "under"):
                 continue
             if not _is_number(points):
                 continue
-            decimal_odds = american_to_decimal(raw_price)
-            if decimal_odds <= 1.0:
+            decimal_odds = _american_decimal_or_none(raw_price)
+            if decimal_odds is None:
                 continue
             line = float(points)
             label = "Over" if designation == "over" else "Under"
@@ -495,6 +655,8 @@ def extract_spread_quotes(
     games_ns = sport in _GAMES_DETAIL_SPORTS
     quotes: list[MarketQuote] = []
     for market in markets:
+        if not isinstance(market, Mapping):
+            continue
         if not str(market.get("key") or "").startswith(_SPREAD_PREFIX):
             continue
         if market.get("type") != "spread" or market.get("period") != 0:
@@ -505,7 +667,7 @@ def extract_spread_quotes(
         matchup = matchups.get(event_id)
         if matchup is None:
             continue
-        prices = market.get("prices") or []
+        prices = _mapping_rows(market.get("prices"))
         home_line = next(
             (
                 float(p["points"])
@@ -526,12 +688,12 @@ def extract_spread_quotes(
             designation = price.get("designation")
             raw_price = price.get("price")
             points = price.get("points")
-            if designation not in ("home", "away") or not _is_int_price(raw_price):
+            if designation not in ("home", "away"):
                 continue
             if not _is_number(points):
                 continue
-            decimal_odds = american_to_decimal(raw_price)
-            if decimal_odds <= 1.0:
+            decimal_odds = _american_decimal_or_none(raw_price)
+            if decimal_odds is None:
                 continue
             team = matchup.home if designation == "home" else matchup.away
             snapshots.append(
@@ -628,7 +790,13 @@ class PinnacleArcadiaClient:
         guest_key: str = "",
     ) -> None:
         self._client = client
-        self._base_url = base_url.rstrip("/")
+        try:
+            self._base_url = validate_https_url(
+                base_url.rstrip("/"),
+                allowed_hosts=ARCADIA_ALLOWED_HOSTS,
+            )
+        except UnsafeUpstreamURL as exc:
+            raise ValueError("arcadia base URL violates HTTPS origin policy") from exc
         self._guest_key = guest_key
 
     def apply_config(self, config: ArcadiaConfig) -> None:
@@ -637,7 +805,13 @@ class PinnacleArcadiaClient:
         The key is read out of the SecretStr only here, only into the private
         header field; it is never logged or returned. Used by the composition
         root when ``arcadia_discover_config`` is opted in."""
-        self._base_url = config.base_url.rstrip("/")
+        try:
+            self._base_url = validate_https_url(
+                config.base_url.rstrip("/"),
+                allowed_hosts=ARCADIA_ALLOWED_HOSTS,
+            )
+        except UnsafeUpstreamURL as exc:
+            raise ValueError("arcadia discovered base URL violates HTTPS origin policy") from exc
         self._guest_key = config.guest_key.get_secret_value()
 
     def _headers(self) -> dict[str, str]:
@@ -653,19 +827,23 @@ class PinnacleArcadiaClient:
         # "no data this cycle". Permanent 4xx is NEVER raised as transient here,
         # so it is never retried (it returns the Response and the caller's non-200
         # check raises PinnacleArcadiaError at once).
-        # 6 attempts (was 3): a 403 rotates to the NEXT proxy each request (round-
-        # robin), so with ~8 proxies in the pool 3 attempts only tried ~3 before
-        # declaring "no data" — daytime 403 spikes (more arcadia fetches) leaked
-        # transient blocks into the floor. 6 attempts exhausts more of the pool
-        # so a recoverable 403 actually recovers instead of becoming "no data".
+        # Three total attempts is the global self-heal ceiling. Exhaustion is
+        # surfaced to capture_once, which degrades that sport rather than hiding
+        # a persistently blocked/failed upstream behind an extended retry loop.
         retry=retry_if_exception_type((httpx.TransportError, _TransientStatusError)),
-        stop=stop_after_attempt(6),
+        stop=stop_after_attempt(3),
         wait=wait_exponential_jitter(initial=0.5, max=8.0),
         reraise=True,
     )
     async def _get(self, path: str, params: dict[str, str] | None = None) -> httpx.Response:
-        response = await self._client.get(
-            f"{self._base_url}{path}", params=params, headers=self._headers(), timeout=20.0
+        response = await request_httpx_bounded(
+            self._client,
+            "GET",
+            f"{self._base_url}{path}",
+            max_bytes=MAX_RESPONSE_BYTES,
+            params=params,
+            headers=self._headers(),
+            timeout=20.0,
         )
         if (
             response.status_code in _TRANSIENT_STATUSES
@@ -681,6 +859,10 @@ class PinnacleArcadiaClient:
     ) -> list[dict[str, Any]]:
         try:
             response = await self._get(path, params)
+        except UpstreamBodyTooLarge as exc:
+            raise PinnacleArcadiaError(
+                f"pinnacle {what} exceeded byte ceiling for sport={sport_id}"
+            ) from exc
         except _TransientStatusError as exc:
             # Retries exhausted on a transient 429/5xx: surface it as the normal
             # non-retryable error so capture_once's per-sport isolation/dedupe is
@@ -704,7 +886,11 @@ class PinnacleArcadiaClient:
             raise PinnacleArcadiaError(
                 f"pinnacle {what} returned a non-JSON body for sport={sport_id}"
             ) from exc
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            raise PinnacleArcadiaSchemaError(
+                f"pinnacle {what} returned an invalid JSON container for sport={sport_id}"
+            )
+        return _validated_response_rows(data, what=what, sport_id=sport_id)
 
     async def fetch_matchups(self, sport_id: int) -> list[dict[str, Any]]:
         return await self._fetch_list(f"/sports/{sport_id}/matchups", None, "matchups", sport_id)
@@ -729,6 +915,8 @@ class PinnacleArcadiaClient:
         """
         try:
             response = await self._get("/sports")
+        except UpstreamBodyTooLarge as exc:
+            raise PinnacleArcadiaError("pinnacle sports exceeded byte ceiling") from exc
         except _TransientStatusError as exc:
             # Retries exhausted on a transient 429/5xx — status only, never URL/key.
             raise PinnacleArcadiaError(
@@ -740,20 +928,29 @@ class PinnacleArcadiaClient:
             data = response.json()
         except ValueError as exc:
             raise PinnacleArcadiaError("pinnacle sports returned a non-JSON body") from exc
+        if not isinstance(data, list):
+            raise PinnacleArcadiaSchemaError("pinnacle sports returned an invalid JSON container")
+        if len(data) > MAX_SPORT_ROWS:
+            raise PinnacleArcadiaSchemaError("pinnacle sports exceeded row ceiling")
         live: dict[str, int] = {}
-        for entry in data if isinstance(data, list) else []:
+        for entry in data:
             if not isinstance(entry, dict):
-                continue
-            if entry.get("isHidden"):
-                continue
-            count = entry.get("matchupCount")
-            # isinstance (not _is_number) so mypy narrows away None; bool is not
-            # a valid count.
-            if not isinstance(count, (int, float)) or isinstance(count, bool) or count <= 0:
-                continue
+                raise PinnacleArcadiaSchemaError("pinnacle sports returned malformed rows")
             sport_id = entry.get("id")
             name = entry.get("name")
-            if not _is_int_price(sport_id) or not isinstance(name, str) or not name:
+            count = entry.get("matchupCount")
+            if (
+                not _is_int_price(sport_id)
+                or not isinstance(name, str)
+                or not name
+                or not isinstance(count, (int, float))
+                or isinstance(count, bool)
+                or not math.isfinite(float(count))
+            ):
+                raise PinnacleArcadiaSchemaError("pinnacle sports returned malformed rows")
+            if entry.get("isHidden"):
+                continue
+            if count <= 0:
                 continue
             live[name.lower()] = sport_id
         return live
@@ -798,10 +995,16 @@ class PinnacleArcadiaCapture:
         self._horizon = horizon
         self._now_fn = now_fn or _utc_now
         self._seen_version: dict[tuple[str, str, str], int] = {}
+        self._schema_drift_count: dict[str, int] = {}
         # sports whose per-cycle fetch failure has already been logged once, so a
         # persistently-empty sport (e.g. NFL out of season) does not warn every
         # cycle. Cleared on a successful capture so a later real outage re-warns.
         self._fetch_warned: set[str] = set()
+
+    @property
+    def schema_drift_count(self) -> Mapping[str, int]:
+        """Per-sport count of cycles rejected for an invalid upstream shape."""
+        return dict(self._schema_drift_count)
 
     def _select_fresh(
         self,
@@ -842,10 +1045,14 @@ class PinnacleArcadiaCapture:
         caller to FALL BACK to capturing every configured sport (today's
         behaviour) — discovery is an optimisation, never a gate that can abort
         or shrink the cycle on a transient error."""
-        assert self._client is not None
+        client = self._client
+        if client is None:
+            return None
         try:
-            live = await self._client.fetch_sports()
+            live = await client.fetch_sports()
         except (httpx.HTTPError, PinnacleArcadiaError) as exc:
+            if isinstance(exc, PinnacleArcadiaSchemaError):
+                self._schema_drift_count["sports"] = self._schema_drift_count.get("sports", 0) + 1
             logger.info(
                 "pinnacle arcadia /sports discovery failed: %s; capturing all configured sports",
                 type(exc).__name__,
@@ -889,6 +1096,8 @@ class PinnacleArcadiaCapture:
                 # clears the flag so a genuine new outage re-warns.
                 first = sport not in self._fetch_warned
                 self._fetch_warned.add(sport)
+                if isinstance(exc, PinnacleArcadiaSchemaError):
+                    self._schema_drift_count[sport] = self._schema_drift_count.get(sport, 0) + 1
                 logger.log(
                     logging.WARNING if first else logging.DEBUG,
                     "pinnacle arcadia: no data for %s this cycle (%s)",
@@ -906,8 +1115,18 @@ class PinnacleArcadiaCapture:
             # Post-fetch stamping is conservative in the safe direction.
             now = self._now_fn()
             horizon_end = now + self._horizon
-            matchups = parse_matchups(raw_matchups, now=now, horizon_end=horizon_end)
-            quotes = extract_market_quotes(matchups, raw_markets, now=now, sport=sport)
+            try:
+                matchups = parse_matchups(raw_matchups, now=now, horizon_end=horizon_end)
+                quotes = extract_market_quotes(matchups, raw_markets, now=now, sport=sport)
+            except (TypeError, ValueError, OverflowError) as exc:
+                self._schema_drift_count[sport] = self._schema_drift_count.get(sport, 0) + 1
+                logger.warning(
+                    "pinnacle arcadia: invalid %s payload this cycle (%s)",
+                    sport,
+                    type(exc).__name__,
+                )
+                written[sport] = 0
+                continue
             # Snapshot the change-gate state for every key this sport's quotes can
             # touch BEFORE _select_fresh advances it, so a persist failure below can
             # roll the gate back (else the failed rows are marked seen and silently
@@ -952,12 +1171,30 @@ class PinnacleArcadiaCapture:
                         self._seen_version[key] = prior
                 written[sport] = 0
                 continue
+            failed_event_ids = frozenset(getattr(rows, "failed_event_ids", ()))
+            if failed_event_ids:
+                # Per-event SAVEPOINT failures are reported without raising.
+                # Retry only their unchanged market versions next cycle while
+                # retaining successful events' version gates.
+                for key, prior in gate_prior.items():
+                    if key[1] not in failed_event_ids:
+                        continue
+                    if prior is None:
+                        self._seen_version.pop(key, None)
+                    else:
+                        self._seen_version[key] = prior
+                logger.warning(
+                    "pinnacle arcadia: %s persist skipped %d event(s) — their "
+                    "change-gates rolled back",
+                    sport,
+                    len(failed_event_ids),
+                )
             written[sport] = rows
             if rows:
                 logger.info(
                     "pinnacle arcadia: %s captured %d new sharp rows (%d events)",
                     sport,
                     rows,
-                    len(teams),
+                    len(set(teams) - failed_event_ids),
                 )
         return written

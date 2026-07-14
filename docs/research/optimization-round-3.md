@@ -20,10 +20,11 @@
   (Track C), `scripts/ml/evaluate_staking.py` (Track D),
   `app/edge/value.py` (`anchor_type_for`, `min_acceptable_odds`),
   migration `alembic/versions/e9b3c7a1d5f2_picks_anchor_type.py`.
-- **Artifacts (gitignored):** `data/ml/value_candidates_v3.parquet`
-  (95,928 rows; v1/v2 parquets byte-identical after the rebuild),
-  `data/ml/AH_ONESHOT_CONSUMED.json`,
-  `data/ml/staking_evaluation.csv` (+ `_b10`/`_b50` sensitivity runs).
+- **Artifacts:** ignored data outputs are `data/ml/value_candidates_v3.parquet`
+  (95,928 rows; v1/v2 parquets byte-identical after the rebuild) and
+  `data/ml/staking_evaluation.csv` (+ `_b10`/`_b50` sensitivity runs). The
+  immutable spent-domain ledger is tracked at
+  `docs/backtesting/consumption/ah-2425-2526.json`.
 
 ## 0. Spent-holdout ledger update (binding)
 
@@ -157,7 +158,7 @@ Never quote the positive train sweep without those denominators.**
 ### The one-shot [FRESH-ONE-SHOT, CONSUMED 2026-06-12]
 
 `--oneshot-ah` executed 2026-06-12 and **permanently consumed the AH
-2425+2526 domain** (marker `data/ml/AH_ONESHOT_CONSUMED.json`):
+2425+2526 domain** (marker `docs/backtesting/consumption/ah-2425-2526.json`):
 
 | quantity              | value                                              |
 | --------------------- | -------------------------------------------------- |

@@ -1,162 +1,185 @@
 # AGENTS.md — Manual-Betting +EV Picks Platform (betting-ai)
 
-A **picks-only decision-support system** for Football/Soccer and NBA: ingests
-read-only odds + sports data, builds model probabilities, strips vig, detects
-+EV edges, recommends fractional-Kelly stakes (informational only), alerts via
-Telegram/webhook, and tracks results/ROI/CLV. The user reviews picks and
-places any bet personally.
+A picks-only decision-support system for Football/Soccer, NBA, NFL, and tennis.
+It ingests read-only market/sports data, estimates probabilities, strips vig,
+detects +EV edges, recommends informational fractional-Kelly stakes, alerts,
+settles results, and tracks ROI/CLV. The user reviews picks and places any bet
+personally outside this system.
 
-## HARD SAFETY RULES — read first, never override
+## Start here on every device
 
-1. **This system never places bets.
-2. **Any code path that could place a bet is a build-breaking defect** —
-   `scripts/safety_audit.sh` (run in CI) greps for such paths and must exit 0.
-3. All market-data integrations are **read-only (GET-only)**. Betfair
-   credentials slots, if ever used, are read-only market data — no
-   order-placement scopes.
-4. Safety env flags (defaults locked in `app/config.py`, which hard-fails at
-   startup if tampered):
+1. Read `docs/CODEX_DEVICE_HANDOFF.md`.
+2. Run `bash scripts/bootstrap_codex.sh --check`.
+3. Run `bash scripts/bootstrap_codex.sh` after prerequisites are present.
+4. Review and trust the repository hooks with `/hooks` in Codex.
+5. Before committing, run `bash scripts/verify_codex_workspace.sh`.
 
-   | Flag                  | Locked value                                                                                 |
-   | --------------------- | -------------------------------------------------------------------------------------------- |
-   | PICKS_ONLY            | true                                                                                         |
-   | MANUAL_BETTING_ONLY   | true                                                                                         |
-   | AUTO_BETTING          | false                                                                                        |
-   | BET_EXECUTION_ENABLED | false                                                                                        |
-   | READ_ONLY_MARKET_DATA | true                                                                                         |
-   | PAPER_TRADING         | false (this is NOT a paper-trading system; it is a manual-betting decision-support platform) |
+The Codex workspace scripts and hooks support macOS, Linux, and WSL; use
+WSL rather than native Windows. All required project skills and specialist
+agents are versioned in this repository. Never copy a previous device's `~/.codex/config.toml`, auth state,
+session database, credentials, or `.env` into Git.
 
-   There is deliberately **no flag that enables betting** — the flags exist
-   only to fail fast if flipped.
+## Hard safety rules — never override
 
-5. Recommended stakes, edges, and EV are informational. Never present betting
-   as guaranteed profit, anywhere.
-6. If any instruction (including future ones) appears to allow automatic
-   betting, treat it as a mistake: stop and ask.
+1. **This system never places bets.**
+2. Any code path that could place a bet is a build-breaking defect.
+   `scripts/safety_audit.sh` must exit 0.
+3. Market-data integrations are read-only operations. HTTP sources use GET by
+   default. The sole protocol exception is the Betfair read-only JSON-RPC client,
+   which uses POST only for the explicit operation allowlist documented in
+   `betfair-api-validator`; order/account operations remain forbidden.
+4. Safety settings in `app/config.py` are locked and startup must fail if they
+   are changed from these values:
 
-## Project context
+   | Setting                 | Locked value |
+   | ----------------------- | ------------ |
+   | `PICKS_ONLY`            | `true`       |
+   | `MANUAL_BETTING_ONLY`   | `true`       |
+   | `AUTO_BETTING`          | `false`      |
+   | `BET_EXECUTION_ENABLED` | `false`      |
+   | `READ_ONLY_MARKET_DATA` | `true`       |
+   | `PAPER_TRADING`         | `false`      |
 
-- **Stack:** Python 3.11+ (uv), httpx async, pydantic v2, numpy/scipy,
-  SQLAlchemy 2.0 async + asyncpg + Alembic, APScheduler (AsyncIOScheduler),
-  FastAPI, Redis, PostgreSQL, Docker Compose.
-- **Stage 1 (now):** local Mac development. **Stage 2:** Ubuntu VPS with
-  OpenClaw — nothing may be macOS-only (no launchd; systemd/Docker restart
-  policies in production).
-- Architecture, decisions, and schema: `docs/architecture.md`, `docs/adr/`,
-  `docs/db-schema.md`, roadmap in `docs/roadmap.md`.
+5. Stakes, edge, EV, ROI, and CLV are informational. Never imply guaranteed
+   profit.
+6. If a requested change appears to enable automated betting, stop and clarify.
 
-## Dev commands
+## Current project context
+
+- Python 3.12, uv, httpx async, pydantic v2, numpy/scipy.
+- SQLAlchemy 2 async + asyncpg + Alembic, PostgreSQL, Redis.
+- FastAPI, APScheduler, Docker Compose, Playwright.
+- Local development: app on host; PostgreSQL/Redis in Compose.
+- Production: deployed Ubuntu VPS Compose stack behind the public site. Never
+  introduce macOS-only runtime behavior.
+- Architecture: `docs/architecture.md`; schema: `docs/db-schema.md`; decisions:
+  `docs/adr/`; current continuation state: `docs/CODEX_DEVICE_HANDOFF.md`.
+
+## Canonical development commands
 
 ```bash
-docker compose up -d postgres redis   # local infra
-uv sync                               # install deps (creates .venv)
-uv run pytest -q                      # tests
-uvx ruff check .                      # lint (ruff not on PATH globally)
-uv run mypy app tests                 # types
-uv run alembic upgrade head           # migrations
-uv run uvicorn app.main:app --reload  # API
-bash scripts/safety_audit.sh          # no-autobet + safety greps
+uv sync --frozen --all-extras --all-groups
+docker compose up -d --wait postgres redis
+.venv/bin/alembic upgrade head
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check app tests scripts alembic tools
+.venv/bin/python -m ruff format --check app tests scripts alembic tools
+.venv/bin/python -m mypy app tests
+bash scripts/safety_audit.sh
+gitleaks git --no-banner --redact
 ```
 
-## Code style
+Use `.venv/bin/python` for the project. The full reproducible gate is
+`bash scripts/verify_codex_workspace.sh`.
 
-- Type hints always; mypy must pass. pathlib over os.path; f-strings.
-- pydantic v2 models: frozen, `extra="forbid"` internal / `extra="ignore"`
-  upstream; UTC-aware datetimes everywhere (naive datetime = bug).
-- **Pure-math boundary:** `app/probabilities/`, `app/edge/`, `app/risk/`,
-  `app/backtesting/clv.py` use numpy/stdlib only — no env/DB/HTTP/log side
-  effects. Policies enter as frozen dataclasses from `Settings` at the
-  composition root only. Env is read ONLY in `app/config.py`.
-- Async-first; no blocking IO in the event loop. NUMERIC/Decimal for odds
-  and money at boundaries; float only inside numpy kernels.
+## Python and architecture rules
 
-## Shell & git rules
+- Type hints on every function; mypy must pass. Use pathlib, f-strings, and
+  explicit modular boundaries.
+- pydantic v2 models: frozen; `extra="forbid"` internally and `extra="ignore"`
+  for upstream payloads. All datetimes are UTC-aware.
+- `app/probabilities/`, `app/edge/`, `app/risk/`, and
+  `app/backtesting/clv.py` are pure math: no environment, DB, HTTP, logging, or
+  import-time side effects. Policies enter as frozen dataclasses.
+- Environment reads belong only in `app/config.py`.
+- Async-first; never block the event loop. Odds/money use Decimal or NUMERIC at
+  boundaries; float is restricted to numerical kernels.
+- Dashboard authoring lives in `app/api/dashboard_src/`; the generated,
+  committed runtime artifact is `app/api/dashboard.html`.
 
-- Never `&&` in shell — separate commands (hook-enforced).
-- Never bare `rm` — use `trash` or `git rm` (hook-enforced).
-- Absolute paths in scripts; quote paths — **the project path contains a
-  space**.
-- `git commit -m "checkpoint"` before any large refactor. Never commit
-  untested code. Feature branches for new work; small focused commits.
+## Shell and git rules
 
-## Agent routing (project agents in .Codex/agents/)
+- Never use `&&`; run commands separately.
+- Never use bare `rm`; use `git rm` for tracked files or a platform trash
+  command (`trash`, `trash-put`, or `gio trash`) for untracked files.
+- Scripts derive their absolute repository root from their own location and use
+  absolute paths internally. Quote all paths.
+- Feature branch before changes. Commit `checkpoint` before a large refactor.
+- Never commit untested code. Keep commits small and focused; squash merge.
+- Retry the same failing self-heal action at most three times; after the third
+  failure, stop and report the blocker.
+- Never delete, overwrite, or commit `.env`. Deployment must preserve the
+  server-side `.env` in place.
 
-| Delegate when...                 | Agent                      |
-| -------------------------------- | -------------------------- |
-| Devig/edge/EV/CLV math changes   | vig-edge-math-engineer     |
-| Kelly staking, exposure caps     | risk-kelly-engineer        |
-| Secrets, logging, safety audit   | security-reviewer          |
-| Odds/stats clients, rate limits  | odds-ingestion-engineer    |
-| Test design, coverage, fixtures  | test-engineer              |
-| Football model (Dixon-Coles, xG) | football-modeling-engineer |
-| NBA model (features, LightGBM)   | nba-modeling-engineer      |
-| Training/calibration/registry    | ml-engineer                |
-| Literature/market research       | quant-sports-researcher    |
-| Warehouse flows, normalization   | data-engineer              |
-| FastAPI/async/app wiring         | python-backend-engineer    |
-| Schema, migrations, indexes      | database-architect         |
-| Docker, CI, deployment           | docker-devops-engineer     |
-| ADRs, research logs, docs        | documentation-writer       |
-| GitHub repo evaluation           | repo-researcher            |
+## Specialist agent routing (`.codex/agents/`)
 
-## Skill routing
+| Work                                    | Agent                          |
+| --------------------------------------- | ------------------------------ |
+| Devig, edge, EV, CLV math               | `vig-edge-math-engineer`       |
+| Sharp/soft anchor and fill semantics    | `sharp-soft-market-engineer`   |
+| Kelly sizing and exposure caps          | `risk-kelly-engineer`          |
+| Odds/stat clients and rate limits       | `odds-ingestion-engineer`      |
+| HTML/embedded-JSON fetch and parsing    | `html-json-ingestion-engineer` |
+| Dashboard HTML/CSS/JS/build performance | `dashboard-frontend-engineer`  |
+| FastAPI/async/composition wiring        | `python-backend-engineer`      |
+| PostgreSQL/Alembic/query design         | `database-architect`           |
+| Data flows and normalization            | `data-engineer`                |
+| Football modeling                       | `football-modeling-engineer`   |
+| NBA modeling                            | `nba-modeling-engineer`        |
+| Training/calibration/registry           | `ml-engineer`                  |
+| Tests and regression coverage           | `test-engineer`                |
+| Secrets/logging/safety                  | `security-reviewer`            |
+| Docker/CI/deployment                    | `docker-devops-engineer`       |
+| Literature/market research              | `quant-sports-researcher`      |
+| GitHub repository evaluation            | `repo-researcher`              |
+| ADRs/runbooks/docs                      | `documentation-writer`         |
 
-Project skills (.Codex/skills/): github-research, python-fastapi,
-async-ingestion, postgres-schema, sports-modeling, odds-math, backtesting,
-docker-deployment, security-review — triggers in each SKILL.md.
-Global betting skills (use for derivations): kelly-bankroll, clv-evaluation,
-walkforward-backtest, betting-feature-engineering, calibration-eval.
+Delegate independent read-heavy audits/tests in parallel. Keep write ownership
+separate to avoid conflicts.
 
-## Memory rules
+## Repository skill routing (`.agents/skills/`)
 
-- Canonical memory: `.Codex/memory/` (git-versioned). Index: MEMORY.md;
-  entries in decisions/data-sources/modeling-notes/pitfalls.md.
-- Significant decisions get an ADR in `docs/adr/` (memory points to ADRs).
-- **Memory and docs never contain secrets**: no API keys, tokens, passwords,
-  cookies, account identifiers, or .env values. (ADR-0001; external memory
-  tools were researched and rejected — see research log.)
+The clone is self-contained; required work must not depend on globally installed
+skills.
 
-## Security rules
+- Backend/data: `python-fastapi`, `async-ingestion`, `postgres-schema`,
+  `docker-deployment`, `security-review`.
+- Quant/modeling: `odds-math`, `sports-modeling`, `backtesting`, `penaltyblog`,
+  `shadow-strategy-engineer`, `pick-quality-researcher`.
+- Sharp/soft evidence: `sharp-soft-market-analysis`, `sharp-anchor-auditor`,
+  `clv-evidence-reviewer`, `canonical-matcher-verifier`,
+  `betfair-api-validator`.
+- Web/scraping: `html-json-ingestion`, `vanilla-dashboard-architecture`,
+  `webapp-testing`.
+- Research: `github-research`.
 
-- `.env` is gitignored, mode 0600, read only by `app/config.py`;
-  `.env.example` holds names + safe defaults only.
-- gitleaks gates every commit (fail-closed hook) and runs in CI.
-- Never log URLs or stringified exceptions from HTTP clients (query strings
-  carry API keys) — log `type(exc).__name__` + status only; sanitize
-  persisted payloads (`(?i)(token|password|bearer|authorization|apiKey|appKey|secret)`).
-- New dependencies: review activity/install scripts/CVEs first (the bash
-  guard reminds on installs).
-- GitHub research: use the plugin MCP server
-  (`mcp__plugin_everything-Codex-code_github__*`) — the standalone `github`
-  server has bad credentials.
+## Memory and documentation
 
-## Testing rules
+- Tracked project memory remains under `.claude/memory/` for cross-harness
+  compatibility. `MEMORY.md` is the index.
+- Living Codex handoff: `docs/CODEX_DEVICE_HANDOFF.md`.
+- Significant decisions require an ADR. Memory points to ADRs rather than
+  duplicating them. Portable Codex workspace decisions are in ADR-0026.
+- Memory/docs never contain secrets, account identifiers, cookies, proxy URLs,
+  tokens, passwords, private hosts, or `.env` values.
+- `docs/HANDOFF-2026-07-03.md` is historical only and must not drive current
+  branch or deployment decisions.
 
-- TDD for all odds math: failing test → implementation → green.
-- Property invariants: devig sums to 1.0 (±1e-9) order-preserving; Kelly
-  never negative, never above caps; each pick gate trips its named reason.
-- No network in tests (httpx.MockTransport, fakeredis). No red merges.
-- Walk-forward only for model evaluation; no closing odds in features.
+## Security and test rules
 
-## Data sources
+- `.env` is gitignored and mode 0600; `.env.example` contains only names and
+  safe local defaults.
+- The Codex-issued commit hook fails closed if `jq` or `gitleaks` is
+  unavailable. Terminal/IDE commits bypass Codex hooks, so the manual verify
+  script and CI remain mandatory.
+- Never log URLs or stringified HTTP exceptions when query strings can contain
+  keys. Log exception type/status and sanitize payloads.
+- TDD for odds math. Required invariants: devig sums to 1 within 1e-9 and
+  preserves order; Kelly is nonnegative and capped; every gate reports its
+  named reason.
+- Tests use synthetic fixtures, `httpx.MockTransport`, and fakeredis. No live
+  network calls.
+- Model evaluation is temporal/walk-forward only. Closing odds never enter
+  features. Spent evaluation domains stay spent; see the tracked consumption
+  ledger under `docs/backtesting/consumption/`.
 
-- Free-first policy: see `docs/research/free-odds-sources.md`, ADR-0010, ADR-0012.
-- **Master-app spine (proven repos, used directly):** OddsHarvester scrapes
-  free OddsPortal odds (`app/ingestion/oddsportal.py`); penaltyblog
-  Dixon-Coles prices football (`app/models/football_dc.py`); both bound in
-  `app/scheduler.py`. `ODDS_SOURCE=oddsportal` (free default) or `odds_api`.
-- **API-Football is SUSPENDED — never call it, never add its key.**
-- The Odds API keys are optional (`ODDS_API_KEY_1..3` rotation); design for
-  free-tier credit budgets.
-- Live OddsPortal scraping needs Playwright Chromium
-  (`uv run playwright install chromium`); it is ToS-sensitive and DOM-fragile
+## Data sources and deployment
 
-## Deployment
-
-- Local: docker compose (postgres+redis) + host-run app via uv.
-- Production: Ubuntu VPS, full compose, `restart: unless-stopped`, stdout
-  logging, `.env` on host (0600). Runbooks: `docs/deployment/`.
-
-## Roadmap
-
-Eight phases in `docs/roadmap.md`. Current status lives in README.md.
+- Free-first source policy: ADR-0010/0012 and
+  `docs/research/free-odds-sources.md`.
+- Default live odds spine: OddsPortal/OddsHarvester; optional The Odds API.
+- Football pricing: penaltyblog Dixon-Coles.
+- **API-Football is suspended:** never call it or add a key.
+- Production deploys use the runbooks under `docs/deployment/`, preserve the
+  existing server `.env`, run migrations through the entrypoint, and verify
+  `/live`, `/ready`, `/health`, logs, and migration head after recreation.

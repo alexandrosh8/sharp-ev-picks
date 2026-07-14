@@ -11,7 +11,6 @@ and a fast-path redirects it on later cycles.
 Rollback-isolated against the compose Postgres; skips when the DB is absent.
 """
 
-import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -26,10 +25,9 @@ from app.storage.repositories import (
     _get_or_create_sport,
     _get_or_create_team,
 )
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = os.environ.get(
-    "TEST_DB_URL", "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
-)
+DB_URL = TEST_DATABASE_URL
 
 KICKOFF = datetime(2026, 6, 10, 18, 0, tzinfo=UTC)
 

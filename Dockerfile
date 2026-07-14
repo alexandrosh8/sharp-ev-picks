@@ -16,7 +16,7 @@ FROM python:3.12-slim
 # OCI image metadata (repo hygiene; no licenses label — repo is private).
 LABEL org.opencontainers.image.title="betting-ai" \
       org.opencontainers.image.description="Manual-betting +EV picks decision-support — picks-only, read-only market data, never places bets." \
-      org.opencontainers.image.source="https://github.com/alexandrosh8/betting-picks-bot" \
+      org.opencontainers.image.source="https://github.com/alexandrosh8/sharp-ev-picks" \
       org.opencontainers.image.vendor="betting-ai"
 
 # PLAYWRIGHT_BROWSERS_PATH is mandatory: without it the browser installs to
@@ -55,16 +55,17 @@ COPY app ./app
 COPY alembic ./alembic
 COPY scripts ./scripts
 RUN uv sync --frozen --no-dev --extra football --extra backfill
+# The deterministic builder enforces this mode too. Keep a build-layer guard
+# so an older/local 0600 artifact can never make the root-owned dashboard
+# unreadable by the unprivileged runtime process.
+RUN chmod 0644 /srv/betting-ai/app/api/dashboard.html
 
-# Non-root user. Chromium sandbox note: running headless Chromium as non-root
-# normally needs sandbox configuration, but oddsharvester 0.3.0 detects Docker
-# via /.dockerenv (utils/utils.py is_running_in_docker) and launches Chromium
-# with `--no-sandbox --disable-dev-shm-usage` (utils/constants.py
-# PLAYWRIGHT_BROWSER_ARGS_DOCKER), so no shm_size hack or seccomp profile is
-# required. RE-VERIFY this upstream behavior whenever oddsharvester is bumped
-# past 0.3.0 (scripts/upgrade_deps.sh).
+# Non-root runtime. Application code and the virtualenv deliberately stay
+# root-owned: appuser can read/execute them but cannot persist a page exploit or
+# dependency mutation. app.ingestion.oddsportal removes upstream `--no-sandbox`
+# and disabled-isolation flags on every scrape admission; compose supplies the
+# Playwright seccomp profile needed for Chromium's user-namespace sandbox.
 RUN useradd --create-home --uid 1000 appuser
-RUN chown -R appuser:appuser /srv/betting-ai
 USER appuser
 
 EXPOSE 8000
@@ -73,10 +74,10 @@ EXPOSE 8000
 # the venv binaries directly — NEVER `uv run` without --no-sync here: a plain
 # `uv run` re-syncs the venv at container start and would UNINSTALL the
 # build-time extras (uv sync removes packages not requested).
-# Liveness against the unauthenticated /health endpoint, via the venv
-# python (slim base has no curl). start-period covers alembic upgrade +
-# scheduler warmup so the container is not killed during boot.
+# Process liveness against the unauthenticated /live endpoint, via the venv
+# python (slim base has no curl). Dependency and poll readiness deliberately
+# live on /ready and must not make Docker kill-loop during a long first scrape.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
-    CMD ["/srv/betting-ai/.venv/bin/python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+    CMD ["/srv/betting-ai/.venv/bin/python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/live', timeout=4).status == 200 else 1)"]
 
 ENTRYPOINT ["bash", "/srv/betting-ai/scripts/docker_entrypoint.sh"]

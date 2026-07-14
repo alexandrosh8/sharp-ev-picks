@@ -1,11 +1,8 @@
 """WP5 — sharp-anchor quality (audit fixes, no IO / no network).
 
-FIX 1  Exchange liquidity floor at anchor-USE time: a Betfair row with KNOWN
-       matched liquidity below the floor must never serve as the named sharp
-       anchor (falls through to consensus), while UNKNOWN (None) liquidity
-       stays anchor-eligible — the dominant main-scrape Betfair rows carry
-       liquidity=None and anchor 59/62 Betfair events (project memory:
-       do-not-remove-main-scrape-betfair). Wired end-to-end from Settings
+FIX 1  Exchange liquidity floor at anchor-USE time: a Betfair row with missing
+       or below-floor matched liquidity must never serve as the named sharp
+       anchor (falls through to consensus). Wired end-to-end from Settings
        (VALUE_EXCHANGE_MIN_LIQUIDITY) through ValuePolicy into
        event_fair_probs.
 FIX 2  Pinnacle Arcadia positive-AH key mismatch: the OddsPortal JSON feed key
@@ -18,7 +15,7 @@ FIX 3  Tennis first-initial fuzzy hole: 'cerundolo f' vs 'cerundolo j' passes
 """
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -51,18 +48,16 @@ def test_known_thin_betfair_liquidity_is_not_the_sharp_anchor() -> None:
     assert res[0] == CONSENSUS_ANCHOR
 
 
-def test_unknown_none_liquidity_keeps_betfair_anchor_eligible() -> None:
-    # liquidity=None (the main-scrape consensus rows) stays anchor-ELIGIBLE:
-    # rejecting NULL would gut Betfair coverage (59/62 anchored events carry
-    # NULL liquidity — only the dedicated gated capture sets it).
+def test_unknown_none_liquidity_cannot_satisfy_positive_floor() -> None:
+    # A configured floor is an evidence requirement: unknown does not prove it.
     res = anchor_fair_probs(_EX_PRICES, liquidity=None, exchange_min_liquidity=50.0)
     assert res is not None
-    assert res[0] == "betfair exchange"
+    assert res[0] == CONSENSUS_ANCHOR
     # A liquidity map that simply has no Betfair entry is the same unknown case.
     other_book = {s: {"SoftA": 900.0} for s in _EX_PRICES}
     res2 = anchor_fair_probs(_EX_PRICES, liquidity=other_book, exchange_min_liquidity=50.0)
     assert res2 is not None
-    assert res2[0] == "betfair exchange"
+    assert res2[0] == CONSENSUS_ANCHOR
 
 
 def test_liquid_betfair_passes_the_floor() -> None:
@@ -124,6 +119,36 @@ def _h2h_snaps(betfair_liquidity: float | None) -> list[OddsSnapshotIn]:
     return snaps
 
 
+def test_grouping_coalesces_price_and_liquidity_from_same_newest_snapshot() -> None:
+    from app.pipeline import group_market_liquidity, group_market_prices
+
+    old = _snap("H", "betfair exchange", 1.80, 500.0).model_copy(
+        update={"captured_at": NOW - timedelta(seconds=5), "ingested_at": NOW}
+    )
+    new = _snap("H", "betfair exchange", 2.20, 25.0)
+    key = ("ev1", Market.H2H, "1x2")
+
+    for snapshots in ([old, new], [new, old]):
+        prices = group_market_prices(snapshots)
+        liquidity = group_market_liquidity(snapshots)
+        assert prices[key][0]["H"]["betfair exchange"] == pytest.approx(2.20)
+        assert liquidity[key]["H"]["betfair exchange"] == pytest.approx(25.0)
+
+
+def test_exact_timestamp_conflict_uses_conservative_order_independent_winner() -> None:
+    from app.pipeline import group_market_liquidity, group_market_prices
+
+    optimistic = _snap("H", "betfair exchange", 2.50, 500.0)
+    conservative = _snap("H", "betfair exchange", 2.20, 10.0)
+    key = ("ev1", Market.H2H, "1x2")
+
+    for snapshots in ([optimistic, conservative], [conservative, optimistic]):
+        prices = group_market_prices(snapshots)
+        liquidity = group_market_liquidity(snapshots)
+        assert prices[key][0]["H"]["betfair exchange"] == pytest.approx(2.20)
+        assert liquidity[key]["H"]["betfair exchange"] == pytest.approx(10.0)
+
+
 def test_event_fair_probs_wires_liquidity_floor_from_policy() -> None:
     from app.pipeline import event_fair_probs, group_market_liquidity, group_market_prices
     from app.probabilities.devig import DevigMethod
@@ -147,7 +172,7 @@ def test_event_fair_probs_wires_liquidity_floor_from_policy() -> None:
         policy,
         liquidity_by_market=group_market_liquidity(null_snaps),
     )
-    assert fair_null[key][0] == "betfair exchange"  # unknown unchanged
+    assert fair_null[key][0] == CONSENSUS_ANCHOR  # unknown cannot prove the floor
 
     liquid_snaps = _h2h_snaps(betfair_liquidity=500.0)
     fair_liquid = event_fair_probs(

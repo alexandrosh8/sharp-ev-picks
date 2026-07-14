@@ -56,7 +56,15 @@ from app.notifications.dedupe import RedisIdempotencyStore
 from app.notifications.dispatcher import AlertDispatcher
 from app.notifications.telegram import TelegramSink
 from app.notifications.webhook import WebhookSink
-from app.pipeline import PipelineDeps, run_pick_pipeline, run_value_pipeline
+from app.pipeline import (
+    LAST_POLL,
+    PipelineDeps,
+    record_poll_failure,
+    record_poll_finished,
+    record_poll_started,
+    run_pick_pipeline,
+    run_value_pipeline,
+)
 from app.probabilities.devig import DevigMethod
 from app.risk.exposure import DailyExposureLedger
 
@@ -98,19 +106,28 @@ async def run_sport_cycle_guarded(
     tolerates it — same path as graceful shutdown). ``cycle_budget <= 0``
     disables the watchdog (pre-incident behavior).
     """
+    record_poll_started(sport_key)
     try:
         if cycle_budget > 0:
             await asyncio.wait_for(pipeline_fn(deps, sport_key), timeout=cycle_budget)
         else:
             await pipeline_fn(deps, sport_key)
     except TimeoutError:
+        record_poll_failure(sport_key, "timeout")
         logger.warning(
             "poll_odds WATCHDOG: %s cycle exceeded %ds and was cancelled — resuming",
             sport_key,
             cycle_budget,
         )
     except Exception as exc:
+        record_poll_failure(sport_key, type(exc).__name__)
         logger.error("poll_odds failed for %s: %s", sport_key, type(exc).__name__)
+    else:
+        # Production pipelines normally replace the in-progress record with
+        # their detailed `_record_poll` payload. Keep the heartbeat contract
+        # complete for successful no-op/test pipelines too.
+        if LAST_POLL.get(sport_key, {}).get("in_progress") is True:
+            record_poll_finished(sport_key)
 
 
 class _PollSkipNoiseFilter(logging.Filter):
@@ -235,17 +252,29 @@ async def seed_exposure_ledger(
     upgraded volume pick gets created_at bumped to its upgrade moment
     (repositories.persist_pick), which is exactly when it DID reserve.
     """
-    from sqlalchemy import func, select
+    from sqlalchemy import and_, case, func, or_, select
 
     from app.storage.models import Event, Pick
 
     now = datetime.now(tz=UTC)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
-    today_premium = (
+    legacy_today = and_(
+        Pick.exposure_reserved_on.is_(None),
         Pick.created_at >= day_start,
         Pick.created_at < day_end,
+    )
+    today_premium = (
+        or_(Pick.exposure_reserved_on == now.date(), legacy_today),
         Pick.tier == "premium",
+    )
+    exposure_charge = case(
+        (
+            Pick.exposure_reserved_on == now.date(),
+            func.coalesce(Pick.exposure_reserved_fraction, 0),
+        ),
+        (legacy_today, Pick.recommended_stake_fraction),
+        else_=0,
     )
     # Seed EVERY cap dimension the ledger enforces, not just the daily total: the
     # ledger also tracks a per-event correlation sub-cap keyed on the same event
@@ -257,15 +286,13 @@ async def seed_exposure_ledger(
     per_event: list[tuple[str, float]] = []
     async with session_factory() as session:
         total = await session.scalar(
-            select(func.coalesce(func.sum(Pick.recommended_stake_fraction), 0)).where(
-                *today_premium
-            )
+            select(func.coalesce(func.sum(exposure_charge), 0)).where(*today_premium)
         )
         if ledger.max_event_fraction is not None:
             rows = await session.execute(
                 select(
                     Event.external_ref,
-                    func.coalesce(func.sum(Pick.recommended_stake_fraction), 0),
+                    func.coalesce(func.sum(exposure_charge), 0),
                 )
                 .join(Event, Pick.event_id == Event.id)
                 .where(*today_premium)
@@ -408,6 +435,9 @@ def build_scheduler(
     arcadia_http_client: httpx.AsyncClient | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
+    # Resource ownership is surfaced to the lifespan so clients constructed
+    # inside this composition function are closed deterministically.
+    scheduler._owned_http_clients = []
 
     # Apply the Settings-derived proxy quarantine knobs to the process-shared
     # health registry (audit 2026-07-03 §5) BEFORE any rotation site is built —
@@ -516,12 +546,20 @@ def build_scheduler(
             )
             model = dc_model
 
+            refit_lock = asyncio.Lock()
+
             async def refit_football_model() -> None:
-                rows = await fetch_football_history(settings, http_client)
-                if len(rows) < 50:
-                    logger.error("refit skipped: only %d historical matches fetched", len(rows))
+                # DateTrigger and cron have distinct APScheduler ids, so their
+                # individual max_instances settings cannot prevent overlap.
+                if refit_lock.locked():
+                    logger.info("football refit already running; coalescing duplicate trigger")
                     return
-                await asyncio.to_thread(dc_model.fit, rows, datetime.now(tz=UTC).date())
+                async with refit_lock:
+                    rows = await fetch_football_history(settings, http_client)
+                    if len(rows) < 50:
+                        logger.error("refit skipped: only %d historical matches fetched", len(rows))
+                        return
+                    await asyncio.to_thread(dc_model.fit, rows, datetime.now(tz=UTC).date())
 
             scheduler.add_job(
                 refit_football_model,
@@ -536,8 +574,12 @@ def build_scheduler(
     elif settings.odds_source == "odds_api":
         keys = settings.odds_api_keys()
         if keys:
+            directory = EventDirectory()
             loader = OddsApiClient(
-                api_keys=keys, client=http_client, regions=settings.odds_api_regions
+                api_keys=keys,
+                client=http_client,
+                regions=settings.odds_api_regions,
+                directory=directory,
             )
             sport_keys = ("soccer_epl", "basketball_nba")
             # Same evidence-gated scoping as the oddsportal branch (audit WP6 —
@@ -619,24 +661,22 @@ def build_scheduler(
             if use_value
             else None
         )
-        ml_filter_enforced = settings.value_ml_filter
+        ml_filter_enforced = use_value and settings.value_ml_filter
         if ml_filter_enforced and value_filter is None:
-            logger.error(
-                "VALUE_ML_FILTER=true but no value-filter model loaded from %s "
-                "(missing artifacts or ML deps?) — picks run UNFILTERED",
-                settings.value_ml_model_dir,
+            raise RuntimeError(
+                f"VALUE_ML_FILTER=true but no value-filter model loaded from "
+                f"{settings.value_ml_model_dir} (missing artifacts or ML dependencies); "
+                "refusing unfiltered startup"
             )
         if ml_filter_enforced and value_filter is not None and value_filter.shadow:
             # Enforcement requires a true ADOPT manifest. A SHADOW-CANDIDATE
             # (verdict != ADOPT, loaded via VALUE_ML_MANIFEST_ALLOW_SHADOW)
             # may only annotate — demotion on unproven evidence is forbidden
             # by the spent-holdout discipline (.claude/memory/decisions.md).
-            logger.error(
-                "VALUE_ML_FILTER=true but manifest %s is a SHADOW-CANDIDATE "
-                "(verdict != ADOPT) — enforcement refused; running ANNOTATION-ONLY",
-                settings.value_ml_manifest_filename,
+            raise RuntimeError(
+                f"VALUE_ML_FILTER=true but manifest {settings.value_ml_manifest_filename} "
+                "is a SHADOW-CANDIDATE (verdict != ADOPT); refusing unproven enforcement"
             )
-            ml_filter_enforced = False
         # OPTIONAL: anchor live picks on the free Betfair/Pinnacle sharp prices
         # (VALUE_SHARP_ANCHOR_FROM_ARCHIVES) instead of the soft-book consensus —
         # merging the captured archives into the anchor set at pick time. Default
@@ -746,6 +786,13 @@ def build_scheduler(
             value_volume_min_edge=settings.value_volume_min_edge,
             value_min_odds=settings.value_min_odds,
             stale_drop_ratio_warn=settings.stale_drop_ratio_warn_threshold,
+            # OddsChecker's betFeedTimestamp is the quote's last-change time,
+            # not proof that the current ACTIVE/notExpired response is old.
+            # Gate that source on the freshly observed ingestion clock while
+            # every other provider keeps the conservative provider timestamp.
+            candidate_freshness_basis=(
+                "observation" if settings.odds_source == "oddschecker" else "provider"
+            ),
             # optional per-market/odds-band/book-count refinements — the
             # default (all env knobs empty) is the all-empty no-op policy
             value_policy=value_policy(settings),
@@ -804,6 +851,8 @@ def build_scheduler(
         # cycle on the cycle's own snapshots (app/pipeline.py) — a separate
         # 30-min fetch job would just double the scraping load.
 
+    finished_scores_lock = asyncio.Lock()
+
     async def capture_finished_scores_job() -> None:
         # DEDICATED finished-score scrape (cactusbets.cloud prod fix, 2026-06-22).
         # Runs on its OWN light interval (RESULTS_SCRAPE_INTERVAL_SECONDS),
@@ -816,6 +865,9 @@ def build_scheduler(
         # a single hung VPS proxy request cannot stall the pass. OddsPortalLoader
         # only (others no-op via the fetch_match_odds duck-type). Per-sport error
         # isolation: one sport failing never blocks the rest.
+        if finished_scores_lock.locked():
+            logger.info("finished-score capture already running; coalescing duplicate trigger")
+            return
         if (
             session_factory is None
             or not settings.settle_from_scraped_scores
@@ -825,19 +877,20 @@ def build_scheduler(
             return
         from app.clv_trueup import capture_finished_scores
 
-        for sport_key in sport_keys:
-            try:
-                await capture_finished_scores(
-                    loader,
-                    session_factory,
-                    directory,
-                    sport_key,
-                    window=timedelta(days=settings.results_scrape_window_days),
-                    per_link_timeout=settings.results_scrape_link_timeout_seconds,
-                    time_budget=settings.results_scrape_cycle_budget_seconds,
-                )
-            except Exception as exc:
-                logger.error("results scrape failed for %s: %s", sport_key, type(exc).__name__)
+        async with finished_scores_lock:
+            for sport_key in sport_keys:
+                try:
+                    await capture_finished_scores(
+                        loader,
+                        session_factory,
+                        directory,
+                        sport_key,
+                        window=timedelta(days=settings.results_scrape_window_days),
+                        per_link_timeout=settings.results_scrape_link_timeout_seconds,
+                        time_budget=settings.results_scrape_cycle_budget_seconds,
+                    )
+                except Exception as exc:
+                    logger.error("results scrape failed for %s: %s", sport_key, type(exc).__name__)
 
     async def settle_results() -> None:
         # Phase 4: free results sources -> outcome mapping -> result_tracking.
@@ -897,6 +950,8 @@ def build_scheduler(
 
     upstream_dispatcher = _dispatcher(settings, http_client, redis)
 
+    upstream_watch_lock = asyncio.Lock()
+
     async def upstream_watch() -> None:
         # Daily PyPI release check for the bound engines (penaltyblog,
         # oddsharvester). Notifies once per release (Redis dedupe) and
@@ -904,11 +959,15 @@ def build_scheduler(
         # go through scripts/upgrade_deps.sh (full test gate).
         from app.maintenance.upstream_watch import check_upstream, update_alert
 
-        try:
-            for notice in await check_upstream(http_client):
-                await upstream_dispatcher.dispatch(update_alert(notice))
-        except Exception as exc:
-            logger.error("upstream watch failed: %s", type(exc).__name__)
+        if upstream_watch_lock.locked():
+            logger.info("upstream watch already running; coalescing duplicate trigger")
+            return
+        async with upstream_watch_lock:
+            try:
+                for notice in await check_upstream(http_client):
+                    await upstream_dispatcher.dispatch(update_alert(notice))
+            except Exception as exc:
+                logger.error("upstream watch failed: %s", type(exc).__name__)
 
     # P0-2/P0-4: a dedicated dispatcher + cross-cycle monitor state so the
     # self-audit can ALERT (not just log) on anomalies and run the dead-man's
@@ -1057,11 +1116,13 @@ def build_scheduler(
         # (audit 2026-07-10 L-scheduler-1013: discovery used the direct
         # http_client even when the capture rode the proxy pool — a config
         # bypass that 403s on datacenter egress and leaks the egress IP).
-        arcadia_transport_client = arcadia_http_client or (
-            build_arcadia_proxy_http_client(_arcadia_proxy_urls)
-            if _arcadia_proxy_urls
-            else http_client
-        )
+        if arcadia_http_client is not None:
+            arcadia_transport_client = arcadia_http_client
+        elif _arcadia_proxy_urls:
+            arcadia_transport_client = build_arcadia_proxy_http_client(_arcadia_proxy_urls)
+            scheduler._owned_http_clients.append(arcadia_transport_client)
+        else:
+            arcadia_transport_client = http_client
         arcadia_client = PinnacleArcadiaClient(
             arcadia_transport_client,
             base_url=settings.arcadia_base_url,
@@ -1253,7 +1314,11 @@ def build_scheduler(
         # SINGLE dedicated proxy (NO rotation — operator requirement). Direct egress
         # when unset. A dedicated client so the proxy never leaks to other callers.
         bfapi_proxy = settings.betfair_api_proxy_url()
-        bfapi_http = httpx.AsyncClient(proxy=bfapi_proxy) if bfapi_proxy else httpx.AsyncClient()
+        if bfapi_proxy:
+            bfapi_http = httpx.AsyncClient(proxy=bfapi_proxy)
+            scheduler._owned_http_clients.append(bfapi_http)
+        else:
+            bfapi_http = http_client
 
         async def _betfair_api_candidates() -> list[EventCandidate]:
             rows = await select_betfair_targets(
@@ -1445,6 +1510,7 @@ def build_scheduler(
         )
         logger.info("betfair API SHADOW capture ENABLED (read-only, persists nothing)")
 
+    scheduler._expected_poll_sports = sport_keys if loader is not None else ()
     return scheduler
 
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "HTML and JSON Ingestion"
+  short_description: "Build resilient HTML and JSON scraper pipelines"
+  default_prompt: "Use $html-json-ingestion to optimize this GET-only scraper or fetcher while preserving parser parity and completeness gates."

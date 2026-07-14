@@ -13,22 +13,26 @@ false match physically impossible — two teams cannot meet twice within 2h).
 Rollback-isolated against the compose Postgres; skips when the DB is absent.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import delete, select, update
+from sqlalchemy import event as sa_event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
-from app.settlement.engine import settle_open_picks
+from app.settlement.engine import settle_event_picks, settle_open_picks
 from app.settlement.results import FinalScore, ScoreBook
 from app.storage.models import Event, Pick, ResultTracking, Team
 from app.storage.repositories import persist_pick
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 
 NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 KICKOFF = NOW - timedelta(hours=6)
@@ -42,6 +46,7 @@ def make_pick(
     market: Market = Market.TOTALS,
     selection: str = "Over 2.5",
     sport: str = "soccer",
+    market_detail: str | None = None,
 ) -> PickOut:
     return PickOut(
         pick_id="p-dedup",
@@ -50,6 +55,7 @@ def make_pick(
         event=event_label,
         event_id=event_id,
         market=market,
+        market_detail=market_detail,
         selection=selection,
         bookmaker="testbook",
         decimal_odds=2.10,
@@ -108,11 +114,19 @@ async def seed_pick(  # type: ignore[no-untyped-def]
     market: Market = Market.TOTALS,
     selection: str = "Over 2.5",
     sport: str = "soccer",
+    market_detail: str | None = None,
 ) -> Pick:
     teams = EventTeams(home=home, away=away, league="test-league-dedup", starts_at=starts_at)
     ok = await persist_pick(
         session,
-        make_pick(event_id, f"{home} vs {away}", market=market, selection=selection, sport=sport),
+        make_pick(
+            event_id,
+            f"{home} vs {away}",
+            market=market,
+            selection=selection,
+            sport=sport,
+            market_detail=market_detail,
+        ),
         teams,
         "value",
         "test-v",
@@ -135,8 +149,18 @@ async def _result_rows(session, *pick_ids):  # type: ignore[no-untyped-def]
     )
 
 
+_DETAIL_UNSET = object()
+
+
 async def _insert_dup_pick(  # type: ignore[no-untyped-def]
-    session, canonical, ref: str, *, selection=None, starts_at=None, away_name=None
+    session,
+    canonical,
+    ref: str,
+    *,
+    selection=None,
+    starts_at=None,
+    away_name=None,
+    market_detail=_DETAIL_UNSET,
 ) -> Pick:
     """Directly insert a duplicate Event (bypassing the mint-time resolver, which
     now correctly merges same-fixture events) plus an alerted Pick on it,
@@ -168,6 +192,9 @@ async def _insert_dup_pick(  # type: ignore[no-untyped-def]
         event_id=dup_event.id,
         model_version_id=canonical.model_version_id,
         market=canonical.market,
+        market_detail=(
+            canonical.market_detail if market_detail is _DETAIL_UNSET else market_detail
+        ),
         selection=selection or canonical.selection,
         bookmaker=canonical.bookmaker,
         decimal_odds=canonical.decimal_odds,
@@ -206,6 +233,168 @@ async def test_duplicate_pick_on_sibling_event_settles_only_once(session) -> Non
     # 'alerted' — else it lingers on the dashboard as a pending pick asking for a
     # manual result even though its twin already settled.
     assert {p1.status, p2.status} == {"settled", "superseded"}
+
+
+async def test_same_label_with_different_market_detail_settles_both(session) -> None:  # type: ignore[no-untyped-def]
+    """Display labels can collide across canonical submarkets; detail is identity."""
+    p1 = await seed_pick(
+        session,
+        "evt-detail-A",
+        market_detail="totals_2_5",
+    )
+    p2 = await _insert_dup_pick(
+        session,
+        p1,
+        "evt-detail-B",
+        market_detail="first_half_totals_2_5",
+    )
+
+    assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 2
+    assert len(await _result_rows(session, p1.id, p2.id)) == 2
+    await session.refresh(p1)
+    await session.refresh(p2)
+    assert p1.status == p2.status == "settled"
+
+
+async def test_concurrent_sibling_settlement_serializes_to_one_result() -> None:
+    """Two committed workers cannot both pass the sibling check then insert."""
+    engine = create_async_engine(DB_URL)
+    try:
+        async with engine.connect() as probe:
+            await probe.exec_driver_sql("SELECT 1")
+    except Exception:
+        await engine.dispose()
+        pytest.skip("compose Postgres not reachable on :5433")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    token = uuid4().hex
+    pick_ids: tuple[int, int] | None = None
+    event_ids: tuple[int, int] | None = None
+    try:
+        async with factory() as seed_session:
+            p1 = await seed_pick(seed_session, f"evt-concurrent-A-{token}")
+            p2 = await _insert_dup_pick(seed_session, p1, f"evt-concurrent-B-{token}")
+            pick_ids = (p1.id, p2.id)
+            event_ids = (p1.event_id, p2.event_id)
+            await seed_session.commit()
+
+        async def settle(event_id: int) -> tuple[int, int]:
+            async with factory() as worker:
+                result = await settle_event_picks(worker, event_id, 2, 1, NOW)
+                await worker.commit()
+                return result
+
+        assert event_ids is not None
+        outcomes = await asyncio.gather(*(settle(event_id) for event_id in event_ids))
+        assert sum(settled for settled, _ in outcomes) == 1
+        async with factory() as verify:
+            assert pick_ids is not None
+            rows = (
+                await verify.scalars(
+                    select(ResultTracking).where(ResultTracking.pick_id.in_(pick_ids))
+                )
+            ).all()
+            statuses = (
+                await verify.scalars(select(Pick.status).where(Pick.id.in_(pick_ids)))
+            ).all()
+            assert len(rows) == 1
+            assert set(statuses) == {"settled", "superseded"}
+    finally:
+        if pick_ids is not None and event_ids is not None:
+            async with factory() as cleanup:
+                await cleanup.execute(
+                    delete(ResultTracking).where(ResultTracking.pick_id.in_(pick_ids))
+                )
+                await cleanup.execute(delete(Pick).where(Pick.id.in_(pick_ids)))
+                await cleanup.execute(delete(Event).where(Event.id.in_(event_ids)))
+                await cleanup.commit()
+        await engine.dispose()
+
+
+async def test_scored_row_always_lock_rechecks_when_bulk_snapshot_is_empty(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gradeable score can write P&L, so the bulk hint can never bypass locking."""
+    await session.execute(
+        update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    pick = await seed_pick(session, "evt-score-always-recheck")
+    calls = {"prefetch": 0, "lock": 0, "recheck": 0}
+
+    async def empty_prefetch(*args: object, **kwargs: object) -> set[int]:
+        del args, kwargs
+        calls["prefetch"] += 1
+        return set()
+
+    async def tracked_lock(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        calls["lock"] += 1
+
+    async def tracked_recheck(*args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        calls["recheck"] += 1
+        return False
+
+    monkeypatch.setattr(
+        "app.settlement.engine._prefetch_settled_sibling_candidate_ids", empty_prefetch
+    )
+    monkeypatch.setattr("app.settlement.engine._lock_settlement_instrument", tracked_lock)
+    monkeypatch.setattr("app.settlement.engine._settled_sibling_exists", tracked_recheck)
+
+    assert await settle_open_picks(session, book_with_score(), NOW) == 1
+    assert calls == {"prefetch": 1, "lock": 1, "recheck": 1}
+    assert len(await _result_rows(session, pick.id)) == 1
+
+
+async def test_prefetched_siblings_cross_chunk_boundary_still_supersede(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every bounded fingerprint chunk returns positive hints; no tail is dropped."""
+    await session.execute(
+        update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    duplicates: list[Pick] = []
+    for index in range(3):
+        canonical = await seed_pick(
+            session,
+            f"evt-chunk-canonical-{index}",
+            home=f"Chunk Home {index}",
+            away=f"Chunk Away {index}",
+        )
+        await _mark_settled(session, canonical)
+        duplicates.append(
+            await _insert_dup_pick(session, canonical, f"evt-chunk-duplicate-{index}")
+        )
+
+    monkeypatch.setattr("app.settlement.engine._SETTLED_SIBLING_PREFETCH_CHUNK_SIZE", 2)
+    statements: list[str] = []
+
+    def count_statement(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del connection, cursor, parameters, context, executemany
+        statements.append(statement)
+
+    connection = await session.connection()
+    sa_event.listen(connection.sync_connection, "before_cursor_execute", count_statement)
+    try:
+        no_fixture_score = ScoreBook(
+            [FinalScore("Unrelated Home", "Unrelated Away", KICKOFF.date(), 1, 0)]
+        )
+        assert await settle_open_picks(session, no_fixture_score, NOW) == 0
+    finally:
+        sa_event.remove(connection.sync_connection, "before_cursor_execute", count_statement)
+
+    assert sum("FROM result_tracking JOIN picks" in statement for statement in statements) == 2
+    assert sum("pg_advisory_xact_lock" in statement for statement in statements) == 3
+    for duplicate in duplicates:
+        await session.refresh(duplicate)
+        assert duplicate.status == "superseded"
+        assert len(await _result_rows(session, duplicate.id)) == 0
 
 
 async def test_duplicate_skipped_across_settlement_cycles(session) -> None:  # type: ignore[no-untyped-def]
@@ -292,6 +481,31 @@ async def test_duplicate_superseded_even_without_own_score(session) -> None:  # 
     assert n == 0  # clean already settled; dup has no own score to settle from
     await session.refresh(dup)
     assert dup.status == "superseded", "duplicate must supersede without its own score"
+
+
+async def test_scored_twin_supersedes_scoreless_twin_in_same_pass(session) -> None:  # type: ignore[no-untyped-def]
+    """Phase 1 must settle before the deferred bulk snapshot is taken."""
+    clean = await seed_pick(session, "evt-one-score-clean")
+    fork = await _insert_dup_pick(
+        session,
+        clean,
+        "evt-one-score-fork",
+        away_name=f"{AWAY} [In Running]",
+    )
+    final = FinalScore(HOME, AWAY, KICKOFF.date(), 2, 1)
+
+    class CanonicalOnlyScoreBook(ScoreBook):
+        def lookup(self, home: str, away: str, kickoff_utc: datetime) -> FinalScore | None:
+            if (home, away) != (HOME, AWAY):
+                return None
+            return super().lookup(home, away, kickoff_utc)
+
+    assert await settle_open_picks(session, CanonicalOnlyScoreBook([final]), NOW) == 1
+    await session.refresh(clean)
+    await session.refresh(fork)
+    assert clean.status == "settled"
+    assert fork.status == "superseded"
+    assert len(await _result_rows(session, clean.id, fork.id)) == 1
 
 
 async def test_distinct_fixtures_both_settle(session) -> None:  # type: ignore[no-untyped-def]
@@ -471,6 +685,7 @@ async def test_tennis_fork_beyond_2h_is_deduped_by_wider_window(session) -> None
         sport_id=sport_id,
         starts_at=KICKOFF + timedelta(hours=2, minutes=47),
         market=settled.market,
+        market_detail=settled.market_detail,
         selection=settled.selection,
         model_version_id=settled.model_version_id,
         target_pair=target,
@@ -498,6 +713,7 @@ async def test_team_sport_fork_beyond_2h_is_not_deduped(session) -> None:  # typ
         sport_id=sport_id,
         starts_at=KICKOFF + timedelta(hours=2, minutes=47),
         market=settled.market,
+        market_detail=settled.market_detail,
         selection=settled.selection,
         model_version_id=settled.model_version_id,
         target_pair=target,

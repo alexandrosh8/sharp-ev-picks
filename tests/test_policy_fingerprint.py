@@ -47,6 +47,7 @@ from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.models import Pick
 from app.storage.repositories import persist_pick
+from tests.database import TEST_DATABASE_URL
 
 # --------------------------------------------------------------------------- #
 # Pure encoder
@@ -178,7 +179,14 @@ class _Sink:
 
 def _deps(*, value_min_edge: float, value_policy: ValuePolicy | None = None) -> PipelineDeps:
     directory = EventDirectory()
-    directory.register("evt-1", EventTeams(home="Home FC", away="Away FC"))
+    directory.register(
+        "evt-1",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+        ),
+    )
     return PipelineDeps(
         loader=_FakeLoader(_market_snapshots()),
         model=NullModel(),
@@ -318,7 +326,7 @@ def test_migration_downgrade_drops_column() -> None:
 # Persistence round-trip (DB-gated — skips when compose Postgres is absent)
 # --------------------------------------------------------------------------- #
 
-_DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+_DB_URL = TEST_DATABASE_URL
 
 
 def _db_pick(*, fingerprint: str | None, tier: str = "premium") -> PickOut:

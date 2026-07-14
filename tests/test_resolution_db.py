@@ -29,8 +29,9 @@ from app.storage.repositories import (
     resolve_pinnacle_close_snaps,
     shadow_match_rate_outcomes,
 )
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 KO = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
 CAPTURED = KO - timedelta(hours=2)
 
@@ -124,6 +125,39 @@ async def test_resolver_slug_fallback_refuses_mens_close_for_womens_pick(factory
             kickoff=KO,
         )
     assert out == []  # slug dropped the marker -> guard refuses the men's close
+
+
+async def test_resolver_recovers_curated_wnba_w_suffix_difference(factory) -> None:  # type: ignore[no-untyped-def]
+    ref = "pin-aces-liberty"
+    snaps = [_pin_snap("Las Vegas Aces", 1.85, ref), _pin_snap("New York Liberty", 2.05, ref)]
+    teams = {
+        ref: EventTeams(
+            home="Las Vegas Aces",
+            away="New York Liberty",
+            league="WNBA",
+            starts_at=KO,
+        )
+    }
+    await persist_odds_snapshots(
+        factory,
+        snaps,
+        teams,
+        "pinnacle_basketball",
+        "pinnacle_basketball",
+    )
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_basketball",
+            pick_external_ref="evt-wnba-pick",
+            home="Las Vegas Aces W",
+            away="New York Liberty W",
+            kickoff=KO,
+        )
+    by_selection = {snapshot.selection: snapshot for snapshot in out}
+    assert set(by_selection) == {"Las Vegas Aces W", "New York Liberty W"}
+    assert by_selection["Las Vegas Aces W"].decimal_odds == pytest.approx(1.85)
+    assert by_selection["New York Liberty W"].decimal_odds == pytest.approx(2.05)
 
 
 # --- LIVE ANCHOR PATH now runs the precision-hardened matcher (go-live flip) ---

@@ -75,9 +75,9 @@ for Understat xG / ClubElo enrichment (roadmap phase 6).
 
 ratings: `Elo`, `Colley`, `Massey`, `PiRatingSystem`.
 metrics: `rps_average`, `rps_array`, `multiclass_brier_score`,
-`ignorance_score` — proper scoring for calibration (calibration-eval skill).
-`backtest` module exists but is a naive date-loop — use our
-`walkforward-backtest` skill / `app/backtesting/` instead.
+`ignorance_score` — proper scoring for calibration (see the repository `sports-modeling` skill).
+`backtest` module exists but is a naive date-loop — use the repository
+`backtesting` skill and `app/backtesting/` instead.
 
 ## Gotchas
 

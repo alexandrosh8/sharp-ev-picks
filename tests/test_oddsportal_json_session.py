@@ -176,6 +176,56 @@ async def test_semaphore_bounds_concurrency() -> None:
     assert live["max"] <= 3, f"concurrency exceeded the cap: peak={live['max']}"
 
 
+async def test_match_url_ceiling_marks_cycle_incomplete_without_scheduling() -> None:
+    calls = 0
+
+    async def scrape(url: str) -> list[OddsSnapshotIn]:
+        nonlocal calls
+        calls += 1
+        return [_row(selection=url)]
+
+    outcome = await run_cycle(
+        ["u1", "u2", "u3"],
+        scrape,
+        markets=["1x2"],
+        max_match_urls=2,
+    )
+    assert not outcome.complete
+    assert "URL ceiling" in outcome.reason
+    assert calls == 0
+
+
+async def test_per_match_snapshot_ceiling_marks_cycle_incomplete() -> None:
+    async def scrape(url: str) -> list[OddsSnapshotIn]:
+        return [_row(selection=f"{url}-1"), _row(selection=f"{url}-2")]
+
+    outcome = await run_cycle(
+        ["u1"],
+        scrape,
+        markets=["1x2"],
+        max_snapshots_per_match=1,
+    )
+    assert not outcome.complete
+    assert "one match exceeded snapshot ceiling" in outcome.reason
+    assert outcome.snapshots == []
+
+
+async def test_cycle_snapshot_ceiling_stops_scheduling_and_marks_incomplete() -> None:
+    async def scrape(url: str) -> list[OddsSnapshotIn]:
+        return [_row(selection=url)]
+
+    outcome = await run_cycle(
+        ["u1", "u2"],
+        scrape,
+        markets=["1x2"],
+        concurrency=1,
+        max_snapshots_per_cycle=1,
+    )
+    assert not outcome.complete
+    assert "cycle snapshot ceiling" in outcome.reason
+    assert len(outcome.snapshots) == 1
+
+
 # --- R3: fail-closed completeness gate --------------------------------------
 
 
@@ -224,18 +274,26 @@ async def test_empty_slate_is_complete_not_failed() -> None:
     assert outcome.matches_total == 0
 
 
-async def test_all_markets_missing_is_not_a_partial_market_gap() -> None:
-    """When EVERY market is empty (total wipeout), it is an empty cycle, not a
-    'one market broke' verdict — the missing-market rule only fires when SOME
-    markets have rows."""
+async def test_listed_matches_with_zero_rows_fail_closed() -> None:
+    """A listing with matches but zero observations is not a successful cycle."""
 
     async def scrape(url: str) -> list[OddsSnapshotIn]:
         return []
 
-    # No prev_cycle_rows -> no collapse check; all markets empty -> not flagged by
-    # the missing-market rule (rows==0). Complete by default (an empty result).
     outcome = await run_cycle(["u1"], scrape, markets=["1x2", "btts"])
-    assert outcome.complete
+    assert not outcome.complete
+    assert "0 rows" in outcome.reason
+
+
+async def test_any_listed_match_fetch_failure_makes_cycle_incomplete() -> None:
+    async def scrape(url: str) -> list[OddsSnapshotIn]:
+        if url == "bad":
+            raise FakeCurlError(60)
+        return [_row()]
+
+    outcome = await run_cycle(["good", "bad"], scrape, markets=["1x2"])
+    assert not outcome.complete
+    assert "fetch" in outcome.reason
 
 
 async def test_wildcard_family_covered_by_its_expanded_line_keys() -> None:
@@ -295,8 +353,24 @@ def test_retry_after_seconds_parses_and_caps() -> None:
 
     assert retry_after_seconds(R({"Retry-After": "5"})) == 5.0
     assert retry_after_seconds(R({"retry-after": "1000"}), cap=30.0) == 30.0
+    assert retry_after_seconds(R({"Retry-After": "NaN"})) is None
+    assert retry_after_seconds(R({"Retry-After": "inf"})) is None
     assert retry_after_seconds(R({})) is None
     assert retry_after_seconds(R({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})) is None
+
+
+def test_transient_status_carries_retry_after_into_wait_policy() -> None:
+    from tenacity import RetryCallState, Retrying
+
+    from app.ingestion.oddsportal_json_session import (
+        TransientHTTPStatusError,
+        _wait_retry_after_or_backoff,
+    )
+
+    state = RetryCallState(Retrying(), None, (), {})
+    error = TransientHTTPStatusError(429, {"Retry-After": "7"})
+    state.set_exception((TransientHTTPStatusError, error, None))
+    assert _wait_retry_after_or_backoff(state) == 7.0
 
 
 def test_status_of_reads_status_code() -> None:

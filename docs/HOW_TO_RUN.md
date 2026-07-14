@@ -5,27 +5,26 @@ Everything below is read-only market data and informational picks.
 
 ## 0) One-time setup (Mac, ~5 minutes)
 
+Run from the repository root. For a new Codex device, follow
+`docs/CODEX_DEVICE_HANDOFF.md` first.
+
 ```bash
-cd "/Users/alexis/code/Betting Picks Bot"
-cp .env.example .env                  # safe defaults; no keys required
-docker compose up -d postgres redis   # local infra on ports 5433/6380
-uv sync --extra football --extra backfill
-uv run playwright install chromium    # for the free OddsPortal live scrape
-uv run alembic upgrade head           # create the 14-table warehouse
+bash scripts/bootstrap_codex.sh --check
+test -e .env || install -m 0600 .env.example .env     # safe local template; add secrets out of band
+bash scripts/bootstrap_codex.sh       # locked deps, Chromium, infra, migrations
 ```
 
 ## 1) Prove the strategy (re-runnable backtest, ~3 minutes)
 
 ```bash
-uv run python scripts/value_backtest.py
+.venv/bin/python scripts/value_backtest.py
 ```
 
-Downloads 7 seasons × 18 leagues × 2 markets (~46k matches) from
-football-data.co.uk, sweeps devig × threshold on TRAIN seasons only, then
-evaluates the chosen combo ONCE on held-out 2024-26. Expected output ends
-with the computed verdict (historically: shin devig, edge ≥ 0.03 → holdout
-n=62, ROI +22.4%, incremental CLV +0.1066 > 2SE). The verdict is computed
-from the data — if the edge ever disappears, the script will say so.
+Downloads the declared historical football-data.co.uk sample, performs the
+train-only sweep, and reports the frozen held-out result with clustered
+uncertainty. This is a reproducibility check of spent historical evidence, not
+a new validation run or a live profitability claim. Current validation status
+and caveats are maintained in `README.md` and ADR-0019.
 
 Honesty caveats (audit 2026-07-01): that historical headline fills at the
 gross Max across ALL books (exchanges included) and its ">2SE" treated
@@ -40,9 +39,9 @@ awaits fresh 2026 data (the 2025 holdout is spent — ADR-0019).
 
 ```bash
 # World Cup 2026 (or any league slug from oddsportal.com)
-uv run python scripts/value_picks.py --league world-cup --min-edge 0.03
-# more volume at the thinner validated tier:
-uv run python scripts/value_picks.py --league world-cup --min-edge 0.015
+.venv/bin/python scripts/value_picks.py --league world-cup --min-edge 0.03
+# lower informational threshold (more candidates):
+.venv/bin/python scripts/value_picks.py --league world-cup --min-edge 0.015
 ```
 
 Scrapes free multi-book OddsPortal odds, anchors fair value on the sharpest
@@ -52,16 +51,17 @@ bookmaker, price, edge, and recommended fractional-Kelly stake.
 ## 3) Run the full platform (scheduler + DB + alerts + API)
 
 ```bash
-uv run uvicorn app.main:app
+.venv/bin/python -m uvicorn app.main:app
 ```
 
-What runs (defaults from `.env`/`app/config.py` — the v3-validated config:
-`PICK_STRATEGY=value`, `VALUE_DEVIG=shin`, `VALUE_MIN_EDGE=0.03`):
+What runs (current defaults from `.env`/`app/config.py`:
+`ODDS_SOURCE=oddsportal`, `PICK_STRATEGY=value`, `VALUE_DEVIG=power`,
+`VALUE_MIN_EDGE=0.03`):
 
 - every 5 min: scrape OddsPortal → find value picks → persist → alert
   (Telegram/webhook if configured in `.env`)
-- every 30 min: CLV true-up — refreshes each open pick's closing fair
-  probability and `clv_log` (the live proof of edge)
+- each completed poll: CLV true-up/revalidation on that cycle's bounded,
+  fresh snapshots; stale or unknown-kickoff candidates never mint picks
 
 Check it — **open the dashboard in your browser**:
 
@@ -85,8 +85,8 @@ one — and a stale one isn't mistaken for healthy):
 - Every row shows **"picked Xh ago — verify price"**: always re-check the
   book's current price before acting; soft-book prices move.
 - A ⚠ banner appears when **no odds poll finished in 45 min** — the engine
-  is down or its first multi-league cycle is still running. `GET /health`
-  shows per-sport poll timestamps (`polls`) and upstream release checks.
+  is down or its first multi-league cycle is still running. authenticated `GET /health` shows per-sport poll timestamps (`polls`) and
+  upstream release checks; anonymous health responses are redacted.
 - Picks come from the **best price across all scraped bookmakers** (~16
   books per market on OddsPortal) — the named book held the best price at
   scrape time; it is not a single-bookie feed.
@@ -94,6 +94,8 @@ one — and a stale one isn't mistaken for healthy):
 Or raw JSON:
 
 ```bash
+curl localhost:8000/live             # process liveness only
+curl localhost:8000/ready            # readiness status; login for component detail
 curl localhost:8000/health
 curl localhost:8000/picks            # picks with book, price, edge, stake
 ```
@@ -119,10 +121,11 @@ TELEGRAM_BOT_TOKEN=... / TELEGRAM_CHAT_ID=... # to receive alerts
 ## 4) Verify the codebase health (what CI runs)
 
 ```bash
-uv run pytest -q              # 173 tests, all green
-uvx ruff check app tests      # lint
-uv run mypy app tests         # types
-bash scripts/safety_audit.sh  # proves no bet-placement code path exists
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check app tests scripts alembic tools
+.venv/bin/python -m ruff format --check app tests scripts alembic tools
+.venv/bin/python -m mypy app tests
+bash scripts/safety_audit.sh
 ```
 
 ## What to watch over time

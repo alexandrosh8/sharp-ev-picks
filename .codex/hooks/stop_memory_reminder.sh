@@ -1,9 +1,6 @@
-#!/bin/bash
-# Stop hook — gentle reminder to persist decisions before the session ends.
-# Informational only; never blocks.
+#!/usr/bin/env bash
+# Stop — informational reminder only. Successful Codex hooks surface JSON on
+# stdout; stderr is discarded.
 
-proj="${CLAUDE_PROJECT_DIR:-$PWD}"
-
-echo "Reminder: if decisions were made this session, update .claude/memory/ (decisions.md / pitfalls.md / data-sources.md) and add an ADR in docs/adr/ for anything significant. Memory must never contain secrets." >&2
-
+printf '%s\n' '{"systemMessage":"Reminder: update the Codex handoff and durable memory for meaningful decisions; never record secrets."}'
 exit 0

@@ -67,6 +67,8 @@ CATALOGUE_RESULT: list[dict[str, Any]] = [
 BOOK_RESULT: list[dict[str, Any]] = [
     {
         "marketId": "1.234567",
+        "status": "OPEN",
+        "inplay": False,
         "runners": [
             {
                 "selectionId": 111,
@@ -181,6 +183,24 @@ async def test_login_failure_raises_without_leaking_password() -> None:
     assert client.has_session is False
 
 
+async def test_response_byte_ceiling_fails_closed_without_secret_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(betfair_api, "MAX_RESPONSE_BYTES", 8)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"x" * 9))
+    client = BetfairApiClient(
+        app_key=APP_KEY,
+        username=USERNAME,
+        password=PASSWORD,
+        client=httpx.AsyncClient(transport=transport),
+    )
+    with pytest.raises(BetfairApiError, match="byte ceiling") as raised:
+        await client.login()
+    assert PASSWORD not in str(raised.value)
+    assert USERNAME not in str(raised.value)
+    assert client.has_session is False
+
+
 async def test_keepalive_and_logout_manage_session() -> None:
     mock = MockBetfair()
     client = make_client(mock)
@@ -236,6 +256,42 @@ def test_parse_market_book_best_back_is_highest_price_with_size() -> None:
     assert backs["1.234567"][58805] == (3.6, 40.0)
 
 
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        {"status": "OPEN", "inplay": True},
+        {"status": "SUSPENDED", "inplay": False},
+        {"status": "CLOSED", "inplay": False},
+        {"status": None, "inplay": False},
+        {"status": "OPEN", "inplay": None},
+    ],
+)
+def test_parse_market_book_rejects_inplay_nonopen_or_unknown_state(
+    unsafe: dict[str, Any],
+) -> None:
+    payload = [{**BOOK_RESULT[0], **unsafe}]
+    assert parse_market_book_backs(payload) == {}
+
+
+def test_parse_market_book_rejects_nonfinite_price_and_size() -> None:
+    payload = [
+        {
+            **BOOK_RESULT[0],
+            "runners": [
+                {
+                    "selectionId": 111,
+                    "ex": {"availableToBack": [{"price": float("inf"), "size": 100}]},
+                },
+                {
+                    "selectionId": 222,
+                    "ex": {"availableToBack": [{"price": 3.1, "size": float("inf")}]},
+                },
+            ],
+        }
+    ]
+    assert parse_market_book_backs(payload) == {"1.234567": {222: (3.1, 0.0)}}
+
+
 def test_join_match_odds_maps_home_away_draw() -> None:
     odds = join_match_odds(
         parse_market_catalogue(CATALOGUE_RESULT), parse_market_book_backs(BOOK_RESULT)
@@ -262,6 +318,38 @@ async def test_fetch_match_odds_joins_catalogue_and_book() -> None:
     )
     assert len(odds) == 1
     assert odds[0].home_back == 2.5 and odds[0].draw_back == 3.6
+
+
+async def test_catalogue_wrong_result_container_is_not_empty_success() -> None:
+    mock = MockBetfair(rpc_results={"listMarketCatalogue": {"result": {"markets": []}}})
+    client = make_client(mock)
+    with pytest.raises(BetfairApiError, match="invalid result container"):
+        await client.list_market_catalogue(
+            event_type_ids=["1"],
+            market_start_from=KICKOFF - timedelta(hours=1),
+            market_start_to=KICKOFF + timedelta(hours=1),
+        )
+
+
+async def test_catalogue_result_ceiling_fails_closed() -> None:
+    mock = MockBetfair(
+        rpc_results={"listMarketCatalogue": {"result": [*CATALOGUE_RESULT, *CATALOGUE_RESULT]}}
+    )
+    client = make_client(mock)
+    with pytest.raises(BetfairApiError, match="result ceiling"):
+        await client.list_market_catalogue(
+            event_type_ids=["1"],
+            market_start_from=KICKOFF - timedelta(hours=1),
+            market_start_to=KICKOFF + timedelta(hours=1),
+            max_results=1,
+        )
+
+
+async def test_market_book_wrong_result_container_is_not_empty_success() -> None:
+    mock = MockBetfair(rpc_results={"listMarketBook": {"result": {"books": []}}})
+    client = make_client(mock)
+    with pytest.raises(BetfairApiError, match="invalid result container"):
+        await client.list_market_book_backs(["1.234567"])
 
 
 async def test_list_market_book_backs_batches_under_weight_cap() -> None:
@@ -348,6 +436,24 @@ async def test_shadow_matched_builds_anchor_under_canonical_ref() -> None:
     assert len(report.snapshots) == 3
     assert {s.event_id for s in report.snapshots} == {"evt-canonical-1"}
     assert {s.selection for s in report.snapshots} == {"Alpha FC", "Beta United", "Draw"}
+
+
+async def test_shadow_uses_post_fetch_timestamp_and_rejects_crossed_kickoff() -> None:
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    times = iter((KICKOFF - timedelta(seconds=1), KICKOFF + timedelta(seconds=1)))
+    capture = BetfairApiShadowCapture(
+        make_client(_full_odds_mock()),
+        candidates_fn=lambda: candidates,
+        window=timedelta(hours=72),
+        aliases=default_aliases(),
+        now_fn=lambda: next(times),
+    )
+    report = await capture.capture_once()
+    assert report.matched == 0
+    assert report.unmatched == 1
+    assert report.snapshots == ()
 
 
 async def test_shadow_snapshots_carry_best_back_liquidity() -> None:

@@ -16,6 +16,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -28,6 +29,7 @@ from app.ingestion.pinnacle_arcadia import (
     PinnacleArcadiaCapture,
     PinnacleArcadiaClient,
     PinnacleArcadiaError,
+    PinnacleArcadiaSchemaError,
     _RoundRobinTransport,
     american_to_decimal,
     discover_arcadia_config,
@@ -39,8 +41,8 @@ from app.ingestion.pinnacle_arcadia import (
 )
 from app.schemas.base import Market
 from app.storage.models import Event, OddsSnapshot
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 NOW = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
 HORIZON_END = NOW + timedelta(hours=72)
 
@@ -136,6 +138,23 @@ def test_parse_matchups_falls_back_to_start_time_when_cutoff_absent() -> None:
     assert parsed["12"].starts_at == datetime(2026, 6, 17, 7, 0, tzinfo=UTC)
     assert parsed["13"].starts_at == datetime(2026, 6, 17, 8, 0, tzinfo=UTC)
     assert parsed["14"].starts_at == datetime(2026, 6, 17, 9, 0, tzinfo=UTC)
+
+
+def test_parse_matchups_isolates_malformed_rows_and_nested_shapes() -> None:
+    malformed: list[Any] = [
+        "not-a-row",
+        {**_tennis_matchup(mid=20), "participants": "not-an-array"},
+        {**_tennis_matchup(mid=21), "participants": ["scalar", None]},
+        {**_tennis_matchup(mid=22), "league": "not-an-object"},
+        {**_tennis_matchup(mid=23), "id": None},
+    ]
+    parsed = parse_matchups(
+        [*malformed, _tennis_matchup(mid=24)],
+        now=NOW,
+        horizon_end=HORIZON_END,
+    )
+    assert set(parsed) == {"22", "24"}
+    assert parsed["22"].league == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +267,30 @@ def test_extract_skips_versionless_market() -> None:
     )
     del market["version"]
     assert extract_moneyline_quotes(matchups, [market], now=NOW) == []
+
+
+def test_extract_market_quotes_isolates_malformed_markets_and_prices() -> None:
+    matchups = parse_matchups([_soccer_matchup()], now=NOW, horizon_end=HORIZON_END)
+    valid = _ml_market(
+        555,
+        [{"designation": "home", "price": 150}, {"designation": "away", "price": 180}],
+    )
+    malformed: list[Any] = [
+        "not-a-market",
+        {**valid, "prices": "not-an-array"},
+        {
+            **valid,
+            "prices": [
+                None,
+                "bad",
+                {"designation": "away", "price": 10**1000},
+                {"designation": "home", "price": 150},
+            ],
+        },
+    ]
+    quotes = extract_market_quotes(matchups, [*malformed, valid], now=NOW)
+    assert len(quotes) == 2
+    assert sum(len(quote.snapshots) for quote in quotes) == 3
 
 
 # --------------------------------------------------------------------------- #
@@ -514,16 +557,41 @@ def _make_client(
 
 
 async def test_client_fetches_and_parses_lists() -> None:
-    payload = [_tennis_matchup()]
+    matchup_payload = [_tennis_matchup()]
+    market_payload = [_ml_market(1631935448, [])]
 
     def handler(request: httpx.Request) -> httpx.Response:
+        payload = market_payload if "/markets/" in request.url.path else matchup_payload
         return httpx.Response(200, content=json.dumps(payload))
 
     client = _make_client(handler)
     rows = await client.fetch_matchups(SPORT_IDS["tennis"])
-    assert rows == payload
+    assert rows == matchup_payload
     markets = await client.fetch_straight_markets(SPORT_IDS["tennis"])
-    assert markets == payload  # handler echoes; only asserting transport/parse
+    assert markets == market_payload
+
+
+async def test_client_response_byte_ceiling_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import pinnacle_arcadia
+
+    monkeypatch.setattr(pinnacle_arcadia, "MAX_RESPONSE_BYTES", 8)
+    client = _make_client(lambda request: httpx.Response(200, content=b"x" * 9))
+    with pytest.raises(PinnacleArcadiaError, match="byte ceiling"):
+        await client.fetch_matchups(33)
+
+
+async def test_client_response_row_ceiling_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import pinnacle_arcadia
+
+    monkeypatch.setattr(pinnacle_arcadia, "MAX_RESPONSE_ROWS", 1)
+    payload = [_tennis_matchup(mid=1), _tennis_matchup(mid=2)]
+    client = _make_client(lambda request: httpx.Response(200, json=payload))
+    with pytest.raises(PinnacleArcadiaSchemaError, match="row ceiling"):
+        await client.fetch_matchups(33)
 
 
 async def test_client_sends_key_only_when_set() -> None:
@@ -552,6 +620,35 @@ async def test_client_sends_pinnacle_referer_on_every_request() -> None:
     await _make_client(handler).fetch_matchups(33)
     await _make_client(handler, guest_key="PUBLIC-CONST").fetch_straight_markets(33)
     assert seen == ["https://www.pinnacle.com/", "https://www.pinnacle.com/"]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://guest.api.arcadia.pinnacle.com/0.1",
+        "https://guest.api.arcadia.pinnacle.com.evil.invalid/0.1",
+        "https://user:secret@guest.api.arcadia.pinnacle.com/0.1",
+        "https://guest.api.arcadia.pinnacle.com:8443/0.1",
+    ],
+)
+async def test_client_rejects_arcadia_base_origin_escape(base_url: str) -> None:
+    async with httpx.AsyncClient() as http_client:
+        with pytest.raises(ValueError, match="origin policy"):
+            PinnacleArcadiaClient(http_client, base_url=base_url)
+
+
+async def test_apply_config_rejects_discovered_origin_before_adopting_key() -> None:
+    async with httpx.AsyncClient() as http_client:
+        client = PinnacleArcadiaClient(http_client)
+        with pytest.raises(ValueError, match="origin policy") as raised:
+            client.apply_config(
+                ArcadiaConfig(
+                    guest_key=SecretStr("SECRET-LOOKING-KEY"),
+                    base_url="https://evil.invalid/0.1",
+                )
+            )
+        assert "SECRET-LOOKING-KEY" not in str(raised.value)
+        assert client._guest_key == ""
 
 
 async def test_discover_arcadia_config_sends_pinnacle_referer() -> None:
@@ -628,6 +725,43 @@ async def test_client_non_json_200_raises_arcadia_error() -> None:
     assert "arcadia.pinnacle" not in msg
 
 
+async def test_client_wrong_top_level_json_container_is_schema_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"matchups": []})
+
+    client = _make_client(handler)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="invalid JSON container"):
+        await client.fetch_matchups(33)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="invalid JSON container"):
+        await client.fetch_sports()
+
+
+async def test_client_nonempty_malformed_rows_are_schema_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["schema-shift", None])
+
+    client = _make_client(handler)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="malformed rows"):
+        await client.fetch_matchups(33)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="malformed rows"):
+        await client.fetch_straight_markets(33)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="malformed rows"):
+        await client.fetch_sports()
+
+
+async def test_client_mapping_rows_missing_required_schema_fail_closed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"renamedId": 33}])
+
+    client = _make_client(handler)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="malformed rows"):
+        await client.fetch_matchups(33)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="malformed rows"):
+        await client.fetch_straight_markets(33)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="malformed rows"):
+        await client.fetch_sports()
+
+
 # --------------------------------------------------------------------------- #
 # Transient HTTP-status retry (429 / 5xx) — robustness, no live network.
 # tenacity's backoff sleeps via asyncio.sleep; neutralize it so the retry
@@ -680,7 +814,7 @@ async def test_client_exhausts_transient_retries_then_raises_arcadia_error(
     client = _make_client(handler, guest_key="SECRET-LOOKING-KEY")
     with pytest.raises(PinnacleArcadiaError) as excinfo:
         await client.fetch_matchups(33)
-    assert calls["n"] == 6  # stop_after_attempt(6): the status WAS retried
+    assert calls["n"] == 3  # global self-heal ceiling: three total attempts
     msg = str(excinfo.value)
     assert str(transient_status) in msg  # status is reported (honest)
     assert "SECRET-LOOKING-KEY" not in msg
@@ -743,7 +877,7 @@ async def test_client_exhausts_403_then_raises_arcadia_error() -> None:
     client = _make_client(handler, guest_key="SECRET-LOOKING-KEY")
     with pytest.raises(PinnacleArcadiaError) as excinfo:
         await client.fetch_matchups(33)
-    assert calls["n"] == 6  # 403 WAS retried (rotated 6x), not an immediate failure
+    assert calls["n"] == 3  # 403 retried to the global three-attempt ceiling
     msg = str(excinfo.value)
     assert "403" in msg
     assert "SECRET-LOOKING-KEY" not in msg
@@ -831,6 +965,33 @@ async def test_discover_arcadia_config_success_populates_key_and_base() -> None:
     assert "PUBLIC-WEBCLIENT-CONST" not in repr(cfg)
 
 
+async def test_discover_arcadia_config_rejects_untrusted_guest_root() -> None:
+    payload = {
+        "api": {"haywire": {"apiKey": "SECRET-LOOKING-KEY"}},
+        "routes": {"curacao": {"guestRoot": "https://evil.invalid/0.1"}},
+    }
+    cfg = await discover_arcadia_config(
+        _config_client(lambda request: httpx.Response(200, json=payload))
+    )
+    assert cfg is None
+
+
+async def test_discover_arcadia_config_rejects_untrusted_source_before_network() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=_APP_JSON)
+
+    cfg = await discover_arcadia_config(
+        _config_client(handler),
+        url="https://evil.invalid/config/app.json",
+    )
+    assert cfg is None
+    assert calls == 0
+
+
 @pytest.mark.parametrize(
     "handler",
     [
@@ -891,6 +1052,10 @@ def _capture(sports: tuple[str, ...] = ("tennis",)) -> PinnacleArcadiaCapture:
         sports=sports,
         horizon=timedelta(hours=72),
     )
+
+
+async def test_live_sport_discovery_without_client_fails_closed_without_assert() -> None:
+    assert await _capture()._live_sport_ids() is None
 
 
 def test_version_gate_emits_once_until_reprice() -> None:
@@ -1034,6 +1199,17 @@ async def test_capture_once_falls_back_to_configured_when_fetch_sports_fails() -
     assert written == {"soccer": 0, "baseball": 0, "hockey": 0}
 
 
+async def test_sports_discovery_schema_failure_is_counted_before_fallback() -> None:
+    source = _RecordingSource(
+        live_sports=None,
+        sports_error=PinnacleArcadiaSchemaError("sports row schema changed"),
+    )
+    capture = _no_db_capture(source, ("soccer",))
+
+    assert await capture._live_sport_ids() is None
+    assert capture.schema_drift_count == {"sports": 1}
+
+
 async def test_capture_once_unknown_configured_sport_is_skipped() -> None:
     # A configured sport with no SPORT_IDS entry is skipped before any fetch.
     source = _RecordingSource(live_sports={"soccer": 29})
@@ -1043,12 +1219,25 @@ async def test_capture_once_unknown_configured_sport_is_skipped() -> None:
     assert written == {"soccer": 0}
 
 
+async def test_capture_counts_row_level_schema_failure() -> None:
+    class Source(_RecordingSource):
+        async def fetch_matchups(self, sport_id: int) -> list[dict]:
+            self.fetched_sport_ids.append(sport_id)
+            raise PinnacleArcadiaSchemaError("row schema changed")
+
+    source = Source(live_sports={"soccer": 29})
+    capture = _no_db_capture(source, ("soccer",))
+
+    assert await capture.capture_once() == {}
+    assert capture.schema_drift_count == {"soccer": 1}
+
+
 # --------------------------------------------------------------------------- #
 # capture_once integration (compose Postgres; skip when absent)
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 async def factory():  # type: ignore[no-untyped-def]
-    engine = create_async_engine(DB_URL)
+    engine = create_async_engine(TEST_DATABASE_URL)
     try:
         async with engine.connect() as probe:
             await probe.exec_driver_sql("SELECT 1")
@@ -1242,6 +1431,48 @@ async def test_capture_once_persist_failure_rolls_back_change_gate(
     written2 = await cap.capture_once()
     assert written2 == {"tennis": 2, "soccer": 2}
     assert persisted == [2, 2]
+
+
+async def test_capture_once_partial_event_failure_retries_unchanged_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.repositories as repositories
+
+    event_id = "777"
+    matchups = [_tennis_matchup(mid=int(event_id))]
+    markets = [
+        _ml_market(
+            int(event_id),
+            [
+                {"designation": "home", "price": -150},
+                {"designation": "away", "price": 130},
+            ],
+            version=9,
+        )
+    ]
+    cap = PinnacleArcadiaCapture(
+        client=_StubClient(matchups, markets),
+        session_factory=cast("async_sessionmaker[Any]", object()),
+        sports=("tennis",),
+        horizon=timedelta(days=365),
+        now_fn=lambda: NOW,
+    )
+    calls = 0
+
+    async def fake_persist(*args: object, **kwargs: object) -> int:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls == 1:
+            return repositories.SnapshotPersistResult(0, failed_event_ids={event_id})
+        return 2
+
+    monkeypatch.setattr(repositories, "persist_odds_snapshots", fake_persist)
+
+    assert await cap.capture_once() == {"tennis": 0}
+    assert await cap.capture_once() == {"tennis": 2}
+    assert await cap.capture_once() == {"tennis": 0}
+    assert calls == 2
 
 
 async def test_capture_once_stamps_post_fetch_clock_per_sport() -> None:

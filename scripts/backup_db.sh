@@ -3,14 +3,14 @@
 # rotated local archive.
 #
 # Usage:
-#   bash /workspace/scripts/backup_db.sh                 # dump + rotate [+ off-host copy]
-#   bash /workspace/scripts/backup_db.sh --verify        # pg_restore --list on newest dump
-#   bash /workspace/scripts/backup_db.sh --offhost-copy  # re-ship the NEWEST dump off-host
+#   bash /opt/sharp-ev-picks/scripts/backup_db.sh                 # dump + rotate [+ off-host copy]
+#   bash /opt/sharp-ev-picks/scripts/backup_db.sh --verify        # pg_restore --list on newest dump
+#   bash /opt/sharp-ev-picks/scripts/backup_db.sh --offhost-copy  # re-ship the NEWEST dump off-host
 #
 # Environment overrides (all optional):
-#   BACKUP_DIR             target directory   (default /workspace/backups)
+#   BACKUP_DIR             target directory   (default <repo>/backups)
 #   RETENTION_DAYS         days to keep dumps (default 14)
-#   COMPOSE_FILE           compose file path  (default /workspace/docker-compose.yml)
+#   COMPOSE_FILE           compose file path  (default <repo>/docker-compose.yml)
 #   OFFHOST_BACKUP_TARGET  optional off-host destination for the fresh dump:
 #                          user@host:/path (rsync -e ssh) or remote:path (rclone
 #                          copyto). Unset = silent no-op; set + failing = LOUD
@@ -27,13 +27,15 @@
 #   otherwise uses a guarded `find -delete` that refuses to run outside
 #   an absolute, existing backup directory and only matches our own
 #   betting_*.dump naming at -maxdepth 1.
-# - Runbook: /workspace/docs/deployment/db-backup.md
+# - Runbook: <repo>/docs/deployment/db-backup.md
 
 set -euo pipefail
 
-BACKUP_DIR="${BACKUP_DIR:-/workspace/backups}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")"; pwd -P)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.."; pwd -P)"
+BACKUP_DIR="${BACKUP_DIR:-${PROJECT_ROOT}/backups}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
-COMPOSE_FILE="${COMPOSE_FILE:-/workspace/docker-compose.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-${PROJECT_ROOT}/docker-compose.yml}"
 DUMP_PREFIX="betting_"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }

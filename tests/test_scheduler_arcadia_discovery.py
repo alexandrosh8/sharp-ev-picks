@@ -71,6 +71,10 @@ async def _run_capture_job_once(
     job = next(j for j in scheduler.get_jobs() if j.id == "capture_pinnacle_arcadia")
     await job.func()
     assert captured["ran"] is True  # discovery failure must never abort the capture
+    owned_clients = list(scheduler._owned_http_clients)
+    assert len(owned_clients) == 1  # internally-created proxy transport is lifecycle-owned
+    for owned in owned_clients:
+        await owned.aclose()
     await direct_client.aclose()
     return proxy_hits, direct_hits
 

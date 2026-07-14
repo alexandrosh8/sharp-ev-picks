@@ -11,7 +11,7 @@ import math
 import re
 import uuid
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -68,10 +68,63 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+CandidateFreshnessBasis = Literal["provider", "observation"]
+
 # Liveness registry, surfaced by GET /health and the dashboard banner: the
 # difference between "engine alive, no new value found" and "engine dead,
 # showing day-old picks" must be visible. In-memory; repopulated each cycle.
 LAST_POLL: dict[str, dict[str, Any]] = {}
+
+
+def record_poll_started(sport_key: str) -> None:
+    """Publish a per-sport in-progress heartbeat before a potentially long scrape."""
+    timestamp = datetime.now(tz=UTC).isoformat()
+    poll = dict(LAST_POLL.get(sport_key, {}))
+    poll.update(
+        {
+            "started_at": timestamp,
+            "heartbeat_at": timestamp,
+            "in_progress": True,
+            "state": "in_progress",
+            "failure_reason": None,
+        }
+    )
+    LAST_POLL[sport_key] = poll
+
+
+def record_poll_finished(sport_key: str) -> None:
+    """Complete a successful heartbeat when a pipeline emitted no poll payload."""
+    timestamp = datetime.now(tz=UTC).isoformat()
+    poll = dict(LAST_POLL.get(sport_key, {}))
+    poll.update(
+        {
+            "finished_at": timestamp,
+            "heartbeat_at": timestamp,
+            "in_progress": False,
+            "state": "completed",
+            "failure_reason": None,
+            "degraded": False,
+        }
+    )
+    LAST_POLL[sport_key] = poll
+
+
+def record_poll_failure(sport_key: str, reason: str) -> None:
+    """Publish a sanitized timeout/error heartbeat that degrades readiness."""
+    timestamp = datetime.now(tz=UTC).isoformat()
+    poll = dict(LAST_POLL.get(sport_key, {}))
+    poll.update(
+        {
+            "finished_at": timestamp,
+            "heartbeat_at": timestamp,
+            "in_progress": False,
+            "state": "failed",
+            "failure_reason": reason,
+            "degraded": True,
+        }
+    )
+    LAST_POLL[sport_key] = poll
+
 
 # Latest unrestricted fixture view, surfaced by GET /games and the dashboard.
 # It is intentionally separate from picks: games list what the read-only odds
@@ -116,13 +169,33 @@ def _record_poll(
     volume_picks: int = 0,
     stale_candidates: int = 0,
     stale_drop_ratio: float = 0.0,
+    stale_drop_ratio_warn: float = 0.5,
+    *,
+    source_complete: bool = True,
+    completeness_reason: str | None = None,
 ) -> None:
+    timestamp = datetime.now(tz=UTC).isoformat()
+    started_at = LAST_POLL.get(sport_key, {}).get("started_at")
+    listed_without_odds = bool(matches_found) and not snapshots
+    stale_starved = stale_candidates > 0 and stale_drop_ratio > stale_drop_ratio_warn
+    degradation_reasons: list[str] = []
+    if listed_without_odds:
+        degradation_reasons.append("listed_matches_without_odds")
+    if not source_complete:
+        degradation_reasons.append("source_incomplete")
+    if stale_starved:
+        degradation_reasons.append("stale_drop_ratio")
     per_market: dict[str, int] = {}
     for snap in snapshots:
         key = snap.market_detail or str(snap.market)
         per_market[key] = per_market.get(key, 0) + 1
     LAST_POLL[sport_key] = {
-        "finished_at": datetime.now(tz=UTC).isoformat(),
+        "started_at": started_at if isinstance(started_at, str) else None,
+        "finished_at": timestamp,
+        "heartbeat_at": timestamp,
+        "in_progress": False,
+        "state": "completed",
+        "failure_reason": None,
         "snapshots": len(snapshots),
         # PREMIUM picks only — the alerted tier the operator acts on. The
         # shadow tier rides separately in volume_picks so it can never
@@ -145,12 +218,20 @@ def _record_poll(
         # Fraction of this cycle's mintable candidates dropped SOLELY for
         # staleness (n_stale / candidates reaching the freshness gate). 0.0 when
         # nothing was mintable. A value near 1.0 means the scrape outran the
-        # freshness window and the slate is STARVING — the self-audit/alert layer
-        # watches this to catch a too-slow cycle that stale_candidates alone hides.
+        # freshness window and the slate is STARVING — health/readiness consume
+        # the degraded flag below so a too-slow cycle cannot look green.
         "stale_drop_ratio": stale_drop_ratio,
-        # Listings parsed but ZERO odds rows: selector/DOM break or anti-bot
-        # wall. finished_at alone would look healthy — flag it explicitly.
-        "degraded": bool(matches_found) and not snapshots,
+        "stale_drop_ratio_warn_threshold": stale_drop_ratio_warn,
+        # Source completeness is an explicit loader verdict. Partial JSON
+        # cycles remain persisted/visible as evidence, but may never mint picks.
+        "source_complete": source_complete,
+        "completeness_reason": completeness_reason if not source_complete else None,
+        # Listings parsed but ZERO odds rows, an explicit partial-cycle verdict,
+        # or a cycle that discarded most mintable candidates as already stale:
+        # finished_at alone would look healthy — flag it explicitly so /health
+        # and /ready fail closed until a healthy cycle replaces this record.
+        "degradation_reasons": degradation_reasons,
+        "degraded": bool(degradation_reasons),
     }
 
 
@@ -189,6 +270,19 @@ def _loader_event_ids(loader: OddsLoader, sport_key: str) -> tuple[str, ...] | N
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return tuple(value)
     return None
+
+
+def _loader_cycle_completeness(loader: OddsLoader, sport_key: str) -> tuple[bool, str | None]:
+    """Current source-cycle completeness, defaulting to complete for loaders
+    that do not expose the optional per-sport contract."""
+    complete_by_sport = getattr(loader, "last_fetch_complete", None)
+    if not isinstance(complete_by_sport, Mapping) or complete_by_sport.get(sport_key) is not False:
+        return True, None
+    reason_by_sport = getattr(loader, "last_fetch_completeness_reason", None)
+    reason = reason_by_sport.get(sport_key) if isinstance(reason_by_sport, Mapping) else None
+    if not isinstance(reason, str) or not reason.strip():
+        reason = "source reported an incomplete cycle"
+    return False, reason
 
 
 def _sport_label(sport_key: str) -> str:
@@ -427,10 +521,19 @@ class PipelineDeps:
     # Stale-starvation alarm threshold: when MORE than this fraction of a cycle's
     # mintable candidates are dropped SOLELY for staleness (the scrape outran the
     # freshness window), run_value_pipeline logs a WARNING-level "picks starving"
-    # line and the ratio rides on LAST_POLL for the self-audit/alert layer. Set
+    # line and the ratio rides on LAST_POLL; an over-threshold cycle also marks
+    # the poll degraded so /health and /ready fail closed. Set
     # from Settings.stale_drop_ratio_warn_threshold at the composition root; the
     # 0.5 default means "warn once a slow cycle costs us over half the slate".
     stale_drop_ratio_warn: float = 0.5
+    # Which timestamp proves a live quote is actionable. Most feeds expose a
+    # provider observation timestamp, so the conservative default remains
+    # ``captured_at``. OddsChecker's ``betFeedTimestamp`` is instead the price's
+    # last-change time: a freshly fetched ACTIVE/notExpired static quote can be
+    # hours old by that clock. Its composition root explicitly selects the local
+    # ``ingested_at`` observation time while preserving captured_at unchanged for
+    # warehouse/CLV/steam provenance.
+    candidate_freshness_basis: CandidateFreshnessBasis = "provider"
     # OPTIONAL value-gate refinements (app/edge/value_policy.py): per-market
     # premium floors, raw-odds bands, per-market min book counts. The default
     # all-empty policy is a strict no-op — current behavior, untouched. Built
@@ -599,9 +702,14 @@ async def _persist_snapshots(
 
     try:
         written = 0
+        successful_events: set[str] = set()
         if to_write:
-            written = await repositories.persist_odds_snapshots(
+            result = await repositories.persist_odds_snapshots(
                 deps.session_factory, to_write, teams_by_event, sport, default_league
+            )
+            written = int(result)
+            successful_events = set(
+                getattr(result, "successful_event_ids", {snap.event_id for snap in to_write})
             )
     except Exception as exc:  # snapshot history must never break picking
         logger.warning(
@@ -610,7 +718,14 @@ async def _persist_snapshots(
             type(exc).__name__,
         )
         return None
-    deps.odds_seen.update(seen_updates)
+    attempted_events = {snap.event_id for snap in to_write}
+    deps.odds_seen.update(
+        {
+            key: value
+            for key, value in seen_updates.items()
+            if key[0] not in attempted_events or key[0] in successful_events
+        }
+    )
     _sweep_odds_seen(deps.odds_seen, now)
     return written
 
@@ -621,12 +736,18 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     # `now` AFTER the fetch: live scrapes take minutes and stamp captured_at
     # during the run — taking now first yields negative odds ages.
     now = datetime.now(tz=UTC)
+    source_complete, completeness_reason = _loader_cycle_completeness(deps.loader, sport_key)
     if sport_key in deps.visibility_only_sports:
         # Defense in depth: a visibility-only sport must mint no pick under
         # ANY strategy. Tennis only runs the value pipeline, but keep the
         # invariant strategy-agnostic — publish the slate (unvalidated), record
-        # the poll, no picks/alerts. (No persist here: the model strategy is
-        # football-only and has no visibility-only sports in practice.)
+        # the poll, no picks/alerts. Persist the raw slate when configured so
+        # even an incomplete visibility cycle remains diagnostic evidence.
+        persisted = (
+            await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
+            if snapshots
+            else None
+        )
         _record_available_games(
             sport_key,
             snapshots,
@@ -636,17 +757,47 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             now,
             unvalidated=True,
         )
-        _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
+        _record_poll(
+            sport_key,
+            snapshots,
+            0,
+            _loader_matches_found(deps.loader, sport_key),
+            snapshots_persisted=persisted,
+            source_complete=source_complete,
+            completeness_reason=completeness_reason,
+        )
         return []
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
         _record_available_games(
             sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
         )
-        _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
+        _record_poll(
+            sport_key,
+            snapshots,
+            0,
+            _loader_matches_found(deps.loader, sport_key),
+            source_complete=source_complete,
+            completeness_reason=completeness_reason,
+        )
         return []
 
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
+    if not source_complete:
+        _record_available_games(
+            sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
+        )
+        _record_poll(
+            sport_key,
+            snapshots,
+            0,
+            _loader_matches_found(deps.loader, sport_key),
+            snapshots_persisted=persisted,
+            source_complete=False,
+            completeness_reason=completeness_reason,
+        )
+        logger.warning("model pipeline %s withheld picks from incomplete source cycle", sport_key)
+        return []
     # POST-KICKOFF DROP (leakage guard): identical protection to
     # run_value_pipeline via the SAME shared helpers. An in-play snapshot —
     # captured at or after its event's kickoff — must never mint a model pick
@@ -654,8 +805,9 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     # stay intact; only the pricing view drops in-play rows. ``started`` then
     # skips a started event wholesale (belt-and-suspenders for an event whose
     # surviving rows are pre-match but which has since kicked off). The
-    # persisted ``events.starts_at`` is preferred over the ephemeral directory,
-    # and a NULL/unknown kickoff is KEPT (cannot be proven post-KO).
+    # persisted ``events.starts_at`` is preferred over the ephemeral directory.
+    # A NULL/unknown kickoff remains in the visibility/persistence feed but is
+    # not actionable: without a start time we cannot prove the quote is pre-game.
     kickoff_by_event = await _load_kickoffs(deps, {s.event_id for s in snapshots})
     priced_snapshots = drop_post_kickoff_snapshots(snapshots, kickoff_by_event)
     started = started_event_ids({s.event_id for s in priced_snapshots}, kickoff_by_event, now)
@@ -664,8 +816,8 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     n_unpersisted_withheld = 0
 
     for event_id in sorted({s.event_id for s in priced_snapshots}):
-        if event_id in started:
-            continue  # kicked off: in-play odds never become picks/upgrades
+        if event_id in started or kickoff_by_event.get(event_id) is None:
+            continue  # started/unknown: cannot prove a pre-game actionable quote
         predictions = {(p.market, p.selection): p for p in await deps.model.predict(event_id)}
         if not predictions:
             continue
@@ -687,7 +839,10 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 # to now — taken AFTER the fetch — is provider clock skew, not
                 # a fresh price. The raw signed age_seconds() let the negative
                 # age sail through the odds-age gate; +inf always drops it.
-                odds_age_seconds=_candidate_age_seconds(now, snap.captured_at),
+                odds_age_seconds=_candidate_age_seconds(
+                    now,
+                    _snapshot_freshness_time(snap, deps.candidate_freshness_basis),
+                ),
                 liquidity=snap.liquidity or 0.0,
                 bookmaker=snap.bookmaker,
             )
@@ -769,22 +924,22 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             # duplicate/unpersisted pick never silently exhausts the daily cap
             # (kr-1 / kelly-risk-r2-1); and (b) never lets an exhausted cap
             # (granted<=0) skip the re-dispatch of an ALREADY-persisted pick.
-            # SHIELDED: the watchdog must never cancel between the persist and
-            # its reservation (see _persist_and_reserve).
-            outcome, staked = await asyncio.shield(
+            # CANCELLATION-SAFE: the watchdog must not return to teardown until
+            # the persist and reservation have both completed.
+            outcome, staked = await _complete_before_propagating_cancellation(
                 _persist_and_reserve(deps, pick, breakdown, snap.event_id, now)
             )
+            if outcome == "unpersisted" and _persistence_configured(deps):
+                # Check the outcome before ``staked``: an atomic write failure
+                # returns no row/pick, but it still must be counted as a
+                # deliberately withheld premium alert.
+                n_unpersisted_withheld += 1
+                continue
             if staked is None:
                 # brand-new pick with no remaining daily/event capacity: skip it
                 logger.info("daily exposure cap reached; skipping %s", snap.selection)
                 continue
             pick = staked
-            if outcome == "unpersisted" and _persistence_configured(deps):
-                # WP2 fail-closed: persistence is configured but THIS pick could
-                # not be persisted (DB outage / unresolvable event) — it can
-                # never be settled, ledger-seeded, or CLV-tracked, so withhold.
-                n_unpersisted_withheld += 1
-                continue
             if outcome in ("inserted", "upgraded", "unpersisted"):
                 picks.append(pick)
             await deps.dispatcher.dispatch(
@@ -792,6 +947,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                     pick,
                     model_name=deps.model_name,
                     model_version=deps.model_version,
+                    repriced=outcome == "repriced",
                 )
             )
 
@@ -847,7 +1003,8 @@ async def _load_kickoffs(deps: "PipelineDeps", event_ids: set[str]) -> dict[str,
     start times land late) would otherwise let an in-play price mint a pre-match
     pick / stamp a CLV close. Falls back to the directory for any event not yet
     persisted (or when there is no DB). A DB read failure degrades to the
-    directory alone — kickoff hygiene must never block picking."""
+    directory alone; any event still unresolved is rejected by the candidate
+    loops rather than failing open as an assumed pre-game fixture."""
     kickoffs: dict[str, datetime | None] = {}
     if deps.session_factory is not None:
         from app.storage.repositories import load_event_kickoffs
@@ -855,7 +1012,7 @@ async def _load_kickoffs(deps: "PipelineDeps", event_ids: set[str]) -> dict[str,
         try:
             async with deps.session_factory() as session:
                 kickoffs = await load_event_kickoffs(session, event_ids)
-        except Exception as exc:  # kickoff read must never break picking
+        except Exception as exc:  # degrade the cycle; unresolved events fail closed below
             logger.error("kickoff load failed: %s (directory fallback)", type(exc).__name__)
             kickoffs = {}
     if deps.directory is not None:
@@ -1053,7 +1210,9 @@ def _score_value_candidate(
         return None
 
 
-PersistOutcome = Literal["inserted", "upgraded", "duplicate", "duplicate_denied", "unpersisted"]
+PersistOutcome = Literal[
+    "inserted", "upgraded", "repriced", "duplicate", "duplicate_denied", "unpersisted"
+]
 
 
 def _persistence_configured(deps: "PipelineDeps") -> bool:
@@ -1088,53 +1247,14 @@ async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> 
 
     try:
         async with deps.session_factory() as session:
-            outcome: PersistOutcome = await repositories.persist_pick(
+            raw_outcome = await repositories.persist_pick(
                 session, pick, teams, deps.model_name, deps.model_version
             )
             await session.commit()
-        return outcome
+        return raw_outcome if isinstance(raw_outcome, str) else raw_outcome.outcome
     except Exception as exc:  # persistence must never break alerting
         logger.error("pick persistence failed for %s: %s", pick.pick_id, type(exc).__name__)
         return "unpersisted"
-
-
-async def _persist_stake_clip(
-    deps: "PipelineDeps", pick: PickOut, event_id: str, *, persist_tier: bool = False
-) -> None:
-    """Rewrite the persisted row's stake to the daily-clipped amount (BUG 2).
-
-    The row was persisted with the pre-clip (per-bet-capped) stake BEFORE the
-    daily-exposure reservation ran; when that reservation clips the stake, the
-    stored/reported value must be brought in line with what the ledger actually
-    reserved, or the persisted stake escapes the daily cap. Best-effort, with
-    the SAME guards as `_maybe_persist`: without a session factory, directory,
-    or resolvable teams there is no row to correct, and a failure here must
-    never break alerting (the in-memory pick already carries the clip).
-
-    ``persist_tier=True`` (the stake-zero demotion) additionally rewrites the
-    row's tier + reason_summary from the pick — see update_pick_stake."""
-    if deps.session_factory is None or deps.directory is None:
-        return
-    teams = deps.directory.lookup(event_id)
-    if teams is None:
-        return
-    from app.storage import repositories
-
-    try:
-        async with deps.session_factory() as session:
-            await repositories.update_pick_stake(
-                session,
-                pick,
-                teams,
-                deps.model_name,
-                deps.model_version,
-                persist_tier=persist_tier,
-            )
-            await session.commit()
-    except Exception as exc:  # persistence must never break alerting
-        logger.error(
-            "pick stake-clip persistence failed for %s: %s", pick.pick_id, type(exc).__name__
-        )
 
 
 async def _record_candidate_audit(
@@ -1213,78 +1333,34 @@ async def _record_candidate_audit(
         )
 
 
-async def _reserve_for_outcome(
-    deps: "PipelineDeps",
-    pick: PickOut,
-    breakdown: StakeBreakdown,
-    outcome: PersistOutcome,
-    event_id: str,
-    now: datetime,
-) -> PickOut | None:
-    """Apply the daily-exposure ledger AFTER persistence (kr-1 ordering).
+async def _complete_before_propagating_cancellation[T](
+    operation: Coroutine[Any, Any, T],
+) -> T:
+    """Finish an atomic operation before propagating caller cancellation.
 
-    - inserted/upgraded: reserve breakdown.final, bounded by the daily AND the
-      optional per-event cap. A clip below breakdown.final rebuilds the pick
-      with the daily-clipped stake AND rewrites the persisted row to match (the
-      row was stored pre-clip — BUG 2). A ZERO grant (cap exhausted) returns
-      None (never a stake-0 alert — pick 2332 mis-stated the strategy) AND
-      DEMOTES the persisted row — stored at FULL stake before the reservation
-      ran — to the volume tier at stake 0 with the 'stake_zero' note (Task 1,
-      2026-07-10). The demoted row stays CLV-tracked and, because it is
-      tier='volume', a later premium re-detection takes persist_pick's
-      volume->premium UPGRADE path — the denial lifts once daily capacity
-      frees (the old premium stake-0 'duplicate_denied' marker was permanent).
-    - duplicate: already persisted AND dispatch-eligible at insert (stake > 0);
-      reserve NOTHING (a re-detection is not new exposure — its budget was
-      consumed on its creation day, which is exactly what seed_exposure_ledger
-      re-counts after a restart). The pick keeps breakdown.final.
-    - duplicate_denied: the persisted row is a cap-denial marker (stake 0) —
-      never dispatch the alert the cap already refused (returns None).
-    - unpersisted: DB state is unknown; reserve NOTHING it could never release,
-      so a sustained-unpersisted pick cannot accumulate standing daily exposure
-      across cycles and silently exhaust the cap (kelly-risk-r2-1).
+    ``asyncio.shield`` alone returns control to a cancelled caller immediately
+    while its implicit child task keeps running. The caller may then tear down
+    resources that the child still owns. Keep a strong task reference and wait
+    for it to finish; repeated cancellation requests remain deferred until the
+    protected operation is done.
     """
-    if outcome == "duplicate_denied":
-        return None
-    if outcome in ("duplicate", "unpersisted"):
-        return pick
-    granted = deps.ledger.reserve(now.date(), breakdown.final, event_id)
-    if granted <= 0.0 and outcome in ("inserted", "upgraded"):
-        # WP2 + Task 1 (stake_zero): the row was already persisted at full
-        # stake — a zero grant must NEVER alert (an 'upgraded' zero grant used
-        # to fire the premium alert at stake 0: pick 2332). Demote the row to
-        # the volume tier at stake 0 with the stake_zero note: still
-        # CLV-tracked, reserving nothing, and re-promotable via persist_pick's
-        # volume->premium upgrade path once daily capacity frees.
-        demoted = pick.model_copy(
-            update={
-                "tier": "volume",
-                "recommended_stake_fraction": 0.0,
-                "recommended_stake_amount": stake_amount(0.0, deps.bankroll),
-                "stake_breakdown": pick.stake_breakdown.model_copy(
-                    update={"final": 0.0, "daily_clipped": True}
-                ),
-                "reason_summary": pick.reason_summary
-                + " | stake_zero: daily exposure cap granted 0 — demoted to volume",
-            }
-        )
-        await _persist_stake_clip(deps, demoted, event_id, persist_tier=True)
-        return None
-    if granted < breakdown.final:
-        clipped = pick.model_copy(
-            update={
-                "recommended_stake_fraction": granted,
-                "recommended_stake_amount": stake_amount(granted, deps.bankroll),
-                "stake_breakdown": pick.stake_breakdown.model_copy(
-                    update={"final": granted, "daily_clipped": True}
-                ),
-            }
-        )
-        # BUG 2: the row was persisted with the pre-clip stake; correct it so the
-        # stored/reported stake honours the daily cap and matches the reservation.
-        await _persist_stake_clip(deps, clipped, event_id)
-        return clipped
-    return pick
+    task = asyncio.create_task(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        # Consume an exception that completed the protected task after the
+        # caller was cancelled. Caller cancellation remains authoritative; the
+        # persistence operation handles and logs ordinary failures itself.
+        if task.done() and not task.cancelled():
+            task.exception()
+        raise
 
 
 async def _persist_and_reserve(
@@ -1294,21 +1370,130 @@ async def _persist_and_reserve(
     event_id: str,
     now: datetime,
 ) -> tuple[PersistOutcome, PickOut | None]:
-    """Persist + daily-exposure reserve as ONE unit, run under ``asyncio.shield``.
+    """Atomically persist the cap-adjusted row and account its exposure.
 
-    The scheduler watchdog (asyncio.wait_for) can cancel a cycle at ANY await;
-    a cancellation landing between a pick's DB persist and its ledger
-    reservation left a full-stake premium row the daily/per-event caps never
-    counted (until a restart re-ran seed_exposure_ledger) — the next cycle's
-    re-detected 'duplicate' deliberately reserves nothing, and its alert still
-    dispatched (2026-07-08 audit). Shielding this pair lets an in-flight
-    persist run on to its reservation while the cycle itself still cancels
-    promptly; the alert dispatch stays OUTSIDE the shield, so a cancelled
-    cycle's alert is simply lost and the next cycle's duplicate re-dispatches
-    it — with the exposure already accounted."""
-    outcome = await _maybe_persist(deps, pick, event_id)
-    staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
-    return outcome, staked
+    The DB insert/promotion, daily-cap decision, any stake rewrite, and commit
+    happen in one session. A failed write releases the in-memory grant and
+    withholds the alert; caller cancellation waits for this operation to
+    complete. Consequently no committed full-stake row can escape its durable
+    exposure accounting, and teardown cannot close resources underneath it.
+
+    Re-priced existing picks reserve only a positive increase over their
+    already-accounted total. Their updated odds and total exposure commit in
+    this same transaction, so a price-move alert never outruns persistence.
+    """
+    if deps.session_factory is None or deps.directory is None:
+        return "unpersisted", pick
+    teams = deps.directory.lookup(event_id)
+    if teams is None:
+        return "unpersisted", None
+
+    from app.storage import repositories
+
+    granted = 0.0
+    outcome: PersistOutcome = "unpersisted"
+    try:
+        async with deps.session_factory() as session:
+            raw_outcome = await repositories.persist_pick(
+                session, pick, teams, deps.model_name, deps.model_version
+            )
+            previous_stake = 0.0
+            if isinstance(raw_outcome, str):
+                outcome = raw_outcome
+            else:
+                outcome = raw_outcome.outcome
+                previous_stake = raw_outcome.previous_stake_fraction
+
+            if outcome == "duplicate_denied":
+                await session.commit()
+                return outcome, None
+            if outcome == "duplicate":
+                await session.commit()
+                return outcome, pick
+
+            requested = breakdown.final
+            if outcome == "repriced":
+                # Existing stake is a conservative total recommendation: a
+                # later smaller Kelly number cannot prove the operator reduced
+                # an already-placed manual bet, so never release it. Only the
+                # positive increase consumes new capacity.
+                requested = max(breakdown.final - previous_stake, 0.0)
+            granted = deps.ledger.reserve(now.date(), requested, event_id)
+
+            if outcome in ("inserted", "upgraded"):
+                total_stake = granted
+            else:  # repriced
+                total_stake = previous_stake + granted
+
+            if total_stake <= 0.0 and outcome in ("inserted", "upgraded"):
+                demoted = pick.model_copy(
+                    update={
+                        "tier": "volume",
+                        "recommended_stake_fraction": 0.0,
+                        "recommended_stake_amount": stake_amount(0.0, deps.bankroll),
+                        "stake_breakdown": pick.stake_breakdown.model_copy(
+                            update={"final": 0.0, "daily_clipped": True}
+                        ),
+                        "reason_summary": pick.reason_summary
+                        + " | stake_zero: daily exposure cap granted 0 — demoted to volume",
+                    }
+                )
+                updated = await repositories.update_pick_stake(
+                    session,
+                    demoted,
+                    teams,
+                    deps.model_name,
+                    deps.model_version,
+                    persist_tier=True,
+                )
+                if not updated:
+                    raise RuntimeError("persisted pick disappeared before cap demotion")
+                await session.commit()
+                return outcome, None
+
+            staked = pick
+            if total_stake != breakdown.final or outcome == "repriced":
+                staked = pick.model_copy(
+                    update={
+                        "recommended_stake_fraction": total_stake,
+                        "recommended_stake_amount": stake_amount(total_stake, deps.bankroll),
+                        "stake_breakdown": pick.stake_breakdown.model_copy(
+                            update={
+                                "final": total_stake,
+                                "daily_clipped": total_stake < breakdown.final,
+                            }
+                        ),
+                    }
+                )
+            # Always finalize the stake through this transaction, even when no
+            # clip occurred, so the durable per-day exposure charge is written
+            # atomically with the pick. It is the restart seed for price-move
+            # deltas on long-lived rows.
+            updated = await repositories.update_pick_stake(
+                session,
+                staked,
+                teams,
+                deps.model_name,
+                deps.model_version,
+                exposure_reserved_on=now.date(),
+                exposure_reserved_delta=granted,
+                settlement_basis_increment_amount=(
+                    stake_amount(granted, deps.bankroll) if outcome == "repriced" else None
+                ),
+            )
+            if not updated:
+                raise RuntimeError("persisted pick disappeared before stake update")
+            await session.commit()
+            return outcome, staked
+    except asyncio.CancelledError:
+        if granted > 0.0:
+            deps.ledger.release(now.date(), granted, event_id)
+        raise
+    except Exception as exc:
+        if granted > 0.0:
+            deps.ledger.release(now.date(), granted, event_id)
+        logger.error("atomic pick persistence failed for %s: %s", pick.pick_id, type(exc).__name__)
+        return "unpersisted", None
 
 
 # Schema tag for the policy fingerprint encoding — bump if the field set or the
@@ -1383,6 +1568,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     snapshots = await deps.loader.fetch_odds(sport_key)
     # `now` AFTER the fetch — see run_pick_pipeline comment (negative ages).
     now = datetime.now(tz=UTC)
+    source_complete, completeness_reason = _loader_cycle_completeness(deps.loader, sport_key)
 
     if sport_key in deps.visibility_only_sports:
         # VISIBILITY-ONLY sport (e.g. tennis): publish the slate for the
@@ -1410,6 +1596,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             0,
             _loader_matches_found(deps.loader, sport_key),
             snapshots_persisted=persisted,
+            source_complete=source_complete,
+            completeness_reason=completeness_reason,
         )
         logger.info(
             "value pipeline %s: visibility-only (unvalidated) — %d snapshots, no picks",
@@ -1423,7 +1611,33 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         _record_available_games(
             sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
         )
-        _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
+        _record_poll(
+            sport_key,
+            snapshots,
+            0,
+            _loader_matches_found(deps.loader, sport_key),
+            source_complete=source_complete,
+            completeness_reason=completeness_reason,
+        )
+        return []
+
+    if not source_complete:
+        persisted = await _persist_snapshots(
+            deps, snapshots, sport_key, deps.league or sport_key, now
+        )
+        _record_available_games(
+            sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
+        )
+        _record_poll(
+            sport_key,
+            snapshots,
+            0,
+            _loader_matches_found(deps.loader, sport_key),
+            snapshots_persisted=persisted,
+            source_complete=False,
+            completeness_reason=completeness_reason,
+        )
+        logger.warning("value pipeline %s withheld picks from incomplete source cycle", sport_key)
         return []
 
     # Optionally MERGE the free Betfair/Pinnacle sharp prices (re-keyed to these
@@ -1504,6 +1718,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     kickoff_by_event = await _load_kickoffs(deps, {s.event_id for s in anchor_snapshots})
     anchor_snapshots = drop_post_kickoff_snapshots(anchor_snapshots, kickoff_by_event)
     grouped = group_market_prices(anchor_snapshots)
+    freshness_by_market = group_market_freshness_times(
+        anchor_snapshots,
+        basis=deps.candidate_freshness_basis,
+    )
     fair = event_fair_probs(
         grouped,
         deps.devig_method,
@@ -1521,6 +1739,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # in-memory kickoff still excludes a started event. The per-snapshot drop
     # already removed in-play rows; this event-level skip is belt-and-suspenders.
     started = started_event_ids({key[0] for key in grouped}, kickoff_by_event, now)
+    unknown_kickoff = {
+        event_id for event_id, _market, _detail in grouped if kickoff_by_event.get(event_id) is None
+    }
 
     # Steam gate trajectories: per-(market) per-(selection, book) recent price
     # history for the line-movement / steam-awareness gate. Built ONLY when the
@@ -1615,9 +1836,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         ml_manifest_created_utc=ml_created_utc,
         ml_threshold=ml_threshold,
     )
-    for (event_id, market, detail), (prices, captured) in grouped.items():
-        if event_id in started:
-            continue  # kicked off: in-play odds never become picks/upgrades
+    for (event_id, market, detail), (prices, _captured) in grouped.items():
+        freshness_times = freshness_by_market.get((event_id, market, detail), {})
+        if event_id in started or event_id in unknown_kickoff:
+            continue  # started/unknown: cannot prove a pre-game actionable quote
         # NON-SETTLEABLE market drop: period (half/quarter/set), corner, and
         # card/booking sub-markets have no score in the results feed, so any pick
         # on them can only ever void (or mis-grade as full-match). Drop the whole
@@ -1704,8 +1926,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # the mintable universe — count it so the stale-drop RATIO below is
             # measured against the right denominator).
             n_freshness_candidates += 1
-            cap = captured.get((v.selection, v.best_book))
-            age = _candidate_age_seconds(now, cap)
+            freshness_at = freshness_times.get((v.selection, v.best_book))
+            age = _candidate_age_seconds(now, freshness_at)
             if age > deps.gate_policy.max_odds_age_seconds:
                 n_stale += 1
                 continue
@@ -2170,7 +2392,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # deterministic iteration order. Per-candidate logic is the prior inline path
     # (persist -> reserve -> skip-on-None -> append-on-new-outcome -> dispatch).
     # raw_kelly derives only from already-computed fair/price (no leakage) and the
-    # ledger.reserve math / kr-1 ordering inside _reserve_for_outcome are unchanged.
+    # cap accounting and persistence remain atomic inside _persist_and_reserve.
     premium_candidates.sort(key=lambda c: c[1].raw_kelly, reverse=True)
     n_unpersisted_withheld = 0
     for pick, breakdown, event_id in premium_candidates:
@@ -2182,25 +2404,24 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         # is the only exposure also flags — acceptable: the combined-cap note
         # is still true. Never blocks or re-sizes anything.
         prior_event_exposure = deps.ledger.event_used(now.date(), event_id)
-        # SHIELDED: a watchdog cancellation mid-pair lets the in-flight persist
-        # run on to its ledger reservation (never a persisted full-stake row
-        # the caps don't count); the dispatch below stays cancellable — a lost
-        # alert re-dispatches next cycle as a 'duplicate'.
-        outcome, staked = await asyncio.shield(
+        # CANCELLATION-SAFE: a watchdog cancellation mid-pair waits for the
+        # in-flight persist and ledger reservation before teardown (never a
+        # persisted full-stake row the caps don't count); dispatch below stays
+        # cancellable — a lost alert re-dispatches next cycle as a 'duplicate'.
+        outcome, staked = await _complete_before_propagating_cancellation(
             _persist_and_reserve(deps, pick, breakdown, event_id, now)
         )
+        if outcome == "unpersisted" and _persistence_configured(deps):
+            # Atomic persistence failures return no row/pick. Count the
+            # fail-closed withholding before handling stake-zero/cap outcomes.
+            n_unpersisted_withheld += 1
+            continue
         if staked is None:
             # brand-new premium pick with no remaining daily/event capacity
             # (or a 'duplicate_denied' cap-denial marker — never re-dispatched)
             logger.info("daily exposure cap reached; skipping %s", pick.selection)
             continue
         pick = staked
-        if outcome == "unpersisted" and _persistence_configured(deps):
-            # WP2 fail-closed: persistence is configured but THIS pick could not
-            # be persisted (DB outage / unresolvable event) — it can never be
-            # settled, ledger-seeded, or CLV-tracked, so withhold its alert.
-            n_unpersisted_withheld += 1
-            continue
         if outcome in ("inserted", "upgraded", "unpersisted"):
             # "inserted"/"unpersisted" (uncertainty = "new") or "upgraded"
             # — a volume row just cleared the premium threshold: THIS is its
@@ -2219,6 +2440,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 correlation_warning=(
                     CORRELATED_EXPOSURE_WARNING if prior_event_exposure > 0.0 else None
                 ),
+                repriced=outcome == "repriced",
             )
         )
     if n_unpersisted_withheld:
@@ -2248,11 +2470,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 value_policy=deps.value_policy,
             )
         except Exception as exc:  # revalidation must never break picking
-            # exc_info=True: the intermittent TypeError here was undiagnosable
-            # from the class name alone — log the full traceback so the root
-            # cause is pinpointable. Isolated from the off-window call below so
-            # one failing revalidation path cannot skip the other.
-            logger.error("open-pick revalidation failed: %s", type(exc).__name__, exc_info=True)
+            # Type only: HTTP-client tracebacks can contain request URLs,
+            # query credentials, or inline proxy authentication.
+            logger.error("open-pick revalidation failed: %s", type(exc).__name__)
         try:
             await revalidate_offwindow_picks(
                 deps.loader,
@@ -2263,7 +2483,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 value_policy=deps.value_policy,
             )
         except Exception as exc:  # revalidation must never break picking
-            logger.error("off-window revalidation failed: %s", type(exc).__name__, exc_info=True)
+            logger.error("off-window revalidation failed: %s", type(exc).__name__)
 
     n_premium = len(picks) - n_volume
     logger.info(
@@ -2471,6 +2691,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         volume_picks=n_volume,
         stale_candidates=n_stale,
         stale_drop_ratio=stale_drop_ratio,
+        stale_drop_ratio_warn=deps.stale_drop_ratio_warn,
     )
     return picks
 
@@ -2480,6 +2701,74 @@ GroupedMarkets = dict[
     tuple[dict[str, dict[str, float]], dict[tuple[str, str], datetime]],
 ]
 
+MarketFreshnessTimes = dict[
+    tuple[str, Market, str | None],
+    dict[tuple[str, str], datetime],
+]
+
+
+def coalesce_market_snapshots(snapshots: Sequence[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
+    """One deterministic newest observation per qualified bookmaker outcome.
+
+    Price and liquidity must come from the SAME winning snapshot. Ranking by
+    provider capture time and then ingestion time makes live/archive merge
+    order irrelevant and lets a corrected payload with an unchanged provider
+    timestamp replace its predecessor.
+    """
+    newest: dict[tuple[str, Market, str | None, str, str], OddsSnapshotIn] = {}
+
+    def _rank(snap: OddsSnapshotIn) -> tuple[datetime, datetime, float, bool, float]:
+        # Exact timestamp conflicts are provider corruption. Resolve them
+        # order-independently and conservatively: lower offered odds, then a
+        # known lower liquidity (rather than an optimistic/unknown amount).
+        liquidity = float(snap.liquidity) if snap.liquidity is not None else 0.0
+        return (
+            snap.captured_at,
+            snap.ingested_at,
+            -float(snap.decimal_odds),
+            snap.liquidity is not None,
+            -liquidity,
+        )
+
+    for snap in snapshots:
+        key = (
+            snap.event_id,
+            snap.market,
+            snap.market_detail,
+            snap.selection,
+            snap.bookmaker,
+        )
+        previous = newest.get(key)
+        if previous is None or _rank(snap) > _rank(previous):
+            newest[key] = snap
+    return list(newest.values())
+
+
+def _snapshot_freshness_time(
+    snapshot: OddsSnapshotIn,
+    basis: CandidateFreshnessBasis,
+) -> datetime:
+    """Timestamp used only by the live actionability age gate.
+
+    Provider provenance remains on ``captured_at`` regardless of this choice.
+    ``observation`` means the current response's local ingestion wall clock.
+    """
+    return snapshot.ingested_at if basis == "observation" else snapshot.captured_at
+
+
+def group_market_freshness_times(
+    snapshots: Sequence[OddsSnapshotIn],
+    *,
+    basis: CandidateFreshnessBasis,
+) -> MarketFreshnessTimes:
+    """Freshness timestamp for the exact row selected by market coalescing."""
+    out: MarketFreshnessTimes = {}
+    for snap in coalesce_market_snapshots(snapshots):
+        key = (snap.event_id, snap.market, snap.market_detail)
+        observation_key = (snap.selection, snap.bookmaker)
+        out.setdefault(key, {})[observation_key] = _snapshot_freshness_time(snap, basis)
+    return out
+
 
 def group_market_prices(snapshots: Sequence[OddsSnapshotIn]) -> GroupedMarkets:
     """Group snapshots into {(event_id, market, market_detail):
@@ -2487,11 +2776,12 @@ def group_market_prices(snapshots: Sequence[OddsSnapshotIn]) -> GroupedMarkets:
     finder and CLV true-up. `market_detail` keeps distinct lines (handicaps,
     totals) in separate devig groups — mixing lines corrupts fair value."""
     out: GroupedMarkets = {}
-    for snap in snapshots:
+    for snap in coalesce_market_snapshots(snapshots):
         key = (snap.event_id, snap.market, snap.market_detail)
         prices, captured = out.setdefault(key, ({}, {}))
+        observation_key = (snap.selection, snap.bookmaker)
         prices.setdefault(snap.selection, {})[snap.bookmaker] = snap.decimal_odds
-        captured[(snap.selection, snap.bookmaker)] = snap.captured_at
+        captured[observation_key] = snap.captured_at
     return out
 
 
@@ -2503,10 +2793,11 @@ def drop_post_kickoff_snapshots(
     price must never mint a pre-match value pick nor stamp a CLV close.
 
     A snapshot whose event has an UNKNOWN kickoff (absent from ``kickoffs`` or
-    mapped to None) is KEPT: a NULL kickoff cannot be proven post-KO (the same
-    rule the started-set and the off-window close guards use). Strictly-pre-
-    kickoff snapshots pass through unchanged, so the surviving 'close' for an
-    event is its last snapshot strictly before kickoff, never an in-play one."""
+    mapped to None) is kept by this low-level filter because it cannot be
+    classified as post-kickoff. Both candidate loops separately reject that
+    event as non-actionable: only a known future kickoff proves a pre-game
+    quote. Strictly-pre-kickoff snapshots pass through unchanged, so the
+    surviving close is the last snapshot before kickoff, never an in-play one."""
     kept: list[OddsSnapshotIn] = []
     for snap in snapshots:
         kickoff = kickoffs.get(snap.event_id)
@@ -2525,8 +2816,9 @@ def started_event_ids(
     candidate loop skips wholesale. ``kickoffs`` should already PREFER the
     persisted ``events.starts_at`` over the ephemeral in-memory directory so a
     late-arriving or absent in-memory kickoff (tennis start times land late)
-    still excludes a started event. A NULL/absent kickoff is never 'started' — it
-    cannot be proven, so re-pricing continues (same rule as the CLV guards)."""
+    still excludes a started event. A NULL/absent kickoff is not classified as
+    started here, but the model/value candidate loops reject it explicitly as
+    non-actionable; this helper only computes the known-started subset."""
     return {
         event_id
         for event_id in event_ids
@@ -2542,12 +2834,11 @@ def group_market_liquidity(snapshots: Sequence[OddsSnapshotIn]) -> LiquidityByMa
     {(event_id, market, market_detail): {selection: {book: liquidity}}}.
 
     Only snapshots with a KNOWN (non-None) ``liquidity`` (£ best-back size —
-    today the dedicated Betfair capture) contribute; the dominant main-scrape
-    rows carry liquidity=None and are deliberately ABSENT here, which keeps
-    them anchor-eligible under the WP5 exchange floor (known-thin is rejected,
-    unknown stays as before — see app/edge/value._named_sharp_anchor)."""
+    today the dedicated Betfair capture) contribute. Main-scrape rows with
+    liquidity=None are deliberately absent and therefore cannot satisfy a
+    positive exchange floor (see app/edge/value._named_sharp_anchor)."""
     out: LiquidityByMarket = {}
-    for snap in snapshots:
+    for snap in coalesce_market_snapshots(snapshots):
         if snap.liquidity is None:
             continue
         key = (snap.event_id, snap.market, snap.market_detail)

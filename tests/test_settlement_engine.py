@@ -6,8 +6,9 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from sqlalchemy import event as sa_event
 from sqlalchemy import insert, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
@@ -17,11 +18,12 @@ from app.settlement.engine import (
     settle_event_picks,
     settle_open_picks,
 )
-from app.settlement.results import FinalScore, ScoreBook
+from app.settlement.results import Completion, FinalScore, ScoreBook
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import persist_pick
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
 
 NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 KICKOFF = NOW - timedelta(hours=6)
@@ -117,6 +119,8 @@ async def test_settles_past_pick_with_result_row(session) -> None:  # type: igno
     assert row.outcome == "won"  # Over 2.5 with 3 goals
     assert row.pnl == Decimal("22.00")  # 20 @ 2.10
     assert row.roi == Decimal("1.1")
+    assert row.settled_stake_amount == Decimal("20.00")
+    assert row.settled_effective_odds == Decimal("2.1000")
     assert row.settled_at == NOW
 
 
@@ -166,6 +170,60 @@ async def test_uses_manual_bet_log_stake_and_odds(session) -> None:  # type: ign
     row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
     assert row is not None
     assert row.pnl == Decimal("75.00")  # 50 @ 2.50 won
+    assert row.settled_stake_amount == Decimal("50.00")
+    assert row.settled_effective_odds == Decimal("2.5000")
+
+
+@pytest.mark.parametrize(
+    ("bookmaker", "expected_pnl", "expected_effective_odds"),
+    [
+        ("Betfair", Decimal("71.25"), Decimal("2.4250")),
+        ("Matchbook", Decimal("73.50"), Decimal("2.4700")),
+    ],
+)
+async def test_manual_exchange_fill_is_commission_netted_once(
+    session: AsyncSession,
+    bookmaker: str,
+    expected_pnl: Decimal,
+    expected_effective_odds: Decimal,
+) -> None:
+    pick = await seed_pick(session, f"evt-settle-exchange-{bookmaker.lower()}")
+    await session.execute(
+        insert(ManualBetLog).values(
+            pick_id=pick.id,
+            bet_placed=True,
+            actual_stake=Decimal("50.00"),
+            actual_odds=Decimal("2.50"),
+            bookmaker_used=bookmaker,
+        )
+    )
+    await settle_open_picks(session, book_with_score(2, 1), NOW)
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.pnl == expected_pnl
+    assert row.settled_stake_amount == Decimal("50.00")
+    assert row.settled_effective_odds == expected_effective_odds
+
+
+async def test_manual_bet_without_actual_odds_uses_blended_recommendation(session) -> None:  # type: ignore[no-untyped-def]
+    pick = await seed_pick(session, "evt-settle-manual-blended")
+    pick.settlement_stake_amount = Decimal("30.00")
+    pick.settlement_raw_odds_stake = Decimal("66.000000")
+    pick.settlement_effective_odds_stake = Decimal("66.000000")
+    await session.execute(
+        insert(ManualBetLog).values(
+            pick_id=pick.id,
+            bet_placed=True,
+            actual_stake=Decimal("50.00"),
+            actual_odds=None,
+        )
+    )
+    await settle_open_picks(session, book_with_score(2, 1), NOW)
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.pnl == Decimal("60.00")  # 50 at blended 2.20, not latest 2.10
+    assert row.settled_stake_amount == Decimal("50.00")
+    assert row.settled_effective_odds == Decimal("2.2000")
 
 
 async def test_lost_pick_settles_negative(session) -> None:  # type: ignore[no-untyped-def]
@@ -212,6 +270,50 @@ async def test_settles_football_ah_quarter_line_half_win(session) -> None:  # ty
     assert row.outcome == "half_won"
     assert row.pnl == Decimal("11.00")  # half of 20 @ 2.10 -> 10 * 1.10
     assert row.settled_at == NOW
+
+
+@pytest.mark.parametrize(
+    ("market", "selection", "home_score", "away_score", "outcome", "expected_pnl"),
+    [
+        (Market.TOTALS, "Over 2.5", 2, 1, "won", Decimal("36.00")),
+        (Market.TOTALS, "Over 2.5", 1, 0, "lost", Decimal("-30.00")),
+        (Market.SPREADS, f"{HOME} -0.75", 2, 1, "half_won", Decimal("18.00")),
+        (Market.SPREADS, f"{HOME} +0.75", 0, 1, "half_lost", Decimal("-15.00")),
+    ],
+)
+async def test_two_tranche_basis_grades_exact_pnl(
+    session: AsyncSession,
+    market: Market,
+    selection: str,
+    home_score: int,
+    away_score: int,
+    outcome: str,
+    expected_pnl: Decimal,
+) -> None:
+    """20 @ 2.10 plus 10 @ 2.40 grades as 30 @ blended 2.20."""
+    pick = await seed_pick(
+        session,
+        f"evt-two-tranche-{outcome}",
+        market=market,
+        selection=selection,
+    )
+    pick.settlement_stake_amount = Decimal("30.00")
+    pick.settlement_raw_odds_stake = Decimal("66.000000")
+    pick.settlement_effective_odds_stake = Decimal("66.000000")
+    assert (
+        await settle_open_picks(
+            session,
+            book_with_score(home_score, away_score),
+            NOW,
+        )
+        == 1
+    )
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == outcome
+    assert row.pnl == expected_pnl
+    assert row.settled_stake_amount == Decimal("30.00")
+    assert row.settled_effective_odds == Decimal("2.2000")
 
 
 async def test_football_ah_unparseable_selection_skipped(session, caplog) -> None:  # type: ignore[no-untyped-def]
@@ -466,6 +568,61 @@ async def test_voids_unsettleable_known_kickoff_pick(session) -> None:  # type: 
     assert row is not None and row.outcome == "void"
     # idempotent
     assert await void_unsettleable_known_kickoff_picks(session, now) == 0
+
+
+async def test_known_kickoff_void_supersedes_cross_source_duplicate(session) -> None:  # type: ignore[no-untyped-def]
+    """The stale-void path must not mint two P&L rows for one fixture."""
+    from sqlalchemy import update as sa_update
+
+    from app.settlement.engine import (
+        STALE_UNSETTLEABLE_AGE,
+        void_unsettleable_known_kickoff_picks,
+    )
+
+    now = datetime.now(tz=UTC)
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    canonical = await seed_pick(session, "evt-stale-void-dedup-a")
+    canonical.status = "alerted"
+    event = await session.get(Event, canonical.event_id)
+    assert event is not None
+    event.starts_at = now - STALE_UNSETTLEABLE_AGE - timedelta(days=1)
+
+    duplicate_event = Event(
+        sport_id=event.sport_id,
+        league_id=event.league_id,
+        home_team_id=event.home_team_id,
+        away_team_id=event.away_team_id,
+        external_ref="evt-stale-void-dedup-b",
+        starts_at=event.starts_at,
+    )
+    session.add(duplicate_event)
+    await session.flush()
+    values = {
+        column.name: getattr(canonical, column.name)
+        for column in Pick.__table__.columns
+        if column.name not in {"id", "created_at"}
+    }
+    values["event_id"] = duplicate_event.id
+    duplicate = Pick(**values)
+    session.add(duplicate)
+    await session.flush()
+
+    assert await void_unsettleable_known_kickoff_picks(session, now) == 1
+    await session.refresh(canonical)
+    await session.refresh(duplicate)
+    assert {canonical.status, duplicate.status} == {"settled", "superseded"}
+    result_pick_ids = set(
+        (
+            await session.scalars(
+                select(ResultTracking.pick_id).where(
+                    ResultTracking.pick_id.in_((canonical.id, duplicate.id))
+                )
+            )
+        ).all()
+    )
+    assert len(result_pick_ids) == 1
 
 
 # --- full cycle (providers -> book -> settle), as the scheduler job runs it ----
@@ -1027,7 +1184,7 @@ async def test_tennis_game_line_pick_left_unsettled_from_set_score(session, capl
         session, "evt-ten-gameline", home, away, Market.TOTALS, "Over 2.5"
     )
     book = ScoreBook([FinalScore(home, away, TENNIS_KICKOFF.date(), 2, 1)])
-    with caplog.at_level("INFO"):
+    with caplog.at_level("INFO", logger="app.settlement.engine"):
         assert await settle_open_picks(session, book, NOW) == 1  # only the sets total
     await session.refresh(p_games)
     await session.refresh(p_spread)
@@ -1045,7 +1202,184 @@ async def test_tennis_game_line_pick_left_unsettled_from_set_score(session, capl
     )
     assert sets_row is not None
     assert sets_row.outcome == "won"  # 2+1 = 3 sets > 2.5
-    assert any("set score" in r.message for r in caplog.records)
+    summaries = [
+        record.message
+        for record in caplog.records
+        if "settlement refusal summary" in record.message
+    ]
+    assert len(summaries) == 1
+    assert "reason=tennis_game_line_set_score count=2" in summaries[0]
+    assert f"sample_pick_ids={[p_games.id, p_spread.id]}" in summaries[0]
+    assert not any("not settled: tennis" in record.message for record in caplog.records)
+
+
+async def test_manual_tennis_set_score_guard_remains_request_local(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Auto aggregation must not weaken the manual/direct _settle_one guard."""
+    home, away = "Manual Guard Home", "Manual Guard Away"
+    pick = await seed_tennis_pick(
+        session,
+        "evt-ten-manual-guard",
+        home,
+        away,
+        Market.TOTALS,
+        "Over 22.5",
+    )
+    with caplog.at_level("INFO", logger="app.settlement.engine"):
+        assert await settle_event_picks(session, pick.event_id, 2, 1, NOW) == (0, 1)
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+    assert any("left open for manual settlement" in record.message for record in caplog.records)
+    assert not any("settlement refusal summary" in record.message for record in caplog.records)
+
+
+async def test_scoreless_and_tennis_refusals_skip_per_row_dedup_work(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No-score/manual-only backlog rows do one bulk hint query, not 2N locks."""
+    from sqlalchemy import update as sa_update
+
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    scoreless: list[Pick] = []
+    for index in range(6):
+        scoreless.append(
+            await seed_pick(
+                session,
+                f"evt-bulk-scoreless-{index}",
+                home=f"Scoreless Home {index}",
+                away=f"Scoreless Away {index}",
+            )
+        )
+
+    manual: list[Pick] = []
+    scores: list[FinalScore] = []
+    for index in range(8):
+        home = f"Manual Tennis Home {index}"
+        away = f"Manual Tennis Away {index}"
+        manual.append(
+            await seed_tennis_pick(
+                session,
+                f"evt-bulk-tennis-{index}",
+                home,
+                away,
+                Market.TOTALS,
+                "Over 22.5",
+            )
+        )
+        scores.append(FinalScore(home, away, TENNIS_KICKOFF.date(), 2, 1))
+
+    async def unexpected_lock(*args: object, **kwargs: object) -> None:
+        raise AssertionError(f"deferred row acquired advisory lock: {args!r} {kwargs!r}")
+
+    async def unexpected_recheck(*args: object, **kwargs: object) -> bool:
+        raise AssertionError(f"deferred row ran exact sibling query: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr("app.settlement.engine._lock_settlement_instrument", unexpected_lock)
+    monkeypatch.setattr("app.settlement.engine._settled_sibling_exists", unexpected_recheck)
+    with caplog.at_level("INFO", logger="app.settlement.engine"):
+        assert await settle_open_picks(session, ScoreBook(scores), NOW) == 0
+
+    for pick in [*scoreless, *manual]:
+        await session.refresh(pick)
+        assert pick.status == "alerted"
+    summaries = [
+        record.message
+        for record in caplog.records
+        if "settlement refusal summary" in record.message
+    ]
+    assert len(summaries) == 1
+    assert "reason=tennis_game_line_set_score count=8" in summaries[0]
+    assert f"sample_pick_ids={[pick.id for pick in manual[:3]]}" in summaries[0]
+    assert not any("not settled: tennis" in record.message for record in caplog.records)
+
+
+async def test_scoreless_backlog_queries_are_one_scan_plus_bounded_bulk_chunks(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Query growth is O(ceil(N/chunk)), with no per-pick advisory/check query."""
+    from sqlalchemy import update as sa_update
+
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    for index in range(9):
+        await seed_pick(
+            session,
+            f"evt-query-count-{index}",
+            home=f"Query Count Home {index}",
+            away=f"Query Count Away {index}",
+        )
+    monkeypatch.setattr("app.settlement.engine._SETTLED_SIBLING_PREFETCH_CHUNK_SIZE", 4)
+
+    statements: list[str] = []
+
+    def count_statement(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del connection, cursor, parameters, context, executemany
+        statements.append(statement)
+
+    connection = await session.connection()
+    sa_event.listen(connection.sync_connection, "before_cursor_execute", count_statement)
+    try:
+        unrelated = ScoreBook([FinalScore("No Match Home", "No Match Away", KICKOFF.date(), 1, 0)])
+        assert await settle_open_picks(session, unrelated, NOW) == 0
+    finally:
+        sa_event.remove(connection.sync_connection, "before_cursor_execute", count_statement)
+
+    assert len(statements) == 4  # one open-row scan + ceil(9 / 4) bulk fingerprint queries
+    assert sum("FROM result_tracking JOIN picks" in statement for statement in statements) == 3
+    assert not any("pg_advisory_xact_lock" in statement for statement in statements)
+
+
+@pytest.mark.parametrize(
+    ("completion", "home_score", "away_score", "market", "selection", "outcome"),
+    [
+        ("retired", 1, 0, Market.TOTALS, "Over 22.5", "void"),
+        ("void", 0, 0, Market.SPREADS, "Terminal Home -4.5", "void"),
+        ("full", 12, 10, Market.TOTALS, "Over 20.5", "won"),
+    ],
+)
+async def test_tennis_terminal_and_game_score_paths_bypass_auto_refusal(
+    session: AsyncSession,
+    completion: Completion,
+    home_score: int,
+    away_score: int,
+    market: Market,
+    selection: str,
+    outcome: str,
+) -> None:
+    """Retirement/walkover remain gradeable; actual game totals are not refused."""
+    home, away = "Terminal Home", "Terminal Away"
+    event_id = f"evt-ten-terminal-{completion}-{market}"
+    pick = await seed_tennis_pick(session, event_id, home, away, market, selection)
+    book = ScoreBook(
+        [
+            FinalScore(
+                home,
+                away,
+                TENNIS_KICKOFF.date(),
+                home_score,
+                away_score,
+                completion=completion,
+                winner_side="home" if completion == "retired" else None,
+            )
+        ]
+    )
+    assert await settle_open_picks(session, book, NOW) == 1
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == outcome
 
 
 async def test_soccer_settlement_regression_unchanged_by_completion_fields(session) -> None:  # type: ignore[no-untyped-def]

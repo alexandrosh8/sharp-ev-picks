@@ -26,7 +26,7 @@ patterns:
       is acquired PER ATTEMPT inside the retry, and released before the backoff
       sleep, so one match's backoff never starves the other ~699. curl_cffi does
       NOT raise on 4xx/5xx, so a transient HTTP status (429/5xx) is surfaced via
-      ``retry_if_result``; ``Retry-After`` is honoured; full jitter; 4 attempts.
+      ``retry_if_result``; ``Retry-After`` is honoured; full jitter; 3 attempts.
   R3  A fail-closed per-cycle completeness gate: the cycle is flagged INCOMPLETE
       (so the caller can alert / withhold) when the parsed row count collapses
       versus the previous cycle, or an expected market is wholly missing. Any
@@ -44,11 +44,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from tenacity import (
+    RetryCallState,
     retry,
     retry_if_exception,
     retry_if_result,
@@ -71,7 +73,14 @@ PINNED_IMPERSONATE = "chrome146"
 # this or curl_cffi serialises the surplus handles (defeating the concurrency).
 DEFAULT_CONCURRENCY = 8
 # tenacity attempt cap for one match's GETs (the slot is re-acquired each attempt).
-MATCH_MAX_ATTEMPTS = 4
+MATCH_MAX_ATTEMPTS = 3
+MAX_MATCH_URLS_PER_CYCLE = 2_000
+MAX_SNAPSHOTS_PER_MATCH = 5_000
+MAX_SNAPSHOTS_PER_CYCLE = 250_000
+
+
+class CycleResourceLimitError(RuntimeError):
+    """A listed cycle crossed a fixed URL or snapshot ceiling."""
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +112,35 @@ class TransientHTTPStatusError(Exception):
     transient statuses so tenacity's exception path retries them.
     """
 
-    def __init__(self, status: int) -> None:
+    def __init__(self, status: int, headers: Mapping[str, Any] | None = None) -> None:
         super().__init__(f"transient HTTP status {status}")
         self.status = status
+        self.retry_after = retry_after_seconds_from_headers(headers)
+
+
+class PermanentHTTPStatusError(Exception):
+    """A GET returned a permanent non-200 status and is a named cycle gap."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"permanent HTTP status {status}")
+        self.status = status
+
+
+def retry_after_seconds_from_headers(
+    headers: Mapping[str, Any] | None, *, cap: float = 30.0
+) -> float | None:
+    if not headers:
+        return None
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0 or not math.isfinite(cap) or cap < 0:
+        return None
+    return min(seconds, cap)
 
 
 def _curl_error_code(exc: BaseException) -> int | None:
@@ -131,6 +166,10 @@ def classify_curl_error(exc: BaseException) -> str:
     case by the caller — it is NOT silently retried forever (it does not match
     the transient predicate) and it is NOT swallowed; it surfaces as a gap with a
     WARNING so a genuinely new failure mode is visible, never masked."""
+    if isinstance(exc, TransientHTTPStatusError):
+        return "transient"
+    if isinstance(exc, PermanentHTTPStatusError):
+        return "permanent"
     code = _curl_error_code(exc)
     if code is None:
         return "unknown"
@@ -178,21 +217,22 @@ def retry_after_seconds(result: Any, *, cap: float = 30.0) -> float | None:
     object, capped so a hostile/huge value can't wedge the cycle. None when
     absent/unparseable (the caller then uses plain backoff)."""
     headers = getattr(result, "headers", None)
-    if not headers:
+    if not isinstance(headers, Mapping):
         return None
-    try:
-        raw = headers.get("Retry-After") or headers.get("retry-after")
-    except AttributeError:
-        return None
-    if raw is None:
-        return None
-    try:
-        secs = float(str(raw).strip())
-    except (TypeError, ValueError):
-        return None  # HTTP-date form: fall back to plain backoff
-    if secs < 0:
-        return None
-    return min(secs, cap)
+    return retry_after_seconds_from_headers(headers, cap=cap)
+
+
+_FALLBACK_WAIT = wait_exponential_jitter(initial=0.5, max=8.0)
+
+
+def _wait_retry_after_or_backoff(retry_state: RetryCallState) -> float:
+    """Honor a transient response's Retry-After, otherwise full-jitter backoff."""
+    outcome = retry_state.outcome
+    if outcome is not None and outcome.failed:
+        exc = outcome.exception()
+        if isinstance(exc, TransientHTTPStatusError) and exc.retry_after is not None:
+            return exc.retry_after
+    return float(_FALLBACK_WAIT(retry_state))
 
 
 # A per-match scrape: (match_url) -> rows. Raises on a hard failure (network/
@@ -228,6 +268,7 @@ async def _scrape_one_with_retry(
     semaphore: asyncio.Semaphore,
     *,
     max_attempts: int = MATCH_MAX_ATTEMPTS,
+    max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
 ) -> list[OddsSnapshotIn]:
     """Run one match's scrape under the semaphore, with tenacity retry whose
     BACKOFF SLEEP HAPPENS OUTSIDE THE SLOT (R2).
@@ -242,13 +283,15 @@ async def _scrape_one_with_retry(
     to the caller's ``gather(return_exceptions=True)`` as a single filtered gap.
     """
 
+    attempts = max(1, min(MATCH_MAX_ATTEMPTS, max_attempts))
+
     @retry(
         retry=(
             retry_if_exception(_is_transient_exception)
             | retry_if_result(_is_transient_status_result)
         ),
-        stop=stop_after_attempt(max_attempts),
-        wait=wait_exponential_jitter(initial=0.5, max=8.0),  # full jitter
+        stop=stop_after_attempt(attempts),
+        wait=_wait_retry_after_or_backoff,
         reraise=True,
     )
     async def _attempt() -> list[OddsSnapshotIn]:
@@ -256,7 +299,10 @@ async def _scrape_one_with_retry(
         async with semaphore:
             return await scrape(match_url)
 
-    return await _attempt()
+    result = await _attempt()
+    if len(result) > max_snapshots:
+        raise CycleResourceLimitError(f"one match exceeded snapshot ceiling ({max_snapshots})")
+    return result
 
 
 async def run_cycle(
@@ -268,6 +314,9 @@ async def run_cycle(
     prev_cycle_rows: int | None = None,
     completeness_floor: float = 0.8,
     require_market_coverage: bool = True,
+    max_match_urls: int = MAX_MATCH_URLS_PER_CYCLE,
+    max_snapshots_per_match: int = MAX_SNAPSHOTS_PER_MATCH,
+    max_snapshots_per_cycle: int = MAX_SNAPSHOTS_PER_CYCLE,
 ) -> CycleOutcome:
     """Fan out the per-match JSON scrape across the slate and gate completeness.
 
@@ -285,46 +334,91 @@ async def run_cycle(
     Any exception while evaluating the gate fails CLOSED (incomplete) — a gate
     that itself errors must never green-light a degraded slate.
     """
-    semaphore = asyncio.Semaphore(max(1, concurrency))
-    results = await asyncio.gather(
-        *(_scrape_one_with_retry(url, scrape, semaphore) for url in match_urls),
-        return_exceptions=True,
-    )
+    if isinstance(max_match_urls, bool) or max_match_urls < 1:
+        raise ValueError("max_match_urls must be >= 1")
+    if isinstance(max_snapshots_per_match, bool) or max_snapshots_per_match < 1:
+        raise ValueError("max_snapshots_per_match must be >= 1")
+    if isinstance(max_snapshots_per_cycle, bool) or max_snapshots_per_cycle < 1:
+        raise ValueError("max_snapshots_per_cycle must be >= 1")
+    matches_total = len(match_urls)
+    if matches_total > max_match_urls:
+        reason = f"listed match URL ceiling exceeded ({max_match_urls})"
+        logger.warning("oddsportal JSON cycle INCOMPLETE (fail-closed): %s", reason)
+        return CycleOutcome(
+            snapshots=[],
+            complete=False,
+            reason=reason,
+            matches_total=matches_total,
+        )
 
+    worker_count = max(1, min(concurrency, matches_total or 1))
+    semaphore = asyncio.Semaphore(worker_count)
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    for match_url in match_urls:
+        queue.put_nowait(match_url)
     snapshots: list[OddsSnapshotIn] = []
     matches_with_odds = 0
     transient = permanent = unknown = 0
-    for result in results:
-        if isinstance(result, BaseException):
-            kind = classify_curl_error(result)
-            if kind == "transient":
-                transient += 1
-            elif kind == "permanent":
-                permanent += 1
-            else:
-                unknown += 1
-                # An UNKNOWN failure mode is surfaced loudly (type only — never a
-                # URL/secret): it is neither a known-benign gap nor retried.
-                logger.warning(
-                    "oddsportal JSON match failed with UNCLASSIFIED error (%s) — "
-                    "treated as a gap; investigate if persistent",
-                    type(result).__name__,
+    resource_reason = ""
+
+    async def _worker() -> None:
+        nonlocal matches_with_odds, transient, permanent, unknown, resource_reason
+        while not resource_reason:
+            try:
+                match_url = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                result = await _scrape_one_with_retry(
+                    match_url,
+                    scrape,
+                    semaphore,
+                    max_snapshots=max_snapshots_per_match,
                 )
-            continue
-        if result:
+            except Exception as exc:
+                if isinstance(exc, CycleResourceLimitError):
+                    unknown += 1
+                    resource_reason = str(exc)
+                    continue
+                kind = classify_curl_error(exc)
+                if kind == "transient":
+                    transient += 1
+                elif kind == "permanent":
+                    permanent += 1
+                else:
+                    unknown += 1
+                    # An UNKNOWN failure mode is surfaced loudly (type only —
+                    # never a URL/secret).
+                    logger.warning(
+                        "oddsportal JSON match failed with UNCLASSIFIED error (%s) — "
+                        "treated as a gap; investigate if persistent",
+                        type(exc).__name__,
+                    )
+                continue
+            if resource_reason or not result:
+                continue
+            if len(snapshots) + len(result) > max_snapshots_per_cycle:
+                resource_reason = f"cycle snapshot ceiling exceeded ({max_snapshots_per_cycle})"
+                continue
             matches_with_odds += 1
             snapshots.extend(result)
 
+    await asyncio.gather(*(_worker() for _ in range(worker_count)))
+
     per_market = _count_per_market(snapshots)
-    complete, reason = _evaluate_completeness(
-        snapshots=snapshots,
-        per_market=per_market,
-        markets=markets,
-        prev_cycle_rows=prev_cycle_rows,
-        completeness_floor=completeness_floor,
-        require_market_coverage=require_market_coverage,
-        matches_total=len(match_urls),
-    )
+    if resource_reason:
+        complete, reason = False, resource_reason
+    else:
+        complete, reason = _evaluate_completeness(
+            snapshots=snapshots,
+            per_market=per_market,
+            markets=markets,
+            prev_cycle_rows=prev_cycle_rows,
+            completeness_floor=completeness_floor,
+            require_market_coverage=require_market_coverage,
+            matches_total=matches_total,
+            failure_total=transient + permanent + unknown,
+        )
     if not complete:
         logger.warning("oddsportal JSON cycle INCOMPLETE (fail-closed): %s", reason)
 
@@ -332,7 +426,7 @@ async def run_cycle(
         snapshots=snapshots,
         complete=complete,
         reason=reason,
-        matches_total=len(match_urls),
+        matches_total=matches_total,
         matches_with_odds=matches_with_odds,
         transient_failures=transient,
         permanent_failures=permanent,
@@ -371,6 +465,7 @@ def _evaluate_completeness(
     completeness_floor: float,
     require_market_coverage: bool,
     matches_total: int,
+    failure_total: int = 0,
 ) -> tuple[bool, str]:
     """R3 verdict (pure). Any raised exception is caught here and treated as
     INCOMPLETE (fail-closed) — a gate that errors must never green-light a
@@ -381,6 +476,10 @@ def _evaluate_completeness(
             # empty slate is the caller's separate "0 matches" signal).
             return True, ""
         rows = len(snapshots)
+        if failure_total > 0:
+            return False, f"{failure_total} listed match fetch(es) failed"
+        if rows == 0:
+            return False, f"0 rows from {matches_total} listed match(es)"
         # Row-collapse vs the previous healthy cycle (catches a silent partial).
         if prev_cycle_rows is not None and prev_cycle_rows > 0:
             floor = completeness_floor * prev_cycle_rows

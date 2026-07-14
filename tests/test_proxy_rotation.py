@@ -173,6 +173,7 @@ class _FakeAsyncSession:
 
     def __init__(self, **kwargs: Any) -> None:
         type(self).constructed.append(kwargs)
+        self.request_count = 0
 
     async def __aenter__(self) -> "_FakeAsyncSession":
         return self
@@ -183,8 +184,20 @@ class _FakeAsyncSession:
     async def get(self, *args: Any, **kwargs: Any) -> Any:
         if type(self).fail:
             raise ConnectionError("dead proxy")
-        # 200 page WITHOUT bootstrap tokens -> benign [] gap, transport-clean
-        return SimpleNamespace(status_code=200, text="no bootstrap tokens here")
+        self.request_count += 1
+        if self.request_count == 1:
+            # A schema-valid bootstrap followed by absent optional feeds is a
+            # benign [] gap. Missing bootstrap identity is intentionally a
+            # failover-worthy schema error, not a transport-clean success.
+            html = (
+                '<div id="react-event-header" '
+                "data='{"  # noqa: ISC003
+                '"eventData":{"id":"event-1","sportId":1,'
+                '"defaultBetId":1,"defaultScopeId":1}'
+                "}'></div>"
+            )
+            return SimpleNamespace(status_code=200, text=html)
+        return SimpleNamespace(status_code=404, text="")
 
 
 @pytest.fixture
@@ -201,18 +214,20 @@ async def test_betfair_sweep_capped_and_timeout_explicit(
     fake_session: type[_FakeAsyncSession],
 ) -> None:
     # Audit §5: "the Betfair sweep tries all 14 slots (betfair_exchange.py:325)
-    # with no cap" — with 10 dead proxies the sweep must stop at the cap (6)
-    # and every session must carry the explicit (connect, read) timeout.
+    # with no cap" — with 10 dead proxies the sweep must stop at the global
+    # three-total-attempt self-heal ceiling, and every session must carry the
+    # explicit (connect, read) timeout.
     registry = ProxyHealthRegistry()
     reader = BetfairExchangeReader(
         min_liquidity=0.0, proxy_pool=make_pool(10), proxy_health=registry
     )
     with pytest.raises(BetfairExchangeError):
         await reader._network_load("https://www.oddsportal.com/football/t/a-b/", "soccer")
-    assert len(fake_session.constructed) == 6  # PROXY_MAX_FAILOVER_BETFAIR default
+    assert len(fake_session.constructed) == 3  # global self-heal ceiling
     assert all(kw["timeout"] == (8.0, 25.0) for kw in fake_session.constructed)
     # every failed attempt was attributed to its pool index
-    assert all(registry._slots[i].failures == 1 for i in range(6))
+    assert all(registry._slots[i].failures == 1 for i in range(3))
+    assert all(registry._slots.get(i) is None for i in range(3, 10))
 
 
 async def test_betfair_sweep_respects_custom_cap(
@@ -239,7 +254,7 @@ async def test_betfair_sweep_skips_quarantined_slot(
         min_liquidity=0.0, proxy_pool=make_pool(3), proxy_health=registry
     )
     feeds = await reader._network_load("https://www.oddsportal.com/football/t/a-b/", "soccer")
-    assert feeds == []  # benign no-bootstrap gap via the FIRST healthy slot
+    assert feeds == []  # valid bootstrap; optional feeds absent on first healthy slot
     (kwargs,) = fake_session.constructed
     assert "h1" in kwargs["proxies"]["https"]  # slot 0 quarantined -> slot 1 used
     assert registry._slots[1].successes == 1

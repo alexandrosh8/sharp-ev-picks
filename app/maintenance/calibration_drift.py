@@ -127,7 +127,8 @@ async def load_calibration_periods(
 
     def _bucket(row: Row[tuple[datetime | None, Decimal, str]]) -> str:
         starts_at = row[0]
-        assert starts_at is not None  # filtered by Event.starts_at.is_not(None)
+        if starts_at is None:  # defensive: SQL predicate is the primary invariant
+            raise RuntimeError("calibration row has no kickoff")
         return f"{starts_at.year:04d}-{starts_at.month:02d}"
 
     periods: list[tuple[str, list[CalibrationObservation]]] = []

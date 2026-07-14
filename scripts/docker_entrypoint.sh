@@ -20,7 +20,7 @@ set -euo pipefail
 VENV="/srv/betting-ai/.venv"
 
 attempts=0
-max_attempts=10
+max_attempts=3
 until "$VENV/bin/alembic" upgrade head; do
   attempts=$((attempts + 1))
   if [ "$attempts" -ge "$max_attempts" ]; then
@@ -32,4 +32,7 @@ until "$VENV/bin/alembic" upgrade head; do
 done
 
 echo "[entrypoint] migrations at head — starting uvicorn"
-exec "$VENV/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+exec "$VENV/bin/python" -m uvicorn app.main:app \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --no-server-header

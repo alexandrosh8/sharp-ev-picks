@@ -46,6 +46,13 @@ from decimal import Decimal
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.identity import (
+    BOOKMAKER_MAX_BYTES,
+    MARKET_DETAIL_MAX_BYTES,
+    SELECTION_MAX_BYTES,
+    SPORT_KEY_MAX_BYTES,
+    require_bounded_identity,
+)
 from app.storage.models import CandidateEvaluation
 
 #: Known reason slugs the value pipeline distinguishes (documentation only — the
@@ -92,6 +99,39 @@ class CandidateEvaluationInput:
     best_odds: Decimal | None = None
     edge: Decimal | None = None
     fair_probability: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        require_bounded_identity(
+            self.sport_key,
+            maximum_bytes=SPORT_KEY_MAX_BYTES,
+            field="candidate sport_key",
+        )
+        require_bounded_identity(
+            self.market,
+            maximum_bytes=64,
+            field="candidate market",
+        )
+        require_bounded_identity(
+            self.market_detail,
+            maximum_bytes=MARKET_DETAIL_MAX_BYTES,
+            field="candidate market_detail",
+            allow_empty=True,
+        )
+        require_bounded_identity(
+            self.selection,
+            maximum_bytes=SELECTION_MAX_BYTES,
+            field="candidate selection",
+        )
+        for field, value in (
+            ("candidate anchor_book", self.anchor_book),
+            ("candidate best_book", self.best_book),
+        ):
+            if value is not None:
+                require_bounded_identity(
+                    value,
+                    maximum_bytes=BOOKMAKER_MAX_BYTES,
+                    field=field,
+                )
 
 
 async def record_candidate_evaluation(

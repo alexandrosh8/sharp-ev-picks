@@ -11,10 +11,11 @@ SAFETY / SCOPE (project HARD RULES):
     reads. No login, no credentials, no bet placement, no anti-bot defeat
     beyond the TLS impersonation the Playwright path already performs via UA /
     locale spoofing.
-  * ADDITIVE. Nothing here is wired into `app/scheduler.py`. The proven
-    Playwright path in `app/ingestion/oddsportal.py` is untouched. A real
-    cut-over is a later, separate change (and must `uv add curl_cffi
-    cryptography`; the spike installed them via `uv pip` only).
+  * SELECTABLE. `app/scheduler.py` passes `ODDSPORTAL_USE_JSON_FEED` into
+    `OddsPortalLoader`: false keeps the Playwright/OddsHarvester odds path;
+    true uses this module for per-match odds while Playwright still supplies
+    listings and finished scores. There is no silent DOM-odds fallback.
+    `curl_cffi` and `cryptography` are locked runtime dependencies.
 
 CANONICAL VOCABULARY REUSE: market->Market mapping, the odds-label->selection
 names, line parsing, decimal-odds parsing, the in-play URL-fork collapse and
@@ -44,19 +45,20 @@ live curl_cffi-vs-DB speed-pass 2026-06-23):
 from __future__ import annotations
 
 import base64
-import gzip
 import hashlib
 import json
 import logging
 import re
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any, Protocol
 from urllib.parse import unquote
 
 from app.ingestion.base import EventDirectory, EventTeams
+from app.ingestion.http_safety import get_bounded
 from app.ingestion.oddsportal import (
     _carries_et_marker,
     _coerce_finished,
@@ -69,7 +71,9 @@ from app.ingestion.oddsportal import (
     normalize_match_link,
 )
 from app.ingestion.oddsportal_json_session import (
+    MAX_SNAPSHOTS_PER_MATCH,
     TRANSIENT_HTTP_STATUSES,
+    PermanentHTTPStatusError,
     TransientHTTPStatusError,
 )
 from app.schemas.odds import OddsSnapshotIn
@@ -84,6 +88,15 @@ class FeedOffWindow(ValueError):
     """
 
 
+class FeedEnvelopeError(ValueError):
+    """A HTTP-200 body is not even the feed's outer base64 envelope.
+
+    This is a challenge/interstitial or response-schema failure, not a benign
+    off-window match. Callers must fail the match/proxy rather than healing the
+    session and silently omitting its odds.
+    """
+
+
 class FeedDecryptError(ValueError):
     """A WELL-FORMED ``ct:iv`` envelope failed to decrypt / parse. This is the
     bundle-rotation signal: the server returned a 200 odds body but the static
@@ -91,6 +104,10 @@ class FeedDecryptError(ValueError):
     constants. The caller logs this LOUDLY (re-scrape the app.js constants),
     distinct from the benign off-window case. Fail-closed: no rows, never a
     silently-wrong price."""
+
+
+class FeedResourceLimitError(FeedEnvelopeError):
+    """The encrypted or decrypted feed crossed a fixed memory ceiling."""
 
 
 # Browser-TLS fingerprint for curl_cffi. Same INTENT as the Playwright path's
@@ -104,6 +121,10 @@ _FEED_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
     "Accept": "application/json,text/plain,*/*",
 }
+ODDSPORTAL_ALLOWED_HOSTS: frozenset[str] = frozenset({"www.oddsportal.com"})
+MAX_MATCH_HTML_BYTES = 8 * 1024 * 1024
+MAX_ENCRYPTED_FEED_BYTES = 4 * 1024 * 1024
+MAX_DECRYPTED_FEED_BYTES = 16 * 1024 * 1024
 
 # --- Static decrypt constants (compiled into OddsPortal's public JS bundle) ---
 # These rotate only on a site bundle redeploy; a real migration re-scrapes them
@@ -177,6 +198,20 @@ def _verify_key_fingerprint() -> None:
         )
 
 
+def _bounded_gzip_decompress(data: bytes, *, max_bytes: int) -> bytes:
+    """Inflate one gzip member without ever materializing more than the cap."""
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    output = inflater.decompress(data, max_bytes + 1)
+    if len(output) > max_bytes or inflater.unconsumed_tail:
+        raise FeedResourceLimitError("decrypted gzip feed exceeded byte ceiling")
+    remaining = max_bytes + 1 - len(output)
+    if remaining > 0:
+        output += inflater.flush(remaining)
+    if len(output) > max_bytes or not inflater.eof or inflater.unused_data:
+        raise FeedResourceLimitError("decrypted gzip feed exceeded byte ceiling")
+    return output
+
+
 def decrypt_feed_body(body: str) -> dict[str, Any]:
     """Decrypt one OddsPortal `.dat` feed body to its JSON payload (pure Python).
 
@@ -185,12 +220,10 @@ def decrypt_feed_body(body: str) -> dict[str, Any]:
       ct = atob(ct_b64); AES-256-CBC decrypt; strip PKCS#7; optional gunzip;
       UTF-8 -> JSON.parse.
 
-    Raises `FeedOffWindow` on the short "off-window" alternate body (no ``:``
-    separator) so the caller treats it as a no-odds match, like a Playwright
-    scrape gap. Raises `FeedDecryptError` when a WELL-FORMED ``ct:iv`` envelope
-    fails to decrypt/parse — the bundle-rotation signal the caller logs loudly.
-    Both subclass ValueError, so existing ``except ValueError`` callers still
-    treat every failure as a gap.
+    Raises `FeedOffWindow` only for a syntactically-valid outer base64 envelope
+    containing the short off-window form (no ``:`` separator). Raw HTML or
+    otherwise invalid outer data raises `FeedEnvelopeError`; a WELL-FORMED
+    ``ct:iv`` envelope that fails to decrypt/parse raises `FeedDecryptError`.
     """
     # Imported lazily so the base (curl_cffi/cryptography-free) install and CI
     # profile import this module without the optional deps present.
@@ -202,11 +235,15 @@ def decrypt_feed_body(body: str) -> dict[str, Any]:
     # yield garbage plaintext). Cheap; the derive is pure CPU.
     _verify_key_fingerprint()
 
+    if len(body) > MAX_ENCRYPTED_FEED_BYTES:
+        raise FeedResourceLimitError("encrypted feed exceeded byte ceiling")
+
     try:
-        outer = base64.b64decode(body).decode("utf-8")
+        outer = base64.b64decode(body.strip(), validate=True).decode("utf-8")
     except (ValueError, UnicodeDecodeError) as exc:
-        # Not even base64 text -> the short off-window envelope. Benign gap.
-        raise FeedOffWindow(f"feed body is not base64 text: {type(exc).__name__}") from exc
+        raise FeedEnvelopeError(
+            f"feed body is not a valid base64 envelope ({type(exc).__name__})"
+        ) from exc
     if ":" not in outer:
         # Short single-layer envelope seen when a match left its post-finish
         # grace window — no odds to read. Treat as empty, like a scrape gap.
@@ -223,10 +260,19 @@ def decrypt_feed_body(body: str) -> dict[str, Any]:
         unpadder = PKCS7(128).unpadder()
         plaintext = unpadder.update(padded) + unpadder.finalize()
         # The plaintext is gzip-compressed in some envelopes (magic 0x1f 0x8b).
+        # Inflate incrementally with a hard ceiling: gzip.decompress() would
+        # allow a tiny encrypted gzip bomb to allocate until container OOM.
         if plaintext[:2] == b"\x1f\x8b":
-            plaintext = gzip.decompress(plaintext)
+            plaintext = _bounded_gzip_decompress(
+                plaintext,
+                max_bytes=MAX_DECRYPTED_FEED_BYTES,
+            )
+        elif len(plaintext) > MAX_DECRYPTED_FEED_BYTES:
+            raise FeedResourceLimitError("decrypted feed exceeded byte ceiling")
         payload = json.loads(plaintext.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, OSError) as exc:
+    except FeedResourceLimitError:
+        raise
+    except (ValueError, UnicodeDecodeError, OSError, zlib.error) as exc:
         raise FeedDecryptError(
             f"well-formed feed envelope failed to decrypt against "
             f"{_DECRYPT_BUNDLE_VERSION} ({type(exc).__name__}) — the public "
@@ -521,31 +567,31 @@ def _outcome_at(outcomes: Any, index: str) -> Any:
 _GARBLE_TIME_WARNED = False  # process-lifetime one-shot for the garbled-time warning
 
 
-def _feed_captured_at(payload: Mapping[str, Any], now: datetime) -> datetime:
+def _feed_captured_at(payload: Mapping[str, Any], now: datetime) -> datetime | None:
     """The feed's provider observation time (``d.time-base``, epoch seconds, UTC)
     as the snapshot `captured_at` — the JSON analog of the Playwright path's
-    ``scraped_date`` (oddsportal._convert_match). Falls back to ``now`` when the
-    feed omits/garbles it, exactly like the Playwright ``_parse_ts(...) or now``.
-    Always tz-aware UTC (a naive datetime is a bug)."""
-    raw = (payload.get("d") or {}).get("time-base")
+    ``scraped_date`` (oddsportal._convert_match). A genuinely omitted timestamp
+    uses our observation clock; an explicitly malformed value is rejected so a
+    stale price can never be relabelled fresh. Always tz-aware UTC."""
+    data = payload.get("d")
+    if not isinstance(data, Mapping):
+        return None
+    raw = data.get("time-base")
     if raw is None:
         return now
     try:
         return datetime.fromtimestamp(float(raw), tz=UTC)
     except (ValueError, OverflowError, OSError, TypeError) as exc:
-        # GARBLED time-base (not the documented raw-is-None omission): substituting
-        # `now` lets a stale row read as fresh in the freshness gates, so surface it
-        # — once per process to avoid flooding the hot scrape path on a systemic
-        # garble. captured_at value + every gating threshold are unchanged.
+        # GARBLED time-base (not the documented omission): substituting `now`
+        # would let a stale row read as fresh, so fail closed for this feed.
         global _GARBLE_TIME_WARNED
         if not _GARBLE_TIME_WARNED:
             _GARBLE_TIME_WARNED = True
             logger.warning(
-                "oddsportal feed time-base garbled (%s: %s); using now as captured_at",
+                "oddsportal feed time-base garbled (%s); dropping feed rows",
                 type(exc).__name__,
-                repr(raw)[:40],
             )
-        return now
+        return None
 
 
 def parse_feed_payload(
@@ -566,6 +612,7 @@ def parse_feed_payload(
     finished: bool | None = None,
     default_bet_id: int = 0,
     default_scope_id: int = 0,
+    max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
 ) -> list[OddsSnapshotIn]:
     """Adapt a decrypted feed payload into `OddsSnapshotIn` rows.
 
@@ -605,11 +652,19 @@ def parse_feed_payload(
         ),
     )
 
-    back = (((payload.get("d") or {}).get("oddsdata") or {}).get("back")) or {}
+    data = payload.get("d")
+    if not isinstance(data, Mapping):
+        return []
+    oddsdata = data.get("oddsdata")
+    if not isinstance(oddsdata, Mapping):
+        return []
+    back = oddsdata.get("back") or {}
     if not isinstance(back, Mapping):
         return []
 
     captured_at = _feed_captured_at(payload, now)
+    if captured_at is None or captured_at > now + timedelta(minutes=5):
+        return []
     snapshots: list[OddsSnapshotIn] = []
     for market_key in markets:
         resolved = _resolve_feed_market(
@@ -635,6 +690,7 @@ def parse_feed_payload(
                     event_id=event_id,
                     captured_at=captured_at,
                     now=now,
+                    max_snapshots=max_snapshots,
                 )
             continue
         # WILDCARD family: emit EVERY half-line present in the betType's feed body.
@@ -661,6 +717,7 @@ def parse_feed_payload(
                 event_id=event_id,
                 captured_at=captured_at,
                 now=now,
+                max_snapshots=max_snapshots,
             )
     return snapshots
 
@@ -678,6 +735,7 @@ def _emit_block(
     event_id: str,
     captured_at: datetime,
     now: datetime,
+    max_snapshots: int,
 ) -> None:
     """Append one (market, line)'s rows from a decrypted ``back[...]`` block.
 
@@ -704,6 +762,8 @@ def _emit_block(
             odds = _parse_odds(_outcome_at(outcomes, index))
             if odds is None:
                 continue
+            if len(snapshots) >= max_snapshots:
+                raise FeedResourceLimitError(f"match exceeded snapshot ceiling ({max_snapshots})")
             snapshots.append(
                 OddsSnapshotIn(
                     event_id=event_id,
@@ -1028,29 +1088,52 @@ async def fetch_match_feed(
     for feed_url, market_keys in url_to_markets.items():
         label = ",".join(market_keys)
         try:
-            resp = await session.get(
+            bounded = await get_bounded(
+                session,
                 feed_url,
+                allowed_hosts=ODDSPORTAL_ALLOWED_HOSTS,
+                max_bytes=MAX_ENCRYPTED_FEED_BYTES,
                 headers=headers,
                 impersonate=_IMPERSONATE,
                 params={"geo": geo, "lang": lang},
             )
-        except Exception as exc:  # network / TLS / timeout -> scrape gap
+        except Exception as exc:  # network / TLS / timeout -> typed cycle failure
             logger.warning(
-                "oddsportal feed GET failed for market(s) %s (%s) — treating as gap",
+                "oddsportal feed GET failed for market(s) %s (%s)",
                 label,
                 type(exc).__name__,
             )
-            continue
+            raise
+        resp = bounded.response
         if getattr(resp, "status_code", 0) != 200:
             status = getattr(resp, "status_code", 0)
+            if status in {204, 404, 410}:
+                # A configured optional market can legitimately be absent for
+                # this fixture. Preserve rows already parsed from sibling feed
+                # URLs; cycle-level market coverage still degrades the poll if
+                # the market disappears across the whole listed slate.
+                logger.info(
+                    "oddsportal feed absent for market(s) %s (HTTP %d)",
+                    label,
+                    status,
+                )
+                continue
             if status in TRANSIENT_HTTP_STATUSES:
                 # R2 (audit 2026-07-10): see the match-page branch — transient
                 # statuses raise so the whole-match tenacity retry fires.
-                raise TransientHTTPStatusError(int(status))
-            logger.info("oddsportal feed for market(s) %s returned status %s — gap", label, status)
-            continue
+                raise TransientHTTPStatusError(int(status), getattr(resp, "headers", None))
+            raise PermanentHTTPStatusError(int(status))
         try:
-            payload = decrypt_feed_body(resp.text)
+            try:
+                encrypted_body = bounded.body.decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise FeedEnvelopeError("feed body was not ASCII base64") from exc
+            payload = decrypt_feed_body(encrypted_body)
+        except FeedEnvelopeError:
+            # HTTP-200 HTML/challenge or schema drift. Propagate so the cycle
+            # retries/quarantines this proxy; it is not a legitimate no-odds
+            # window and must not be counted as transport success.
+            raise
         except FeedDecryptError as exc:
             # A 200 odds body that WON'T decrypt = the bundle likely rotated its
             # static AES constants. Loud so ops re-scrapes them (version guard).
@@ -1059,7 +1142,7 @@ async def fetch_match_feed(
                 label,
                 exc,
             )
-            continue
+            raise
         except RuntimeError as exc:
             # The version-guard fail-closed signal (_verify_key_fingerprint): the
             # static KDF constants DRIFTED — a half-applied bundle rotation or an
@@ -1073,7 +1156,7 @@ async def fetch_match_feed(
                 label,
                 exc,
             )
-            continue
+            raise
         except ValueError as exc:  # off-window / empty match -> benign gap
             logger.info(
                 "oddsportal feed decrypt skipped for market(s) %s (%s)",
@@ -1081,6 +1164,11 @@ async def fetch_match_feed(
                 type(exc).__name__,
             )
             continue
+        remaining_snapshots = MAX_SNAPSHOTS_PER_MATCH - len(snapshots)
+        if remaining_snapshots <= 0:
+            raise FeedResourceLimitError(
+                f"match exceeded snapshot ceiling ({MAX_SNAPSHOTS_PER_MATCH})"
+            )
         snapshots.extend(
             parse_feed_payload(
                 payload,
@@ -1099,6 +1187,7 @@ async def fetch_match_feed(
                 finished=token.finished,
                 default_bet_id=token.default_bet_id,
                 default_scope_id=token.default_scope_id,
+                max_snapshots=remaining_snapshots,
             )
         )
     return snapshots
@@ -1140,35 +1229,41 @@ async def scrape_match_odds(
     Only ever calls ``session.get`` — structurally GET-only (READ-ONLY safety).
     """
     try:
-        resp = await session.get(match_url, impersonate=_IMPERSONATE)
-    except Exception as exc:  # network / TLS / timeout -> scrape gap
+        bounded = await get_bounded(
+            session,
+            match_url,
+            allowed_hosts=ODDSPORTAL_ALLOWED_HOSTS,
+            max_bytes=MAX_MATCH_HTML_BYTES,
+            impersonate=_IMPERSONATE,
+        )
+    except Exception as exc:  # network / TLS / timeout -> typed cycle failure
         # Security rule: NEVER log URLs from HTTP-client error paths — the
         # exception type is the whole diagnostic (uniform with the module's
         # other logger calls and the non-200 branch below).
         logger.warning(
-            "oddsportal match-page GET failed (%s) — treating as gap",
+            "oddsportal match-page GET failed (%s)",
             type(exc).__name__,
         )
-        return []
+        raise
+    resp = bounded.response
     if getattr(resp, "status_code", 0) != 200:
         status = getattr(resp, "status_code", 0)
         if status in TRANSIENT_HTTP_STATUSES:
             # R2 (audit 2026-07-10): a transient 429/5xx must reach tenacity as
             # an exception so the per-match retry actually fires — returning a
             # gap here made the documented retry_if_result predicate dead code.
-            raise TransientHTTPStatusError(int(status))
-        logger.info("oddsportal match page returned status %s — gap", status)
-        return []
-    html = resp.text
+            raise TransientHTTPStatusError(int(status), getattr(resp, "headers", None))
+        raise PermanentHTTPStatusError(int(status))
+    html = bounded.body.decode("utf-8", errors="replace")
     try:
         token = extract_bootstrap_tokens(html, markets=markets)
-    except ValueError as exc:  # bootstrap header absent / unparseable -> gap
+    except ValueError as exc:  # listed page returned an unidentifiable/challenge body
         # Type-only, never the URL (see the GET-failure branch above).
         logger.info(
             "oddsportal bootstrap parse skipped (%s)",
             type(exc).__name__,
         )
-        return []
+        raise RuntimeError("oddsportal bootstrap identity payload missing") from exc
     # Resolve numeric-id -> canonical book NAME (cached on the shared registry).
     # Read the bundle URL from THIS page's HTML to avoid a second page GET; the
     # bundle itself is the only extra GET, and it's cached across the cycle.

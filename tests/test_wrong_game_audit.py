@@ -76,6 +76,35 @@ def test_women_vs_men_anchor_is_flagged() -> None:
     assert a.severity == "ERROR"
 
 
+def test_curated_wnba_w_suffix_difference_passes() -> None:
+    # The matcher now admits only this exact, bilaterally roster-confirmed WNBA
+    # provider difference; the safety-net audit must not false-alarm on it.
+    assert (
+        verify_same_game(
+            "Las Vegas Aces",
+            "New York Liberty",
+            "Las Vegas Aces W",
+            "New York Liberty W",
+            KO,
+            KO,
+        )
+        is None
+    )
+
+
+def test_wnba_marker_exception_does_not_cover_unknown_opponent() -> None:
+    a = verify_same_game(
+        "Las Vegas Aces",
+        "Los Angeles Lakers",
+        "Las Vegas Aces W",
+        "Los Angeles Lakers",
+        KO,
+        KO,
+    )
+    assert a is not None
+    assert a.code == "wrong_game_anchor"
+
+
 def test_unrelated_teams_anchor_is_flagged() -> None:
     # WRONG GAME: a genuine merge of two different fixtures (unrelated names).
     a = verify_same_game("Alpha", "Beta", "Gamma", "Delta", KO, KO)

@@ -4,27 +4,101 @@ Uses a savepoint-style rollback: each test runs in a transaction that is
 rolled back, so the warehouse is never mutated by the suite.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.models import Event, ModelVersion, OddsSnapshot, Pick, Sport
 from app.storage.repositories import (
+    PickRepriced,
+    _latest_available_games_statement,
     latest_available_games_with_events,
     latest_picks_with_events,
     persist_pick,
     refresh_event_kickoffs,
+    update_pick_stake,
 )
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
+DB_URL = TEST_DATABASE_URL
+
+
+def test_available_games_uses_bounded_lateral_snapshot_queries() -> None:
+    statement = _latest_available_games_statement(
+        limit=20,
+        sport=None,
+        as_of=datetime(2026, 7, 14, 0, 0, tzinfo=UTC),
+    )
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    candidate_sql, aggregate_sql = sql.split("LEFT OUTER JOIN LATERAL", maxsplit=1)
+
+    assert "UNION ALL" in candidate_sql
+    assert "available_game_recent_odds" in candidate_sql
+    assert "JOIN LATERAL" in candidate_sql
+    assert "LIMIT 1" in candidate_sql
+    assert "LIMIT 20" in candidate_sql
+    assert "EXISTS" not in candidate_sql
+    assert "available_game_odds" in aggregate_sql
+    assert "CAST(odds_snapshots.market AS TEXT)" in aggregate_sql
+    assert "CAST(odds_snapshots.bookmaker AS TEXT)" in aggregate_sql
+    assert "odds_snapshots.event_id = available_game_candidates.event_pk" in aggregate_sql
+    assert "GROUP BY odds_snapshots.event_id" not in aggregate_sql
+
+
+async def test_available_games_restores_jit_after_first_array_codec_introspection() -> None:
+    engine = create_async_engine(
+        DB_URL,
+        poolclass=NullPool,
+        connect_args={"server_settings": {"jit": "on"}},
+    )
+    try:
+        try:
+            async with engine.connect() as probe:
+                await probe.execute(sa.text("SELECT 1"))
+        except Exception:
+            pytest.skip("compose Postgres not reachable on :5433")
+
+        # Keep one physical connection across the transaction boundary. A fresh
+        # asyncpg connection has no cached result codecs, so the first array_agg
+        # execution exercises any JIT-disabled type introspection it requires.
+        async with (
+            engine.connect() as connection,
+            AsyncSession(bind=connection, expire_on_commit=False) as session,
+        ):
+            assert await session.scalar(sa.text("SHOW jit")) == "on"
+            await latest_available_games_with_events(
+                session,
+                limit=1,
+                sport="soccer",
+                now=datetime(2026, 6, 20, 12, 0, tzinfo=UTC),
+            )
+            await session.commit()
+            assert await session.scalar(sa.text("SHOW jit")) == "on"
+
+        # A subsequent fresh DB session must inherit the configured server
+        # setting rather than leaked state from the introspection transaction.
+        async with (
+            engine.connect() as connection,
+            AsyncSession(bind=connection, expire_on_commit=False) as session,
+        ):
+            assert await session.scalar(sa.text("SHOW jit")) == "on"
+    finally:
+        await engine.dispose()
 
 
 def make_pick(
@@ -34,6 +108,9 @@ def make_pick(
     edge: float = 0.05,
     league: str = "test-league-persist",
     mint_devig_fell_back: bool | None = None,
+    market_detail: str | None = None,
+    stake: float = 0.02,
+    bookmaker: str = "testbook",
 ) -> PickOut:
     return PickOut(
         pick_id="p-1",
@@ -42,17 +119,23 @@ def make_pick(
         event="Alpha FC vs Beta United",
         event_id=event_id,
         market=Market.H2H,
+        market_detail=market_detail,
         selection="Alpha FC",
-        bookmaker="testbook",
+        bookmaker=bookmaker,
         decimal_odds=decimal_odds,
         model_probability=0.55,
         fair_probability=0.50,
         edge=edge,
         ev=0.155,
         confidence=0.70,
-        recommended_stake_fraction=0.02,
-        recommended_stake_amount=Decimal("20.00"),
-        stake_breakdown=StakeBreakdownOut(raw_kelly=0.1, fractional=0.025, capped=True, final=0.02),
+        recommended_stake_fraction=stake,
+        recommended_stake_amount=Decimal(str(stake * 1000)),
+        stake_breakdown=StakeBreakdownOut(
+            raw_kelly=0.1,
+            fractional=0.025,
+            capped=stake < 0.025,
+            final=stake,
+        ),
         odds_age_seconds=30.0,
         liquidity=None,
         reason_summary="persistence test",
@@ -114,6 +197,41 @@ async def committing_session():  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
+async def test_long_provider_identity_persists_end_to_end(session) -> None:  # type: ignore[no-untyped-def]
+    sport = "s" * 100
+    league = "l" * 200
+    home = "H" * 180
+    away = "A" * 180
+    event_ref = "e" * 200
+    bookmaker = "b" * 128
+    pick = make_pick(
+        event_id=event_ref,
+        league=league,
+        bookmaker=bookmaker,
+    ).model_copy(
+        update={
+            "sport": sport,
+            "event": f"{home} vs {away}",
+            "selection": home,
+        }
+    )
+    teams = EventTeams(
+        home=home,
+        away=away,
+        league=league,
+        country="c" * 100,
+        starts_at=datetime(2026, 7, 15, 18, 0, tzinfo=UTC),
+    )
+
+    assert await persist_pick(session, pick, teams, "value", "wide-identity-v1") == "inserted"
+    stored = await session.scalar(select(Pick).where(Pick.bookmaker == bookmaker))
+    assert stored is not None
+    assert stored.selection == home
+    event = await session.get(Event, stored.event_id)
+    assert event is not None
+    assert event.external_ref == event_ref
+
+
 async def test_persist_pick_inserts_then_dedupes(session) -> None:  # type: ignore[no-untyped-def]
     teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
 
@@ -132,6 +250,192 @@ async def test_persist_pick_inserts_then_dedupes(session) -> None:  # type: igno
         select(func.count()).select_from(Pick).where(Pick.bookmaker == "testbook")
     )
     assert count2 == 1
+
+
+async def test_pick_identity_keeps_distinct_market_details(session) -> None:  # type: ignore[no-untyped-def]
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    event_ref = "evt-line-qualified-picks"
+
+    first = await persist_pick(
+        session,
+        make_pick(event_ref, market_detail="totals_2_5"),
+        teams,
+        "value",
+        "line-key-v1",
+    )
+    second = await persist_pick(
+        session,
+        make_pick(event_ref, market_detail="totals_3_5"),
+        teams,
+        "value",
+        "line-key-v1",
+    )
+    assert first == "inserted"
+    assert second == "inserted"
+
+    rows = (
+        (await session.execute(select(Pick).where(Pick.reason_summary == "persistence test")))
+        .scalars()
+        .all()
+    )
+    ours = [row for row in rows if row.market_detail in {"totals_2_5", "totals_3_5"}]
+    assert {row.market_detail for row in ours} == {"totals_2_5", "totals_3_5"}
+
+
+async def test_event_ref_cannot_cross_sport_boundary(session) -> None:  # type: ignore[no-untyped-def]
+    event_ref = "evt-cross-sport-ref"
+    soccer_teams = EventTeams(home="Alpha FC", away="Beta United", league="cross-sport")
+    assert (
+        await persist_pick(
+            session,
+            make_pick(event_ref, league="cross-sport"),
+            soccer_teams,
+            "value",
+            "cross-sport-v1",
+        )
+        == "inserted"
+    )
+
+    basketball = make_pick(event_ref, league="cross-sport").model_copy(
+        update={"sport": "basketball"}
+    )
+    basketball_teams = EventTeams(
+        home="Alpha Hoops",
+        away="Beta Hoops",
+        league="cross-sport",
+    )
+    with pytest.raises(ValueError, match="another sport"):
+        await persist_pick(
+            session,
+            basketball,
+            basketball_teams,
+            "value",
+            "cross-sport-v1",
+        )
+
+
+async def test_premium_price_move_updates_row_and_returns_previous_total(session) -> None:  # type: ignore[no-untyped-def]
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    event_ref = "evt-repriced-pick"
+    original = make_pick(event_ref, decimal_odds=2.10, stake=0.02)
+    assert await persist_pick(session, original, teams, "value", "reprice-v1") == "inserted"
+
+    row = await session.scalar(
+        select(Pick).where(Pick.reason_summary == "persistence test").order_by(Pick.id.desc())
+    )
+    assert row is not None
+    row.closing_odds = Decimal("2.0000")
+    row.clv_log = Decimal("0.010000")
+    row.revalidated_at = datetime.now(tz=UTC)
+    await session.flush()
+
+    moved = make_pick(event_ref, decimal_odds=2.40, edge=0.08, stake=0.03).model_copy(
+        update={
+            "steam_tripped": False,
+            "steam_reasons": "soft_steamed_away",
+            "steam_closed_fraction": 0.11,
+            "steam_anchor_age_seconds": 42.0,
+        }
+    )
+    outcome = await persist_pick(session, moved, teams, "value", "reprice-v1")
+    assert isinstance(outcome, PickRepriced)
+    assert outcome.previous_stake_fraction == pytest.approx(0.02)
+    assert row.decimal_odds == Decimal("2.4000")
+    assert row.edge == Decimal("0.080000")
+    assert row.recommended_stake_fraction == Decimal("0.030000")
+    assert row.closing_odds is None
+    assert row.clv_log is None
+    assert row.revalidated_at is None
+    assert row.steam_tripped is False
+    assert row.steam_reasons == "soft_steamed_away"
+    assert row.steam_closed_fraction == Decimal("0.110000")
+    assert row.steam_anchor_age_seconds == Decimal("42.000000")
+
+    # Repricing preserves the initial 20 @ 2.10 and adds only the cap-granted
+    # 10 @ 2.40. The mutable latest-alert fields remain 30 @ 2.40.
+    assert await update_pick_stake(
+        session,
+        moved,
+        teams,
+        "value",
+        "reprice-v1",
+        settlement_basis_increment_amount=Decimal("10.00"),
+    )
+    assert row.settlement_stake_amount == Decimal("30.00")
+    assert row.settlement_raw_odds_stake == Decimal("66.000000")
+    assert row.settlement_effective_odds_stake == Decimal("66.000000")
+    assert row.settlement_basis_bookmaker == "testbook"
+
+
+async def test_premium_venue_move_at_same_price_updates_row(session) -> None:  # type: ignore[no-untyped-def]
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    event_ref = "evt-repriced-venue"
+    original = make_pick(event_ref, decimal_odds=2.10, stake=0.02)
+    assert await persist_pick(session, original, teams, "value", "venue-v1") == "inserted"
+
+    moved = make_pick(
+        event_ref,
+        decimal_odds=2.10,
+        edge=0.05,
+        stake=0.02,
+        bookmaker="replacement-book",
+    )
+    outcome = await persist_pick(session, moved, teams, "value", "venue-v1")
+
+    assert isinstance(outcome, PickRepriced)
+    assert outcome.previous_stake_fraction == pytest.approx(0.02)
+    row = await session.scalar(
+        select(Pick).join(Event, Pick.event_id == Event.id).where(Event.external_ref == event_ref)
+    )
+    assert row is not None
+    assert row.bookmaker == "replacement-book"
+    assert row.decimal_odds == Decimal("2.1000")
+
+
+async def test_update_pick_stake_persists_daily_exposure_delta(session) -> None:  # type: ignore[no-untyped-def]
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    event_ref = "evt-durable-exposure"
+    pick = make_pick(event_ref)
+    assert await persist_pick(session, pick, teams, "value", "exposure-v1") == "inserted"
+
+    first_day = date(2026, 7, 13)
+    assert await update_pick_stake(
+        session,
+        pick,
+        teams,
+        "value",
+        "exposure-v1",
+        exposure_reserved_on=first_day,
+        exposure_reserved_delta=0.01,
+    )
+    assert await update_pick_stake(
+        session,
+        pick,
+        teams,
+        "value",
+        "exposure-v1",
+        exposure_reserved_on=first_day,
+        exposure_reserved_delta=0.005,
+    )
+    row = await session.scalar(
+        select(Pick).where(Pick.reason_summary == "persistence test").order_by(Pick.id.desc())
+    )
+    assert row is not None
+    assert row.exposure_reserved_on == first_day
+    assert row.exposure_reserved_fraction == Decimal("0.015000")
+
+    next_day = first_day + timedelta(days=1)
+    assert await update_pick_stake(
+        session,
+        pick,
+        teams,
+        "value",
+        "exposure-v1",
+        exposure_reserved_on=next_day,
+        exposure_reserved_delta=0.004,
+    )
+    assert row.exposure_reserved_on == next_day
+    assert row.exposure_reserved_fraction == Decimal("0.004000")
 
 
 async def test_persist_pick_cap_denied_row_returns_duplicate_denied(session) -> None:  # type: ignore[no-untyped-def]
@@ -789,6 +1093,115 @@ async def test_available_games_fallback_reads_current_warehouse_events(session) 
     assert row["updated_at"] == (captured + timedelta(seconds=20)).isoformat()
 
 
+async def test_available_games_preserves_scheduled_and_tbd_snapshot_windows(
+    session: AsyncSession,
+) -> None:
+    now = datetime.now(tz=UTC)
+    old = now - timedelta(days=2)
+    recent = now - timedelta(minutes=5)
+    league = "test-league-games-snapshot-window"
+
+    async def _seed_event(ref: str, kickoff: datetime | None) -> Event:
+        teams = EventTeams(
+            home=f"{ref} Home",
+            away=f"{ref} Away",
+            league=league,
+            starts_at=kickoff,
+        )
+        await persist_pick(
+            session,
+            make_pick(ref, league=league, bookmaker=f"pick-{ref}"),
+            teams,
+            "value-sharp-vs-soft",
+            "t-games-window",
+        )
+        event = await session.scalar(select(Event).where(Event.external_ref == ref))
+        assert event is not None
+        return event
+
+    scheduled = await _seed_event("evt-games-window-scheduled", now + timedelta(hours=2))
+    tbd_recent = await _seed_event("evt-games-window-tbd-recent", None)
+    tbd_stale = await _seed_event("evt-games-window-tbd-stale", None)
+    session.add_all(
+        [
+            OddsSnapshot(
+                event_id=scheduled.id,
+                bookmaker="ScheduledOld",
+                market="h2h",
+                selection="Old",
+                decimal_odds=Decimal("2.0000"),
+                liquidity=None,
+                captured_at=old,
+                ingested_at=old,
+            ),
+            OddsSnapshot(
+                event_id=scheduled.id,
+                bookmaker="ScheduledRecent",
+                market="totals",
+                selection="Recent",
+                decimal_odds=Decimal("1.9000"),
+                liquidity=None,
+                captured_at=recent,
+                ingested_at=recent,
+            ),
+            OddsSnapshot(
+                event_id=tbd_recent.id,
+                bookmaker="TbdOld",
+                market="h2h",
+                selection="Old",
+                decimal_odds=Decimal("2.1000"),
+                liquidity=None,
+                captured_at=old,
+                ingested_at=old,
+            ),
+            OddsSnapshot(
+                event_id=tbd_recent.id,
+                bookmaker="TbdRecent",
+                market="spreads",
+                selection="Recent",
+                decimal_odds=Decimal("1.9500"),
+                liquidity=None,
+                captured_at=recent,
+                ingested_at=recent,
+            ),
+            OddsSnapshot(
+                event_id=tbd_stale.id,
+                bookmaker="TbdStale",
+                market="h2h",
+                selection="Stale",
+                decimal_odds=Decimal("2.2000"),
+                liquidity=None,
+                captured_at=old,
+                ingested_at=old,
+            ),
+        ]
+    )
+    await session.flush()
+
+    rows = await latest_available_games_with_events(
+        session,
+        limit=5000,
+        sport="soccer",
+        now=now,
+    )
+    by_ref = {row["event_id"]: row for row in rows}
+
+    scheduled_row = by_ref["evt-games-window-scheduled"]
+    assert scheduled_row["snapshot_count"] == 2
+    assert scheduled_row["markets"] == ["h2h", "totals"]
+    assert scheduled_row["bookmakers"] == ["ScheduledOld", "ScheduledRecent"]
+    assert scheduled_row["first_captured_at"] == old.isoformat()
+    assert scheduled_row["last_captured_at"] == recent.isoformat()
+
+    tbd_row = by_ref["evt-games-window-tbd-recent"]
+    assert tbd_row["snapshot_count"] == 1
+    assert tbd_row["markets"] == ["spreads"]
+    assert tbd_row["bookmakers"] == ["TbdRecent"]
+    assert tbd_row["first_captured_at"] == recent.isoformat()
+    assert tbd_row["last_captured_at"] == recent.isoformat()
+    assert "evt-games-window-tbd-stale" not in by_ref
+
+
 async def test_available_games_excludes_finished_fixtures(session) -> None:  # type: ignore[no-untyped-def]
     # GET /games must NOT show an already-FINISHED game as bettable: a fixture
     # kicked off >3h30m ago is over, even if it still carries recent odds rows
@@ -1036,6 +1449,222 @@ async def test_open_pick_has_null_outcome_and_pnl(session) -> None:  # type: ign
     assert ours
     assert ours[0]["outcome"] is None
     assert ours[0]["pnl"] is None
+
+
+@pytest.mark.parametrize(
+    (
+        "case_id",
+        "bet_placed",
+        "actual_stake",
+        "actual_odds",
+        "bookmaker_used",
+        "expected_stake",
+        "expected_effective_odds",
+        "expected_pnl",
+    ),
+    [
+        (
+            "recommended",
+            False,
+            None,
+            None,
+            None,
+            Decimal("20.00"),
+            Decimal("2.1000"),
+            Decimal("22.00"),
+        ),
+        (
+            "actual-stake-blended-price",
+            True,
+            Decimal("50.00"),
+            None,
+            None,
+            Decimal("50.00"),
+            Decimal("2.2000"),
+            Decimal("60.00"),
+        ),
+        (
+            "betfair",
+            True,
+            Decimal("50.00"),
+            2.5,
+            "Betfair",
+            Decimal("50.00"),
+            Decimal("2.4250"),
+            Decimal("71.25"),
+        ),
+        (
+            "matchbook",
+            True,
+            Decimal("50.00"),
+            2.5,
+            "Matchbook",
+            Decimal("50.00"),
+            Decimal("2.4700"),
+            Decimal("73.50"),
+        ),
+    ],
+)
+async def test_record_result_persists_exact_settlement_basis(
+    committing_session: AsyncSession,
+    case_id: str,
+    bet_placed: bool,
+    actual_stake: Decimal | None,
+    actual_odds: float | None,
+    bookmaker_used: str | None,
+    expected_stake: Decimal,
+    expected_effective_odds: Decimal,
+    expected_pnl: Decimal,
+) -> None:
+    from app.api.routes import record_result
+    from app.schemas.base import Outcome
+    from app.schemas.events import ResultIn
+    from app.storage.models import ResultTracking
+
+    session = committing_session
+    teams = EventTeams(
+        home=f"Basis Home {case_id}",
+        away=f"Basis Away {case_id}",
+        league=f"test-result-basis-{case_id}",
+    )
+    await persist_pick(
+        session,
+        make_pick(f"evt-result-basis-{case_id}", league=f"test-result-basis-{case_id}"),
+        teams,
+        "value",
+        "result-basis-v1",
+    )
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == f"evt-result-basis-{case_id}")
+    )
+    assert pick is not None
+    if case_id == "actual-stake-blended-price":
+        pick.settlement_stake_amount = Decimal("30.00")
+        pick.settlement_raw_odds_stake = Decimal("66.000000")
+        pick.settlement_effective_odds_stake = Decimal("66.000000")
+        await session.flush()
+
+    await record_result(
+        pick.id,
+        ResultIn(
+            pick_id=str(pick.id),
+            outcome=Outcome.WON,
+            bet_placed=bet_placed,
+            actual_stake=actual_stake,
+            actual_odds=actual_odds,
+            bookmaker_used=bookmaker_used,
+            settled_at=datetime.now(tz=UTC),
+        ),
+        session,
+    )
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.settled_stake_amount == expected_stake
+    assert row.settled_effective_odds == expected_effective_odds
+    assert row.pnl == expected_pnl
+    assert row.roi == expected_pnl / expected_stake
+
+
+async def test_record_result_rejects_impossible_timestamps(committing_session) -> None:  # type: ignore[no-untyped-def]
+    from fastapi import HTTPException
+
+    from app.api.routes import record_result
+    from app.schemas.base import Outcome
+    from app.schemas.events import ResultIn
+    from app.storage.models import ResultTracking
+
+    session = committing_session
+    teams = EventTeams(home="Clock Home", away="Clock Away", league="test-result-clock")
+    await persist_pick(
+        session,
+        make_pick("evt-result-clock", league="test-result-clock"),
+        teams,
+        "value",
+        "result-clock-v1",
+    )
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == "evt-result-clock")
+    )
+    assert pick is not None
+    created_at = pick.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+
+    impossible_times = (
+        created_at - timedelta(seconds=2),
+        datetime.now(tz=UTC) + timedelta(minutes=6),
+    )
+    for impossible in impossible_times:
+        with pytest.raises(HTTPException) as exc:
+            await record_result(
+                pick.id,
+                ResultIn(pick_id=str(pick.id), outcome=Outcome.WON, settled_at=impossible),
+                session,
+            )
+        assert exc.value.status_code == 422
+    assert (
+        await session.scalar(
+            select(func.count())
+            .select_from(ResultTracking)
+            .where(ResultTracking.pick_id == pick.id)
+        )
+        == 0
+    )
+
+
+async def test_performance_uses_same_actual_stake_as_pnl(
+    committing_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import delete as sa_delete
+
+    from app.api.routes import record_result
+    from app.schemas.base import Outcome
+    from app.schemas.events import ResultIn
+    from app.storage.models import ResultTracking
+    from app.storage.repositories import performance_report
+
+    session = committing_session
+    monkeypatch.setattr("app.storage.repositories.MIN_HEADLINE_N", 1)
+    await session.execute(sa_delete(ResultTracking))
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    teams = EventTeams(home="Denom Home", away="Denom Away", league="test-result-denominator")
+    await persist_pick(
+        session,
+        make_pick("evt-result-denominator", league="test-result-denominator"),
+        teams,
+        "value",
+        "result-denominator-v1",
+    )
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == "evt-result-denominator")
+    )
+    assert pick is not None
+    await record_result(
+        pick.id,
+        ResultIn(
+            pick_id=str(pick.id),
+            outcome=Outcome.WON,
+            bet_placed=True,
+            actual_stake=Decimal("50.00"),
+            actual_odds=2.5,
+            settled_at=datetime.now(tz=UTC),
+        ),
+        session,
+    )
+    report = await performance_report(session)
+    assert report["n_settled"] == 1
+    assert report["total_staked"] == "50.00"
+    assert report["total_pnl"] == "75.00"
+    assert report["roi"] == "1.5"
 
 
 async def test_record_result_repost_is_idempotent(committing_session) -> None:  # type: ignore[no-untyped-def]

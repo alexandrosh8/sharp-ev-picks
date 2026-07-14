@@ -12,8 +12,11 @@ from app.ingestion.oddschecker import (
     OddsCheckerChallenge,
     OddsCheckerError,
     OddsCheckerFetchResult,
+    OddsCheckerHTTPError,
     OddsCheckerLoader,
+    OddsCheckerSecurityError,
     _line_bearing_selection,
+    _other_market_detail,
     discover_football_daily_match_urls,
     fetch_html,
     football_listing_context,
@@ -28,6 +31,7 @@ from app.ingestion.oddschecker import (
 )
 from app.ingestion.oddsportal import _fmt_line
 from app.schemas.base import Market
+from app.schemas.odds import OddsSnapshotIn
 
 
 @pytest.mark.parametrize(
@@ -91,6 +95,22 @@ def test_set_and_game_handicap_same_line_never_share_a_devig_key() -> None:
     assert set_result[1] != game_result[1]
 
 
+def test_other_market_detail_preserves_identity_beyond_legacy_64_chars() -> None:
+    prefix = "long capture market " + "x" * 80
+    first = _other_market_detail(f"{prefix} alpha")
+    second = _other_market_detail(f"{prefix} beta")
+
+    assert len(first) > 64
+    assert first != second
+    assert first.endswith("_alpha")
+    assert second.endswith("_beta")
+
+
+def test_other_market_detail_rejects_instead_of_truncating_oversized_key() -> None:
+    with pytest.raises(ValueError, match="512 UTF-8 bytes"):
+        _other_market_detail("x" * 513)
+
+
 def test_line_bearing_is_idempotent_and_skips_non_line_markets() -> None:
     # Already-line-bearing legacy grid rows are not double-appended.
     assert _line_bearing_selection("Over 2.5", "2.5", Market.TOTALS) == "Over 2.5"
@@ -105,7 +125,7 @@ def _json_script(payload: dict[str, object]) -> str:
 
 
 def _match_html() -> str:
-    header = {
+    header: dict[str, object] = {
         "repub": "OC",
         "lastUpdated": 1783246057889,
         "eventName": "English Premier League Matches",
@@ -229,6 +249,49 @@ def _match_html() -> str:
     return f"<html><body>{_json_script(header)}{_json_script(odds)}</body></html>"
 
 
+def test_match_parser_enforces_snapshot_ceiling_before_append() -> None:
+    with pytest.raises(OddsCheckerSecurityError, match="snapshot ceiling"):
+        parse_match_page(
+            _match_html(),
+            url="https://www.oddschecker.com/football/a-v-b/winner",
+            directory=EventDirectory(),
+            now=datetime(2026, 7, 5, 12, 0, tzinfo=UTC),
+            max_snapshots=1,
+        )
+
+
+def _all_odds_payload() -> list[dict[str, object]]:
+    common: dict[str, object] = {
+        "subeventId": 101610031,
+        "subeventName": "Arsenal vs Coventry",
+        "subeventStartTime": "2026-08-21T19:00:00Z",
+        "eventName": "English Premier League Matches",
+    }
+    rows: list[tuple[int, str, dict[str, object], float]] = [
+        (10, "Win Market", {"betId": 1, "betName": "Arsenal"}, 1.9),
+        (20, "Double Chance", {"betId": 2, "betName": "Arsenal or Draw"}, 1.5),
+        (30, "Asian Total", {"betId": 3, "betName": "Over", "line": "2.5"}, 2.1),
+    ]
+    return [
+        {
+            **common,
+            "marketId": market_id,
+            "marketTypeName": market_type,
+            "bets": [bet],
+            "odds": [
+                {
+                    "betId": bet["betId"],
+                    "bookmakerCode": "WH",
+                    "oddsDecimal": price,
+                    "status": "ACTIVE",
+                    "betFeedTimestamp": "2026-07-05T09:59:00Z",
+                }
+            ],
+        }
+        for market_id, market_type, bet, price in rows
+    ]
+
+
 def test_challenge_detection_ignores_normal_js_detection_snippet() -> None:
     assert not is_challenge_response(
         status_code=200,
@@ -249,7 +312,7 @@ def test_challenge_detection_ignores_normal_js_detection_snippet() -> None:
 
 def test_parse_match_page_emits_snapshots_and_registers_event() -> None:
     directory = EventDirectory()
-    now = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    now = datetime(2026, 7, 5, 10, 10, tzinfo=UTC)
 
     snapshots = parse_match_page(
         _match_html(),
@@ -507,17 +570,20 @@ async def test_fetch_match_odds_markets_override_reaches_api_parse(
         status_code=200,
     )
     snapshots = await loader._parse_modern_or_legacy_match_page(
-        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None, markets=(Market.TOTALS,)
+        page,
+        now=datetime(2026, 7, 5, 10, 10, tzinfo=UTC),
+        session=None,
+        markets=(Market.TOTALS,),
     )
     assert snapshots, "explicitly requested TOTALS override returned no rows"
     assert {s.market for s in snapshots} == {Market.TOTALS}
 
 
-async def test_fetch_match_odds_markets_override_reaches_fallback_parse(
+async def test_market_api_failure_does_not_fall_back_to_embedded_subset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With the market API down, the parse_match_page fallback must honor the
-    caller's `markets` override too (same H2H-scoped loader, TOTALS request)."""
+    """A page that advertises API markets must not become a healthy-looking
+    embedded subset when that API fails; API-only markets would disappear."""
     import app.ingestion.oddschecker as oc
 
     async def boom(
@@ -532,11 +598,64 @@ async def test_fetch_match_odds_markets_override_reaches_fallback_parse(
         html=_match_html(),
         status_code=200,
     )
-    snapshots = await loader._parse_modern_or_legacy_match_page(
-        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None, markets=(Market.TOTALS,)
+    with pytest.raises(OddsCheckerError, match="api down"):
+        await loader._parse_modern_or_legacy_match_page(
+            page,
+            now=datetime(2026, 7, 5, 10, 10, tzinfo=UTC),
+            session=None,
+            markets=(Market.TOTALS,),
+        )
+
+
+async def test_transient_market_api_failure_escapes_for_proxy_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.ingestion.oddschecker as oc
+
+    async def unavailable(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        del args, kwargs
+        raise OddsCheckerHTTPError("rate limited", status_code=429)
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", unavailable)
+    loader = OddsCheckerLoader(EventDirectory())
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/a-v-b/winner",
+        html=_match_html(),
+        status_code=200,
     )
-    assert snapshots, "explicitly requested TOTALS override returned no rows"
-    assert {s.market for s in snapshots} == {Market.TOTALS}
+
+    with pytest.raises(OddsCheckerHTTPError) as caught:
+        await loader._parse_modern_or_legacy_match_page(
+            page,
+            now=datetime(2026, 7, 5, 10, 10, tzinfo=UTC),
+            session=None,
+        )
+    assert caught.value.status_code == 429
+
+
+async def test_market_api_nonempty_malformed_rows_raise_schema_failure() -> None:
+    from app.ingestion import oddschecker as oc
+
+    class Response:
+        status_code = 200
+        text = '["renamed-market-row"]'
+        headers: dict[str, str] = {}
+        url = "https://www.oddschecker.com/api/markets/v2/all-odds"
+
+        def json(self) -> object:
+            return ["renamed-market-row"]
+
+    class Session:
+        async def get(self, url: str, **kwargs: object) -> Response:
+            del url, kwargs
+            return Response()
+
+    with pytest.raises(oc.OddsCheckerParseError, match="malformed rows"):
+        await oc.fetch_market_api_payloads(
+            ["1"],
+            referer="https://www.oddschecker.com/football/a-v-b/winner",
+            session=Session(),
+        )
 
 
 def test_parse_legacy_match_page_reads_old_table_grid() -> None:
@@ -730,6 +849,37 @@ class _QueuedSession:
         return self.responses.pop(0)
 
 
+async def test_fetch_html_enforces_body_byte_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.ingestion import oddschecker as oc
+
+    monkeypatch.setattr(oc, "MAX_HTML_RESPONSE_BYTES", 8)
+    session = _QueuedSession(
+        [
+            _QueuedResponse(
+                text="x" * 9,
+                url="https://www.oddschecker.com/football",
+                headers={"content-type": "text/html"},
+            )
+        ]
+    )
+    with pytest.raises(OddsCheckerSecurityError, match="UpstreamBodyTooLarge"):
+        await fetch_html("https://www.oddschecker.com/football", session=session)
+
+
+async def test_fetch_html_rejects_final_redirect_host() -> None:
+    session = _QueuedSession(
+        [
+            _QueuedResponse(
+                text="ok",
+                url="https://evil.invalid/redirected",
+                headers={"content-type": "text/html"},
+            )
+        ]
+    )
+    with pytest.raises(OddsCheckerSecurityError, match="UnsafeUpstreamURL"):
+        await fetch_html("https://www.oddschecker.com/football", session=session)
+
+
 @pytest.mark.asyncio
 async def test_discover_football_daily_match_urls_uses_api_window() -> None:
     session = _QueuedSession(
@@ -832,6 +982,221 @@ def test_parse_market_api_capture_other_is_sharp_anchor_gated() -> None:
     }
 
 
+def test_market_api_overflow_is_mapped_fail_closed_but_optional_prefix_bounded() -> None:
+    with pytest.raises(OddsCheckerSecurityError, match="snapshot ceiling"):
+        parse_market_api_payloads(
+            _all_odds_payload(),
+            url="https://www.oddschecker.com/football/x/y/winner",
+            directory=EventDirectory(),
+            max_snapshots=1,
+        )
+
+    optional_payload = {
+        "subeventId": 7001,
+        "subeventName": "Arsenal vs Chelsea",
+        "marketTypeName": "Total Corners",
+        "bets": [{"betId": 1, "betName": "Over", "line": "9.5"}],
+        "odds": [
+            {"betId": 1, "bookmakerCode": "OE", "oddsDecimal": 1.9, "status": "ACTIVE"},
+            {"betId": 1, "bookmakerCode": "WH", "oddsDecimal": 1.85, "status": "ACTIVE"},
+        ],
+    }
+    snapshots = parse_market_api_payloads(
+        [optional_payload],
+        url="https://www.oddschecker.com/football/x/y/winner",
+        directory=EventDirectory(),
+        capture_other=True,
+        capture_only_other=True,
+        truncate_on_limit=True,
+        max_snapshots=1,
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].market is Market.OTHER
+    assert snapshots[0].bookmaker == "Betfair Exchange"
+
+
+def _modern_html_with_optional_market() -> str:
+    payload: dict[str, object] = {
+        "repub": "OC",
+        "bestOdds": {
+            "bets": {
+                "entities": {"1": {"ocBetId": 1, "betName": "Alpha", "marketId": 10}},
+                "ids": [1],
+            },
+            "odds": {"1": {"WH": {"oddsDecimal": 2.0}}},
+            "markets": {
+                "entities": {
+                    "10": {"ocMarketId": 10, "marketTypeName": "Win Market"},
+                    "50": {"ocMarketId": 50, "marketTypeName": "Total Corners"},
+                },
+                "ids": [10, 50],
+            },
+        },
+    }
+    return _json_script(payload)
+
+
+@pytest.mark.asyncio
+async def test_optional_market_api_failure_preserves_mapped_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    calls: list[tuple[str, ...]] = []
+
+    async def fetch(market_ids: list[str], **kwargs: object) -> list[dict[str, object]]:
+        del kwargs
+        ids = tuple(str(market_id) for market_id in market_ids)
+        calls.append(ids)
+        if ids == ("10",):
+            return [_all_odds_payload()[0]]
+        raise OddsCheckerSecurityError("optional response exceeded body ceiling")
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    loader = OddsCheckerLoader(EventDirectory(), capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/x/y/winner",
+        html=_modern_html_with_optional_market(),
+        status_code=200,
+    )
+
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None
+    )
+
+    assert calls == [("10",), ("50",)]
+    assert len(snapshots) == 1
+    assert snapshots[0].market is Market.H2H
+
+
+@pytest.mark.parametrize(
+    ("optional_selection", "optional_event_id", "expect_optional"),
+    [
+        pytest.param("Over", 101610031, True, id="success"),
+        pytest.param("x" * 10_000, 101610031, False, id="parse-error"),
+        pytest.param("Over", 999999999, False, id="mismatched-event"),
+        pytest.param("Over", None, False, id="missing-event"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_optional_market_metadata_cannot_mutate_mapped_event(
+    optional_selection: str,
+    optional_event_id: int | None,
+    expect_optional: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    optional_payload: dict[str, object] = {
+        "marketId": 50,
+        "marketTypeName": "Total Corners",
+        "bets": [{"betId": 2, "betName": optional_selection, "line": "9.5"}],
+        "odds": [
+            {
+                "betId": 2,
+                "bookmakerCode": "OE",
+                "oddsDecimal": 1.9,
+                "status": "ACTIVE",
+            }
+        ],
+        # Event metadata is deliberately absent. Optional archive payloads
+        # must not replace the mapped response's authoritative team context.
+    }
+    if optional_event_id is not None:
+        optional_payload["subeventId"] = optional_event_id
+
+    async def fetch(market_ids: list[str], **kwargs: object) -> list[dict[str, object]]:
+        del kwargs
+        ids = tuple(str(market_id) for market_id in market_ids)
+        return [_all_odds_payload()[0]] if ids == ("10",) else [optional_payload]
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    directory = EventDirectory()
+    loader = OddsCheckerLoader(directory, capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/x/y/winner",
+        html=_modern_html_with_optional_market(),
+        status_code=200,
+    )
+
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None
+    )
+
+    event = directory.lookup("oddschecker:101610031")
+    assert event is not None
+    assert (event.home, event.away, event.league) == (
+        "Arsenal",
+        "Coventry",
+        "English Premier League",
+    )
+    assert event.starts_at == datetime(2026, 8, 21, 19, 0, tzinfo=UTC)
+    expected_markets = {Market.H2H, Market.OTHER} if expect_optional else {Market.H2H}
+    assert {snapshot.market for snapshot in snapshots} == expected_markets
+    assert {snapshot.event_id for snapshot in snapshots} == {"oddschecker:101610031"}
+
+
+@pytest.mark.asyncio
+async def test_optional_markets_are_not_fetched_without_a_mapped_event_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    calls: list[tuple[str, ...]] = []
+    mapped_payload = _all_odds_payload()[0]
+    raw_odds = mapped_payload["odds"]
+    assert isinstance(raw_odds, list)
+    mapped_payload["odds"] = [
+        {**raw_odd, "status": "SUSPENDED"} for raw_odd in raw_odds if isinstance(raw_odd, dict)
+    ]
+
+    async def fetch(market_ids: list[str], **kwargs: object) -> list[dict[str, object]]:
+        del kwargs
+        ids = tuple(str(market_id) for market_id in market_ids)
+        calls.append(ids)
+        if ids != ("10",):
+            raise AssertionError("optional markets must not load without mapped identity")
+        return [mapped_payload]
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    loader = OddsCheckerLoader(EventDirectory(), capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/x/y/winner",
+        html=_modern_html_with_optional_market(),
+        status_code=200,
+    )
+
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None
+    )
+
+    assert snapshots == []
+    assert calls == [("10",)]
+
+
+@pytest.mark.asyncio
+async def test_mapped_market_api_failure_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    async def fetch(market_ids: object, **kwargs: object) -> list[dict[str, object]]:
+        del market_ids, kwargs
+        raise OddsCheckerSecurityError("mapped response exceeded body ceiling")
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    loader = OddsCheckerLoader(EventDirectory(), capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/x/y/winner",
+        html=_modern_html_with_optional_market(),
+        status_code=200,
+    )
+
+    with pytest.raises(OddsCheckerSecurityError, match="mapped response"):
+        await loader._parse_modern_or_legacy_match_page(page, now=None, session=None)
+
+
 @pytest.mark.asyncio
 async def test_for_scheduler_fetch_odds_is_per_sport() -> None:
     """Scheduler mode discovers + parses ONLY the requested pipeline sport."""
@@ -847,11 +1212,12 @@ async def test_for_scheduler_fetch_odds_is_per_sport() -> None:
                     url="https://www.oddschecker.com/api/acca",
                 ),
             ),
-            # Empty all-odds list -> parse_market_api_payloads yields nothing ->
-            # the loader falls back to the embedded bestOdds match payload.
             (
                 "api/markets/v2/all-odds",
-                _QueuedResponse(text="[]", url="https://www.oddschecker.com/api/markets"),
+                _QueuedResponse(
+                    text=json.dumps(_all_odds_payload()),
+                    url="https://www.oddschecker.com/api/markets",
+                ),
             ),
             (
                 "/winner",
@@ -968,6 +1334,165 @@ async def test_proxy_session_pool_reuses_one_session_per_proxy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pool_evict_defers_close_until_shared_leases_release() -> None:
+    from app.ingestion.oddschecker import _ProxySessionPool
+
+    proxy = ScraperProxy(url="http://p0", username="", password="")
+    session = _PoolFakeSession([])
+    pool = _ProxySessionPool((proxy,), session_factory=lambda unused: session)
+    first = pool.acquire_lease()
+    sibling = pool.acquire_lease()
+
+    await pool.evict(first)
+    assert session.closed is False
+    await pool.release(first)
+    assert session.closed is False
+    await pool.release(sibling)
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_partial_match_failure_is_retained_but_explicitly_incomplete() -> None:
+    captured_at = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del now, session, markets
+            if url.endswith("/bad"):
+                raise OddsCheckerError("market API schema drift")
+            return [
+                OddsSnapshotIn(
+                    event_id="good-event",
+                    bookmaker="bet365",
+                    market=Market.H2H,
+                    selection="Alpha",
+                    decimal_odds=2.0,
+                    captured_at=captured_at,
+                    ingested_at=captured_at,
+                )
+            ]
+
+    loader = Loader(EventDirectory())
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/good", "https://www.oddschecker.com/bad"],
+        None,
+        pipeline_key="soccer",
+    )
+
+    assert len(snapshots) == 1
+    assert loader.last_fetch_complete["soccer"] is False
+    assert loader.last_fetch_completeness_reason["soccer"] == "1/2 listed match fetch(es) failed"
+
+
+async def test_optional_rows_never_make_cycle_snapshot_ceiling_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    captured_at = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+
+    market_scopes: list[tuple[Market, ...] | None] = []
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del now, session
+            market_scopes.append(None if markets is None else tuple(markets))
+            market = Market.OTHER if url.endswith("/optional") else Market.H2H
+            return [
+                OddsSnapshotIn(
+                    event_id=url,
+                    bookmaker="Betfair Exchange",
+                    market=market,
+                    selection="Alpha",
+                    decimal_odds=2.0,
+                    captured_at=captured_at,
+                    ingested_at=captured_at,
+                    market_detail="oc_archive" if market is Market.OTHER else "h2h",
+                )
+            ]
+
+    monkeypatch.setattr(oc, "MAX_SNAPSHOTS_PER_CYCLE", 1)
+    loader = Loader(EventDirectory(), capture_other=True, max_clients=1)
+    snapshots = await loader._gather_snapshots(
+        [
+            "https://www.oddschecker.com/optional",
+            "https://www.oddschecker.com/mapped",
+        ],
+        None,
+        pipeline_key="soccer",
+    )
+
+    assert [snapshot.market for snapshot in snapshots] == [Market.H2H]
+    assert market_scopes[0] is None
+    assert market_scopes[1] == tuple(market for market in Market if market is not Market.OTHER)
+    assert loader.last_fetch_complete["soccer"] is True
+    assert loader.last_fetch_completeness_reason["soccer"] == ""
+
+
+async def test_gather_match_url_ceiling_is_explicitly_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    monkeypatch.setattr(oc, "MAX_MATCH_URLS_PER_CYCLE", 1)
+    loader = OddsCheckerLoader(EventDirectory())
+    snapshots = await loader._gather_snapshots(
+        [
+            "https://www.oddschecker.com/football/a/winner",
+            "https://www.oddschecker.com/football/b/winner",
+        ],
+        None,
+        pipeline_key="soccer",
+    )
+    assert snapshots == []
+    assert loader.last_fetch_complete["soccer"] is False
+    assert "URL ceiling" in loader.last_fetch_completeness_reason["soccer"]
+
+
+async def test_gather_cycle_snapshot_ceiling_is_explicitly_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    captured_at = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del now, session, markets
+            return [
+                OddsSnapshotIn(
+                    event_id=url,
+                    bookmaker="bet365",
+                    market=Market.H2H,
+                    selection="Alpha",
+                    decimal_odds=2.0,
+                    captured_at=captured_at,
+                    ingested_at=captured_at,
+                )
+            ]
+
+    monkeypatch.setattr(oc, "MAX_SNAPSHOTS_PER_CYCLE", 1)
+    loader = Loader(EventDirectory())
+    snapshots = await loader._gather_snapshots(
+        [
+            "https://www.oddschecker.com/football/a/winner",
+            "https://www.oddschecker.com/football/b/winner",
+        ],
+        None,
+        pipeline_key="soccer",
+    )
+    assert len(snapshots) == 1
+    assert loader.last_fetch_complete["soccer"] is False
+    assert "snapshot ceiling" in loader.last_fetch_completeness_reason["soccer"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_odds_reuses_persistent_session_per_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -983,7 +1508,10 @@ async def test_fetch_odds_reuses_persistent_session_per_proxy(
             [
                 (
                     "api/markets/v2/all-odds",
-                    _QueuedResponse(text="[]", url="https://www.oddschecker.com/api/markets"),
+                    _QueuedResponse(
+                        text=json.dumps(_all_odds_payload()),
+                        url="https://www.oddschecker.com/api/markets",
+                    ),
                 ),
                 (
                     "/winner",
@@ -1019,7 +1547,7 @@ async def test_fetch_odds_reuses_persistent_session_per_proxy(
     assert len(created) == 1
     session = created[0]
     assert sum("/winner" in url for url in session.urls) == 3
-    # 3 matches x 3 active snapshots each (all-odds returns [] -> bestOdds fallback).
+    # 3 matches x 3 active all-odds snapshots each.
     assert len(snapshots) == 9
     # The cycle closed the session and dropped the pool (no leak).
     assert session.closed is True
@@ -1068,8 +1596,8 @@ def test_bookmaker_name_disambiguates_bare_betfair_by_code() -> None:
     sometimes the bare 'Betfair', persisting the SAME sportsbook under two
     names (2,241 live rows) — and effective_odds maps bare 'betfair' to 5%
     exchange commission, mispricing those rows. The ambiguous display name
-    must resolve through the code's canonical fallback; unambiguous names and
-    unknown codes pass through unchanged."""
+    must resolve through the code's canonical fallback; unambiguous entity
+    names pass through and unnamed unknown codes are rejected."""
     from app.ingestion.oddschecker import _bookmaker_name
 
     assert _bookmaker_name("BF", {"BF": {"bookmakerName": "Betfair"}}) == "Betfair Sportsbook"
@@ -1079,7 +1607,342 @@ def test_bookmaker_name_disambiguates_bare_betfair_by_code() -> None:
         _bookmaker_name("BF", {"BF": {"bookmakerName": "Betfair Sportsbook"}})
         == "Betfair Sportsbook"
     )
-    # unknown code with the ambiguous name: no canonical mapping exists -> unchanged
-    assert _bookmaker_name("ZZ", {"ZZ": {"bookmakerName": "Betfair"}}) == "Betfair"
+    # unknown code with the ambiguous brand cannot safely select sportsbook
+    # versus exchange commission semantics.
+    assert _bookmaker_name("ZZ", {"ZZ": {"bookmakerName": "Betfair"}}) is None
     # fallback path (no entity) unchanged
     assert _bookmaker_name("BF", {}) == "Betfair Sportsbook"
+    # A raw provider code is not a canonical bookmaker identity.
+    assert _bookmaker_name("ZZ", {}) is None
+
+
+def test_canonical_header_id_never_falls_back_to_another_embedded_match() -> None:
+    """Related/accumulator blobs must never be attributed to the page URL."""
+    header: dict[str, object] = {
+        "subeventName": "Target FC vs Target United",
+        "subeventStartTime": "2026-07-06T10:00:00Z",
+        "breadcrumbs": [{"type": "subevent", "id": "target-123"}],
+    }
+    wrong_match: dict[str, object] = {
+        "bestOdds": {
+            "bets": {"entities": {"1": {"betName": "Wrong FC", "marketId": "10"}}},
+            "odds": {"1": {"WH": {"oddsDecimal": 2.0, "status": "ACTIVE"}}},
+            "markets": {"entities": {"10": {"marketTypeName": "Win Market"}}},
+            "subeventConfig": {
+                "subeventId": "wrong-999",
+                "homeTeamName": "Wrong FC",
+                "awayTeamName": "Wrong United",
+            },
+        }
+    }
+    html = f"{_json_script(header)}{_json_script(wrong_match)}"
+    directory = EventDirectory()
+
+    with pytest.raises(OddsCheckerError, match="canonical subevent id"):
+        parse_match_page(
+            html,
+            url="https://www.oddschecker.com/football/target-fc-v-target-united/winner",
+            directory=directory,
+        )
+    assert directory.lookup("oddschecker:wrong-999") is None
+    assert supported_market_ids_from_match_page(html) == []
+
+
+def test_market_api_isolates_nonfinite_prices_and_bad_provider_timestamps() -> None:
+    now = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    bets = [{"betId": index, "betName": f"Team {index}"} for index in range(1, 7)]
+    odds = [
+        {"betId": 1, "bookmakerCode": "WH", "oddsDecimal": float("nan"), "status": "ACTIVE"},
+        {"betId": 2, "bookmakerCode": "WH", "oddsDecimal": float("inf"), "status": "ACTIVE"},
+        {"betId": 3, "bookmakerCode": "WH", "oddsDecimal": 1001.0, "status": "ACTIVE"},
+        {
+            "betId": 4,
+            "bookmakerCode": "WH",
+            "oddsDecimal": 2.04,
+            "status": "ACTIVE",
+            "betFeedTimestamp": "2026-07-05T11:00:00Z",
+        },
+        {
+            "betId": 5,
+            "bookmakerCode": "WH",
+            "oddsDecimal": 2.05,
+            "status": "ACTIVE",
+            "betFeedTimestamp": "not-a-timestamp",
+        },
+        {"betId": 6, "bookmakerCode": "WH", "oddsDecimal": 2.06, "status": "ACTIVE"},
+    ]
+    snapshots = parse_market_api_payloads(
+        [
+            {
+                "subeventId": "finite-1",
+                "subeventName": "Home FC vs Away FC",
+                "marketTypeName": "Win Market",
+                "bets": bets,
+                "odds": odds,
+            }
+        ],
+        url="https://www.oddschecker.com/football/home-v-away/winner",
+        directory=EventDirectory(),
+        now=now,
+    )
+
+    assert [(snapshot.selection, snapshot.decimal_odds) for snapshot in snapshots] == [
+        ("Team 6", 2.06)
+    ]
+    assert snapshots[0].captured_at == now
+
+
+def test_epoch_millisecond_overflow_is_not_fatal() -> None:
+    from app.ingestion.oddschecker import _parse_epoch_ms
+
+    assert _parse_epoch_ms(10**100) is None
+    assert _parse_epoch_ms(float("inf")) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_html_preserves_http_status_and_bounded_retry_after() -> None:
+    class Response:
+        status_code = 429
+        text = "rate limited"
+        headers = {"Retry-After": "999999"}
+        url = "https://www.oddschecker.com/football"
+
+    class Session:
+        async def get(self, url: str, **kwargs: object) -> Response:
+            del url, kwargs
+            return Response()
+
+    with pytest.raises(OddsCheckerHTTPError) as caught:
+        await fetch_html("https://www.oddschecker.com/football", session=Session())
+    assert caught.value.status_code == 429
+    assert caught.value.retry_after == 60.0
+
+    from app.ingestion.oddschecker import _retry_after_seconds
+
+    assert _retry_after_seconds({"Retry-After": "inf"}) is None
+    assert _retry_after_seconds({"Retry-After": "NaN"}) is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_retry_evicts_challenged_session_and_rotates_proxy() -> None:
+    from app.ingestion.oddschecker import _ProxySessionPool
+
+    proxies = (
+        ScraperProxy(url="http://p0", username="", password=""),
+        ScraperProxy(url="http://p1", username="", password=""),
+    )
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+
+    def factory(proxy: ScraperProxy | None) -> _PoolFakeSession:
+        result = _PoolFakeSession([])
+        created.append((proxy, result))
+        return result
+
+    pool = _ProxySessionPool(proxies, session_factory=factory)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, markets
+            if session is created[0][1]:
+                raise OddsCheckerChallenge("challenge")
+            return ["snapshot"]
+
+    loader = Loader(EventDirectory())
+    loader._session_pool = pool
+    snapshots = await loader._gather_snapshots(["https://www.oddschecker.com/a/winner"], None)
+
+    assert snapshots == ["snapshot"]
+    assert [proxy for proxy, _session in created] == [proxies[0], proxies[1]]
+    assert created[0][1].closed is True
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_proxy_retry_evicts_the_second_transient_failure_too() -> None:
+    from app.ingestion.oddschecker import _ProxySessionPool
+
+    proxies = (
+        ScraperProxy(url="http://p0", username="", password=""),
+        ScraperProxy(url="http://p1", username="", password=""),
+    )
+    created: list[_PoolFakeSession] = []
+
+    def factory(proxy: ScraperProxy | None) -> _PoolFakeSession:
+        del proxy
+        result = _PoolFakeSession([])
+        created.append(result)
+        return result
+
+    pool = _ProxySessionPool(proxies, session_factory=factory)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, session, markets
+            raise OddsCheckerChallenge("challenge")
+
+    loader = Loader(EventDirectory())
+    loader._session_pool = pool
+
+    assert await loader._gather_snapshots(["https://www.oddschecker.com/a/winner"], None) == []
+    assert len(created) == 2
+    assert all(session.closed for session in created)
+    assert pool._sessions == {}
+
+
+def test_malformed_and_nonfinite_market_lines_fail_closed() -> None:
+    from app.ingestion.oddschecker import _market_for_type
+
+    for line in ("not-a-line", float("nan"), float("inf"), object()):
+        assert _market_for_type("Asian Handicap", line) is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_pool_closes_every_session_when_one_close_fails() -> None:
+    from app.ingestion.oddschecker import _ProxySessionPool
+
+    class CloseSession(_PoolFakeSession):
+        def __init__(self, *, fail: bool) -> None:
+            super().__init__([])
+            self.fail = fail
+
+        async def close(self) -> None:
+            self.closed = True
+            if self.fail:
+                raise RuntimeError("close failed")
+
+    created: list[CloseSession] = []
+
+    def factory(proxy: ScraperProxy | None) -> CloseSession:
+        del proxy
+        result = CloseSession(fail=not created)
+        created.append(result)
+        return result
+
+    pool = _ProxySessionPool(
+        (
+            ScraperProxy(url="http://p0", username="", password=""),
+            ScraperProxy(url="http://p1", username="", password=""),
+        ),
+        session_factory=factory,
+    )
+    pool.acquire()
+    pool.acquire()
+
+    await pool.aclose()
+
+    assert all(session.closed for session in created)
+    assert pool._sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_scheduler_discovery_retries_typed_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    calls = 0
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls == 1:
+            raise OddsCheckerHTTPError("unavailable", status_code=503)
+        return []
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory())
+
+    assert await loader._fetch_sport("soccer", None) == []
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_scheduler_discovery_evicts_failed_pool_lease_and_rotates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    proxies = (
+        ScraperProxy(url="http://p0", username="", password=""),
+        ScraperProxy(url="http://p1", username="", password=""),
+    )
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+
+    def factory(proxy: ScraperProxy | None) -> _PoolFakeSession:
+        result = _PoolFakeSession([])
+        created.append((proxy, result))
+        return result
+
+    pool = oc._ProxySessionPool(proxies, session_factory=factory)
+    seen_sessions: list[object] = []
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        del args
+        seen_sessions.append(kwargs["session"])
+        if len(seen_sessions) == 1:
+            raise OddsCheckerChallenge("challenge")
+        return []
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory())
+    loader._session_pool = pool
+
+    assert await loader._fetch_sport("soccer", None) == []
+    assert seen_sessions == [created[0][1], created[1][1]]
+    assert [proxy for proxy, _session in created] == [proxies[0], proxies[1]]
+    assert created[0][1].closed is True
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_linked_legacy_pages_honor_per_call_market_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    parsed_scopes: list[tuple[Market, ...] | None] = []
+
+    def parse(
+        *args: object,
+        markets: tuple[Market, ...] | None = None,
+        **kwargs: object,
+    ) -> list[OddsSnapshotIn]:
+        del args, kwargs
+        parsed_scopes.append(markets)
+        return []
+
+    def discover(*args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        return ["https://www.oddschecker.com/basketball/a/total-points"]
+
+    async def fetch(*args: object, **kwargs: object) -> OddsCheckerFetchResult:
+        del args, kwargs
+        return OddsCheckerFetchResult(
+            url="https://www.oddschecker.com/basketball/a/total-points",
+            html="linked",
+            status_code=200,
+        )
+
+    monkeypatch.setattr(oc, "parse_legacy_match_page", parse)
+    monkeypatch.setattr(oc, "discover_legacy_market_urls", discover)
+    monkeypatch.setattr(oc, "fetch_html", fetch)
+    loader = OddsCheckerLoader(EventDirectory(), markets=(Market.H2H,))
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/basketball/a/winner",
+        html="main",
+        status_code=200,
+    )
+
+    await loader._parse_legacy_match_with_linked_markets(
+        page,
+        now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC),
+        session=None,
+        markets=(Market.TOTALS,),
+    )
+
+    assert parsed_scopes == [(Market.TOTALS,), (Market.TOTALS,)]

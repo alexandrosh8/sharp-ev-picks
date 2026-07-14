@@ -62,7 +62,7 @@ One cycle of `app/pipeline.py::run_value_pipeline`, invoked per sport by the
 4. **Edge → gates** — `find_value_bets_with_fair` flags soft prices above
    fair. Gates (defaults in `app/config.py`): edge ≥ 0.03 premium /
    ≥ 0.015 volume, edge ≤ 0.20 (implausibility ceiling), odds ≥ 1.30,
-   moneyline odds ≤ 5.0 (`VALUE_MONEYLINE_MAX_ODDS`, ADR-0019),
+   moneyline odds ≤ 4.0 (`VALUE_MONEYLINE_MAX_ODDS`, ADR-0019),
    Asian-handicap plausibility (`ah_candidate_plausible`), odds age ≤ 300 s,
    in-play veto (kicked-off events never mint/upgrade), exchange
    liquidity floor (`VALUE_EXCHANGE_MIN_LIQUIDITY=50` on known-liquidity

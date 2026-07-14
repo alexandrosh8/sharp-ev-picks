@@ -14,10 +14,12 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import urljoin, urlparse
@@ -25,9 +27,16 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
+from app.identity import MARKET_DETAIL_MAX_BYTES, require_bounded_identity
 from app.ingestion.base import EventDirectory, EventTeams, ScraperProxy
+from app.ingestion.http_safety import (
+    UnsafeUpstreamURL,
+    UpstreamBodyTooLarge,
+    get_bounded,
+    validate_https_url,
+)
 from app.schemas.base import Market
-from app.schemas.odds import OddsSnapshotIn
+from app.schemas.odds import MAX_DECIMAL_ODDS, OddsSnapshotIn
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +57,18 @@ PINNED_IMPERSONATE: Literal["chrome146"] = "chrome146"
 DEFAULT_TIMEOUT: tuple[float, float] = (8.0, 25.0)
 DEFAULT_MAX_CLIENTS = 8
 MARKET_API_CHUNK_SIZE = 35
+MAX_RETRY_AFTER_SECONDS = 60.0
+MAX_HTML_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_MATCH_URLS_PER_CYCLE = 2_000
+MAX_LEGACY_MARKET_URLS_PER_MATCH = 64
+MAX_MARKET_IDS_PER_MATCH = 256
+MAX_SNAPSHOTS_PER_MATCH = 5_000
+MAX_SNAPSHOTS_PER_CYCLE = 250_000
+ODDSCHECKER_ALLOWED_HOSTS: frozenset[str] = frozenset({"www.oddschecker.com"})
+_MAPPED_MARKET_SCOPE: tuple[Market, ...] = tuple(
+    market for market in Market if market is not Market.OTHER
+)
 
 _HTML_HEADERS: Mapping[str, str] = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -152,8 +173,27 @@ class OddsCheckerChallenge(OddsCheckerError):
     """The response was a provider/CDN challenge page, not usable odds HTML."""
 
 
+class OddsCheckerHTTPError(OddsCheckerError):
+    """A non-success HTTP response with status/retry metadata preserved."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
 class OddsCheckerParseError(OddsCheckerError):
     """The HTML did not contain the expected odds payload shape."""
+
+
+class OddsCheckerSecurityError(OddsCheckerError):
+    """A response violated an origin, redirect, or resource ceiling policy."""
 
 
 class AsyncGetSession(Protocol):
@@ -179,6 +219,14 @@ class OddsCheckerFootballContext:
     event_urls: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class _ProxySessionLease:
+    """Identity-bearing lease used to evict exactly the failed proxy session."""
+
+    index: int
+    session: AsyncGetSession
+
+
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -198,10 +246,10 @@ def _proxy_with_creds(proxy: ScraperProxy) -> str:
 
 def _normalize_url(url: str, *, base_url: str = ODDSCHECKER_BASE_URL) -> str:
     absolute = urljoin(base_url, url)
-    parsed = urlparse(absolute)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise OddsCheckerParseError("invalid OddsChecker URL")
-    return parsed._replace(fragment="").geturl()
+    try:
+        return validate_https_url(absolute, allowed_hosts=ODDSCHECKER_ALLOWED_HOSTS)
+    except UnsafeUpstreamURL as exc:
+        raise OddsCheckerSecurityError("invalid OddsChecker HTTPS origin") from exc
 
 
 def _site_root(base_url: str) -> str:
@@ -259,6 +307,86 @@ def is_challenge_response(
     )
 
 
+def _retry_after_seconds(headers: Mapping[str, Any] | Any) -> float | None:
+    """Parse Retry-After as seconds or an HTTP date, bounded at zero."""
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except AttributeError:
+        return None
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        pass
+    else:
+        if not math.isfinite(seconds):
+            return None
+        return min(MAX_RETRY_AFTER_SECONDS, max(0.0, seconds))
+    try:
+        retry_at = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    seconds = (retry_at.astimezone(UTC) - _utcnow()).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return min(MAX_RETRY_AFTER_SECONDS, max(0.0, seconds))
+
+
+_TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+_TRANSIENT_CURL_CODES: frozenset[int] = frozenset({7, 18, 28, 35, 52, 55, 56})
+
+
+def _is_transient_fetch_error(exc: BaseException) -> bool:
+    """Classify retryable network/provider failures without class-name-only logic."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OddsCheckerChallenge):
+            return True
+        if isinstance(current, OddsCheckerHTTPError):
+            return current.status_code in _TRANSIENT_HTTP_STATUSES
+        if isinstance(current, (TimeoutError, ConnectionError)):
+            return True
+
+        raw_code = getattr(current, "code", None)
+        try:
+            code = int(raw_code) if raw_code is not None else None
+        except (TypeError, ValueError):
+            code = None
+        if code in _TRANSIENT_CURL_CODES:
+            return True
+
+        text = f"{type(current).__name__} {current}".lower()
+        if any(
+            marker in text
+            for marker in (
+                "timeout",
+                "timed out",
+                "connection reset",
+                "connectionreset",
+                "recv failure",
+                "curl: (56)",
+                "curl (56)",
+            )
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+async def _wait_before_retry(exc: BaseException) -> None:
+    retry_after = exc.retry_after if isinstance(exc, OddsCheckerHTTPError) else None
+    if retry_after is not None and retry_after > 0:
+        await asyncio.sleep(min(retry_after, 60.0))
+
+
 async def fetch_html(
     url: str,
     *,
@@ -268,32 +396,52 @@ async def fetch_html(
 ) -> OddsCheckerFetchResult:
     """GET one OddsChecker HTML page with curl_cffi browser impersonation."""
     target = _normalize_url(url)
-    if session is not None:
-        response = await session.get(target, headers=dict(_HTML_HEADERS), timeout=timeout)
-    else:
-        from curl_cffi.requests import AsyncSession
+    try:
+        if session is not None:
+            bounded = await get_bounded(
+                session,
+                target,
+                allowed_hosts=ODDSCHECKER_ALLOWED_HOSTS,
+                max_bytes=MAX_HTML_RESPONSE_BYTES,
+                headers=dict(_HTML_HEADERS),
+                timeout=timeout,
+            )
+        else:
+            from curl_cffi.requests import AsyncSession
 
-        kwargs: dict[str, Any] = {
-            "impersonate": PINNED_IMPERSONATE,
-            "default_headers": True,
-            "timeout": timeout,
-            "allow_redirects": True,
-        }
-        if proxy is not None and proxy.url:
-            inline = _proxy_with_creds(proxy)
-            kwargs["proxies"] = {"http": inline, "https": inline}
-        async with AsyncSession(**kwargs) as own_session:
-            response = await own_session.get(target, headers=dict(_HTML_HEADERS))
+            kwargs: dict[str, Any] = {
+                "impersonate": PINNED_IMPERSONATE,
+                "default_headers": True,
+                "timeout": timeout,
+                "allow_redirects": False,
+            }
+            if proxy is not None and proxy.url:
+                inline = _proxy_with_creds(proxy)
+                kwargs["proxies"] = {"http": inline, "https": inline}
+            async with AsyncSession(**kwargs) as own_session:
+                bounded = await get_bounded(
+                    own_session,
+                    target,
+                    allowed_hosts=ODDSCHECKER_ALLOWED_HOSTS,
+                    max_bytes=MAX_HTML_RESPONSE_BYTES,
+                    headers=dict(_HTML_HEADERS),
+                )
+    except (UnsafeUpstreamURL, UpstreamBodyTooLarge) as exc:
+        raise OddsCheckerSecurityError(type(exc).__name__) from exc
 
+    response = bounded.response
     status = int(getattr(response, "status_code", 0) or 0)
-    text = str(getattr(response, "text", "") or "")
+    text = bounded.body.decode("utf-8", errors="replace")
     headers = getattr(response, "headers", {})
     if is_challenge_response(status_code=status, headers=headers, body=text):
         raise OddsCheckerChallenge("oddschecker returned a challenge/interstitial response")
     if status >= 400:
-        raise OddsCheckerError(f"oddschecker GET returned HTTP {status}")
-    final_url = str(getattr(response, "url", "") or target)
-    return OddsCheckerFetchResult(url=final_url, html=text, status_code=status)
+        raise OddsCheckerHTTPError(
+            f"oddschecker GET returned HTTP {status}",
+            status_code=status,
+            retry_after=_retry_after_seconds(headers),
+        )
+    return OddsCheckerFetchResult(url=bounded.final_url, html=text, status_code=status)
 
 
 async def fetch_json_value(
@@ -307,39 +455,59 @@ async def fetch_json_value(
     """GET one OddsChecker JSON endpoint with the same curl_cffi profile."""
     target = _normalize_url(url)
     headers = dict(_JSON_HEADERS)
-    headers["Referer"] = referer
-    if session is not None:
-        response = await session.get(target, headers=headers, timeout=timeout)
-    else:
-        from curl_cffi.requests import AsyncSession
+    headers["Referer"] = _normalize_url(referer)
+    try:
+        if session is not None:
+            bounded = await get_bounded(
+                session,
+                target,
+                allowed_hosts=ODDSCHECKER_ALLOWED_HOSTS,
+                max_bytes=MAX_JSON_RESPONSE_BYTES,
+                headers=headers,
+                timeout=timeout,
+            )
+        else:
+            from curl_cffi.requests import AsyncSession
 
-        kwargs: dict[str, Any] = {
-            "impersonate": PINNED_IMPERSONATE,
-            "default_headers": True,
-            "timeout": timeout,
-            "allow_redirects": True,
-        }
-        if proxy is not None and proxy.url:
-            inline = _proxy_with_creds(proxy)
-            kwargs["proxies"] = {"http": inline, "https": inline}
-        async with AsyncSession(**kwargs) as own_session:
-            response = await own_session.get(target, headers=headers)
+            kwargs: dict[str, Any] = {
+                "impersonate": PINNED_IMPERSONATE,
+                "default_headers": True,
+                "timeout": timeout,
+                "allow_redirects": False,
+            }
+            if proxy is not None and proxy.url:
+                inline = _proxy_with_creds(proxy)
+                kwargs["proxies"] = {"http": inline, "https": inline}
+            async with AsyncSession(**kwargs) as own_session:
+                bounded = await get_bounded(
+                    own_session,
+                    target,
+                    allowed_hosts=ODDSCHECKER_ALLOWED_HOSTS,
+                    max_bytes=MAX_JSON_RESPONSE_BYTES,
+                    headers=headers,
+                )
+    except (UnsafeUpstreamURL, UpstreamBodyTooLarge) as exc:
+        raise OddsCheckerSecurityError(type(exc).__name__) from exc
 
+    response = bounded.response
     status = int(getattr(response, "status_code", 0) or 0)
-    text = str(getattr(response, "text", "") or "")
+    try:
+        text = bounded.body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OddsCheckerParseError("oddschecker JSON response was not UTF-8") from exc
     response_headers = getattr(response, "headers", {})
     if is_challenge_response(status_code=status, headers=response_headers, body=text):
         raise OddsCheckerChallenge("oddschecker returned a challenge/interstitial response")
     if status >= 400:
-        raise OddsCheckerError(f"oddschecker JSON GET returned HTTP {status}")
+        raise OddsCheckerHTTPError(
+            f"oddschecker JSON GET returned HTTP {status}",
+            status_code=status,
+            retry_after=_retry_after_seconds(response_headers),
+        )
     try:
-        payload = response.json()
-    except (AttributeError, ValueError):
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise OddsCheckerParseError("oddschecker JSON response did not parse") from exc
-    return payload
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise OddsCheckerParseError("oddschecker JSON response did not parse") from exc
 
 
 async def fetch_json(
@@ -480,6 +648,8 @@ def football_match_urls_from_api(
             continue
         seen.add(url)
         rows.append((kickoff, url))
+        if len(rows) > MAX_MATCH_URLS_PER_CYCLE:
+            raise OddsCheckerSecurityError("football discovery exceeded match URL ceiling")
     rows.sort(key=lambda item: (item[0], item[1]))
     return [url for _, url in rows]
 
@@ -566,6 +736,8 @@ def parse_static_sport_match_urls(
             seen.add(absolute)
             rows.append((current_date, order, absolute))
             order += 1
+            if len(rows) > MAX_MATCH_URLS_PER_CYCLE:
+                raise OddsCheckerSecurityError("sport discovery exceeded match URL ceiling")
     rows.sort(key=lambda item: (item[0], item[1], item[2]))
     return [url for _, _, url in rows]
 
@@ -659,7 +831,25 @@ def _find_match_payload(html: str, *, prefer_subevent_id: str | None = None) -> 
                 and str(config.get("subeventId") or "").strip() == prefer_subevent_id
             ):
                 return payload
-    return max(candidates, key=lambda item: len(json.dumps(item.get("bestOdds", {}))))
+        raise OddsCheckerParseError(
+            "no populated bestOdds payload matches the page's canonical subevent id"
+        )
+
+    def _payload_score(payload: Mapping[str, Any]) -> tuple[int, int, int]:
+        """Prefer the structurally richest blob without serializing it again."""
+        best = payload.get("bestOdds")
+        if not isinstance(best, Mapping):
+            return (0, 0, 0)
+        odds = best.get("odds")
+        quote_count = 0
+        bet_count = 0
+        if isinstance(odds, Mapping):
+            bet_count = len(odds)
+            quote_count = sum(len(value) for value in odds.values() if isinstance(value, Mapping))
+        market_count = len(_entity_map(best.get("markets")))
+        return quote_count, bet_count, market_count
+
+    return max(candidates, key=_payload_score)
 
 
 def _find_header_payload(html: str) -> dict[str, Any]:
@@ -702,9 +892,12 @@ def _parse_datetime(value: Any) -> datetime | None:
 def _parse_epoch_ms(value: Any) -> datetime | None:
     try:
         millis = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return datetime.fromtimestamp(millis / 1000, tz=UTC)
+    try:
+        return datetime.fromtimestamp(millis / 1000, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _is_boost_market(market_type: str) -> bool:
@@ -717,11 +910,16 @@ def _other_market_detail(market_type: str, line: Any = None) -> str:
     """`market_detail` for a capture-only OTHER market: ``oc_<slug>[_<line>]``.
 
     Carries the real submarket identity for odds history when a market has no
-    Market-enum home. Capped at 64 to match odds_snapshots.market (String(64))."""
+    Market-enum home. Oversized values are rejected, never truncated: truncation
+    can alias two distinct capture-only instruments under the snapshot key."""
     base = re.sub(r"[^0-9a-z]+", "_", market_type.strip().lower()).strip("_")
-    line_slug = "" if line in {None, ""} else _slug_line(line)
+    line_slug = "" if line is None or line == "" else _slug_line(line)
     detail = f"oc_{base}" if not line_slug else f"oc_{base}_{line_slug}"
-    return detail[:64]
+    return require_bounded_identity(
+        detail,
+        maximum_bytes=MARKET_DETAIL_MAX_BYTES,
+        field="OddsChecker market_detail",
+    )
 
 
 def _odds_have_sharp_anchor(raw_odds: Sequence[Any]) -> bool:
@@ -739,6 +937,8 @@ def _odds_have_sharp_anchor(raw_odds: Sequence[Any]) -> bool:
             continue
         if odd.get("expired") is True or odd.get("notExpired") is False:
             continue
+        if _decimal(odd.get("oddsDecimal")) is None:
+            continue
         return True
     return False
 
@@ -752,6 +952,8 @@ def _market_for_type(
     direct = _SUPPORTED_MARKET_TYPES.get(key)
     if direct is not None:
         return direct
+    if _is_nonfinite_numeric(line):
+        return None
     if "draw no bet" in key:
         return Market.DNB, _market_detail("dnb", key, line)
     if key == "both teams to score":
@@ -838,7 +1040,7 @@ def _is_total_market_type(key: str, selection: str | None = None) -> bool:
 
 def _market_detail(prefix: str, market_type: str, line: Any) -> str:
     period = _market_period_slug(market_type)
-    line_slug = "" if line in {None, ""} else _slug_line(line)
+    line_slug = "" if line is None or line == "" else _slug_line(line)
     parts = [prefix]
     if period:
         parts.append(period)
@@ -879,7 +1081,7 @@ def _slug_line(value: Any) -> str:
     return re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_").lower()
 
 
-def _bookmaker_name(code: str, bookmaker_entities: Mapping[str, Any]) -> str:
+def _bookmaker_name(code: str, bookmaker_entities: Mapping[str, Any]) -> str | None:
     raw = bookmaker_entities.get(code)
     if isinstance(raw, Mapping):
         name = raw.get("bookmakerName") or raw.get("name")
@@ -892,10 +1094,16 @@ def _bookmaker_name(code: str, bookmaker_entities: Mapping[str, Any]) -> str:
             # name resolves through the code's canonical fallback (BF ->
             # "Betfair Sportsbook", OE -> "Betfair Exchange"); every other
             # display name passes through unchanged.
-            if cleaned.lower() == "betfair" and code in _BOOKMAKER_FALLBACKS:
-                return _BOOKMAKER_FALLBACKS[code]
+            if cleaned.lower() == "betfair":
+                # The bare brand is ambiguous: BF is the sportsbook while OE
+                # is the exchange and only the latter carries commission. An
+                # unknown code cannot be priced safely as either venue.
+                return _BOOKMAKER_FALLBACKS.get(code)
             return cleaned
-    return _BOOKMAKER_FALLBACKS.get(code, code)
+    # Raw provider codes are not stable bookmaker identities. If neither the
+    # payload nor our audited mapping can name the code, drop that quote rather
+    # than persist a second identity that can carry the wrong commission model.
+    return _BOOKMAKER_FALLBACKS.get(code)
 
 
 def _team_names(best: Mapping[str, Any], header: Mapping[str, Any]) -> tuple[str, str]:
@@ -949,6 +1157,7 @@ def parse_match_page(
     directory: EventDirectory,
     now: datetime | None = None,
     markets: Sequence[Market] | None = None,
+    max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
 ) -> list[OddsSnapshotIn]:
     """Parse one OddsChecker match page into normalized odds snapshots."""
     ingested_at = now or _utcnow()
@@ -1021,11 +1230,22 @@ def parse_match_page(
             decimal = _decimal(raw_odd.get("oddsDecimal"))
             if decimal is None:
                 continue
-            captured_at = _parse_datetime(raw_odd.get("betFeedTimestamp")) or fallback_captured
+            bookmaker = _bookmaker_name(str(code), bookmaker_entities)
+            if bookmaker is None:
+                continue
+            captured_at = _provider_capture_time(
+                raw_odd.get("betFeedTimestamp"),
+                fallback=fallback_captured,
+                ingested_at=ingested_at,
+            )
+            if captured_at is None:
+                continue
+            if len(snapshots) >= max_snapshots:
+                raise OddsCheckerSecurityError(f"match exceeded snapshot ceiling ({max_snapshots})")
             snapshots.append(
                 OddsSnapshotIn(
                     event_id=event_id,
-                    bookmaker=_bookmaker_name(str(code), bookmaker_entities),
+                    bookmaker=bookmaker,
                     market=market_key,
                     selection=selection,
                     decimal_odds=decimal,
@@ -1055,9 +1275,37 @@ def _decimal(value: Any) -> float | None:
         decimal = float(value)
     except (TypeError, ValueError):
         return None
-    if decimal <= 1.0:
+    if not math.isfinite(decimal) or decimal <= 1.0 or decimal > MAX_DECIMAL_ODDS:
         return None
     return decimal
+
+
+def _is_nonfinite_numeric(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return True
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return True
+    return not math.isfinite(numeric)
+
+
+def _provider_capture_time(
+    value: Any,
+    *,
+    fallback: datetime,
+    ingested_at: datetime,
+) -> datetime | None:
+    """Validate an optional provider timestamp without masking malformed data."""
+    supplied = value is not None and str(value).strip() != ""
+    captured_at = _parse_datetime(value) if supplied else fallback
+    if captured_at is None:
+        return None
+    if captured_at > ingested_at + timedelta(minutes=5):
+        return None
+    return captured_at
 
 
 def supported_market_ids_from_match_page(
@@ -1074,7 +1322,8 @@ def supported_market_ids_from_match_page(
     emission is still sharp-anchor-gated in ``parse_market_api_payloads``."""
     wanted = set(markets) if markets is not None else None
     try:
-        payload = _find_match_payload(html)
+        header = _find_header_payload(html)
+        payload = _find_match_payload(html, prefer_subevent_id=_header_subevent_id(header))
     except OddsCheckerParseError:
         return []
     best = payload.get("bestOdds")
@@ -1106,6 +1355,8 @@ def supported_market_ids_from_match_page(
             if wanted is not None and market_key not in wanted:
                 continue
         ids.append(str(market.get("ocMarketId") or market_id))
+        if len(ids) > MAX_MARKET_IDS_PER_MATCH:
+            raise OddsCheckerSecurityError("match page exceeded market ID ceiling")
     return ids
 
 
@@ -1129,7 +1380,27 @@ async def fetch_market_api_payloads(
         payload = await fetch_json_value(url, session=session, proxy=proxy, referer=referer)
         if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
             raise OddsCheckerParseError("oddschecker market API response is not a list")
-        payloads.extend(item for item in payload if isinstance(item, Mapping))
+        chunk_payloads: list[Mapping[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, Mapping):
+                raise OddsCheckerParseError("oddschecker market API returned malformed rows")
+            raw_bets = item.get("bets")
+            raw_odds = item.get("odds")
+            if (
+                not isinstance(raw_bets, Sequence)
+                or isinstance(raw_bets, (str, bytes))
+                or not isinstance(raw_odds, Sequence)
+                or isinstance(raw_odds, (str, bytes))
+            ):
+                raise OddsCheckerParseError("oddschecker market API returned malformed rows")
+            chunk_payloads.append(item)
+        returned_market_ids = {
+            str(item.get("marketId") or item.get("ocMarketId") or "") for item in chunk_payloads
+        }
+        missing_market_ids = set(chunk) - returned_market_ids
+        if missing_market_ids:
+            raise OddsCheckerParseError("oddschecker market API returned an incomplete chunk")
+        payloads.extend(chunk_payloads)
     return payloads
 
 
@@ -1141,13 +1412,22 @@ def parse_market_api_payloads(
     now: datetime | None = None,
     markets: Sequence[Market] | None = None,
     capture_other: bool = False,
+    capture_only_other: bool = False,
+    truncate_on_limit: bool = False,
+    max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
 ) -> list[OddsSnapshotIn]:
     """Parse ``/api/markets/v2/all-odds`` payloads into normalized snapshots.
 
     With ``capture_other`` (and no ``markets`` filter), unmapped non-boost
     markets that carry a sharp-anchor (Betfair Exchange) quote are captured
     under ``Market.OTHER`` with an ``oc_<slug>`` market_detail — odds history
-    only (never priced/settled; see the OTHER enum note)."""
+    only (never priced/settled; see the OTHER enum note). ``capture_only_other``
+    isolates that optional archive from mapped, pick-critical markets.
+    ``truncate_on_limit`` is valid only for that optional-only mode: it retains
+    a bounded prefix rather than letting archive overflow fail a mapped match.
+    """
+    if truncate_on_limit and not capture_only_other:
+        raise ValueError("truncate_on_limit requires capture_only_other")
     ingested_at = now or _utcnow()
     wanted = set(markets) if markets is not None else None
     snapshots: list[OddsSnapshotIn] = []
@@ -1207,17 +1487,23 @@ def parse_market_api_payloads(
             if not selection:
                 continue
             line = raw_bet.get("line")
+            if _is_nonfinite_numeric(line):
+                continue
             exact_sets_selection = (
                 None if exact_sets_map is None else exact_sets_map.get(selection.lower())
             )
             if exact_sets_selection is not None:
                 # Proven-bo3 exact-sets bet -> the canonical set-totals group.
+                if capture_only_other:
+                    continue
                 market_key = Market.TOTALS
                 market_detail = _EXACT_SETS_BO3_DETAIL
                 if wanted is not None and market_key not in wanted:
                     continue
                 selection = exact_sets_selection
             elif (mapped := _market_for_type(market_type, line, selection)) is not None:
+                if capture_only_other:
+                    continue
                 market_key, market_detail = mapped
                 if wanted is not None and market_key not in wanted:
                     continue
@@ -1239,6 +1525,21 @@ def parse_market_api_payloads(
                 if decimal is None:
                     continue
                 bookmaker = _bookmaker_name(str(raw_odd.get("bookmakerCode") or ""), bm_entities)
+                if bookmaker is None:
+                    continue
+                captured_at = _provider_capture_time(
+                    raw_odd.get("betFeedTimestamp"),
+                    fallback=ingested_at,
+                    ingested_at=ingested_at,
+                )
+                if captured_at is None:
+                    continue
+                if len(snapshots) >= max_snapshots:
+                    if truncate_on_limit:
+                        return snapshots
+                    raise OddsCheckerSecurityError(
+                        f"match exceeded snapshot ceiling ({max_snapshots})"
+                    )
                 snapshots.append(
                     OddsSnapshotIn(
                         event_id=event_id,
@@ -1246,7 +1547,7 @@ def parse_market_api_payloads(
                         market=market_key,
                         selection=selection,
                         decimal_odds=decimal,
-                        captured_at=_parse_datetime(raw_odd.get("betFeedTimestamp")) or ingested_at,
+                        captured_at=captured_at,
                         ingested_at=ingested_at,
                         market_detail=market_detail,
                     )
@@ -1272,6 +1573,7 @@ def parse_legacy_match_page(
     directory: EventDirectory,
     now: datetime | None = None,
     markets: Sequence[Market] | None = None,
+    max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
 ) -> list[OddsSnapshotIn]:
     """Parse the older OddsChecker table grid used by basketball pages."""
     ingested_at = now or _utcnow()
@@ -1314,10 +1616,15 @@ def parse_legacy_match_page(
             bookmaker_code = str(cell.get("data-bk") or "").strip()
             if not bookmaker_code:
                 continue
+            bookmaker = _bookmaker_name(bookmaker_code, {})
+            if bookmaker is None:
+                continue
+            if len(snapshots) >= max_snapshots:
+                raise OddsCheckerSecurityError(f"match exceeded snapshot ceiling ({max_snapshots})")
             snapshots.append(
                 OddsSnapshotIn(
                     event_id=event_id,
-                    bookmaker=_bookmaker_name(bookmaker_code, {}),
+                    bookmaker=bookmaker,
                     market=market_key,
                     selection=selection,
                     decimal_odds=decimal,
@@ -1409,12 +1716,13 @@ _LINE_BEARING_MARKETS: frozenset[Market] = frozenset(
 
 
 def _line_value(line: Any) -> float | None:
-    if line in {None, ""}:
+    if line is None or line == "":
         return None
     try:
-        return float(line)
+        value = float(line)
     except (TypeError, ValueError):
         return None
+    return value if math.isfinite(value) else None
 
 
 def _line_bearing_selection(selection: str, line: Any, market: Market) -> str:
@@ -1531,6 +1839,8 @@ def parse_competition_match_urls(
         if absolute not in seen:
             seen.add(absolute)
             urls.append(absolute)
+            if len(urls) > MAX_MATCH_URLS_PER_CYCLE:
+                raise OddsCheckerSecurityError("competition exceeded match URL ceiling")
     return urls
 
 
@@ -1560,7 +1870,7 @@ def _new_impersonated_session(proxy: ScraperProxy | None) -> AsyncGetSession:
         "impersonate": PINNED_IMPERSONATE,
         "default_headers": True,
         "timeout": DEFAULT_TIMEOUT,
-        "allow_redirects": True,
+        "allow_redirects": False,
     }
     if proxy is not None and proxy.url:
         inline = _proxy_with_creds(proxy)
@@ -1592,28 +1902,110 @@ class _ProxySessionPool:
         # the module-level factory.
         self._factory = session_factory or _new_impersonated_session
         self._sessions: dict[int, AsyncGetSession] = {}
+        self._lease_counts: dict[tuple[int, int], int] = {}
+        self._retired_sessions: dict[tuple[int, int], AsyncGetSession] = {}
         self._cursor = 0
 
-    def acquire(self) -> AsyncGetSession:
+    @staticmethod
+    def _lease_key(lease: _ProxySessionLease) -> tuple[int, int]:
+        return lease.index, id(lease.session)
+
+    def acquire_lease(
+        self,
+        *,
+        exclude_indices: frozenset[int] = frozenset(),
+    ) -> _ProxySessionLease:
         if not self._proxies:
             raise OddsCheckerError("proxy session pool is empty")
-        index = self._cursor % len(self._proxies)
-        self._cursor += 1
+        index: int | None = None
+        for _ in range(len(self._proxies)):
+            candidate = self._cursor % len(self._proxies)
+            self._cursor += 1
+            if candidate not in exclude_indices:
+                index = candidate
+                break
+        if index is None:
+            raise OddsCheckerError("no proxy session remains after exclusions")
         session = self._sessions.get(index)
         if session is None:
             session = self._factory(self._proxies[index])
             self._sessions[index] = session
-        return session
+        lease = _ProxySessionLease(index=index, session=session)
+        key = self._lease_key(lease)
+        self._lease_counts[key] = self._lease_counts.get(key, 0) + 1
+        return lease
+
+    def acquire(self) -> AsyncGetSession:
+        """Compatibility wrapper for callers that do not need lease identity."""
+        return self.acquire_lease().session
+
+    @staticmethod
+    async def _close_session(session: AsyncGetSession) -> None:
+        close = getattr(session, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+    async def evict(self, lease: _ProxySessionLease) -> None:
+        """Retire the failed session without closing it under active siblings.
+
+        New acquisitions stop seeing it immediately. The actual close is
+        deferred until every outstanding lease on that exact session releases,
+        preventing one challenged request from cancelling healthy in-flight
+        siblings that share the per-proxy connection pool.
+        """
+        current = self._sessions.get(lease.index)
+        if current is not lease.session:
+            return
+        self._sessions.pop(lease.index, None)
+        key = self._lease_key(lease)
+        if self._lease_counts.get(key, 0) > 0:
+            self._retired_sessions[key] = lease.session
+            return
+        try:
+            await self._close_session(lease.session)
+        except Exception as exc:
+            logger.warning(
+                "oddschecker proxy session eviction close failed (%s)",
+                type(exc).__name__,
+            )
+
+    async def release(self, lease: _ProxySessionLease) -> None:
+        """Release one borrower and close a retired session at refcount zero."""
+        key = self._lease_key(lease)
+        count = self._lease_counts.get(key, 0)
+        if count <= 1:
+            self._lease_counts.pop(key, None)
+            retired = self._retired_sessions.pop(key, None)
+            if retired is None:
+                return
+            try:
+                await self._close_session(retired)
+            except Exception as exc:
+                logger.warning(
+                    "oddschecker retired proxy session close failed (%s)",
+                    type(exc).__name__,
+                )
+            return
+        self._lease_counts[key] = count - 1
 
     async def aclose(self) -> None:
-        for session in self._sessions.values():
-            close = getattr(session, "close", None)
-            if close is None:
-                continue
-            result = close()
-            if inspect.isawaitable(result):
-                await result
+        sessions_by_id = {
+            id(session): session
+            for session in (*self._sessions.values(), *self._retired_sessions.values())
+        }
         self._sessions.clear()
+        self._retired_sessions.clear()
+        self._lease_counts.clear()
+        results = await asyncio.gather(
+            *(self._close_session(session) for session in sessions_by_id.values()),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning("oddschecker proxy session close failed (%s)", type(result).__name__)
 
 
 class OddsCheckerLoader:
@@ -1656,7 +2048,10 @@ class OddsCheckerLoader:
         # fetch_odds cycle (created/closed in _run_with_session). None outside a
         # cycle and whenever a session is injected (tests) or no proxy pool.
         self._session_pool: _ProxySessionPool | None = None
-        self._max_clients = max(1, max_clients)
+        # Eight bounded responses is the memory/concurrency budget used by the
+        # scheduler configuration. Clamp direct construction too, so callers
+        # cannot bypass the 3 GiB container safety envelope.
+        self._max_clients = max(1, min(DEFAULT_MAX_CLIENTS, max_clients))
         self._markets = tuple(markets) if markets is not None else None
         # Per-sport scheduler mode: when set, ``fetch_odds(sport_key)`` discovers
         # and parses ONLY that pipeline sport key's slate (mapped to an
@@ -1670,6 +2065,10 @@ class OddsCheckerLoader:
         # pipeline sport key on each fetch in scheduler mode.
         self.last_fetch_matches: dict[str, int] = {}
         self.last_fetch_event_ids: dict[str, tuple[str, ...]] = {}
+        # Partial siblings remain persistable/visible, but pipeline picks are
+        # withheld unless every listed match completed successfully.
+        self.last_fetch_complete: dict[str, bool] = {}
+        self.last_fetch_completeness_reason: dict[str, str] = {}
 
     @classmethod
     def football_today_tomorrow(
@@ -1781,6 +2180,8 @@ class OddsCheckerLoader:
         snapshots = await self._parse_modern_or_legacy_match_page(
             page, now=now, session=session, markets=markets
         )
+        if len(snapshots) > MAX_SNAPSHOTS_PER_MATCH:
+            raise OddsCheckerSecurityError("match exceeded snapshot ceiling")
         return snapshots
 
     async def _parse_modern_or_legacy_match_page(
@@ -1792,47 +2193,121 @@ class OddsCheckerLoader:
         markets: Sequence[Market] | None = None,
     ) -> list[OddsSnapshotIn]:
         eff_markets = markets if markets is not None else self._markets
-        market_ids = supported_market_ids_from_match_page(
-            page.html, markets=eff_markets, include_other=self._capture_other
+        # Fetch mapped, pick-critical markets independently. Optional OTHER
+        # capture must never turn a healthy mapped match into an incomplete one.
+        mapped_market_ids = supported_market_ids_from_match_page(
+            page.html, markets=eff_markets, include_other=False
         )
-        if market_ids:
+        optional_market_ids: list[str] = []
+        if self._capture_other and eff_markets is None:
+            try:
+                all_market_ids = supported_market_ids_from_match_page(
+                    page.html, markets=None, include_other=True
+                )
+            except OddsCheckerSecurityError as exc:
+                logger.warning(
+                    "oddschecker optional market capture skipped (%s)",
+                    type(exc).__name__,
+                )
+            else:
+                mapped_ids = set(mapped_market_ids)
+                optional_market_ids = [
+                    market_id for market_id in all_market_ids if market_id not in mapped_ids
+                ]
+
+        mapped_snapshots: list[OddsSnapshotIn] = []
+        if mapped_market_ids:
             try:
                 payloads = await fetch_market_api_payloads(
-                    market_ids,
+                    mapped_market_ids,
                     referer=page.url,
                     session=session,
                     proxy=None if session is not None else self._next_proxy(),
                 )
-                snapshots = parse_market_api_payloads(
+                mapped_snapshots = parse_market_api_payloads(
                     payloads,
                     url=page.url,
                     directory=self._directory,
                     now=now,
                     markets=eff_markets,
-                    capture_other=self._capture_other,
+                    capture_other=False,
                 )
-                if snapshots:
-                    return snapshots
-            except OddsCheckerError as exc:
+            except OddsCheckerError:
+                # Any API failure after the page advertised supported market
+                # ids is systemic for this match. Falling back to embedded
+                # bestOdds would silently discard API-only markets and make a
+                # partial slate look complete. Let the gather retain healthy
+                # sibling matches while marking this cycle incomplete.
+                raise
+
+        if not mapped_snapshots:
+            try:
+                mapped_snapshots = parse_match_page(
+                    page.html,
+                    url=page.url,
+                    directory=self._directory,
+                    now=now,
+                    markets=eff_markets,
+                )
+            except OddsCheckerParseError:
+                mapped_snapshots = await self._parse_legacy_match_with_linked_markets(
+                    page,
+                    now=now,
+                    session=session,
+                    markets=eff_markets,
+                )
+
+        mapped_event_ids = frozenset(snapshot.event_id for snapshot in mapped_snapshots)
+        remaining = MAX_SNAPSHOTS_PER_MATCH - len(mapped_snapshots)
+        if not optional_market_ids or remaining <= 0 or not mapped_event_ids:
+            if optional_market_ids and remaining <= 0:
+                logger.warning("oddschecker optional market capture skipped (snapshot ceiling)")
+            elif optional_market_ids and not mapped_event_ids:
                 logger.warning(
-                    "oddschecker market API skipped (%s)",
-                    type(exc).__name__,
+                    "oddschecker optional capture skipped (mapped event identity unavailable)"
                 )
+            return mapped_snapshots
+
         try:
-            return parse_match_page(
-                page.html,
-                url=page.url,
-                directory=self._directory,
-                now=now,
-                markets=eff_markets,
-            )
-        except OddsCheckerParseError:
-            return await self._parse_legacy_match_with_linked_markets(
-                page,
-                now=now,
+            optional_payloads = await fetch_market_api_payloads(
+                optional_market_ids,
+                referer=page.url,
                 session=session,
-                markets=eff_markets,
+                proxy=None if session is not None else self._next_proxy(),
             )
+            # Optional archive payloads are not authoritative event metadata.
+            # Parse them against a disposable registry so missing/corrupt fields
+            # cannot overwrite the mapped match context, even if parsing raises
+            # after registration and the archive exception is isolated below.
+            optional_directory = EventDirectory()
+            parsed_optional_snapshots = parse_market_api_payloads(
+                optional_payloads,
+                url=page.url,
+                directory=optional_directory,
+                now=now,
+                capture_other=True,
+                capture_only_other=True,
+                truncate_on_limit=True,
+                max_snapshots=remaining,
+            )
+            optional_snapshots = [
+                snapshot
+                for snapshot in parsed_optional_snapshots
+                if snapshot.event_id in mapped_event_ids
+            ]
+            if len(optional_snapshots) != len(parsed_optional_snapshots):
+                logger.warning(
+                    "oddschecker optional market capture discarded (event identity mismatch)"
+                )
+        except Exception as exc:
+            # OTHER is an archive-only surface. Keep mapped snapshots and emit
+            # only the safe exception class (never a URL/body/proxy credential).
+            logger.warning(
+                "oddschecker optional market capture skipped (%s)",
+                type(exc).__name__,
+            )
+            return mapped_snapshots
+        return [*mapped_snapshots, *optional_snapshots]
 
     async def _parse_legacy_match_with_linked_markets(
         self,
@@ -1862,34 +2337,37 @@ class OddsCheckerLoader:
             )
             if url != page.url
         ]
+        if len(linked_urls) > MAX_LEGACY_MARKET_URLS_PER_MATCH:
+            raise OddsCheckerSecurityError("legacy match exceeded linked-market URL ceiling")
         if not linked_urls:
             return snapshots
-        semaphore = asyncio.Semaphore(min(4, self._max_clients))
-
-        async def _linked(url: str) -> list[OddsSnapshotIn]:
-            async with semaphore:
+        # Legacy linked markets are rare and bounded. Parse them serially with
+        # the exact remaining row budget so no concurrent sibling can allocate
+        # beyond the per-match ceiling before the aggregate check runs.
+        for url in linked_urls:
+            remaining = MAX_SNAPSHOTS_PER_MATCH - len(snapshots)
+            if remaining <= 0:
+                raise OddsCheckerSecurityError("legacy match exceeded snapshot ceiling")
+            try:
                 linked_page = await fetch_html(
                     url,
                     session=session,
                     proxy=None if session is not None else self._next_proxy(),
                 )
-                return parse_legacy_match_page(
+                result = parse_legacy_match_page(
                     linked_page.html,
                     url=linked_page.url,
                     directory=self._directory,
                     now=now,
-                    markets=self._markets,
+                    markets=eff_markets,
+                    max_snapshots=remaining,
                 )
-
-        results = await asyncio.gather(
-            *(_linked(url) for url in linked_urls),
-            return_exceptions=True,
-        )
-        for result in results:
-            if isinstance(result, BaseException):
+            except OddsCheckerSecurityError:
+                raise
+            except Exception as exc:
                 logger.debug(
                     "oddschecker linked legacy market skipped (%s)",
-                    type(result).__name__,
+                    type(exc).__name__,
                 )
                 continue
             snapshots.extend(result)
@@ -1949,7 +2427,7 @@ class OddsCheckerLoader:
             impersonate=PINNED_IMPERSONATE,
             default_headers=True,
             timeout=DEFAULT_TIMEOUT,
-            allow_redirects=True,
+            allow_redirects=False,
             max_clients=self._max_clients,
         ) as session:
             return await runner(session)
@@ -1960,33 +2438,62 @@ class OddsCheckerLoader:
         oc_key = SCHEDULER_SPORT_KEY_MAP.get(pipeline_key)
         if oc_key is None:
             return []
-        try:
-            match_urls = await discover_sport_daily_match_urls(
+
+        self.last_fetch_complete[pipeline_key] = False
+        self.last_fetch_completeness_reason[pipeline_key] = "cycle did not complete"
+
+        discovery_lease: _ProxySessionLease | None = None
+        discovery_session = session
+        if discovery_session is None and self._session_pool is not None:
+            discovery_lease = self._session_pool.acquire_lease()
+            discovery_session = discovery_lease.session
+
+        async def _discover(active_session: AsyncGetSession | None) -> list[str]:
+            return await discover_sport_daily_match_urls(
                 oc_key,
                 start_date=self._football_daily_start_date,
                 days=self._football_daily_days,
-                session=session,
-                proxy=None if session is not None else self._next_proxy(),
+                session=active_session,
+                proxy=None if active_session is not None else self._next_proxy(),
             )
-        except OddsCheckerError as exc:
-            logger.warning(
-                "oddschecker %s daily discovery skipped (%s)", oc_key, type(exc).__name__
+
+        try:
+            try:
+                match_urls = await _discover(discovery_session)
+            except Exception as exc:
+                if not _is_transient_fetch_error(exc):
+                    raise
+                await _wait_before_retry(exc)
+                logger.warning(
+                    "oddschecker %s daily discovery retrying (%s)",
+                    oc_key,
+                    type(exc).__name__,
+                )
+                if discovery_lease is not None and self._session_pool is not None:
+                    failed_lease = discovery_lease
+                    await self._session_pool.evict(failed_lease)
+                    await self._session_pool.release(failed_lease)
+                    discovery_lease = None
+                    try:
+                        discovery_lease = self._session_pool.acquire_lease(
+                            exclude_indices=frozenset({failed_lease.index})
+                        )
+                    except OddsCheckerError:
+                        discovery_lease = self._session_pool.acquire_lease()
+                    discovery_session = discovery_lease.session
+                match_urls = await _discover(discovery_session)
+        finally:
+            if discovery_lease is not None and self._session_pool is not None:
+                await self._session_pool.release(discovery_lease)
+        try:
+            deduped = self._dedupe_urls(match_urls)
+        except OddsCheckerSecurityError:
+            self.last_fetch_matches[pipeline_key] = len(match_urls)
+            self.last_fetch_complete[pipeline_key] = False
+            self.last_fetch_completeness_reason[pipeline_key] = (
+                f"listed match URL ceiling exceeded ({MAX_MATCH_URLS_PER_CYCLE})"
             )
-            match_urls = []
-        except Exception as exc:
-            # A discovery-fetch TIMEOUT must not fail the whole poll_odds cycle
-            # (it surfaced as "poll_odds failed for soccer: Timeout"). Skip this
-            # sport's slate this cycle like an OddsCheckerError; it retries next
-            # cycle. Non-timeout errors still propagate unchanged.
-            if "timeout" not in type(exc).__name__.lower():
-                raise
-            logger.warning(
-                "oddschecker %s daily discovery timed out (%s) — skipping this cycle",
-                oc_key,
-                type(exc).__name__,
-            )
-            match_urls = []
-        deduped = self._dedupe_urls(match_urls)
+            return []
         self.last_fetch_matches[pipeline_key] = len(deduped)
         return await self._gather_snapshots(deduped, session, pipeline_key=pipeline_key)
 
@@ -1999,6 +2506,8 @@ class OddsCheckerLoader:
                 continue
             seen.add(url)
             deduped.append(url)
+            if len(deduped) > MAX_MATCH_URLS_PER_CYCLE:
+                raise OddsCheckerSecurityError("listed match URL ceiling exceeded")
         return deduped
 
     async def _gather_snapshots(
@@ -2010,40 +2519,168 @@ class OddsCheckerLoader:
     ) -> Sequence[OddsSnapshotIn]:
         semaphore = asyncio.Semaphore(self._max_clients)
 
-        async def _one(url: str) -> list[OddsSnapshotIn]:
+        async def _one(url: str, *, capture_optional: bool) -> list[OddsSnapshotIn]:
             async with semaphore:
+                lease: _ProxySessionLease | None = None
+                active_session = session
+                market_scope = None if capture_optional else _MAPPED_MARKET_SCOPE
+                if active_session is None and self._session_pool is not None:
+                    lease = self._session_pool.acquire_lease()
+                    active_session = lease.session
                 try:
-                    return await self.fetch_match_odds(url, session=session)
-                except Exception as exc:
-                    # A reused per-proxy pooled session can carry a stale
-                    # keep-alive connection (idle-dropped by the proxy/site), so
-                    # the next request stalls to the 8s CONNECT timeout. Live
-                    # instrumentation (2026-07-06) found ~7% of match-page fetches
-                    # hitting this, almost all on pooled sessions; a retry on a
-                    # fresh cold session + rotated proxy recovers ~all of them
-                    # (net failures fell ~7% -> ~1.4%). Only timeouts retry.
-                    if "timeout" not in type(exc).__name__.lower():
-                        raise
-                    retry_session = _new_impersonated_session(self._next_proxy())
                     try:
-                        return await self.fetch_match_odds(url, session=retry_session)
-                    finally:
-                        closer = getattr(retry_session, "close", None)
-                        if closer is not None:
-                            closed = closer()
-                            if inspect.isawaitable(closed):
-                                await closed
+                        return await self.fetch_match_odds(
+                            url,
+                            session=active_session,
+                            markets=market_scope,
+                        )
+                    except Exception as exc:
+                        if not _is_transient_fetch_error(exc):
+                            raise
+                        await _wait_before_retry(exc)
 
-        results = await asyncio.gather(*(_one(url) for url in deduped), return_exceptions=True)
-        snapshots: list[OddsSnapshotIn] = []
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.warning("oddschecker match page skipped (%s)", type(result).__name__)
-                continue
-            snapshots.extend(result)
+                        if lease is not None and self._session_pool is not None:
+                            failed_lease = lease
+                            await self._session_pool.evict(failed_lease)
+                            await self._session_pool.release(failed_lease)
+                            lease = None
+                            try:
+                                retry_lease = self._session_pool.acquire_lease(
+                                    exclude_indices=frozenset({failed_lease.index})
+                                )
+                            except OddsCheckerError:
+                                # A one-proxy pool cannot rotate, but it must
+                                # rebuild the retired session rather than reuse
+                                # the challenged/stale connection.
+                                retry_lease = self._session_pool.acquire_lease()
+                            try:
+                                return await self.fetch_match_odds(
+                                    url,
+                                    session=retry_lease.session,
+                                    markets=market_scope,
+                                )
+                            except Exception as retry_exc:
+                                if _is_transient_fetch_error(retry_exc):
+                                    await self._session_pool.evict(retry_lease)
+                                raise
+                            finally:
+                                await self._session_pool.release(retry_lease)
+
+                        retry_session = _new_impersonated_session(self._next_proxy())
+                        try:
+                            return await self.fetch_match_odds(
+                                url,
+                                session=retry_session,
+                                markets=market_scope,
+                            )
+                        finally:
+                            try:
+                                await _ProxySessionPool._close_session(retry_session)
+                            except Exception as close_exc:
+                                logger.warning(
+                                    "oddschecker retry session close failed (%s)",
+                                    type(close_exc).__name__,
+                                )
+                finally:
+                    if lease is not None and self._session_pool is not None:
+                        await self._session_pool.release(lease)
+
+        mapped_snapshots: list[OddsSnapshotIn] = []
+        optional_snapshots: list[OddsSnapshotIn] = []
+        failures = 0
+        snapshot_overflow = False
+        optional_truncated = False
+        if len(deduped) > MAX_MATCH_URLS_PER_CYCLE:
+            reason = f"listed match URL ceiling exceeded ({MAX_MATCH_URLS_PER_CYCLE})"
+            if pipeline_key is None:
+                raise OddsCheckerSecurityError(reason)
+            self.last_fetch_complete[pipeline_key] = False
+            self.last_fetch_completeness_reason[pipeline_key] = reason
+            self.last_fetch_event_ids[pipeline_key] = ()
+            return []
+
+        # Batch fan-out at the actual concurrency width. Unlike one giant
+        # gather, this never allocates one coroutine/result slot per listed URL
+        # and lets us stop scheduling new work as soon as the cycle row budget
+        # is exhausted.
+        batch_size = max(1, self._max_clients)
+        for start in range(0, len(deduped), batch_size):
+            # Once optional rows fill the retained cycle budget, later batches
+            # still fetch every mapped market but skip archive-only API work.
+            # This bounds parsing near the cycle ceiling without letting early
+            # OTHER-heavy matches hide mapped rows listed later in the slate.
+            capture_optional = not (
+                self._capture_other
+                and self._markets is None
+                and len(mapped_snapshots) + len(optional_snapshots) >= MAX_SNAPSHOTS_PER_CYCLE
+            )
+            results = await asyncio.gather(
+                *(
+                    _one(url, capture_optional=capture_optional)
+                    for url in deduped[start : start + batch_size]
+                ),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    failures += 1
+                    logger.warning("oddschecker match page skipped (%s)", type(result).__name__)
+                    continue
+                mapped_result = [
+                    snapshot
+                    for snapshot in result
+                    if getattr(snapshot, "market", None) is not Market.OTHER
+                ]
+                optional_result = [
+                    snapshot
+                    for snapshot in result
+                    if getattr(snapshot, "market", None) is Market.OTHER
+                ]
+                if len(mapped_result) > MAX_SNAPSHOTS_PER_MATCH:
+                    failures += 1
+                    logger.warning("oddschecker match page skipped (snapshot ceiling)")
+                    continue
+                per_match_optional_capacity = MAX_SNAPSHOTS_PER_MATCH - len(mapped_result)
+                if len(optional_result) > per_match_optional_capacity:
+                    optional_result = optional_result[:per_match_optional_capacity]
+                    optional_truncated = True
+                if len(mapped_snapshots) + len(mapped_result) > MAX_SNAPSHOTS_PER_CYCLE:
+                    snapshot_overflow = True
+                    break
+                mapped_snapshots.extend(mapped_result)
+
+                # Optional rows never consume space required by later mapped
+                # rows. Shrink the archive buffer as the critical slate grows.
+                optional_capacity = MAX_SNAPSHOTS_PER_CYCLE - len(mapped_snapshots)
+                if len(optional_snapshots) > optional_capacity:
+                    del optional_snapshots[optional_capacity:]
+                    optional_truncated = True
+                remaining_optional = optional_capacity - len(optional_snapshots)
+                if len(optional_result) > remaining_optional:
+                    optional_result = optional_result[:remaining_optional]
+                    optional_truncated = True
+                optional_snapshots.extend(optional_result)
+            if snapshot_overflow:
+                break
+        snapshots = [*mapped_snapshots, *optional_snapshots]
+        if optional_truncated:
+            logger.warning("oddschecker optional market capture truncated (snapshot ceiling)")
         if pipeline_key is not None:
+            complete = failures == 0 and not snapshot_overflow
+            self.last_fetch_complete[pipeline_key] = complete
+            if snapshot_overflow:
+                reason = f"cycle snapshot ceiling exceeded ({MAX_SNAPSHOTS_PER_CYCLE})"
+            elif failures:
+                reason = f"{failures}/{len(deduped)} listed match fetch(es) failed"
+            else:
+                reason = ""
+            self.last_fetch_completeness_reason[pipeline_key] = reason
             self.last_fetch_event_ids[pipeline_key] = tuple(
                 dict.fromkeys(snapshot.event_id for snapshot in snapshots)
+            )
+        elif snapshot_overflow:
+            raise OddsCheckerSecurityError(
+                f"cycle snapshot ceiling exceeded ({MAX_SNAPSHOTS_PER_CYCLE})"
             )
         return snapshots
 

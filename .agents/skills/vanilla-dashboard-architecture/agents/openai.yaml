@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vanilla Dashboard Architecture"
+  short_description: "Structure and optimize the single-file dashboard"
+  default_prompt: "Use $vanilla-dashboard-architecture to refactor or optimize the dashboard without breaking its locked contract."

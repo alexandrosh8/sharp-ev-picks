@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -29,7 +29,9 @@ from app.ingestion.betfair_exchange import (
     BOOKMAKER,
     SPORT_SEGMENTS,
     BetfairExchangeCapture,
+    BetfairExchangeHTTPStatusError,
     BetfairExchangeReader,
+    BetfairExchangeSchemaError,
     FeedFeasible,
     MatchTarget,
     feed_markets_for_sport,
@@ -39,8 +41,8 @@ from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.storage.models import Event, OddsSnapshot
 from app.storage.repositories import persist_odds_snapshots
+from tests.database import TEST_DATABASE_URL
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 NOW = datetime(2026, 6, 28, 18, 0, tzinfo=UTC)
 # A real provider observation epoch (d.time-base) -> captured_at.
 TIME_BASE = 1782352800
@@ -76,11 +78,14 @@ def _payload(
 def _soccer_1x2_payload(
     odds: Mapping[str, float] | None = None,
     volume: Mapping[str, float] | None = None,
+    *,
+    time_base: int | None = TIME_BASE,
 ) -> dict[str, Any]:
     return _payload(
         "E-1-2-0-0-0",
         odds if odds is not None else {"0": 2.12, "1": 3.5, "2": 4.0},
         volume if volume is not None else {"0": 9052, "1": 3307, "2": 1307},
+        time_base=time_base,
     )
 
 
@@ -246,6 +251,42 @@ def test_parse_captured_at_falls_back_to_now_without_time_base() -> None:
     assert all(s.captured_at == NOW for s in snaps)
 
 
+def test_parse_nonfinite_liquidity_is_rejected() -> None:
+    payload = _soccer_1x2_payload()
+    payload["d"]["oddsdata"]["back"]["E-1-2-0-0-0"]["volume"]["44"]["0"] = "inf"
+    snaps = parse_betfair_feed(
+        payload,
+        market_key="1x2",
+        default_bet_id=0,
+        default_scope_id=0,
+        home="Real Madrid",
+        away="Al Hilal",
+        event_id="evt",
+        min_liquidity=0.0,
+        now=NOW,
+    )
+    assert "Real Madrid" not in {snap.selection for snap in snaps}
+
+    payload["d"]["oddsdata"]["back"]["E-1-2-0-0-0"]["volume"]["44"]["1"] = 10**13
+    snaps = _parse_soccer_1x2(payload)
+    assert "Draw" not in {snap.selection for snap in snaps}
+
+
+@pytest.mark.parametrize("bad_price", [float("nan"), float("inf"), 1001.0])
+def test_parse_invalid_decimal_price_is_isolated(bad_price: float) -> None:
+    payload = _soccer_1x2_payload()
+    payload["d"]["oddsdata"]["back"]["E-1-2-0-0-0"]["odds"]["44"]["0"] = bad_price
+
+    snapshots = _parse_soccer_1x2(payload)
+
+    assert {snapshot.selection for snapshot in snapshots} == {"Draw", "Al Hilal"}
+
+
+def test_parse_future_provider_observation_is_rejected() -> None:
+    future_epoch = int((NOW + timedelta(minutes=6)).timestamp())
+    assert _parse_soccer_1x2(_soccer_1x2_payload(time_base=future_epoch)) == []
+
+
 def test_parse_skips_unbackable_price() -> None:
     # A price <= 1.0 is not a backable BACK price and is dropped (with its leg).
     payload = _soccer_1x2_payload(odds={"0": 1.0, "1": 3.5, "2": 4.0})
@@ -337,6 +378,137 @@ async def test_reader_empty_feeds_returns_empty() -> None:
     # No Betfair rows this cycle (loader yields nothing) is a benign gap.
     reader = BetfairExchangeReader(min_liquidity=0.0, feed_loader=_feed_loader({}))
     assert await reader.read_snapshots(_target(), sport="soccer", now=NOW) == []
+
+
+async def test_reader_callable_clock_is_sampled_after_loader() -> None:
+    sampled: list[str] = []
+
+    async def loader(match_url: str, sport: str) -> Sequence[FeedFeasible]:  # noqa: ARG001
+        sampled.append("loaded")
+        return [FeedFeasible("1x2", 0, 0, _soccer_1x2_payload(time_base=None))]
+
+    def clock() -> datetime:
+        assert sampled == ["loaded"]
+        return NOW
+
+    reader = BetfairExchangeReader(min_liquidity=0.0, feed_loader=loader)
+    snaps = await reader.read_snapshots(_target(), sport="soccer", now=clock)
+    assert snaps
+    assert {snap.captured_at for snap in snaps} == {NOW}
+
+
+class _Response:
+    def __init__(self, status_code: int, text: str = "") -> None:
+        self.status_code = status_code
+        self.text = text
+
+
+class _Session:
+    def __init__(self, responses: Sequence[_Response]) -> None:
+        self._responses = iter(responses)
+
+    async def get(self, *args: Any, **kwargs: Any) -> _Response:  # noqa: ARG002
+        return next(self._responses)
+
+
+async def test_network_loader_rejects_non_200_bootstrap_instead_of_empty_success() -> None:
+    reader = BetfairExchangeReader(min_liquidity=0.0)
+    with pytest.raises(BetfairExchangeHTTPStatusError, match="429"):
+        await reader._load_with_session(
+            _Session([_Response(429)]),
+            "https://www.oddsportal.com/x",
+            ("1x2",),
+        )
+
+
+async def test_network_loader_rejects_challenge_bootstrap_instead_of_empty_success() -> None:
+    reader = BetfairExchangeReader(min_liquidity=0.0)
+    with pytest.raises(BetfairExchangeSchemaError):
+        await reader._load_with_session(
+            _Session([_Response(200, "<html>challenge</html>")]),
+            "https://www.oddsportal.com/x",
+            ("1x2",),
+        )
+
+
+async def test_network_loader_rejects_http_200_challenge_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.ingestion import betfair_exchange as be
+
+    monkeypatch.setattr(
+        be,
+        "extract_bootstrap_tokens",
+        lambda html: SimpleNamespace(  # noqa: ARG005
+            sport_id=1,
+            event_id="event",
+            default_bet_id=0,
+            default_scope_id=0,
+        ),
+    )
+    monkeypatch.setattr(
+        be,
+        "build_feed_url",
+        lambda sport_id, event_id, market_key, default_bet_id, default_scope_id: (
+            "https://www.oddsportal.com/match-event/1x2"
+        ),
+    )
+    reader = BetfairExchangeReader(min_liquidity=0.0)
+
+    with pytest.raises(BetfairExchangeSchemaError, match="FeedEnvelopeError"):
+        await reader._load_with_session(
+            _Session(
+                [
+                    _Response(200, "bootstrap"),
+                    _Response(200, "<html>challenge</html>"),
+                ]
+            ),
+            "https://www.oddsportal.com/x",
+            ("1x2",),
+        )
+
+
+async def test_network_loader_preserves_valid_feed_when_optional_market_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.ingestion import betfair_exchange as be
+
+    monkeypatch.setattr(
+        be,
+        "extract_bootstrap_tokens",
+        lambda html: SimpleNamespace(  # noqa: ARG005
+            sport_id=1,
+            event_id="event",
+            default_bet_id=0,
+            default_scope_id=0,
+        ),
+    )
+    monkeypatch.setattr(
+        be,
+        "build_feed_url",
+        lambda sport_id, event_id, market_key, default_bet_id, default_scope_id: (
+            f"https://www.oddsportal.com/match-event/{market_key}"
+        ),
+    )
+    monkeypatch.setattr(be, "decrypt_feed_body", lambda body: {"body": body})
+    reader = BetfairExchangeReader(min_liquidity=0.0)
+    feeds = await reader._load_with_session(
+        _Session(
+            [
+                _Response(200, "bootstrap"),
+                _Response(200, "valid-feed"),
+                _Response(404),
+            ]
+        ),
+        "https://www.oddsportal.com/x",
+        ("1x2", "over_under_2_5"),
+    )
+
+    assert [(feed.market_key, feed.payload) for feed in feeds] == [("1x2", {"body": "valid-feed"})]
 
 
 # --------------------------------------------------------------------------- #
@@ -499,6 +671,44 @@ async def test_capture_persist_failure_rolls_back_change_gate_and_continues(
     assert await capture.capture_once() == {"soccer": 0, "basketball": 0}
 
 
+@pytest.mark.asyncio
+async def test_capture_partial_event_failure_rolls_back_only_reported_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SAVEPOINT/attach-only failures are returned, not raised; their prices
+    must re-emit unchanged on the next cycle."""
+    import app.storage.repositories as repositories
+
+    target = _target()
+    calls = 0
+
+    async def fake_persist(*args: object, **kwargs: object) -> int:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls == 1:
+            return repositories.SnapshotPersistResult(0, failed_event_ids={target.event_id})
+        return 3
+
+    monkeypatch.setattr(repositories, "persist_odds_snapshots", fake_persist)
+    reader = BetfairExchangeReader(
+        min_liquidity=0.0,
+        feed_loader=_feed_loader({"soccer": (FeedFeasible("1x2", 0, 0, _soccer_1x2_payload()),)}),
+    )
+    capture = BetfairExchangeCapture(
+        reader,
+        session_factory=object(),  # type: ignore[arg-type]
+        targets_fn=lambda sport: [target],
+        sports=("soccer",),
+        now_fn=lambda: NOW,
+    )
+
+    assert await capture.capture_once() == {"soccer": 0}
+    assert await capture.capture_once() == {"soccer": 3}
+    assert await capture.capture_once() == {"soccer": 0}
+    assert calls == 2
+
+
 # --------------------------------------------------------------------------- #
 # DB integration: rows attach INLINE onto the canonical event (ADR-0015 v2) as
 # bookmaker "Betfair Exchange" with NUMERIC liquidity. Skipped without Postgres.
@@ -506,7 +716,7 @@ async def test_capture_persist_failure_rolls_back_change_gate_and_continues(
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 async def factory():  # type: ignore[no-untyped-def]
-    engine = create_async_engine(DB_URL)
+    engine = create_async_engine(TEST_DATABASE_URL)
     try:
         async with engine.connect() as probe:
             await probe.exec_driver_sql("SELECT 1")
@@ -612,7 +822,7 @@ async def test_capture_does_not_create_event_when_canonical_absent(factory) -> N
 
 
 async def test_db_tests_leave_no_committed_pollution() -> None:
-    probe_engine = create_async_engine(DB_URL)
+    probe_engine = create_async_engine(TEST_DATABASE_URL)
     try:
         async with probe_engine.connect() as probe:
             await probe.exec_driver_sql("SELECT 1")
@@ -631,7 +841,7 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
         ingested_at=NOW,
     )
 
-    inner_engine = create_async_engine(DB_URL)
+    inner_engine = create_async_engine(TEST_DATABASE_URL)
     try:
         async with inner_engine.connect() as conn:
             trans = await conn.begin()

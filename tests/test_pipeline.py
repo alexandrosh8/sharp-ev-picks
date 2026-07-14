@@ -76,6 +76,15 @@ class RecordingSink:
 
 
 def make_deps(sink: RecordingSink) -> PipelineDeps:
+    directory = EventDirectory()
+    directory.register(
+        "evt-1",
+        EventTeams(
+            home="Home FC",
+            away="Away FC",
+            starts_at=datetime.now(tz=UTC) + timedelta(hours=6),
+        ),
+    )
     return PipelineDeps(
         loader=FakeLoader(),
         model=FakeModel(),
@@ -85,6 +94,7 @@ def make_deps(sink: RecordingSink) -> PipelineDeps:
         ledger=DailyExposureLedger(max_daily_fraction=0.05),
         bankroll=Decimal("1000"),
         devig_method=DevigMethod.MULTIPLICATIVE,
+        directory=directory,
     )
 
 
@@ -141,7 +151,7 @@ async def test_pipeline_produces_pick_and_alert() -> None:
     assert pick.ev > 0.01
     assert pick.recommended_stake_fraction <= 0.02
     assert len(sink.sent) == 1
-    assert "you place any bet" not in sink.sent[0].body  # footer removed per operator request
+    assert "you place any bet" in sink.sent[0].body  # mandatory decision-support footer
 
 
 async def test_model_pipeline_nets_exchange_commission_for_ev_and_stake() -> None:
@@ -186,6 +196,27 @@ async def test_model_pipeline_drops_future_captured_at() -> None:
     picks = await run_pick_pipeline(deps, "soccer_epl")
     assert picks == []
     assert sink.sent == []
+
+
+async def test_model_pipeline_observation_basis_uses_ingested_at() -> None:
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    now = datetime.now(tz=UTC)
+    provider_time = now - timedelta(hours=1)
+    observed_time = now - timedelta(seconds=30)
+    deps.loader.snapshots = [  # type: ignore[attr-defined]
+        snapshot.model_copy(update={"captured_at": provider_time, "ingested_at": observed_time})
+        for snapshot in deps.loader.snapshots  # type: ignore[attr-defined]
+    ]
+    deps.candidate_freshness_basis = "observation"
+
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+
+    assert len(picks) == 1
+    assert all(  # provider/CLV provenance is untouched by the live age basis
+        snapshot.captured_at == provider_time
+        for snapshot in deps.loader.snapshots  # type: ignore[attr-defined]
+    )
 
 
 async def test_model_pipeline_alert_key_includes_strategy_identity() -> None:
@@ -264,16 +295,79 @@ def patch_persist_dedupe_after_first(monkeypatch: pytest.MonkeyPatch) -> None:
         calls["n"] += 1
         return "inserted" if calls["n"] == 1 else "duplicate"
 
+    async def fake_update_pick_stake(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return True
+
     monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", fake_update_pick_stake)
 
 
 def make_persisting_deps(sink: RecordingSink) -> PipelineDeps:
     deps = make_deps(sink)
     directory = EventDirectory()
-    directory.register("evt-1", EventTeams(home="Over Town", away="Under City"))
+    directory.register(
+        "evt-1",
+        EventTeams(
+            home="Over Town",
+            away="Under City",
+            starts_at=NOW + timedelta(hours=6),
+        ),
+    )
     deps.directory = directory
     deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
     return deps
+
+
+async def test_model_cycle_cancellation_waits_for_persist_and_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The model call site must finish its atomic DB/ledger child before the
+    cancelled cycle returns control to scheduler teardown."""
+    import asyncio
+
+    import app.storage.repositories as repos
+
+    update_started = asyncio.Event()
+    release_update = asyncio.Event()
+    update_finished = asyncio.Event()
+    persisted: list[str] = []
+
+    async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        persisted.append(pick.event_id)
+        return "inserted"
+
+    async def blocking_update_pick_stake(*args, **kwargs):  # type: ignore[no-untyped-def]
+        update_started.set()
+        await release_update.wait()
+        update_finished.set()
+        return True
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", blocking_update_pick_stake)
+
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)
+    day = datetime.now(tz=UTC).date()
+    task = asyncio.create_task(run_pick_pipeline(deps, "soccer_epl"))
+    await asyncio.wait_for(update_started.wait(), timeout=5.0)
+    reserved = deps.ledger.used(day)
+    assert reserved > 0.0
+
+    task.cancel()
+    await asyncio.sleep(0)
+
+    assert not task.done()
+    assert not update_finished.is_set()
+    assert deps.ledger.used(day) == pytest.approx(reserved)
+
+    release_update.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+
+    assert update_finished.is_set()
+    assert persisted == ["evt-1"]
+    assert deps.ledger.used(day) == pytest.approx(reserved)
+    assert sink.sent == []
 
 
 async def test_pick_pipeline_duplicate_releases_exposure_and_unchanged_odds_stay_quiet(
@@ -337,6 +431,25 @@ async def test_pick_pipeline_duplicate_price_move_realerts(
     assert "2.20" in sink.sent[1].title
 
 
+async def test_model_pipeline_withholds_picks_from_incomplete_source_cycle() -> None:
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    deps.loader.last_fetch_complete = {"soccer_epl": False}  # type: ignore[attr-defined]
+    deps.loader.last_fetch_completeness_reason = {  # type: ignore[attr-defined]
+        "soccer_epl": "row count 2 below completeness floor"
+    }
+
+    assert await run_pick_pipeline(deps, "soccer_epl") == []
+    assert sink.sent == []
+    poll = LAST_POLL["soccer_epl"]
+    assert poll["degraded"] is True
+    assert poll["source_complete"] is False
+    assert poll["completeness_reason"] == "row count 2 below completeness floor"
+    assert poll["snapshots"] == 2  # partial evidence remains visible
+
+
 async def test_model_pipeline_drops_post_kickoff_snapshot() -> None:
     """Post-kickoff leakage guard parity with run_value_pipeline (shared
     helpers): a snapshot captured AT OR AFTER its event's kickoff is an in-play
@@ -358,9 +471,7 @@ async def test_model_pipeline_drops_post_kickoff_snapshot() -> None:
 
 
 async def test_model_pipeline_keeps_pre_kickoff_snapshot() -> None:
-    """Regression: a legit strictly-pre-kickoff snapshot (future kickoff) still
-    prices and alerts — the guard drops only in-play rows, never pre-match
-    value. A NULL/absent kickoff is likewise kept (cannot be proven post-KO)."""
+    """A known, strictly-future kickoff proves the quote is pre-game."""
     sink = RecordingSink()
     deps = make_deps(sink)
     directory = EventDirectory()
@@ -372,6 +483,26 @@ async def test_model_pipeline_keeps_pre_kickoff_snapshot() -> None:
     picks = await run_pick_pipeline(deps, "soccer_epl")
     assert len(picks) == 1
     assert len(sink.sent) == 1
+
+
+@pytest.mark.parametrize("kickoff_state", ["absent", "none"])
+async def test_model_pipeline_rejects_unknown_kickoff(kickoff_state: str) -> None:
+    """Absent/NULL kickoff cannot prove a quote is actionable pre-game."""
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    directory = EventDirectory()
+    if kickoff_state == "none":
+        directory.register(
+            "evt-1",
+            EventTeams(home="Over Town", away="Under City", starts_at=None),
+        )
+    deps.directory = directory
+
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+
+    assert picks == []
+    assert sink.sent == []
+    assert deps.ledger.used(datetime.now(tz=UTC).date()) == 0.0
 
 
 async def test_unpersisted_premium_pick_does_not_accumulate_exposure() -> None:
@@ -448,7 +579,7 @@ async def test_daily_clip_persists_clipped_stake(monkeypatch: pytest.MonkeyPatch
     persisted_clips: list[float] = []
 
     async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
-        session, pick, teams, model_name, model_version, *, persist_tier=False
+        session, pick, teams, model_name, model_version, *, persist_tier=False, **kwargs
     ):
         persisted_clips.append(pick.recommended_stake_fraction)
         return True
@@ -478,12 +609,11 @@ async def test_daily_clip_persists_clipped_stake(monkeypatch: pytest.MonkeyPatch
     assert persisted_clips[0] <= remaining_at_reservation + 1e-12
 
 
-async def test_uncapped_pick_does_not_rewrite_persisted_stake(
+async def test_uncapped_pick_finalizes_durable_exposure_in_same_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The clip-persist is a NO-OP when no daily clip occurs: an inserted pick
-    with ample daily room keeps its first-write stake and update_pick_stake is
-    never called (no needless second write, no double-application)."""
+    """Even without clipping, the final stake update persists the durable
+    exposure charge in the same transaction as the inserted pick."""
     import app.storage.repositories as repos
 
     async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
@@ -492,7 +622,7 @@ async def test_uncapped_pick_does_not_rewrite_persisted_stake(
     update_calls: list[float] = []
 
     async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
-        session, pick, teams, model_name, model_version, *, persist_tier=False
+        session, pick, teams, model_name, model_version, *, persist_tier=False, **kwargs
     ):
         update_calls.append(pick.recommended_stake_fraction)
         return True
@@ -506,7 +636,7 @@ async def test_uncapped_pick_does_not_rewrite_persisted_stake(
     picks = await run_pick_pipeline(deps, "soccer_epl")
     assert len(picks) == 1
     assert picks[0].stake_breakdown.daily_clipped is False
-    assert update_calls == []  # no clip -> no stake-rewrite
+    assert update_calls == [pytest.approx(picks[0].recommended_stake_fraction)]
 
 
 async def test_cap_denied_inserted_pick_zeroes_stake_and_never_alerts(
@@ -526,7 +656,7 @@ async def test_cap_denied_inserted_pick_zeroes_stake_and_never_alerts(
     rewrites: list[float] = []
 
     async def spy_update_pick_stake(  # type: ignore[no-untyped-def]
-        session, pick, teams, model_name, model_version, *, persist_tier=False
+        session, pick, teams, model_name, model_version, *, persist_tier=False, **kwargs
     ):
         rewrites.append(pick.recommended_stake_fraction)
         return True
@@ -576,6 +706,33 @@ async def test_unpersisted_with_persistence_configured_withholds_alert(
     assert sink.sent == []  # ... and no alert
     assert deps.ledger.used(day) == 0.0  # ... and no phantom reservation
     assert "withheld 1 premium alert" in caplog.text
+
+
+async def test_commit_failure_releases_atomic_exposure_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.repositories as repos
+
+    async def fake_persist_pick(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return "inserted"
+
+    async def fake_update_pick_stake(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return True
+
+    class FailingCommitFactory(FakeSessionFactory):
+        async def commit(self) -> None:
+            raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", fake_update_pick_stake)
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)
+    deps.session_factory = FailingCommitFactory()  # type: ignore[assignment]
+    day = datetime.now(tz=UTC).date()
+
+    assert await run_pick_pipeline(deps, "soccer_epl") == []
+    assert sink.sent == []
+    assert deps.ledger.used(day) == pytest.approx(0.0)
 
 
 async def test_pipeline_no_model_predictions_no_picks() -> None:

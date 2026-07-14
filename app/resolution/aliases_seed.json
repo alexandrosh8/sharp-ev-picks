@@ -1,6 +1,25 @@
 {
   "_comment": "Cross-source club/team name alias table. Format: {\"teams\": {\"canonical\": [\"alias\", ...]}}. Names are normalized on load (matching.normalize_name strips accents/FC-noise), so list human-readable forms. Do NOT add men's/women's/youth/reserve-conflating aliases — every import is marker-filtered via distinguishing_markers and collision-checked (scripts/research/import_alias_datasets.py + import_reep_soccer_aliases.py).",
   "_provenance": "LICENSE-CLEAN sources only (CC0/MIT). (1) openfootball/clubs (CC0) — men's-senior top-5 Europe + Portugal/Netherlands club names, dotted bookmaker abbreviations + [en] exonyms. (2) pretrehr/Sports-betting translation.json (MIT) — odds-feed names (mostly already covered / French-localization rejected). (3) withqwerty/reep names.csv reep_t rows (CC0) — Wikidata-derived club aliases bounded to scraped teams. (4) swar/nba_api static teams (MIT) — the 30 NBA full-name<->tricode<->nickname maps. WNBA 'W'-suffix forms are hand-curated and stay gender-distinct. Reserve hand-maps (Real Madrid Castilla, Jong Ajax/PSV/AZ, Sanse, Bilbao Athletic, Barca B) are explicit. EXCLUDED (non-commercial): TheSportsDB, engsoccerdata, Sackmann, tennis-data. (5) Wikidata SPARQL/REST altLabels (CC0) — exotic clubs + national teams + native-script (Arabic/Chinese/Icelandic) forms for the off-season slate (Real de Banjul, Al-Shorta Baghdad, Wydad Casablanca, Vikingur Reykjavik, Shanghai Port, ...), gated on P31 football-club/national-team and exact-normalized to a slate feed name (scripts/research/import_wikidata_aliases.py). (6) Fixture-CONFIRMED exotic hand-map (scripts/research/exotic_slate_aliases.py) — feed<->Pinnacle pairs verified same-day same-opponent against our own warehouse (Lidkoping/Lidkopings, Kinondoni MC/KMC, Hammarby TFF/Talang, ...); marker-filtered, cross-sport collisions rejected on merge (FC Jazz/Utah Jazz, Miami FC/Miami Heat).",
+  "_confirmed_all_women_league_teams": {
+    "wnba": [
+      "Atlanta Dream",
+      "Chicago Sky",
+      "Connecticut Sun",
+      "Dallas Wings",
+      "Golden State Valkyries",
+      "Indiana Fever",
+      "Las Vegas Aces",
+      "Los Angeles Sparks",
+      "Minnesota Lynx",
+      "New York Liberty",
+      "Phoenix Mercury",
+      "Portland Fire",
+      "Seattle Storm",
+      "Toronto Tempo",
+      "Washington Mystics"
+    ]
+  },
   "teams": {
     "1. CfR Pforzheim": [
       "1. Club für Rasenspiele Pforzheim"
@@ -2240,6 +2259,9 @@
     "Portland Hearts of Pine": [
       "Hearts of Pine"
     ],
+    "Portland Fire": [
+      "Portland Fire W"
+    ],
     "Portland Trail Blazers": [
       "POR",
       "Trail Blazers",
@@ -3075,6 +3097,9 @@
       "TOR",
       "Raptors",
       "Toronto"
+    ],
+    "Toronto Tempo": [
+      "Toronto Tempo W"
     ],
     "Torquay United FC": [
       "Torquay"

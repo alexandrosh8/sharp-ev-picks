@@ -1,0 +1,22 @@
+{
+  "consumed_on": "2026-06-12",
+  "domain": "AH market, seasons 2425+2526, half-line rows",
+  "protocol_source": "docs/research/optimization-round-3.md",
+  "status": "completed",
+  "thr_star": 0.015,
+  "n": 27,
+  "n_labeled_max": 10,
+  "roi": -0.1096,
+  "roi_ci_95": [
+    -0.481,
+    0.281
+  ],
+  "inc_clv_max": 0.033,
+  "inc_clv_max_se": 0.018,
+  "inc_clv_max_ci_95": [
+    -0.0019,
+    0.0687
+  ],
+  "verdict": "UNDERPOWERED — n_labeled 10 < 100; defer the AH verdict to live shadow CLV + season 2627",
+  "note": "This is the first and binding one-shot consumption record. Later reruns cannot create independent evidence."
+}

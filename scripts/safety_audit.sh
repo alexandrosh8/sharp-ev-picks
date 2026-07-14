@@ -22,7 +22,13 @@ if grep -I --exclude-dir=__pycache__ -rniE --exclude=safety_audit.sh "placeOrder
 fi
 
 echo "== 2. browser/login automation must be ABSENT from app/ =="
-if grep -I --exclude-dir=__pycache__ -rnE "import selenium|from selenium|import playwright|from playwright" app/; then
+# Match only direct imports of the selenium/playwright packages.  A loose
+# ``import playwright`` substring also matches the sanctioned OddsHarvester
+# symbol ``import playwright_manager`` and turns this gate into a false
+# positive without detecting any additional executable capability.
+if grep -I --exclude-dir=__pycache__ -rnE \
+  "(^|[[:space:];])(import[[:space:]]+(selenium|playwright)([.[:space:],]|$)|from[[:space:]]+(selenium|playwright)([.[:space:]]|$))" \
+  app/; then
   echo "FAIL: browser automation imports found in app/"
   fail=1
 fi
@@ -79,6 +85,14 @@ done
 echo "== 8. alerts must carry the manual-betting reminder =="
 if ! grep -rq "This system does not place bets" app/schemas/picks.py; then
   echo "FAIL: manual-betting reminder constant missing"
+  fail=1
+fi
+if ! grep -qE '^from app\.schemas\.picks import .*ALERT_FOOTER' app/notifications/base.py; then
+  echo "FAIL: alert builder does not import ALERT_FOOTER"
+  fail=1
+fi
+if ! grep -qE '^[[:space:]]+ALERT_FOOTER,$' app/notifications/base.py; then
+  echo "FAIL: alert builder does not append ALERT_FOOTER to the body"
   fail=1
 fi
 

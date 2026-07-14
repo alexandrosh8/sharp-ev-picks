@@ -50,18 +50,26 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from app.ingestion.base import EventTeams, ScraperProxy
+from app.ingestion.http_safety import get_bounded
 from app.ingestion.oddsportal import (
     _market_for_key,
     _parse_odds,
     _selections,
 )
 from app.ingestion.oddsportal_json import (
+    MAX_ENCRYPTED_FEED_BYTES,
+    MAX_MATCH_HTML_BYTES,
+    ODDSPORTAL_ALLOWED_HOSTS,
+    FeedDecryptError,
+    FeedEnvelopeError,
+    FeedOffWindow,
     _feed_captured_at,
     _outcome_at,
     _resolve_feed_market,
@@ -70,7 +78,7 @@ from app.ingestion.oddsportal_json import (
     extract_bootstrap_tokens,
 )
 from app.ingestion.proxy_health import ProxyHealthRegistry, get_registry
-from app.schemas.odds import OddsSnapshotIn
+from app.schemas.odds import MAX_LIQUIDITY, OddsSnapshotIn
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -107,6 +115,18 @@ class BetfairExchangeError(Exception):
     """Non-retryable read failure. Message never contains the URL or creds."""
 
 
+class BetfairExchangeTransportError(BetfairExchangeError):
+    """A bootstrap/feed request did not complete."""
+
+
+class BetfairExchangeHTTPStatusError(BetfairExchangeError):
+    """A bootstrap/feed response was not HTTP 200."""
+
+
+class BetfairExchangeSchemaError(BetfairExchangeError):
+    """A response body could not be identified/decrypted safely."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -122,7 +142,7 @@ def _coerce_liquidity(raw: Any) -> float | None:
         value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
-    return value if value >= 0.0 else None
+    return value if math.isfinite(value) and 0.0 <= value <= MAX_LIQUIDITY else None
 
 
 def parse_betfair_feed(
@@ -163,7 +183,13 @@ def parse_betfair_feed(
     if market is None:
         return []
 
-    back = (((payload.get("d") or {}).get("oddsdata") or {}).get("back")) or {}
+    data = payload.get("d")
+    if not isinstance(data, Mapping):
+        return []
+    oddsdata = data.get("oddsdata")
+    if not isinstance(oddsdata, Mapping):
+        return []
+    back = oddsdata.get("back") or {}
     if not isinstance(back, Mapping):
         return []
     block = back.get(resolved.feed_key)
@@ -184,6 +210,8 @@ def parse_betfair_feed(
     )
 
     captured_at = _feed_captured_at(payload, now)
+    if captured_at is None or captured_at > now + timedelta(minutes=5):
+        return []
     label_to_selection = dict(_selections(market_key, home.strip(), away.strip()))
     snapshots: list[OddsSnapshotIn] = []
     for index, label in resolved.index_to_label.items():
@@ -279,7 +307,7 @@ class BetfairExchangeReader:
         feed_loader: FeedLoader | None = None,
         geo: str = "GB",
         lang: str = "en",
-        max_failover: int = 6,
+        max_failover: int = 3,
         proxy_health: ProxyHealthRegistry | None = None,
     ) -> None:
         self._min_liquidity = min_liquidity
@@ -292,20 +320,29 @@ class BetfairExchangeReader:
         # Betfair sweep tries all 14 slots (betfair_exchange.py:325) with no
         # cap") — mirrors oddsportal.py's _MAX_PROXY_FAILOVER pattern. Wired
         # from Settings.proxy_max_failover_betfair at the composition root.
-        self._max_failover = max(1, max_failover)
+        self._max_failover = max(1, min(3, max_failover))
         # Shared per-index health/quarantine registry (same pool indices as the
         # main scrape, so a slot dead there is skipped here too). Injectable
         # for tests; defaults to the process singleton.
         self._proxy_health = proxy_health if proxy_health is not None else get_registry()
 
     async def read_snapshots(
-        self, target: MatchTarget, *, sport: str, now: datetime
+        self,
+        target: MatchTarget,
+        *,
+        sport: str,
+        now: datetime | Callable[[], datetime],
     ) -> list[OddsSnapshotIn]:
         """The gated Betfair BACK snapshots for one match across every feasible
         market for ``sport``. An empty result is a benign gap (no Betfair-liquid
         row this cycle), never an error. Transport failures in the default loader
         surface as ``BetfairExchangeError`` for the caller to log + skip."""
         feeds = await self._feed_loader(target.url, sport)
+        # A callable is evaluated only AFTER the network/decrypt work. Capture
+        # passes its clock this way so sequential targets cannot all inherit a
+        # stale pre-cycle timestamp. Tests/direct callers may still pass a fixed
+        # datetime for deterministic pure parsing.
+        observed_at = now() if callable(now) else now
         snapshots: list[OddsSnapshotIn] = []
         for feed in feeds:
             snapshots.extend(
@@ -318,7 +355,7 @@ class BetfairExchangeReader:
                     away=target.teams.away,
                     event_id=target.event_id,
                     min_liquidity=self._min_liquidity,
-                    now=now,
+                    now=observed_at,
                 )
             )
         return snapshots
@@ -390,17 +427,30 @@ class BetfairExchangeReader:
     ) -> list[FeedFeasible]:
         """One match's bootstrap + per-market feed GET/decrypt on a bound session.
 
-        A non-200 HTML page or an unparseable bootstrap is a benign gap (``[]``).
-        A per-feed transport error / off-window / decrypt failure skips THAT market
-        (recovered next cycle), never the whole match. Only a transport failure on
-        the bootstrap GET propagates (so the caller can fail over proxies)."""
-        resp = await session.get(match_url, impersonate=_IMPERSONATE)
-        if getattr(resp, "status_code", 0) != 200:
-            return []
+        Non-200/challenge/decrypt/transport failures raise a typed error so the
+        outer proxy loop quarantines the failed lease and retries elsewhere.
+        They must never become an empty successful capture that heals a bad
+        proxy. A valid decrypted feed with no Betfair row remains a benign gap."""
         try:
-            token = extract_bootstrap_tokens(resp.text)
-        except ValueError:
-            return []  # bootstrap header absent/unparseable -> benign gap
+            bounded = await get_bounded(
+                session,
+                match_url,
+                allowed_hosts=ODDSPORTAL_ALLOWED_HOSTS,
+                max_bytes=MAX_MATCH_HTML_BYTES,
+                impersonate=_IMPERSONATE,
+            )
+        except Exception as exc:
+            raise BetfairExchangeTransportError(
+                f"bootstrap transport failed ({type(exc).__name__})"
+            ) from exc
+        resp = bounded.response
+        status = int(getattr(resp, "status_code", 0) or 0)
+        if status != 200:
+            raise BetfairExchangeHTTPStatusError(f"bootstrap returned status {status}")
+        try:
+            token = extract_bootstrap_tokens(bounded.body.decode("utf-8", errors="replace"))
+        except ValueError as exc:
+            raise BetfairExchangeSchemaError("bootstrap identity payload missing") from exc
 
         feeds: list[FeedFeasible] = []
         for market_key in markets:
@@ -414,32 +464,38 @@ class BetfairExchangeReader:
             if url is None:
                 continue
             try:
-                feed_resp = await session.get(
+                feed_bounded = await get_bounded(
+                    session,
                     url,
+                    allowed_hosts=ODDSPORTAL_ALLOWED_HOSTS,
+                    max_bytes=MAX_ENCRYPTED_FEED_BYTES,
                     headers=_FEED_HEADERS,
                     impersonate=_IMPERSONATE,
                     params={"geo": self._geo, "lang": self._lang},
                 )
-            except Exception as exc:  # one feed's transport blip -> benign skip
-                logger.warning(
-                    "betfair exchange feed GET failed for market %s (%s) — gap",
-                    market_key,
-                    type(exc).__name__,
+            except Exception as exc:
+                raise BetfairExchangeTransportError(
+                    f"feed transport failed for market {market_key} ({type(exc).__name__})"
+                ) from exc
+            feed_resp = feed_bounded.response
+            feed_status = int(getattr(feed_resp, "status_code", 0) or 0)
+            if feed_status != 200:
+                if feed_status in {204, 404, 410}:
+                    # Optional markets are not offered on every fixture. Keep
+                    # already-decrypted sibling feeds; an absent submarket is
+                    # not evidence that this proxy/session is unhealthy.
+                    continue
+                raise BetfairExchangeHTTPStatusError(
+                    f"feed returned status {feed_status} for market {market_key}"
                 )
-                continue
-            if getattr(feed_resp, "status_code", 0) != 200:
-                continue
             try:
-                payload = decrypt_feed_body(feed_resp.text)
-            except (ValueError, RuntimeError) as exc:
-                # off-window / empty / decrypt-rotation / version-guard: all benign
-                # for one market (the rest of the slate is unaffected this cycle).
-                logger.info(
-                    "betfair exchange feed decrypt skipped for market %s (%s)",
-                    market_key,
-                    type(exc).__name__,
-                )
+                payload = decrypt_feed_body(feed_bounded.body.decode("ascii"))
+            except FeedOffWindow:
                 continue
+            except (FeedDecryptError, FeedEnvelopeError, RuntimeError) as exc:
+                raise BetfairExchangeSchemaError(
+                    f"feed decode failed for market {market_key} ({type(exc).__name__})"
+                ) from exc
             feeds.append(
                 FeedFeasible(
                     market_key=market_key,
@@ -536,7 +592,6 @@ class BetfairExchangeCapture:
 
         from app.storage.repositories import persist_odds_snapshots
 
-        now = self._now_fn()
         written: dict[str, int] = {}
         for sport in self._sports:
             if sport not in SPORT_SEGMENTS:
@@ -562,7 +617,9 @@ class BetfairExchangeCapture:
             for target in target_list:
                 targets += 1
                 try:
-                    snapshots = await self._reader.read_snapshots(target, sport=sport, now=now)
+                    snapshots = await self._reader.read_snapshots(
+                        target, sport=sport, now=self._now_fn
+                    )
                 except Exception as exc:
                     logger.warning(
                         "betfair exchange read failed for one %s match: %s",
@@ -640,13 +697,31 @@ class BetfairExchangeCapture:
                         self._seen_price[key] = prior
                 written[sport] = 0
                 continue
+            failed_event_ids = frozenset(getattr(rows, "failed_event_ids", ()))
+            if failed_event_ids:
+                # Per-event SAVEPOINT/attach-only failures do not raise. Roll
+                # back only those events' keys so unchanged prices retry next
+                # cycle; successfully persisted events remain change-gated.
+                for key, prior in gate_prior.items():
+                    if key[1] not in failed_event_ids:
+                        continue
+                    if prior is None:
+                        self._seen_price.pop(key, None)
+                    else:
+                        self._seen_price[key] = prior
+                logger.warning(
+                    "betfair exchange: %s persist skipped %d event(s) — their "
+                    "change-gates rolled back",
+                    sport,
+                    len(failed_event_ids),
+                )
             written[sport] = rows
             if rows:
                 logger.info(
                     "betfair exchange: %s captured %d new BACK rows (%d events of %d read)",
                     sport,
                     rows,
-                    len(teams_by_event),
+                    len(set(teams_by_event) - failed_event_ids),
                     targets,
                 )
         return written

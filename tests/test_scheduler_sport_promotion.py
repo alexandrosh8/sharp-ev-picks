@@ -172,3 +172,83 @@ async def test_odds_api_branch_without_keys_skips_gate(
     settings = make_settings(odds_source="odds_api")
     calls = await _recorded_scope_calls(settings, monkeypatch)
     assert calls == []
+
+
+async def test_odds_api_branch_wires_shared_event_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fakeredis.aioredis as fakeredis
+
+    import app.scheduler as scheduler_mod
+    from app.ingestion.base import EventDirectory
+
+    captured: dict[str, object] = {}
+
+    class RecordingOddsApiClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def fetch_odds(self, sport_key: str) -> list[object]:  # noqa: ARG002
+            return []
+
+    monkeypatch.setattr(scheduler_mod, "OddsApiClient", RecordingOddsApiClient)
+    settings = make_settings(odds_source="odds_api", odds_api_key_1="test-key")
+    async with httpx.AsyncClient() as client:
+        scheduler_mod.build_scheduler(settings, client, fakeredis.FakeRedis())
+
+    assert isinstance(captured.get("directory"), EventDirectory)
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        (make_settings(), "provider"),
+        (
+            make_settings(
+                odds_source="oddschecker",
+                scraper_proxy_pool="proxy.example|8080|user|pass",
+            ),
+            "observation",
+        ),
+    ],
+)
+async def test_scheduler_wires_source_specific_candidate_freshness_basis(
+    settings: Settings,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fakeredis.aioredis as fakeredis
+
+    import app.scheduler as scheduler_mod
+
+    real_pipeline_deps = scheduler_mod.PipelineDeps
+    captured: list[str] = []
+
+    def recording_pipeline_deps(*args: object, **kwargs: object) -> object:
+        deps = real_pipeline_deps(*args, **kwargs)  # type: ignore[arg-type]
+        captured.append(deps.candidate_freshness_basis)
+        return deps
+
+    monkeypatch.setattr(scheduler_mod, "PipelineDeps", recording_pipeline_deps)
+    async with httpx.AsyncClient() as client:
+        scheduler_mod.build_scheduler(settings, client, fakeredis.FakeRedis())
+
+    assert captured == [expected]
+
+
+async def test_ml_enforcement_refuses_startup_when_artifacts_do_not_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fakeredis.aioredis as fakeredis
+
+    import app.scheduler as scheduler_mod
+
+    monkeypatch.setattr(
+        scheduler_mod.ValueFilterModel,
+        "load",
+        classmethod(lambda cls, *args, **kwargs: None),
+    )
+    settings = make_settings(value_ml_filter=True, value_ml_model_dir="/missing/value-model")
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(RuntimeError, match="refusing unfiltered startup"):
+            scheduler_mod.build_scheduler(settings, client, fakeredis.FakeRedis())

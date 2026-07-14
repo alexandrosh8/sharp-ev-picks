@@ -28,8 +28,8 @@ calibration-first, walk-forward-only, leakage-free.
    lineups/injuries carry an as-of timestamp; closing odds never appear as
    features.
 4. Evaluate with Brier, log-loss, ECE + reliability diagrams per
-   league/market — full derivations in global skills `calibration-eval`
-   and `betting-feature-engineering` (use them; don't re-derive here).
+   league/market. Enforce the leakage and temporal-feature rules in this skill
+   and the project model/test modules; no global skill is required.
 5. Blend with market prior where it measurably improves calibration;
    document the blend weight per league.
 6. Register every artifact in `model_versions` before its predictions

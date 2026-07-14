@@ -42,3 +42,6 @@ def test_safety_audit_script_contains_hardened_checks() -> None:
     assert "_enforce_picks_only" in text
     # (e) betfair_api.py runtime op-allowlist presence check.
     assert "_ALLOWED_OPS" in text
+    # (f) direct browser-package imports are matched on module boundaries so
+    # sanctioned symbols such as ``playwright_manager`` cannot fail the gate.
+    assert "(selenium|playwright)([.[:space:],]|$)" in text

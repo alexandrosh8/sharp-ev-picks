@@ -6,12 +6,14 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/pre_bash_guard.sh'",
+            "command": "bash \"$(git -C \"$PWD\" rev-parse --show-toplevel)/.codex/hooks/pre_bash_guard.sh\"",
+            "timeout": 10,
             "statusMessage": "Safety-checking command..."
           },
           {
             "type": "command",
-            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/pre_commit_secret_scan.sh'",
+            "command": "bash \"$(git -C \"$PWD\" rev-parse --show-toplevel)/.codex/hooks/pre_commit_secret_scan.sh\"",
+            "timeout": 120,
             "statusMessage": "Scanning staged changes for secrets..."
           }
         ]
@@ -23,13 +25,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/post_edit_format.sh'",
-            "statusMessage": "Formatting Python..."
-          },
-          {
-            "type": "command",
-            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/post_edit_pytest.sh'",
-            "statusMessage": "Running tests..."
+            "command": "bash \"$(git -C \"$PWD\" rev-parse --show-toplevel)/.codex/hooks/post_edit_validate.sh\"",
+            "timeout": 180,
+            "statusMessage": "Formatting changed Python and running regression tests..."
           }
         ]
       }
@@ -39,7 +37,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'/Users/alexis/code/Betting Picks Bot/.codex/hooks/stop_memory_reminder.sh'"
+            "command": "bash \"$(git -C \"$PWD\" rev-parse --show-toplevel)/.codex/hooks/stop_memory_reminder.sh\"",
+            "timeout": 10
           }
         ]
       }

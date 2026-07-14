@@ -54,14 +54,18 @@ snapshot, else the last seen price.
 from __future__ import annotations
 
 import bz2
+import io
 import json
 import logging
 import tarfile
-from collections.abc import Iterable
+import tempfile
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import IO
 
 from app.resolution.matching import AliasTable
 
@@ -74,6 +78,20 @@ BASKETBALL_EVENT_TYPE_ID = "7522"
 # "The Draw" has a FIXED selection id across every soccer MATCH_ODDS market, so
 # the draw runner is identifiable even when a Basic-tier file omits runner names.
 DRAW_SELECTION_ID = 58805
+
+# One Betfair market stream is normally far below 1 MiB. These deliberately
+# generous ceilings make corrupt archives/decompression bombs finite without
+# excluding legitimate high-churn markets.
+MAX_COMPRESSED_MEMBER_BYTES = 32 * 1024 * 1024
+MAX_DECOMPRESSED_MEMBER_BYTES = 128 * 1024 * 1024
+MAX_STREAM_LINES = 2_000_000
+MAX_TAR_MEMBERS = 2_000_000
+_DECOMPRESS_CHUNK_BYTES = 64 * 1024
+_SPOOL_MEMORY_BYTES = 4 * 1024 * 1024
+
+
+class BetfairArchiveLimitError(Exception):
+    """A market/archive exceeded a configured resource ceiling."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +142,7 @@ def _to_decimal(value: object) -> Decimal | None:
         dec = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
         return None
-    return dec if dec > 1 else None
+    return dec if dec.is_finite() and dec > 1 else None
 
 
 def _parse_market_time(raw: object) -> datetime | None:
@@ -143,9 +161,66 @@ def _parse_market_time(raw: object) -> datetime | None:
 
 
 def _epoch_ms_to_utc(pt: object) -> datetime | None:
-    if not isinstance(pt, (int, float)):
+    if not isinstance(pt, (int, float)) or isinstance(pt, bool):
         return None
-    return datetime.fromtimestamp(pt / 1000.0, tz=UTC)
+    try:
+        return datetime.fromtimestamp(pt / 1000.0, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _limited_lines(lines: Iterable[str], max_lines: int) -> Iterator[str]:
+    for count, line in enumerate(lines, start=1):
+        if count > max_lines:
+            raise BetfairArchiveLimitError(f"market stream exceeds {max_lines} lines")
+        yield line
+
+
+@contextmanager
+def _bounded_bz2_text(
+    source: IO[bytes],
+    *,
+    max_compressed_bytes: int,
+    max_decompressed_bytes: int,
+) -> Iterator[io.TextIOWrapper]:
+    """Incrementally decompress one bz2 member into a bounded seekable spool.
+
+    The spool stays in memory only up to a small threshold and then spills to a
+    temporary file. This lets tar loaders peek and rewind without ever calling
+    ``read()``/``bz2.decompress()`` on an untrusted whole member.
+    """
+    decompressor = bz2.BZ2Decompressor()
+    compressed = 0
+    decompressed = 0
+    with tempfile.SpooledTemporaryFile(max_size=_SPOOL_MEMORY_BYTES, mode="w+b") as spool:
+        while not decompressor.eof:
+            if decompressor.needs_input:
+                chunk = source.read(_DECOMPRESS_CHUNK_BYTES)
+                if not chunk:
+                    break
+                compressed += len(chunk)
+                if compressed > max_compressed_bytes:
+                    raise BetfairArchiveLimitError(
+                        f"compressed member exceeds {max_compressed_bytes} bytes"
+                    )
+            else:
+                chunk = b""
+            remaining = max_decompressed_bytes - decompressed
+            output = decompressor.decompress(chunk, max_length=max(1, remaining + 1))
+            decompressed += len(output)
+            if decompressed > max_decompressed_bytes:
+                raise BetfairArchiveLimitError(
+                    f"decompressed member exceeds {max_decompressed_bytes} bytes"
+                )
+            spool.write(output)
+        if not decompressor.eof:
+            raise EOFError("truncated bz2 member")
+        spool.seek(0)
+        text = io.TextIOWrapper(spool, encoding="utf-8", errors="replace", newline=None)
+        try:
+            yield text
+        finally:
+            text.close()
 
 
 class _RunnerLadder:
@@ -238,7 +313,11 @@ def parse_market_stream(lines: Iterable[str]) -> BetfairMarketClose | None:
         if not isinstance(msg, dict) or msg.get("op") != "mcm":
             continue
         pt = msg.get("pt")
-        for mc in msg.get("mc", []) or []:
+        market_changes = msg.get("mc")
+        if not isinstance(market_changes, list):
+            logger.warning("skip betfair stream line: mc is not an array")
+            continue
+        for mc in market_changes:
             if not isinstance(mc, dict):
                 continue
             if mc.get("id"):
@@ -250,7 +329,13 @@ def parse_market_stream(lines: Iterable[str]) -> BetfairMarketClose | None:
                 if mdef.get("inPlay") is True and pre_inplay is None:
                     pre_inplay = _prices_now()
                     in_play_utc = _epoch_ms_to_utc(pt)
-            for rc in mc.get("rc", []) or []:
+            runner_changes = mc.get("rc")
+            if runner_changes is None:
+                continue
+            if not isinstance(runner_changes, list):
+                logger.warning("skip betfair market change: rc is not an array")
+                continue
+            for rc in runner_changes:
                 if not isinstance(rc, dict):
                     continue
                 sid = rc.get("id")
@@ -460,7 +545,13 @@ def event_name_home_away(event_name: str | None) -> tuple[str, str] | None:
     return home, away
 
 
-def load_betfair_dir(path: Path) -> list[BetfairMarketClose]:
+def load_betfair_dir(
+    path: Path,
+    *,
+    max_compressed_bytes: int = MAX_COMPRESSED_MEMBER_BYTES,
+    max_decompressed_bytes: int = MAX_DECOMPRESSED_MEMBER_BYTES,
+    max_lines: int = MAX_STREAM_LINES,
+) -> list[BetfairMarketClose]:
     """Read-only: parse every operator-placed market file in ``path``.
 
     Reads ``*.bz2`` (compressed) and plain ``*.json`` / ``*.jsonl`` / ``*.txt``
@@ -474,13 +565,25 @@ def load_betfair_dir(path: Path) -> list[BetfairMarketClose]:
     for f in sorted({p for pat in patterns for p in path.glob(pat)}):
         try:
             if f.suffix == ".bz2":
-                text = bz2.decompress(f.read_bytes()).decode("utf-8", errors="replace")
+                with (
+                    f.open("rb") as source,
+                    _bounded_bz2_text(
+                        source,
+                        max_compressed_bytes=max_compressed_bytes,
+                        max_decompressed_bytes=max_decompressed_bytes,
+                    ) as text,
+                ):
+                    market = parse_market_stream(_limited_lines(text, max_lines))
             else:
-                text = f.read_text(encoding="utf-8", errors="replace")
-        except (OSError, ValueError) as exc:
+                if f.stat().st_size > max_decompressed_bytes:
+                    raise BetfairArchiveLimitError(
+                        f"plain member exceeds {max_decompressed_bytes} bytes"
+                    )
+                with f.open("r", encoding="utf-8", errors="replace") as text:
+                    market = parse_market_stream(_limited_lines(text, max_lines))
+        except (OSError, ValueError, EOFError, BetfairArchiveLimitError) as exc:
             logger.warning("skip betfair file %s: %s", f.name, type(exc).__name__)
             continue
-        market = parse_market_stream(text.splitlines())
         if market is not None and market.runners:
             markets.append(market)
     markets.sort(key=lambda m: (m.kickoff_utc or datetime.min.replace(tzinfo=UTC), m.market_id))
@@ -503,7 +606,10 @@ def _peek_market_def(lines: Iterable[str]) -> tuple[str | None, str | None]:
             continue
         if not isinstance(msg, dict) or msg.get("op") != "mcm":
             continue
-        for mc in msg.get("mc", []) or []:
+        market_changes = msg.get("mc")
+        if not isinstance(market_changes, list):
+            continue
+        for mc in market_changes:
             if not isinstance(mc, dict):
                 continue
             mdef = mc.get("marketDefinition")
@@ -520,6 +626,10 @@ def load_betfair_tar(
     event_type_id: str = SOCCER_EVENT_TYPE_ID,
     market_type: str = "MATCH_ODDS",
     log_every: int = 50_000,
+    max_members: int = MAX_TAR_MEMBERS,
+    max_compressed_bytes: int = MAX_COMPRESSED_MEMBER_BYTES,
+    max_decompressed_bytes: int = MAX_DECOMPRESSED_MEMBER_BYTES,
+    max_lines: int = MAX_STREAM_LINES,
 ) -> list[BetfairMarketClose]:
     """Read-only: stream soccer MATCH_ODDS closes straight out of a Betfair
     historical ``.tar`` archive WITHOUT extracting its (1M+) members to disk.
@@ -545,6 +655,10 @@ def load_betfair_tar(
         with tarfile.open(tar_path, mode="r|*") as tar:
             for member in tar:
                 scanned += 1
+                if scanned > max_members:
+                    raise BetfairArchiveLimitError(
+                        f"archive exceeds configured {max_members} member limit"
+                    )
                 if log_every and scanned % log_every == 0:
                     logger.info(
                         "betfair tar scan: %d members read, %d soccer MATCH_ODDS kept",
@@ -553,25 +667,32 @@ def load_betfair_tar(
                     )
                 if not member.isfile() or not member.name.endswith(".bz2"):
                     continue
+                if member.size > max_compressed_bytes:
+                    logger.warning("skip oversized betfair tar member %s", member.name)
+                    continue
                 fobj = tar.extractfile(member)
                 if fobj is None:
                     continue
                 try:
-                    raw = bz2.decompress(fobj.read())
-                except (OSError, ValueError, EOFError):
+                    with _bounded_bz2_text(
+                        fobj,
+                        max_compressed_bytes=max_compressed_bytes,
+                        max_decompressed_bytes=max_decompressed_bytes,
+                    ) as text:
+                        et, mt = _peek_market_def(_limited_lines(text, max_lines))
+                        if et != event_type_id or mt != market_type:
+                            continue
+                        text.seek(0)
+                        market = parse_market_stream(_limited_lines(text, max_lines))
+                except (OSError, ValueError, EOFError, BetfairArchiveLimitError):
                     continue
-                lines = raw.decode("utf-8", errors="replace").splitlines()
-                et, mt = _peek_market_def(lines)
-                if et != event_type_id or mt != market_type:
-                    continue  # skip cheaply — non-matching market never fully parsed
-                market = parse_market_stream(lines)
                 # BSP inventory 2026-07-03: the peek reads the FIRST definition
                 # but the record carries the LAST — a mixed-definition stream
                 # must be classified by its final type or it lands in the
                 # wrong cache (match_odds cache measured only 76% pure).
                 if market is not None and market.runners and market.market_type == market_type:
                     markets.append(market)
-    except (tarfile.TarError, OSError) as exc:
+    except (tarfile.TarError, OSError, BetfairArchiveLimitError) as exc:
         logger.warning("betfair tar read aborted after %d members: %s", scanned, type(exc).__name__)
     logger.info(
         "betfair tar done: %d members read, %d soccer MATCH_ODDS markets", scanned, len(markets)
@@ -586,6 +707,10 @@ def load_betfair_tar_by_type(
     event_type_id: str = SOCCER_EVENT_TYPE_ID,
     market_types: tuple[str, ...] = ("MATCH_ODDS",),
     log_every: int = 50_000,
+    max_members: int = MAX_TAR_MEMBERS,
+    max_compressed_bytes: int = MAX_COMPRESSED_MEMBER_BYTES,
+    max_decompressed_bytes: int = MAX_DECOMPRESSED_MEMBER_BYTES,
+    max_lines: int = MAX_STREAM_LINES,
 ) -> dict[str, list[BetfairMarketClose]]:
     """Read-only: ONE streaming pass over a Betfair Basic ``.tar`` that buckets
     every soccer market whose ``marketType`` is in ``market_types`` into a
@@ -610,6 +735,10 @@ def load_betfair_tar_by_type(
         with tarfile.open(tar_path, mode="r|*") as tar:
             for member in tar:
                 scanned += 1
+                if scanned > max_members:
+                    raise BetfairArchiveLimitError(
+                        f"archive exceeds configured {max_members} member limit"
+                    )
                 if log_every and scanned % log_every == 0:
                     logger.info(
                         "betfair tar scan: %d members read, %d kept (%s)",
@@ -619,24 +748,31 @@ def load_betfair_tar_by_type(
                     )
                 if not member.isfile() or not member.name.endswith(".bz2"):
                     continue
+                if member.size > max_compressed_bytes:
+                    logger.warning("skip oversized betfair tar member %s", member.name)
+                    continue
                 fobj = tar.extractfile(member)
                 if fobj is None:
                     continue
                 try:
-                    raw = bz2.decompress(fobj.read())
-                except (OSError, ValueError, EOFError):
+                    with _bounded_bz2_text(
+                        fobj,
+                        max_compressed_bytes=max_compressed_bytes,
+                        max_decompressed_bytes=max_decompressed_bytes,
+                    ) as text:
+                        et, mt = _peek_market_def(_limited_lines(text, max_lines))
+                        if et != event_type_id or mt is None or mt not in wanted:
+                            continue
+                        text.seek(0)
+                        market = parse_market_stream(_limited_lines(text, max_lines))
+                except (OSError, ValueError, EOFError, BetfairArchiveLimitError):
                     continue
-                lines = raw.decode("utf-8", errors="replace").splitlines()
-                et, mt = _peek_market_def(lines)
-                if et != event_type_id or mt is None or mt not in wanted:
-                    continue  # skip cheaply — non-matching member never fully parsed
-                market = parse_market_stream(lines)
                 # Bucket by the record's FINAL market_type, not the first-seen
                 # peek (see load_betfair_tar — same mixed-definition hazard).
                 if market is not None and market.runners and market.market_type in wanted:
                     buckets[str(market.market_type)].append(market)
                     kept += 1
-    except (tarfile.TarError, OSError) as exc:
+    except (tarfile.TarError, OSError, BetfairArchiveLimitError) as exc:
         logger.warning("betfair tar read aborted after %d members: %s", scanned, type(exc).__name__)
     for mt in buckets:
         buckets[mt].sort(
@@ -836,7 +972,17 @@ def attach_betfair_close(
         for off in range(-max_day_drift, max_day_drift + 1):
             local.extend(by_date.get(kdate + timedelta(days=off), ()))
         match = match_event(
-            home, away, kickoff, local, aliases=aliases, max_day_drift=max_day_drift
+            home,
+            away,
+            kickoff,
+            local,
+            aliases=aliases,
+            max_day_drift=max_day_drift,
+            # football-data supplies a DATE, not a wall-clock kickoff. Keep the
+            # calendar window while relying on match_event's new divergent-
+            # kickoff ambiguity veto; guessing a nearest repeated fixture is
+            # forbidden, but one unique exact-team fixture remains joinable.
+            max_minute_drift=(max_day_drift + 1) * 24 * 60,
         )
         if match is None:
             n_unmatched += 1
@@ -929,7 +1075,13 @@ def attach_betfair_ou_close(
         for off in range(-max_day_drift, max_day_drift + 1):
             local.extend(by_date.get(kdate + timedelta(days=off), ()))
         match = match_event(
-            home, away, kickoff, local, aliases=aliases, max_day_drift=max_day_drift
+            home,
+            away,
+            kickoff,
+            local,
+            aliases=aliases,
+            max_day_drift=max_day_drift,
+            max_minute_drift=(max_day_drift + 1) * 24 * 60,
         )
         if match is None:
             n_unmatched += 1

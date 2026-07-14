@@ -155,16 +155,16 @@ def verify_same_game(
     ERROR ``Anomaly`` on any same-game violation, else None.
 
     Three independent rules (any failure => wrong game):
-      1. MARKER CONSISTENCY — ``distinguishing_markers`` (women/youth/reserve) must
-         agree on BOTH sides (a one-sided marker is a reserve-vs-senior /
-         women-vs-men different fixture).
+      1. MARKER CONSISTENCY — women/youth/reserve markers must agree on BOTH
+         sides, except the same narrow exact-alias + bilateral-roster WNBA ``W``
+         suffix case admitted by the matcher.
       2. NAME RELATEDNESS — both team pairs are same-game related (base equality or
          the two-tier fuzzy bar). ``ordered`` events match forward only; unordered
          (tennis) also accept the home/away swap.
       3. KICKOFF WINDOW — the anchor kickoff is within ``max_minute_drift`` of the
          pick kickoff (an out-of-window capture is a different round / in-play row).
     """
-    from app.resolution.matching import distinguishing_markers
+    from app.resolution.matching import default_aliases, fixture_markers_compatible
 
     detail = (
         f"pick={pick_home!r} v {pick_away!r} @ {pick_kickoff.isoformat()} "
@@ -179,9 +179,14 @@ def verify_same_game(
         return flag("anchor kickoff outside window")
 
     # 1+2 forward orientation
-    markers_ok_fwd = distinguishing_markers(pick_home) == distinguishing_markers(
-        anchor_home
-    ) and distinguishing_markers(pick_away) == distinguishing_markers(anchor_away)
+    aliases = default_aliases()
+    markers_ok_fwd = fixture_markers_compatible(
+        pick_home,
+        pick_away,
+        anchor_home,
+        anchor_away,
+        aliases=aliases,
+    )
     names_ok_fwd = _names_same_game(pick_home, anchor_home) and _names_same_game(
         pick_away, anchor_away
     )
@@ -190,9 +195,13 @@ def verify_same_game(
 
     # Unordered (tennis): the home/away swap is the same fixture too.
     if not ordered:
-        markers_ok_swap = distinguishing_markers(pick_home) == distinguishing_markers(
-            anchor_away
-        ) and distinguishing_markers(pick_away) == distinguishing_markers(anchor_home)
+        markers_ok_swap = fixture_markers_compatible(
+            pick_home,
+            pick_away,
+            anchor_away,
+            anchor_home,
+            aliases=aliases,
+        )
         names_ok_swap = _names_same_game(pick_home, anchor_away) and _names_same_game(
             pick_away, anchor_home
         )

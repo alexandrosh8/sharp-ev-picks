@@ -179,13 +179,12 @@ class ValuePolicy:
     consensus_logit_pool: bool = False
     # EXCHANGE ANCHOR LIQUIDITY FLOOR (£ matched best-back size — the unit the
     # dedicated Betfair capture writes into odds_snapshots.liquidity). When
-    # > 0, an exchange row (Betfair/Smarkets/Matchbook) with KNOWN liquidity
-    # below the floor on any selection must NOT serve as the named sharp
-    # anchor (falls through to the next anchor / consensus — fail-closed
-    # anchoring). UNKNOWN (None) liquidity stays anchor-ELIGIBLE: the dominant
-    # main-scrape Betfair rows carry liquidity=None and provide 59/62
-    # Betfair-anchored events. 0.0 = gate OFF (the inert empty-policy default);
-    # set from Settings.value_exchange_min_liquidity at the composition root.
+    # > 0, an exchange row (Betfair/Smarkets/Matchbook) must report liquidity
+    # at or above the floor on every selection before it may serve as the named
+    # sharp anchor. Thin OR unknown liquidity falls through to the next anchor
+    # / consensus: an enabled risk gate is fail-closed. 0.0 = gate OFF (the
+    # inert empty-policy default); set from Settings.value_exchange_min_liquidity
+    # at the composition root.
     exchange_min_liquidity: float = 0.0
     # Mirrors Settings.value_betfair_api_promote (composition root). When the
     # read-only Betfair API is PROMOTED to persist odds rows, exchange rows on

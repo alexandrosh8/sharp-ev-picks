@@ -50,6 +50,11 @@ def test_marker_safe_slug_names_refuses_marker_losing_slugs() -> None:
     assert marker_safe_slug_names(ref, "Los Angeles Sparks W", "New York Liberty") is None
 
 
+def test_marker_safe_slug_names_rejects_marker_shifted_between_sides() -> None:
+    ref = "https://www.oddsportal.com/basketball/h2h/sparks-Ia6UdBZF/new-york-liberty-w-h4iAv3Jl/"
+    assert marker_safe_slug_names(ref, "Sparks W", "New York Liberty") is None
+
+
 def test_oddschecker_slug_names_parse_v_and_at_orientations() -> None:
     # ISSUE 1 fix: OddsChecker refs carry the matchup in a path segment
     # ("home-v-away" for soccer/tennis; "away-at-home" for US sports), unlike
@@ -213,12 +218,12 @@ def test_no_match_for_different_teams() -> None:
     )
 
 
-def test_kickoff_drift_within_window_matches() -> None:
+def test_kickoff_drift_within_absolute_window_matches() -> None:
     m = match_event(
         "Alpha",
         "Beta",
         KO,
-        [_cand("1", "Alpha", "Beta", KO + timedelta(days=1))],
+        [_cand("1", "Alpha", "Beta", KO + timedelta(hours=6))],
         aliases=AliasTable(),
     )
     assert m is not None
@@ -254,27 +259,33 @@ def test_unordered_pair_matches_swap_for_tennis() -> None:
     assert m is not None and m.ref == "1"
 
 
-def test_duplicate_captures_match_nearest_kickoff() -> None:
-    # Two archive captures of the SAME fixture (identical canonical teams) at
-    # DIFFERENT kickoff times within the window are duplicates of one game (a
-    # team plays once per day), NOT two distinct fixtures. The matcher picks the
-    # capture nearest the pick's kickoff rather than rejecting — a wrong close
-    # cannot result because both candidates ARE the same canonical fixture.
+def test_repeated_fixture_with_different_kickoffs_is_ambiguous() -> None:
+    # Exact team names are not proof of one event: doubleheaders and tournament
+    # rematches can repeat within hours.  Divergent kickoffs fail closed.
     pick_ko = datetime(2026, 6, 20, 12, 10, tzinfo=UTC)
     cands = [
         _cand("early", "Alpha", "Beta", datetime(2026, 6, 20, 10, 20, tzinfo=UTC)),
         _cand("exact", "Alpha", "Beta", datetime(2026, 6, 20, 12, 10, tzinfo=UTC)),
     ]
-    m = match_event("Alpha", "Beta", pick_ko, cands, aliases=AliasTable())
-    assert m is not None and m.ref == "exact"
+    assert match_event("Alpha", "Beta", pick_ko, cands, aliases=AliasTable()) is None
 
 
-def test_duplicate_captures_identical_kickoff_match_deterministically() -> None:
-    # Exact duplicates (same teams + same kickoff) collapse to a single match,
-    # chosen deterministically (lowest ref) — still the same fixture's close.
+def test_exact_fixture_outside_absolute_kickoff_window_does_not_match() -> None:
+    candidate = _cand("later", "Alpha", "Beta", KO + timedelta(hours=7))
+    assert match_event("Alpha", "Beta", KO, [candidate], aliases=AliasTable()) is None
+
+
+def test_distinct_refs_with_identical_kickoff_are_ambiguous() -> None:
+    # Equal published kickoffs are not a source identity: doubleheaders and
+    # tournament legs can share them, so distinct refs must fail closed.
     cands = [_cand("b", "Alpha", "Beta"), _cand("a", "Alpha", "Beta")]
-    m = match_event("Alpha", "Beta", KO, cands, aliases=AliasTable())
-    assert m is not None and m.ref == "a"
+    assert match_event("Alpha", "Beta", KO, cands, aliases=AliasTable()) is None
+
+
+def test_repeated_copy_of_same_ref_can_collapse() -> None:
+    cands = [_cand("same", "Alpha", "Beta"), _cand("same", "Alpha", "Beta")]
+    match = match_event("Alpha", "Beta", KO, cands, aliases=AliasTable())
+    assert match is not None and match.ref == "same"
 
 
 def test_women_fixture_never_matches_mens() -> None:
