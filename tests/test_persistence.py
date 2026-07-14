@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
@@ -53,8 +54,51 @@ def test_available_games_uses_bounded_lateral_snapshot_queries() -> None:
     assert "LIMIT 20" in candidate_sql
     assert "EXISTS" not in candidate_sql
     assert "available_game_odds" in aggregate_sql
+    assert "CAST(odds_snapshots.market AS TEXT)" in aggregate_sql
+    assert "CAST(odds_snapshots.bookmaker AS TEXT)" in aggregate_sql
     assert "odds_snapshots.event_id = available_game_candidates.event_pk" in aggregate_sql
     assert "GROUP BY odds_snapshots.event_id" not in aggregate_sql
+
+
+async def test_available_games_restores_jit_after_first_array_codec_introspection() -> None:
+    engine = create_async_engine(
+        DB_URL,
+        poolclass=NullPool,
+        connect_args={"server_settings": {"jit": "on"}},
+    )
+    try:
+        try:
+            async with engine.connect() as probe:
+                await probe.execute(sa.text("SELECT 1"))
+        except Exception:
+            pytest.skip("compose Postgres not reachable on :5433")
+
+        # Keep one physical connection across the transaction boundary. A fresh
+        # asyncpg connection has no cached result codecs, so the first array_agg
+        # execution exercises any JIT-disabled type introspection it requires.
+        async with (
+            engine.connect() as connection,
+            AsyncSession(bind=connection, expire_on_commit=False) as session,
+        ):
+            assert await session.scalar(sa.text("SHOW jit")) == "on"
+            await latest_available_games_with_events(
+                session,
+                limit=1,
+                sport="soccer",
+                now=datetime(2026, 6, 20, 12, 0, tzinfo=UTC),
+            )
+            await session.commit()
+            assert await session.scalar(sa.text("SHOW jit")) == "on"
+
+        # A subsequent fresh DB session must inherit the configured server
+        # setting rather than leaked state from the introspection transaction.
+        async with (
+            engine.connect() as connection,
+            AsyncSession(bind=connection, expire_on_commit=False) as session,
+        ):
+            assert await session.scalar(sa.text("SHOW jit")) == "on"
+    finally:
+        await engine.dispose()
 
 
 def make_pick(

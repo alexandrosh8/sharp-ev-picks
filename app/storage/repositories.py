@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import and_, case, func, select, text, true, union_all
+from sqlalchemy import Text, and_, case, func, select, text, true, union_all
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -1250,10 +1250,10 @@ def _latest_available_games_statement(
             func.min(OddsSnapshot.captured_at).label("first_captured_at"),
             func.max(OddsSnapshot.captured_at).label("last_captured_at"),
             func.max(OddsSnapshot.ingested_at).label("updated_at"),
-            func.array_agg(OddsSnapshot.market.distinct())
+            func.array_agg(OddsSnapshot.market.cast(Text).distinct())
             .filter(OddsSnapshot.market.is_not(None))
             .label("markets"),
-            func.array_agg(OddsSnapshot.bookmaker.distinct())
+            func.array_agg(OddsSnapshot.bookmaker.cast(Text).distinct())
             .filter(OddsSnapshot.bookmaker.is_not(None))
             .label("bookmakers"),
         )
