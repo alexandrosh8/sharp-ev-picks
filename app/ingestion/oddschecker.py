@@ -223,6 +223,133 @@ class OddsCheckerFetchResult:
 
 
 @dataclass(frozen=True)
+class OddsCheckerResult:
+    """A FINAL match result lifted from the OddsChecker live-stats-results feed.
+    Both ids are surfaced so a caller can match our stored pre-match subevent id
+    (``oddschecker:<preMatchSubeventId>``) OR the live subevent id."""
+
+    subevent_id: int
+    prematch_subevent_id: int | None
+    home_name: str
+    away_name: str
+    home_score: int
+    away_score: int
+
+
+def parse_live_stats_results(payload: Mapping[str, Any]) -> list[OddsCheckerResult]:
+    """Extract FINAL results from the OddsChecker
+    ``/api/sports-data/{sport}/v1/subevents/live-stats-results`` POST response.
+
+    SAFETY (never settle a partial): a row is a result ONLY when it is NOT in play
+    (``inPlay is False``), is flagged finished (``hasResults is True``), AND carries
+    a numeric ``summary.scores.fullTime`` pair. In-play rows carry a fullTime score
+    that is the CURRENT (live) score — they are dropped. Malformed rows are skipped,
+    never raised."""
+    if not isinstance(payload, Mapping):
+        return []
+    rows = payload.get("subeventLiveStatsResults")
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return []
+    out: list[OddsCheckerResult] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("inPlay") is not False or row.get("hasResults") is not True:
+            continue
+        scores = (
+            (row.get("summary") or {}) if isinstance(row.get("summary"), Mapping) else {}
+        ).get("scores")
+        ft = scores.get("fullTime") if isinstance(scores, Mapping) else None
+        if not isinstance(ft, Mapping):
+            continue
+        home, away = ft.get("home"), ft.get("away")
+        if not isinstance(home, int) or not isinstance(away, int) or isinstance(home, bool):
+            continue
+        sub = row.get("subeventId")
+        if not isinstance(sub, int):
+            continue
+        pre = row.get("preMatchSubeventId")
+        out.append(
+            OddsCheckerResult(
+                subevent_id=sub,
+                prematch_subevent_id=pre if isinstance(pre, int) else None,
+                home_name=str(row.get("homeName") or ""),
+                away_name=str(row.get("awayName") or ""),
+                home_score=home,
+                away_score=away,
+            )
+        )
+    return out
+
+
+#: pipeline sport key -> OddsChecker results-API path segment.
+_RESULTS_SPORT_PATH: Mapping[str, str] = {
+    "soccer": "football",
+    "basketball": "basketball",
+    "tennis": "tennis",
+    "american_football": "american-football",
+}
+
+
+async def fetch_results(
+    subevent_ids: Sequence[int],
+    *,
+    sport_key: str,
+    proxy: ScraperProxy | None = None,
+    timeout: tuple[float, float] = DEFAULT_TIMEOUT,
+) -> list[OddsCheckerResult]:
+    """POST our stored subevent ids to the OddsChecker live-stats-results feed and
+    return the FINAL results among them. GET-only market data is unaffected: this is
+    a read-only results QUERY (POST body carries the ids to look up — it never
+    mutates anything). Same curl_cffi browser-TLS profile + proxy as the odds feed.
+    Only finished results (gated in ``parse_live_stats_results``) are returned; the
+    caller matches them to events by subevent id / pre-match subevent id."""
+    oc = _RESULTS_SPORT_PATH.get(sport_key)
+    ids = [int(x) for x in subevent_ids if isinstance(x, int) or str(x).isdigit()]
+    if oc is None or not ids:
+        return []
+    url = f"https://www.oddschecker.com/api/sports-data/{oc}/v1/subevents/live-stats-results"
+    body = {
+        "subeventIds": ids,
+        "eventIds": [],
+        "lang": "en",
+        "startDate": "",
+        "endDate": "",
+        "cardIds": [],
+    }
+    headers = dict(_JSON_HEADERS)
+    headers["Referer"] = ODDSCHECKER_BASE_URL
+    from curl_cffi.requests import AsyncSession
+
+    kwargs: dict[str, Any] = {
+        "impersonate": PINNED_IMPERSONATE,
+        "default_headers": True,
+        "timeout": timeout,
+        "allow_redirects": False,
+    }
+    if proxy is not None and proxy.url:
+        inline = _proxy_with_creds(proxy)
+        kwargs["proxies"] = {"http": inline, "https": inline}
+    async with AsyncSession(**kwargs) as sess:
+        resp = await sess.post(url, json=body, headers=headers)
+    status = int(getattr(resp, "status_code", 0) or 0)
+    text = resp.text or ""
+    if len(text.encode("utf-8", "ignore")) > MAX_JSON_RESPONSE_BYTES:
+        raise OddsCheckerSecurityError("oddschecker results response exceeded byte cap")
+    if is_challenge_response(status_code=status, headers=getattr(resp, "headers", {}), body=text):
+        raise OddsCheckerChallenge("oddschecker returned a challenge/interstitial response")
+    if status >= 400:
+        raise OddsCheckerHTTPError(
+            f"oddschecker results POST returned HTTP {status}", status_code=status
+        )
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise OddsCheckerParseError("oddschecker results response did not parse") from exc
+    return parse_live_stats_results(parsed)
+
+
+@dataclass(frozen=True)
 class OddsCheckerFootballContext:
     """Football-home API context lifted from the server-rendered page."""
 

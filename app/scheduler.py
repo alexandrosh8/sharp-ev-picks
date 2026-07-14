@@ -892,6 +892,39 @@ def build_scheduler(
                 except Exception as exc:
                     logger.error("results scrape failed for %s: %s", sport_key, type(exc).__name__)
 
+    oc_results_lock = asyncio.Lock()
+
+    async def capture_oddschecker_results_job() -> None:
+        # OddsChecker's OWN results feed (live-stats-results) -> FINAL scores for
+        # OddsChecker-sourced picks, matched EXACTLY by subevent id (no cross-source
+        # name risk). Independent of odds_source (the OddsPortal scrape path opts out
+        # for OddsCheckerLoader); SHADOW-gated by results_oddschecker_enabled. Light
+        # POST per sport through one scraper proxy; per-sport error isolation.
+        if not settings.results_oddschecker_enabled or session_factory is None:
+            return
+        if oc_results_lock.locked():
+            logger.info("oddschecker results capture already running; coalescing")
+            return
+        proxies = settings.scraper_proxies()
+        proxy = proxies[0] if proxies else None
+        from app.clv_trueup import capture_oddschecker_results
+
+        async with oc_results_lock:
+            for sport_key in sport_keys:
+                try:
+                    await capture_oddschecker_results(
+                        session_factory,
+                        sport_key,
+                        proxy=proxy,
+                        window=timedelta(days=settings.results_scrape_window_days),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "oddschecker results capture failed for %s: %s",
+                        sport_key,
+                        type(exc).__name__,
+                    )
+
     async def settle_results() -> None:
         # Phase 4: free results sources -> outcome mapping -> result_tracking.
         # Leagues without a free results feed (nba, euroleague) settle
@@ -1082,6 +1115,15 @@ def build_scheduler(
         )
         scheduler.add_job(
             capture_finished_scores_job, DateTrigger(), id="capture_finished_scores_initial"
+        )
+    if settings.results_oddschecker_enabled and session_factory is not None:
+        scheduler.add_job(
+            capture_oddschecker_results_job,
+            IntervalTrigger(seconds=settings.results_oddschecker_interval_seconds),
+            id="capture_oddschecker_results",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=None,
         )
     scheduler.add_job(snapshot_bankroll, CronTrigger(hour=0, minute=30), id="snapshot_bankroll")
     scheduler.add_job(

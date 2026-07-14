@@ -964,6 +964,8 @@ _FINISHED_STATUS = "finished"
 #: results feed). The per-cycle limit/budget still bound the backlog.
 #: Overridable via RESULTS_SCRAPE_WINDOW_DAYS (the scheduler injects it).
 RESULTS_SCRAPE_WINDOW = timedelta(days=14)
+#: Sports OddsChecker's live-stats-results feed serves (pipeline keys).
+_RESULTS_OC_SPORTS = frozenset({"soccer", "basketball", "tennis", "american_football"})
 #: Cap finished-score scrapes per cycle so one backlog can't drive 100s of
 #: browser pages at once; the un-scored remainder drains over the next cycles.
 RESULTS_SCRAPE_MAX_PER_CYCLE = 40
@@ -1099,6 +1101,93 @@ async def _scrape_one_finished_score(
     # distinct from the status heal so the caller's per-cycle "written" tally still
     # counts newly-captured scores, not status backfills.
     return res.rowcount or 0
+
+
+async def capture_oddschecker_results(
+    session_factory: "async_sessionmaker",
+    sport_key: str,
+    *,
+    proxy: Any = None,
+    now: datetime | None = None,
+    window: timedelta | None = None,
+    limit: int | None = None,
+    batch_size: int = 40,
+) -> int:
+    """Capture FINAL scores for OddsChecker-sourced picks from OddsChecker's own
+    live-stats-results feed, so they settle by real result instead of the 15-day
+    void fallback. Independent of ``odds_source`` (the finished-score SCRAPE path is
+    OddsPortal-only; OddsChecker serves results via this JSON API instead).
+
+    Matching is EXACT by OddsChecker subevent id (our stored ``oddschecker:<id>`` ==
+    the feed's ``subeventId`` OR ``preMatchSubeventId``) — no fuzzy cross-source
+    matching, so no wrong-game hazard. Only finished results survive
+    ``parse_live_stats_results`` (never in-play). Guarded UPDATE never clobbers an
+    existing score. Returns events whose score was written."""
+    from app.ingestion.oddschecker import fetch_results
+
+    if sport_key not in _RESULTS_OC_SPORTS:
+        return 0
+    now = now or datetime.now(tz=UTC)
+    window = window or RESULTS_SCRAPE_WINDOW
+    limit = limit or RESULTS_SCRAPE_MAX_PER_CYCLE
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Event.external_ref)
+                .join(Pick, Pick.event_id == Event.id)
+                .join(Sport, Sport.id == Event.sport_id)
+                .where(
+                    Sport.key == sport_key,
+                    Pick.status == "alerted",
+                    Event.starts_at.is_not(None),
+                    Event.starts_at < now - _RESULTS_SOFT_FLOOR,
+                    Event.starts_at > now - window,
+                    Event.scraped_home_score.is_(None),
+                    Event.external_ref.like("oddschecker:%"),
+                )
+                .distinct()
+                .limit(limit)
+            )
+        ).all()
+    sub_ids: list[int] = []
+    for (ref,) in rows:
+        tail = str(ref).split(":", 1)[-1]
+        if tail.isdigit():
+            sub_ids.append(int(tail))
+    if not sub_ids:
+        return 0
+    written = 0
+    for start in range(0, len(sub_ids), max(1, batch_size)):
+        chunk = sub_ids[start : start + batch_size]
+        try:
+            results = await fetch_results(chunk, sport_key=sport_key, proxy=proxy)
+        except Exception as exc:  # noqa: BLE001 - resilience: log type only, retry next cycle
+            logger.warning("oddschecker results capture failed (%s)", type(exc).__name__)
+            continue
+        if not results:
+            continue
+        async with session_factory() as session:
+            for r in results:
+                refs = [f"oddschecker:{r.subevent_id}"]
+                if r.prematch_subevent_id is not None:
+                    refs.append(f"oddschecker:{r.prematch_subevent_id}")
+                res = await session.execute(
+                    update(Event)
+                    .where(
+                        Event.external_ref.in_(refs),
+                        Event.scraped_home_score.is_(None),
+                    )
+                    .values(
+                        scraped_home_score=r.home_score,
+                        scraped_away_score=r.away_score,
+                        status=_FINISHED_STATUS,
+                    )
+                )
+                written += res.rowcount or 0
+            await session.commit()
+    if written:
+        logger.info("oddschecker results capture %s: %d score(s) written", sport_key, written)
+    return written
 
 
 async def capture_finished_scores(
