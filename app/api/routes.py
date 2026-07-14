@@ -909,6 +909,67 @@ async def latest_picks(
     return _attach_confidence(rows, threshold, volume_threshold)
 
 
+def _memory_games_cover_request(
+    request: Request,
+    sport: str | None,
+    available_games: Mapping[str, object],
+    last_poll: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """True when every requested poll family has a healthy published slate.
+
+    Membership in ``available_games`` is the publication marker: an empty list
+    is a complete, legitimate quiet slate.  Missing, stale, failed, degraded,
+    or source-incomplete poll families retain the warehouse merge path.
+    """
+    expected = tuple(
+        dict.fromkeys(
+            key
+            for key in (getattr(request.app.state, "expected_poll_sports", ()) or ())
+            if isinstance(key, str) and key
+        )
+    )
+    if not expected:
+        return False
+    requested = (
+        expected
+        if sport is None
+        else tuple(key for key in expected if key == sport or key.startswith(f"{sport}_"))
+    )
+    if not requested:
+        return False
+
+    requested_polls: dict[str, Mapping[str, Any]] = {}
+    for sport_key in requested:
+        poll = last_poll.get(sport_key)
+        if sport_key not in available_games or not isinstance(poll, Mapping):
+            return False
+        state = poll.get("state")
+        has_consistent_state = (state == "completed" and poll.get("in_progress") is False) or (
+            state == "in_progress" and poll.get("in_progress") is True
+        )
+        if (
+            poll.get("source_complete") is not True
+            or bool(poll.get("degraded"))
+            or poll.get("failure_reason") is not None
+            or not has_consistent_state
+            or _parse_poll_finish(poll.get("finished_at")) is None
+        ):
+            return False
+        requested_polls[sport_key] = poll
+
+    from app.config import get_settings
+
+    settings = get_settings()
+    status, _, _ = _poll_health(
+        requested_polls,
+        datetime.now(tz=UTC),
+        settings.poll_interval_seconds,
+        expected_sport_count=len(expected),
+        cycle_timeout_seconds=settings.poll_cycle_timeout_seconds,
+    )
+    return status == "ok"
+
+
 async def _warehouse_available_games(
     request: Request,
     limit: int,
@@ -939,7 +1000,7 @@ async def available_games(
     This is a read-only visibility feed. It does not apply edge, odds-age,
     exposure, tier, or pick-status gates; those remain exclusive to /picks.
     """
-    from app.pipeline import AVAILABLE_GAMES
+    from app.pipeline import AVAILABLE_GAMES, LAST_POLL
 
     memory_rows: list[dict[str, Any]] = []
     for sport_key in sorted(AVAILABLE_GAMES):
@@ -947,11 +1008,15 @@ async def available_games(
             continue
         memory_rows.extend(AVAILABLE_GAMES[sport_key])
 
-    # A restart repopulates one poll family at a time. Falling back only while
-    # the entire registry was empty made every not-yet-polled sport disappear
-    # as soon as the first family completed. Always merge durable coverage;
-    # live memory wins for the same canonical (sport, event_id) fixture.
-    warehouse_rows = await _warehouse_available_games(request, limit=limit, sport=sport)
+    # Once every requested scheduler family has published a healthy, complete
+    # slate, memory is authoritative — including an explicitly empty slate —
+    # and the append-only warehouse never needs to be scanned on the hot path.
+    # Cold start, partial restart, incomplete/failed polls, and stale health keep
+    # the exact legacy one-query merge; live memory still wins duplicate ids.
+    if _memory_games_cover_request(request, sport, AVAILABLE_GAMES, LAST_POLL):
+        warehouse_rows: list[dict[str, Any]] = []
+    else:
+        warehouse_rows = await _warehouse_available_games(request, limit=limit, sport=sport)
     merged: dict[tuple[str, str], dict[str, Any]] = {
         (str(row.get("sport", "")), str(row.get("event_id", ""))): row for row in warehouse_rows
     }

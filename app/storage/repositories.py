@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import and_, case, func, select, text
+from sqlalchemy import and_, case, func, select, text, true, union_all
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -1169,18 +1169,20 @@ def _latest_available_games_statement(
     sport: str | None,
     as_of: datetime,
 ) -> Select[Any]:
-    """Build the restart-durability query without aggregating rejected events.
+    """Build the restart-durability query with bounded snapshot work.
 
-    ``odds_snapshots`` is append-only and can contain thousands of observations
-    per fixture.  The former statement joined that history before GROUP BY and
-    LIMIT, so PostgreSQL repeated the wide event/team/league columns for every
-    observation and sorted the full eligible slate even when callers requested
-    only a handful of games.  Select and limit the identically ordered event
-    candidates first, then aggregate history for only those event ids.
+    ``odds_snapshots`` is append-only and production has millions of rows.  The
+    event eligibility predicate is deliberately split into scheduled and TBD
+    branches: scheduled/live fixtures qualify by kickoff, while a TBD fixture
+    uses a correlated ``LATERAL ... LIMIT 1`` probe for recent odds.  This keeps
+    PostgreSQL on the existing event-leading odds index instead of decorrelating
+    an ``OR EXISTS`` into a full recent-odds scan.
 
-    The recent-odds ``EXISTS`` preserves the old SQL's three-valued predicate:
-    scheduled events qualify from ``starts_at`` alone, while a NULL/TBD kickoff
-    qualifies only when it has an odds row ingested in the last 24 hours.
+    After the identically ordered event window is limited, each candidate gets
+    its own lateral aggregate.  That bounds index scans to the selected event
+    ids and avoids the former global sort of every selected snapshot.  The old
+    aggregation semantics remain exact: scheduled fixtures aggregate all their
+    history; TBD fixtures aggregate only rows ingested in the last 24 hours.
     """
     event_cutoff = as_of - timedelta(hours=12)
     recent_odds_cutoff = as_of - timedelta(hours=24)
@@ -1188,37 +1190,21 @@ def _latest_available_games_statement(
 
     home = aliased(Team)
     away = aliased(Team)
-    has_recent_odds = (
-        select(OddsSnapshot.id)
-        .where(
-            OddsSnapshot.event_id == Event.id,
-            OddsSnapshot.ingested_at >= recent_odds_cutoff,
-        )
-        .exists()
-    )
-
-    candidate_stmt = (
-        select(
-            Event.id.label("event_pk"),
-            Sport.key.label("sport_key"),
-            Sport.name.label("sport_name"),
-            Event.external_ref.label("external_ref"),
-            home.name.label("home_name"),
-            away.name.label("away_name"),
-            League.name.label("league_name"),
-            Event.starts_at.label("starts_at"),
-        )
-        .join(Sport, Event.sport_id == Sport.id)
-        .join(League, Event.league_id == League.id)
-        .join(home, Event.home_team_id == home.id)
-        .join(away, Event.away_team_id == away.id)
-        .where(
-            (Event.starts_at >= event_cutoff) | has_recent_odds,
-            (Event.starts_at.is_(None)) | (Event.starts_at > in_play_grace),
-        )
-    )
+    eligible_event_stmt = select(
+        Event.id.label("event_pk"),
+        Sport.key.label("sport_key"),
+        Sport.name.label("sport_name"),
+        Event.external_ref.label("external_ref"),
+        home.name.label("home_name"),
+        away.name.label("away_name"),
+        League.name.label("league_name"),
+        Event.starts_at.label("starts_at"),
+    ).join(Sport, Event.sport_id == Sport.id)
+    eligible_event_stmt = eligible_event_stmt.join(League, Event.league_id == League.id)
+    eligible_event_stmt = eligible_event_stmt.join(home, Event.home_team_id == home.id)
+    eligible_event_stmt = eligible_event_stmt.join(away, Event.away_team_id == away.id)
     if sport is None:
-        candidate_stmt = candidate_stmt.where(
+        eligible_event_stmt = eligible_event_stmt.where(
             (Sport.key == "soccer")
             | Sport.key.startswith("soccer_")
             | (Sport.key == "basketball")
@@ -1229,23 +1215,37 @@ def _latest_available_games_statement(
             | Sport.key.startswith("american_football_")
         )
     else:
-        candidate_stmt = candidate_stmt.where(
+        eligible_event_stmt = eligible_event_stmt.where(
             (Sport.key == sport) | Sport.key.startswith(f"{sport}_")
         )
 
+    recent_odds = (
+        select(OddsSnapshot.id.label("recent_snapshot_id"))
+        .where(
+            OddsSnapshot.event_id == Event.id,
+            OddsSnapshot.ingested_at >= recent_odds_cutoff,
+        )
+        .limit(1)
+        .correlate(Event)
+        .lateral("available_game_recent_odds")
+    )
+    scheduled_events = eligible_event_stmt.where(Event.starts_at > in_play_grace)
+    tbd_events = eligible_event_stmt.join(recent_odds, true()).where(Event.starts_at.is_(None))
+    eligible = union_all(scheduled_events, tbd_events).subquery("available_game_eligible")
     candidates = (
-        candidate_stmt.order_by(
-            Event.starts_at.is_(None),
-            Event.starts_at,
-            home.name,
-            away.name,
+        select(*eligible.c)
+        .order_by(
+            eligible.c.starts_at.is_(None),
+            eligible.c.starts_at,
+            eligible.c.home_name,
+            eligible.c.away_name,
         )
         .limit(limit)
         .cte("available_game_candidates")
     )
+
     odds = (
         select(
-            OddsSnapshot.event_id.label("event_pk"),
             func.count(OddsSnapshot.id).label("snapshot_count"),
             func.min(OddsSnapshot.captured_at).label("first_captured_at"),
             func.max(OddsSnapshot.captured_at).label("last_captured_at"),
@@ -1257,15 +1257,13 @@ def _latest_available_games_statement(
             .filter(OddsSnapshot.bookmaker.is_not(None))
             .label("bookmakers"),
         )
-        .join(candidates, candidates.c.event_pk == OddsSnapshot.event_id)
-        # Preserve the former outer-join WHERE semantics: a scheduled event
-        # aggregates all history, while a NULL/TBD kickoff retains recent rows.
         .where(
+            OddsSnapshot.event_id == candidates.c.event_pk,
             (candidates.c.starts_at >= event_cutoff)
-            | (OddsSnapshot.ingested_at >= recent_odds_cutoff)
+            | (OddsSnapshot.ingested_at >= recent_odds_cutoff),
         )
-        .group_by(OddsSnapshot.event_id)
-        .cte("available_game_odds")
+        .correlate(candidates)
+        .lateral("available_game_odds")
     )
     return (
         select(
@@ -1283,7 +1281,7 @@ def _latest_available_games_statement(
             odds.c.markets,
             odds.c.bookmakers,
         )
-        .outerjoin(odds, odds.c.event_pk == candidates.c.event_pk)
+        .outerjoin(odds, true())
         .order_by(
             candidates.c.starts_at.is_(None),
             candidates.c.starts_at,
@@ -1316,6 +1314,12 @@ async def latest_available_games_with_events(
     # kickoff (TBD) is kept — it has no finish to be past. 3h30m covers a full
     # match incl. stoppage/extra-time/penalties so a live fixture is never hidden.
     stmt = _latest_available_games_statement(limit=limit, sport=sport, as_of=as_of)
+    # PostgreSQL's cardinality estimate for per-event odds history can cross
+    # the JIT threshold even for a small result window. Production then spends
+    # more than a second compiling this fallback query. Keep the setting local
+    # to this transaction; non-PostgreSQL test/session dialects never see it.
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(text("SET LOCAL jit = off"))
     rows = await session.execute(stmt)
     payload: list[dict[str, Any]] = []
     for (

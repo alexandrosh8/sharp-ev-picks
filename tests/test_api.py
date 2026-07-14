@@ -450,6 +450,46 @@ def test_picks_tier_param_is_validated() -> None:
     assert client.get("/picks?tier=").status_code == 422
 
 
+def _available_game_row(
+    *,
+    sport: str = "soccer",
+    event_id: str = "evt-live-soccer",
+    event: str = "Live Home vs Live Away",
+) -> dict[str, object]:
+    return {
+        "sport": sport,
+        "sport_label": "Football" if sport.startswith("soccer") else "Basketball",
+        "event_id": event_id,
+        "event": event,
+        "home": "Live Home",
+        "away": "Live Away",
+        "league": "Live",
+        "starts_at": "2026-07-15T18:00:00+00:00",
+        "market_count": 1,
+        "markets": ["h2h"],
+        "bookmaker_count": 1,
+        "bookmakers": ["Pinnacle"],
+        "snapshot_count": 6,
+        "first_captured_at": "2026-07-14T10:00:00+00:00",
+        "last_captured_at": "2026-07-14T10:01:00+00:00",
+        "updated_at": "2026-07-14T10:02:00+00:00",
+    }
+
+
+def _healthy_available_games_poll() -> dict[str, object]:
+    timestamp = datetime.now(tz=UTC).isoformat()
+    return {
+        "started_at": timestamp,
+        "finished_at": timestamp,
+        "heartbeat_at": timestamp,
+        "in_progress": False,
+        "state": "completed",
+        "failure_reason": None,
+        "source_complete": True,
+        "degraded": False,
+    }
+
+
 def test_games_endpoint_serves_unrestricted_latest_fixture_view() -> None:
     from app.pipeline import AVAILABLE_GAMES
 
@@ -516,6 +556,132 @@ def test_games_endpoint_serves_unrestricted_latest_fixture_view() -> None:
     finally:
         AVAILABLE_GAMES.clear()
         AVAILABLE_GAMES.update(saved)
+
+
+def test_games_endpoint_skips_warehouse_for_healthy_published_slates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import routes
+    from app.pipeline import AVAILABLE_GAMES, LAST_POLL
+
+    saved_games = dict(AVAILABLE_GAMES)
+    saved_polls = dict(LAST_POLL)
+    AVAILABLE_GAMES.clear()
+    LAST_POLL.clear()
+    AVAILABLE_GAMES["soccer"] = [_available_game_row()]
+    AVAILABLE_GAMES["basketball"] = []  # explicitly published quiet slate
+    LAST_POLL["soccer"] = {
+        **_healthy_available_games_poll(),
+        "state": "in_progress",
+        "in_progress": True,
+    }  # active refresh retains the prior healthy published slate
+    LAST_POLL["basketball"] = _healthy_available_games_poll()
+    calls: list[tuple[int, str | None]] = []
+
+    class FakeSessionFactory:
+        def __call__(self) -> "FakeSessionFactory":
+            return self
+
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    async def fake_latest_available_games_with_events(
+        session: object,
+        limit: int,
+        sport: str | None,
+    ) -> list[dict[str, object]]:
+        calls.append((limit, sport))
+        return []
+
+    monkeypatch.setattr(
+        routes,
+        "latest_available_games_with_events",
+        fake_latest_available_games_with_events,
+    )
+    app = make_app()
+    app.state.expected_poll_sports = ("soccer", "basketball")
+    app.state.session_factory = FakeSessionFactory()
+    try:
+        all_rows = TestClient(app).get("/games").json()
+        basketball_rows = TestClient(app).get("/games?sport=basketball").json()
+    finally:
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved_games)
+        LAST_POLL.clear()
+        LAST_POLL.update(saved_polls)
+
+    assert [row["event_id"] for row in all_rows] == ["evt-live-soccer"]
+    assert basketball_rows == []
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "poll_overrides",
+    [
+        {"source_complete": False, "degraded": True},
+        {
+            "state": "failed",
+            "failure_reason": "timeout",
+            "source_complete": True,
+            "degraded": True,
+        },
+    ],
+    ids=["source-incomplete", "failed"],
+)
+def test_games_endpoint_keeps_one_warehouse_query_for_unhealthy_slates(
+    monkeypatch: pytest.MonkeyPatch,
+    poll_overrides: dict[str, object],
+) -> None:
+    from app.api import routes
+    from app.pipeline import AVAILABLE_GAMES, LAST_POLL
+
+    saved_games = dict(AVAILABLE_GAMES)
+    saved_polls = dict(LAST_POLL)
+    AVAILABLE_GAMES.clear()
+    LAST_POLL.clear()
+    AVAILABLE_GAMES["soccer"] = [_available_game_row()]
+    LAST_POLL["soccer"] = {**_healthy_available_games_poll(), **poll_overrides}
+    calls: list[tuple[int, str | None]] = []
+
+    class FakeSessionFactory:
+        def __call__(self) -> "FakeSessionFactory":
+            return self
+
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    async def fake_latest_available_games_with_events(
+        session: object,
+        limit: int,
+        sport: str | None,
+    ) -> list[dict[str, object]]:
+        calls.append((limit, sport))
+        return []
+
+    monkeypatch.setattr(
+        routes,
+        "latest_available_games_with_events",
+        fake_latest_available_games_with_events,
+    )
+    app = make_app()
+    app.state.expected_poll_sports = ("soccer",)
+    app.state.session_factory = FakeSessionFactory()
+    try:
+        rows = TestClient(app).get("/games?sport=soccer").json()
+    finally:
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved_games)
+        LAST_POLL.clear()
+        LAST_POLL.update(saved_polls)
+
+    assert [row["event_id"] for row in rows] == ["evt-live-soccer"]
+    assert calls == [(1000, "soccer")]
 
 
 def test_games_endpoint_falls_back_to_warehouse_when_poll_registry_empty(
@@ -590,9 +756,10 @@ def test_games_endpoint_merges_partial_registry_with_warehouse(
 ) -> None:
     """One completed poll must not hide durable rows for pending sports."""
     from app.api import routes
-    from app.pipeline import AVAILABLE_GAMES
+    from app.pipeline import AVAILABLE_GAMES, LAST_POLL
 
     saved = dict(AVAILABLE_GAMES)
+    saved_polls = dict(LAST_POLL)
     live_soccer = {
         "sport": "soccer",
         "sport_label": "Football",
@@ -612,7 +779,10 @@ def test_games_endpoint_merges_partial_registry_with_warehouse(
         "updated_at": "2026-06-16T12:00:00+00:00",
     }
     AVAILABLE_GAMES.clear()
+    LAST_POLL.clear()
     AVAILABLE_GAMES["soccer"] = [live_soccer]
+    LAST_POLL["soccer"] = _healthy_available_games_poll()
+    calls: list[tuple[int, str | None]] = []
 
     class FakeSessionFactory:
         def __call__(self) -> "FakeSessionFactory":
@@ -629,8 +799,7 @@ def test_games_endpoint_merges_partial_registry_with_warehouse(
         limit: int,
         sport: str | None,
     ) -> list[dict[str, object]]:
-        assert limit == 1000
-        assert sport is None
+        calls.append((limit, sport))
         return [
             {**live_soccer, "event": "Stale Home vs Stale Away", "snapshot_count": 1},
             {
@@ -649,13 +818,17 @@ def test_games_endpoint_merges_partial_registry_with_warehouse(
         fake_latest_available_games_with_events,
     )
     app = make_app()
+    app.state.expected_poll_sports = ("soccer", "basketball")
     app.state.session_factory = FakeSessionFactory()
     try:
         rows = TestClient(app).get("/games").json()
     finally:
         AVAILABLE_GAMES.clear()
         AVAILABLE_GAMES.update(saved)
+        LAST_POLL.clear()
+        LAST_POLL.update(saved_polls)
 
+    assert calls == [(1000, None)]
     by_id = {row["event_id"]: row for row in rows}
     assert set(by_id) == {"evt-shared", "evt-db-basketball"}
     assert by_id["evt-shared"]["event"] == "Fresh Home vs Fresh Away"

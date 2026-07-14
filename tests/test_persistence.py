@@ -32,7 +32,7 @@ from tests.database import TEST_DATABASE_URL
 DB_URL = TEST_DATABASE_URL
 
 
-def test_available_games_limits_candidates_before_snapshot_aggregation() -> None:
+def test_available_games_uses_bounded_lateral_snapshot_queries() -> None:
     statement = _latest_available_games_statement(
         limit=20,
         sport=None,
@@ -44,11 +44,17 @@ def test_available_games_limits_candidates_before_snapshot_aggregation() -> None
             compile_kwargs={"literal_binds": True},
         )
     )
-    candidate_sql, aggregate_sql = sql.split("available_game_odds AS", maxsplit=1)
+    candidate_sql, aggregate_sql = sql.split("LEFT OUTER JOIN LATERAL", maxsplit=1)
 
+    assert "UNION ALL" in candidate_sql
+    assert "available_game_recent_odds" in candidate_sql
+    assert "JOIN LATERAL" in candidate_sql
+    assert "LIMIT 1" in candidate_sql
     assert "LIMIT 20" in candidate_sql
-    assert "LEFT OUTER JOIN odds_snapshots" not in candidate_sql
-    assert "JOIN available_game_candidates" in aggregate_sql
+    assert "EXISTS" not in candidate_sql
+    assert "available_game_odds" in aggregate_sql
+    assert "odds_snapshots.event_id = available_game_candidates.event_pk" in aggregate_sql
+    assert "GROUP BY odds_snapshots.event_id" not in aggregate_sql
 
 
 def make_pick(
@@ -1041,6 +1047,115 @@ async def test_available_games_fallback_reads_current_warehouse_events(session) 
     assert row["first_captured_at"] == captured.isoformat()
     assert row["last_captured_at"] == captured.isoformat()
     assert row["updated_at"] == (captured + timedelta(seconds=20)).isoformat()
+
+
+async def test_available_games_preserves_scheduled_and_tbd_snapshot_windows(
+    session: AsyncSession,
+) -> None:
+    now = datetime.now(tz=UTC)
+    old = now - timedelta(days=2)
+    recent = now - timedelta(minutes=5)
+    league = "test-league-games-snapshot-window"
+
+    async def _seed_event(ref: str, kickoff: datetime | None) -> Event:
+        teams = EventTeams(
+            home=f"{ref} Home",
+            away=f"{ref} Away",
+            league=league,
+            starts_at=kickoff,
+        )
+        await persist_pick(
+            session,
+            make_pick(ref, league=league, bookmaker=f"pick-{ref}"),
+            teams,
+            "value-sharp-vs-soft",
+            "t-games-window",
+        )
+        event = await session.scalar(select(Event).where(Event.external_ref == ref))
+        assert event is not None
+        return event
+
+    scheduled = await _seed_event("evt-games-window-scheduled", now + timedelta(hours=2))
+    tbd_recent = await _seed_event("evt-games-window-tbd-recent", None)
+    tbd_stale = await _seed_event("evt-games-window-tbd-stale", None)
+    session.add_all(
+        [
+            OddsSnapshot(
+                event_id=scheduled.id,
+                bookmaker="ScheduledOld",
+                market="h2h",
+                selection="Old",
+                decimal_odds=Decimal("2.0000"),
+                liquidity=None,
+                captured_at=old,
+                ingested_at=old,
+            ),
+            OddsSnapshot(
+                event_id=scheduled.id,
+                bookmaker="ScheduledRecent",
+                market="totals",
+                selection="Recent",
+                decimal_odds=Decimal("1.9000"),
+                liquidity=None,
+                captured_at=recent,
+                ingested_at=recent,
+            ),
+            OddsSnapshot(
+                event_id=tbd_recent.id,
+                bookmaker="TbdOld",
+                market="h2h",
+                selection="Old",
+                decimal_odds=Decimal("2.1000"),
+                liquidity=None,
+                captured_at=old,
+                ingested_at=old,
+            ),
+            OddsSnapshot(
+                event_id=tbd_recent.id,
+                bookmaker="TbdRecent",
+                market="spreads",
+                selection="Recent",
+                decimal_odds=Decimal("1.9500"),
+                liquidity=None,
+                captured_at=recent,
+                ingested_at=recent,
+            ),
+            OddsSnapshot(
+                event_id=tbd_stale.id,
+                bookmaker="TbdStale",
+                market="h2h",
+                selection="Stale",
+                decimal_odds=Decimal("2.2000"),
+                liquidity=None,
+                captured_at=old,
+                ingested_at=old,
+            ),
+        ]
+    )
+    await session.flush()
+
+    rows = await latest_available_games_with_events(
+        session,
+        limit=5000,
+        sport="soccer",
+        now=now,
+    )
+    by_ref = {row["event_id"]: row for row in rows}
+
+    scheduled_row = by_ref["evt-games-window-scheduled"]
+    assert scheduled_row["snapshot_count"] == 2
+    assert scheduled_row["markets"] == ["h2h", "totals"]
+    assert scheduled_row["bookmakers"] == ["ScheduledOld", "ScheduledRecent"]
+    assert scheduled_row["first_captured_at"] == old.isoformat()
+    assert scheduled_row["last_captured_at"] == recent.isoformat()
+
+    tbd_row = by_ref["evt-games-window-tbd-recent"]
+    assert tbd_row["snapshot_count"] == 1
+    assert tbd_row["markets"] == ["spreads"]
+    assert tbd_row["bookmakers"] == ["TbdRecent"]
+    assert tbd_row["first_captured_at"] == recent.isoformat()
+    assert tbd_row["last_captured_at"] == recent.isoformat()
+    assert "evt-games-window-tbd-stale" not in by_ref
 
 
 async def test_available_games_excludes_finished_fixtures(session) -> None:  # type: ignore[no-untyped-def]
