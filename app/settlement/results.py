@@ -110,8 +110,61 @@ def normalize_team(name: str) -> str:
     return " ".join(cleaned.split())
 
 
+# Club-type prefix/suffix tokens that differ between result providers for the SAME
+# club (OddsChecker "FK Riga" vs ESPN "Riga FC"; "CE Europa" vs "Europa FC"). Dropped
+# only for the token-set comparison below — never for the wrong-game marker veto.
+_CLUB_TOKENS = frozenset(
+    {
+        "fc",
+        "fk",
+        "cf",
+        "sc",
+        "ce",
+        "ss",
+        "bc",
+        "kf",
+        "cs",
+        "sk",
+        "ac",
+        "cd",
+        "if",
+        "bk",
+        "afc",
+        "nk",
+        "hnk",
+        "us",
+        "as",
+        "rc",
+        "sv",
+        "sd",
+        "ud",
+        "ca",
+        "ki",
+        "club",
+        "fci",
+    }
+)
+
+
+def _core_tokens(normalized: str) -> frozenset[str]:
+    """Distinguishing tokens of an already-normalized name: drop club-type tokens,
+    single letters (the ``d`` of "d'Escaldes"), and pure numbers ("Shkendija 79")."""
+    return frozenset(
+        t for t in normalized.split() if t not in _CLUB_TOKENS and len(t) > 1 and not t.isdigit()
+    )
+
+
 def _names_match(ours: str, theirs: str) -> bool:
-    return ours == theirs or ours in theirs or theirs in ours
+    """True when two normalized team names denote the same club. Containment first
+    (the historical behaviour), then an ORDER-INDEPENDENT token-set comparison that
+    tolerates club-token / word-order / accent / trailing-number differences between
+    result providers ("FC 03 Differdange" == "FC Differdange 03"; "CE Europa" ==
+    "Europa FC"). Safe: the caller still applies the wrong-game marker veto, requires
+    BOTH teams to match on the SAME date, and refuses ambiguous multi-hits."""
+    if ours == theirs or ours in theirs or theirs in ours:
+        return True
+    o, t = _core_tokens(ours), _core_tokens(theirs)
+    return bool(o) and bool(t) and (o == t or o <= t or t <= o)
 
 
 def _markers_agree(ours: str, theirs: str) -> bool:

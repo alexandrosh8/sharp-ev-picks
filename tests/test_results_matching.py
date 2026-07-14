@@ -74,3 +74,20 @@ def test_womens_pick_settles_from_womens_score() -> None:
     # the "W" vs "Women" containment form.
     book = ScoreBook([_score("Arsenal Women", "Chelsea Women")])
     assert book.lookup("Arsenal W", "Chelsea W", KICK) is not None
+
+
+def test_names_match_recovers_provider_variants() -> None:
+    """Order-independent token-set match recovers same-club provider naming diffs
+    (the 2026-07-14 ESPN-vs-OddsChecker misses) while rejecting distinct clubs."""
+    from app.settlement.results import _names_match, normalize_team
+
+    def m(a: str, b: str) -> bool:
+        return _names_match(normalize_team(a), normalize_team(b))
+
+    assert m("FC 03 Differdange", "FC Differdange 03")
+    assert m("Atletic Club Escaldes", "Atlètic Club d'Escaldes")
+    assert m("CE Europa", "Europa FC")
+    assert m("FK Shkendija 79", "KF Shkëndija")
+    assert m("FC Sheriff", "Sheriff Tiraspol")
+    assert not m("Dinamo Tirana", "Dinamo Minsk")
+    assert not m("Real Madrid", "Atletico Madrid")
