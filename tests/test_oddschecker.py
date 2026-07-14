@@ -982,6 +982,40 @@ def test_parse_market_api_capture_other_is_sharp_anchor_gated() -> None:
     }
 
 
+def test_market_api_overflow_is_mapped_fail_closed_but_optional_prefix_bounded() -> None:
+    with pytest.raises(OddsCheckerSecurityError, match="snapshot ceiling"):
+        parse_market_api_payloads(
+            _all_odds_payload(),
+            url="https://www.oddschecker.com/football/x/y/winner",
+            directory=EventDirectory(),
+            max_snapshots=1,
+        )
+
+    optional_payload = {
+        "subeventId": 7001,
+        "subeventName": "Arsenal vs Chelsea",
+        "marketTypeName": "Total Corners",
+        "bets": [{"betId": 1, "betName": "Over", "line": "9.5"}],
+        "odds": [
+            {"betId": 1, "bookmakerCode": "OE", "oddsDecimal": 1.9, "status": "ACTIVE"},
+            {"betId": 1, "bookmakerCode": "WH", "oddsDecimal": 1.85, "status": "ACTIVE"},
+        ],
+    }
+    snapshots = parse_market_api_payloads(
+        [optional_payload],
+        url="https://www.oddschecker.com/football/x/y/winner",
+        directory=EventDirectory(),
+        capture_other=True,
+        capture_only_other=True,
+        truncate_on_limit=True,
+        max_snapshots=1,
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].market is Market.OTHER
+    assert snapshots[0].bookmaker == "Betfair Exchange"
+
+
 def _modern_html_with_optional_market() -> str:
     payload: dict[str, object] = {
         "repub": "OC",
@@ -1254,11 +1288,14 @@ async def test_optional_rows_never_make_cycle_snapshot_ceiling_incomplete(
 
     captured_at = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
 
+    market_scopes: list[tuple[Market, ...] | None] = []
+
     class Loader(OddsCheckerLoader):
         async def fetch_match_odds(  # type: ignore[no-untyped-def]
             self, url, *, now=None, session=None, markets=None
         ):
-            del now, session, markets
+            del now, session
+            market_scopes.append(None if markets is None else tuple(markets))
             market = Market.OTHER if url.endswith("/optional") else Market.H2H
             return [
                 OddsSnapshotIn(
@@ -1274,7 +1311,7 @@ async def test_optional_rows_never_make_cycle_snapshot_ceiling_incomplete(
             ]
 
     monkeypatch.setattr(oc, "MAX_SNAPSHOTS_PER_CYCLE", 1)
-    loader = Loader(EventDirectory())
+    loader = Loader(EventDirectory(), capture_other=True, max_clients=1)
     snapshots = await loader._gather_snapshots(
         [
             "https://www.oddschecker.com/optional",
@@ -1285,6 +1322,8 @@ async def test_optional_rows_never_make_cycle_snapshot_ceiling_incomplete(
     )
 
     assert [snapshot.market for snapshot in snapshots] == [Market.H2H]
+    assert market_scopes[0] is None
+    assert market_scopes[1] == tuple(market for market in Market if market is not Market.OTHER)
     assert loader.last_fetch_complete["soccer"] is True
     assert loader.last_fetch_completeness_reason["soccer"] == ""
 

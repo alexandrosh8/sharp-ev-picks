@@ -66,6 +66,9 @@ MAX_MARKET_IDS_PER_MATCH = 256
 MAX_SNAPSHOTS_PER_MATCH = 5_000
 MAX_SNAPSHOTS_PER_CYCLE = 250_000
 ODDSCHECKER_ALLOWED_HOSTS: frozenset[str] = frozenset({"www.oddschecker.com"})
+_MAPPED_MARKET_SCOPE: tuple[Market, ...] = tuple(
+    market for market in Market if market is not Market.OTHER
+)
 
 _HTML_HEADERS: Mapping[str, str] = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1410,6 +1413,7 @@ def parse_market_api_payloads(
     markets: Sequence[Market] | None = None,
     capture_other: bool = False,
     capture_only_other: bool = False,
+    truncate_on_limit: bool = False,
     max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
 ) -> list[OddsSnapshotIn]:
     """Parse ``/api/markets/v2/all-odds`` payloads into normalized snapshots.
@@ -1419,7 +1423,11 @@ def parse_market_api_payloads(
     under ``Market.OTHER`` with an ``oc_<slug>`` market_detail — odds history
     only (never priced/settled; see the OTHER enum note). ``capture_only_other``
     isolates that optional archive from mapped, pick-critical markets.
+    ``truncate_on_limit`` is valid only for that optional-only mode: it retains
+    a bounded prefix rather than letting archive overflow fail a mapped match.
     """
+    if truncate_on_limit and not capture_only_other:
+        raise ValueError("truncate_on_limit requires capture_only_other")
     ingested_at = now or _utcnow()
     wanted = set(markets) if markets is not None else None
     snapshots: list[OddsSnapshotIn] = []
@@ -1527,6 +1535,8 @@ def parse_market_api_payloads(
                 if captured_at is None:
                     continue
                 if len(snapshots) >= max_snapshots:
+                    if truncate_on_limit:
+                        return snapshots
                     raise OddsCheckerSecurityError(
                         f"match exceeded snapshot ceiling ({max_snapshots})"
                     )
@@ -2267,6 +2277,7 @@ class OddsCheckerLoader:
                 now=now,
                 capture_other=True,
                 capture_only_other=True,
+                truncate_on_limit=True,
                 max_snapshots=remaining,
             )
         except Exception as exc:
@@ -2489,16 +2500,21 @@ class OddsCheckerLoader:
     ) -> Sequence[OddsSnapshotIn]:
         semaphore = asyncio.Semaphore(self._max_clients)
 
-        async def _one(url: str) -> list[OddsSnapshotIn]:
+        async def _one(url: str, *, capture_optional: bool) -> list[OddsSnapshotIn]:
             async with semaphore:
                 lease: _ProxySessionLease | None = None
                 active_session = session
+                market_scope = None if capture_optional else _MAPPED_MARKET_SCOPE
                 if active_session is None and self._session_pool is not None:
                     lease = self._session_pool.acquire_lease()
                     active_session = lease.session
                 try:
                     try:
-                        return await self.fetch_match_odds(url, session=active_session)
+                        return await self.fetch_match_odds(
+                            url,
+                            session=active_session,
+                            markets=market_scope,
+                        )
                     except Exception as exc:
                         if not _is_transient_fetch_error(exc):
                             raise
@@ -2519,7 +2535,11 @@ class OddsCheckerLoader:
                                 # the challenged/stale connection.
                                 retry_lease = self._session_pool.acquire_lease()
                             try:
-                                return await self.fetch_match_odds(url, session=retry_lease.session)
+                                return await self.fetch_match_odds(
+                                    url,
+                                    session=retry_lease.session,
+                                    markets=market_scope,
+                                )
                             except Exception as retry_exc:
                                 if _is_transient_fetch_error(retry_exc):
                                     await self._session_pool.evict(retry_lease)
@@ -2529,7 +2549,11 @@ class OddsCheckerLoader:
 
                         retry_session = _new_impersonated_session(self._next_proxy())
                         try:
-                            return await self.fetch_match_odds(url, session=retry_session)
+                            return await self.fetch_match_odds(
+                                url,
+                                session=retry_session,
+                                markets=market_scope,
+                            )
                         finally:
                             try:
                                 await _ProxySessionPool._close_session(retry_session)
@@ -2562,8 +2586,20 @@ class OddsCheckerLoader:
         # is exhausted.
         batch_size = max(1, self._max_clients)
         for start in range(0, len(deduped), batch_size):
+            # Once optional rows fill the retained cycle budget, later batches
+            # still fetch every mapped market but skip archive-only API work.
+            # This bounds parsing near the cycle ceiling without letting early
+            # OTHER-heavy matches hide mapped rows listed later in the slate.
+            capture_optional = not (
+                self._capture_other
+                and self._markets is None
+                and len(mapped_snapshots) + len(optional_snapshots) >= MAX_SNAPSHOTS_PER_CYCLE
+            )
             results = await asyncio.gather(
-                *(_one(url) for url in deduped[start : start + batch_size]),
+                *(
+                    _one(url, capture_optional=capture_optional)
+                    for url in deduped[start : start + batch_size]
+                ),
                 return_exceptions=True,
             )
             for result in results:
