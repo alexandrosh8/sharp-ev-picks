@@ -2270,10 +2270,15 @@ class OddsCheckerLoader:
                 session=session,
                 proxy=None if session is not None else self._next_proxy(),
             )
+            # Optional archive payloads are not authoritative event metadata.
+            # Parse them against a disposable registry so missing/corrupt fields
+            # cannot overwrite the mapped match context, even if parsing raises
+            # after registration and the archive exception is isolated below.
+            optional_directory = EventDirectory()
             optional_snapshots = parse_market_api_payloads(
                 optional_payloads,
                 url=page.url,
-                directory=self._directory,
+                directory=optional_directory,
                 now=now,
                 capture_other=True,
                 capture_only_other=True,

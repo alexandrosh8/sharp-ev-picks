@@ -1070,6 +1070,68 @@ async def test_optional_market_api_failure_preserves_mapped_snapshots(
     assert snapshots[0].market is Market.H2H
 
 
+@pytest.mark.parametrize(
+    ("optional_selection", "expect_optional"),
+    [
+        pytest.param("Over", True, id="success"),
+        pytest.param("x" * 10_000, False, id="parse-error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_optional_market_metadata_cannot_mutate_mapped_event(
+    optional_selection: str,
+    expect_optional: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    optional_payload = {
+        "subeventId": 101610031,
+        "marketId": 50,
+        "marketTypeName": "Total Corners",
+        "bets": [{"betId": 2, "betName": optional_selection, "line": "9.5"}],
+        "odds": [
+            {
+                "betId": 2,
+                "bookmakerCode": "OE",
+                "oddsDecimal": 1.9,
+                "status": "ACTIVE",
+            }
+        ],
+        # Event metadata is deliberately absent. Optional archive payloads
+        # must not replace the mapped response's authoritative team context.
+    }
+
+    async def fetch(market_ids: list[str], **kwargs: object) -> list[dict[str, object]]:
+        del kwargs
+        ids = tuple(str(market_id) for market_id in market_ids)
+        return [_all_odds_payload()[0]] if ids == ("10",) else [optional_payload]
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    directory = EventDirectory()
+    loader = OddsCheckerLoader(directory, capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/x/y/winner",
+        html=_modern_html_with_optional_market(),
+        status_code=200,
+    )
+
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None
+    )
+
+    event = directory.lookup("oddschecker:101610031")
+    assert event is not None
+    assert (event.home, event.away, event.league) == (
+        "Arsenal",
+        "Coventry",
+        "English Premier League",
+    )
+    assert event.starts_at == datetime(2026, 8, 21, 19, 0, tzinfo=UTC)
+    expected_markets = {Market.H2H, Market.OTHER} if expect_optional else {Market.H2H}
+    assert {snapshot.market for snapshot in snapshots} == expected_markets
+
+
 @pytest.mark.asyncio
 async def test_mapped_market_api_failure_remains_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
