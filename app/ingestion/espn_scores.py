@@ -237,14 +237,43 @@ async def fetch_espn_scores(
 
 
 # Our warehouse sport prefix (Pick.sport) -> the ESPN feeds carrying its
-# results. Soccer is intentionally absent (it auto-settles via football-data
-# CSVs in app/settlement/results.py). EuroLeague is NOT on ESPN (separate
-# official API) — basketball ESPN coverage here is NBA + WNBA + NBL.
+# results. football-data CSVs settle the 12 MAJOR soccer comps; ESPN soccer here
+# ADDS the leagues football-data doesn't cover (UEFA qualifiers, World Cup, and
+# secondary/domestic leagues) so obscure-league soccer picks stop voting to the
+# 15-day void. A 404/idle slug contributes nothing (fetch_espn_scores swallows it),
+# so the list is safe to extend. EuroLeague is NOT on ESPN (separate official API)
+# — basketball ESPN coverage here is NBA + WNBA + NBL.
 SPORT_ESPN_SOURCES: dict[str, tuple[EspnSource, ...]] = {
     "basketball": (
         EspnSource("basketball", "nba"),
         EspnSource("basketball", "wnba"),
         EspnSource("basketball", "nbl"),
+    ),
+    "soccer": (
+        # UEFA club qualifiers (verified returning finals 2026-07) — the current
+        # backlog is dominated by these.
+        EspnSource("soccer", "uefa.champions_qual"),
+        EspnSource("soccer", "uefa.europa_qual"),
+        EspnSource("soccer", "uefa.europa.conf_qual"),
+        # UEFA main competitions (in season Sep-May).
+        EspnSource("soccer", "uefa.champions"),
+        EspnSource("soccer", "uefa.europa"),
+        EspnSource("soccer", "uefa.europa.conf"),
+        # National-team + friendlies (World Cup 2026 finals verified).
+        EspnSource("soccer", "fifa.world"),
+        EspnSource("soccer", "fifa.friendly"),
+        # Secondary / non-major domestic leagues football-data omits.
+        EspnSource("soccer", "bra.1"),
+        EspnSource("soccer", "bra.2"),
+        EspnSource("soccer", "nor.1"),
+        EspnSource("soccer", "irl.1"),
+        EspnSource("soccer", "sco.cis"),  # Scottish League Cup (verified finals)
+        # Majors (football-data primary; ESPN as a cross-source/backup).
+        EspnSource("soccer", "eng.1"),
+        EspnSource("soccer", "esp.1"),
+        EspnSource("soccer", "ita.1"),
+        EspnSource("soccer", "ger.1"),
+        EspnSource("soccer", "fra.1"),
     ),
     "american_football": (
         EspnSource("football", "nfl"),

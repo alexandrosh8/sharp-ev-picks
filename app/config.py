@@ -1176,8 +1176,10 @@ class Settings(BaseSettings):
     # picks (the feed is queried but nothing matches).
     espn_settle_enabled: bool = True
     # csv of warehouse sport keys to fetch ESPN scores for (see
-    # espn_scores.SPORT_ESPN_SOURCES). Soccer is intentionally absent.
-    espn_settle_sports: str = "basketball,american_football,tennis"
+    # espn_scores.SPORT_ESPN_SOURCES). Soccer INCLUDED: football-data CSVs only
+    # cover 12 major comps, so ESPN soccer settles the qualifiers/obscure leagues
+    # that otherwise void at 15 days (2026-07-14).
+    espn_settle_sports: str = "soccer,basketball,american_football,tennis"
     # Days back to query ESPN each cycle (today .. today-N+1). Picks settle
     # within hours of kickoff; this bounds the catch-up window + request count
     # (days x feeds per cycle).

@@ -113,6 +113,25 @@ def test_parse_team_scoreboard_empty_when_no_events() -> None:
     assert parse_team_scoreboard({}) == []
 
 
+def test_soccer_espn_sources_cover_qualifiers() -> None:
+    """Soccer must be registered with the UEFA-qualifier + World Cup + secondary
+    slugs — the leagues football-data does NOT cover, which dominate the settlement
+    backlog. A regression here silently reopens the 15-day-void gap for obscure
+    soccer (2026-07-14). All soccer feeds are team-kind (not tennis)."""
+    from app.ingestion.espn_scores import SPORT_ESPN_SOURCES
+
+    soccer = SPORT_ESPN_SOURCES.get("soccer", ())
+    leagues = {s.league for s in soccer}
+    assert {
+        "uefa.champions_qual",
+        "uefa.europa_qual",
+        "uefa.europa.conf_qual",
+        "fifa.world",
+        "bra.2",
+    } <= leagues
+    assert all(s.sport == "soccer" and s.kind == "team" for s in soccer)
+
+
 def test_parse_tennis_scoreboard_derives_set_score() -> None:
     # Winner took both sets (6-1, 6-3) -> set score 2-0; total sets 2.
     scores = parse_tennis_scoreboard(_TENNIS)
