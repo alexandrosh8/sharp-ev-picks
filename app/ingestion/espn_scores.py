@@ -274,6 +274,26 @@ SPORT_ESPN_SOURCES: dict[str, tuple[EspnSource, ...]] = {
         EspnSource("soccer", "ita.1"),
         EspnSource("soccer", "ger.1"),
         EspnSource("soccer", "fra.1"),
+        EspnSource("soccer", "ned.1"),
+        EspnSource("soccer", "por.1"),
+        # Broader international domestic leagues (all verified valid ESPN slugs;
+        # a 404/idle slug is swallowed). Covers Scandinavian / Alpine / Asian /
+        # Americas leagues our slate touches. (K-League + Croatia/Serbia are NOT
+        # on ESPN — those settle via other feeds or manual.)
+        EspnSource("soccer", "swe.1"),
+        EspnSource("soccer", "den.1"),
+        EspnSource("soccer", "fin.1"),
+        EspnSource("soccer", "aut.1"),
+        EspnSource("soccer", "sui.1"),
+        EspnSource("soccer", "rou.1"),
+        EspnSource("soccer", "gre.1"),
+        EspnSource("soccer", "usa.1"),
+        EspnSource("soccer", "mex.1"),
+        EspnSource("soccer", "arg.1"),
+        EspnSource("soccer", "uru.1"),
+        EspnSource("soccer", "chi.1"),
+        EspnSource("soccer", "jpn.1"),
+        EspnSource("soccer", "aus.1"),
     ),
     "american_football": (
         EspnSource("football", "nfl"),

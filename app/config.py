@@ -1183,7 +1183,10 @@ class Settings(BaseSettings):
     # Days back to query ESPN each cycle (today .. today-N+1). Picks settle
     # within hours of kickoff; this bounds the catch-up window + request count
     # (days x feeds per cycle).
-    espn_settle_days: int = Field(default=4, ge=1)
+    # 14 = the full SCORE_WINDOW: ESPN's date window must reach the whole
+    # settlement backlog, not just the last 4 days, or older stuck picks never
+    # settle before the 15-day void (2026-07-14). Bounded by the 30-min feed cache.
+    espn_settle_days: int = Field(default=14, ge=1)
     # TTL (seconds) for the in-process settlement FEED cache (ops audit WP7):
     # the settle job runs every ~30s but football-data CSVs + ESPN scoreboards
     # update on the order of minutes-hours — refetching ~36 CSVs + ~28 ESPN
