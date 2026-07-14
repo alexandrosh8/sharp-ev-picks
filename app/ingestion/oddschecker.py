@@ -1409,6 +1409,7 @@ def parse_market_api_payloads(
     now: datetime | None = None,
     markets: Sequence[Market] | None = None,
     capture_other: bool = False,
+    capture_only_other: bool = False,
     max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
 ) -> list[OddsSnapshotIn]:
     """Parse ``/api/markets/v2/all-odds`` payloads into normalized snapshots.
@@ -1416,7 +1417,9 @@ def parse_market_api_payloads(
     With ``capture_other`` (and no ``markets`` filter), unmapped non-boost
     markets that carry a sharp-anchor (Betfair Exchange) quote are captured
     under ``Market.OTHER`` with an ``oc_<slug>`` market_detail — odds history
-    only (never priced/settled; see the OTHER enum note)."""
+    only (never priced/settled; see the OTHER enum note). ``capture_only_other``
+    isolates that optional archive from mapped, pick-critical markets.
+    """
     ingested_at = now or _utcnow()
     wanted = set(markets) if markets is not None else None
     snapshots: list[OddsSnapshotIn] = []
@@ -1483,12 +1486,16 @@ def parse_market_api_payloads(
             )
             if exact_sets_selection is not None:
                 # Proven-bo3 exact-sets bet -> the canonical set-totals group.
+                if capture_only_other:
+                    continue
                 market_key = Market.TOTALS
                 market_detail = _EXACT_SETS_BO3_DETAIL
                 if wanted is not None and market_key not in wanted:
                     continue
                 selection = exact_sets_selection
             elif (mapped := _market_for_type(market_type, line, selection)) is not None:
+                if capture_only_other:
+                    continue
                 market_key, market_detail = mapped
                 if wanted is not None and market_key not in wanted:
                     continue
@@ -2176,27 +2183,45 @@ class OddsCheckerLoader:
         markets: Sequence[Market] | None = None,
     ) -> list[OddsSnapshotIn]:
         eff_markets = markets if markets is not None else self._markets
-        market_ids = supported_market_ids_from_match_page(
-            page.html, markets=eff_markets, include_other=self._capture_other
+        # Fetch mapped, pick-critical markets independently. Optional OTHER
+        # capture must never turn a healthy mapped match into an incomplete one.
+        mapped_market_ids = supported_market_ids_from_match_page(
+            page.html, markets=eff_markets, include_other=False
         )
-        if market_ids:
+        optional_market_ids: list[str] = []
+        if self._capture_other and eff_markets is None:
+            try:
+                all_market_ids = supported_market_ids_from_match_page(
+                    page.html, markets=None, include_other=True
+                )
+            except OddsCheckerSecurityError as exc:
+                logger.warning(
+                    "oddschecker optional market capture skipped (%s)",
+                    type(exc).__name__,
+                )
+            else:
+                mapped_ids = set(mapped_market_ids)
+                optional_market_ids = [
+                    market_id for market_id in all_market_ids if market_id not in mapped_ids
+                ]
+
+        mapped_snapshots: list[OddsSnapshotIn] = []
+        if mapped_market_ids:
             try:
                 payloads = await fetch_market_api_payloads(
-                    market_ids,
+                    mapped_market_ids,
                     referer=page.url,
                     session=session,
                     proxy=None if session is not None else self._next_proxy(),
                 )
-                snapshots = parse_market_api_payloads(
+                mapped_snapshots = parse_market_api_payloads(
                     payloads,
                     url=page.url,
                     directory=self._directory,
                     now=now,
                     markets=eff_markets,
-                    capture_other=self._capture_other,
+                    capture_other=False,
                 )
-                if snapshots:
-                    return snapshots
             except OddsCheckerError:
                 # Any API failure after the page advertised supported market
                 # ids is systemic for this match. Falling back to embedded
@@ -2204,21 +2229,55 @@ class OddsCheckerLoader:
                 # partial slate look complete. Let the gather retain healthy
                 # sibling matches while marking this cycle incomplete.
                 raise
+
+        if not mapped_snapshots:
+            try:
+                mapped_snapshots = parse_match_page(
+                    page.html,
+                    url=page.url,
+                    directory=self._directory,
+                    now=now,
+                    markets=eff_markets,
+                )
+            except OddsCheckerParseError:
+                mapped_snapshots = await self._parse_legacy_match_with_linked_markets(
+                    page,
+                    now=now,
+                    session=session,
+                    markets=eff_markets,
+                )
+
+        remaining = MAX_SNAPSHOTS_PER_MATCH - len(mapped_snapshots)
+        if not optional_market_ids or remaining <= 0:
+            if optional_market_ids and remaining <= 0:
+                logger.warning("oddschecker optional market capture skipped (snapshot ceiling)")
+            return mapped_snapshots
+
         try:
-            return parse_match_page(
-                page.html,
+            optional_payloads = await fetch_market_api_payloads(
+                optional_market_ids,
+                referer=page.url,
+                session=session,
+                proxy=None if session is not None else self._next_proxy(),
+            )
+            optional_snapshots = parse_market_api_payloads(
+                optional_payloads,
                 url=page.url,
                 directory=self._directory,
                 now=now,
-                markets=eff_markets,
+                capture_other=True,
+                capture_only_other=True,
+                max_snapshots=remaining,
             )
-        except OddsCheckerParseError:
-            return await self._parse_legacy_match_with_linked_markets(
-                page,
-                now=now,
-                session=session,
-                markets=eff_markets,
+        except Exception as exc:
+            # OTHER is an archive-only surface. Keep mapped snapshots and emit
+            # only the safe exception class (never a URL/body/proxy credential).
+            logger.warning(
+                "oddschecker optional market capture skipped (%s)",
+                type(exc).__name__,
             )
+            return mapped_snapshots
+        return [*mapped_snapshots, *optional_snapshots]
 
     async def _parse_legacy_match_with_linked_markets(
         self,
@@ -2483,9 +2542,11 @@ class OddsCheckerLoader:
                     if lease is not None and self._session_pool is not None:
                         await self._session_pool.release(lease)
 
-        snapshots: list[OddsSnapshotIn] = []
+        mapped_snapshots: list[OddsSnapshotIn] = []
+        optional_snapshots: list[OddsSnapshotIn] = []
         failures = 0
         snapshot_overflow = False
+        optional_truncated = False
         if len(deduped) > MAX_MATCH_URLS_PER_CYCLE:
             reason = f"listed match URL ceiling exceeded ({MAX_MATCH_URLS_PER_CYCLE})"
             if pipeline_key is None:
@@ -2510,16 +2571,45 @@ class OddsCheckerLoader:
                     failures += 1
                     logger.warning("oddschecker match page skipped (%s)", type(result).__name__)
                     continue
-                if len(result) > MAX_SNAPSHOTS_PER_MATCH:
+                mapped_result = [
+                    snapshot
+                    for snapshot in result
+                    if getattr(snapshot, "market", None) is not Market.OTHER
+                ]
+                optional_result = [
+                    snapshot
+                    for snapshot in result
+                    if getattr(snapshot, "market", None) is Market.OTHER
+                ]
+                if len(mapped_result) > MAX_SNAPSHOTS_PER_MATCH:
                     failures += 1
                     logger.warning("oddschecker match page skipped (snapshot ceiling)")
                     continue
-                if len(snapshots) + len(result) > MAX_SNAPSHOTS_PER_CYCLE:
+                per_match_optional_capacity = MAX_SNAPSHOTS_PER_MATCH - len(mapped_result)
+                if len(optional_result) > per_match_optional_capacity:
+                    optional_result = optional_result[:per_match_optional_capacity]
+                    optional_truncated = True
+                if len(mapped_snapshots) + len(mapped_result) > MAX_SNAPSHOTS_PER_CYCLE:
                     snapshot_overflow = True
                     break
-                snapshots.extend(result)
+                mapped_snapshots.extend(mapped_result)
+
+                # Optional rows never consume space required by later mapped
+                # rows. Shrink the archive buffer as the critical slate grows.
+                optional_capacity = MAX_SNAPSHOTS_PER_CYCLE - len(mapped_snapshots)
+                if len(optional_snapshots) > optional_capacity:
+                    del optional_snapshots[optional_capacity:]
+                    optional_truncated = True
+                remaining_optional = optional_capacity - len(optional_snapshots)
+                if len(optional_result) > remaining_optional:
+                    optional_result = optional_result[:remaining_optional]
+                    optional_truncated = True
+                optional_snapshots.extend(optional_result)
             if snapshot_overflow:
                 break
+        snapshots = [*mapped_snapshots, *optional_snapshots]
+        if optional_truncated:
+            logger.warning("oddschecker optional market capture truncated (snapshot ceiling)")
         if pipeline_key is not None:
             complete = failures == 0 and not snapshot_overflow
             self.last_fetch_complete[pipeline_key] = complete

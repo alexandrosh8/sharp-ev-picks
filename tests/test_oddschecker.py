@@ -982,6 +982,82 @@ def test_parse_market_api_capture_other_is_sharp_anchor_gated() -> None:
     }
 
 
+def _modern_html_with_optional_market() -> str:
+    payload: dict[str, object] = {
+        "repub": "OC",
+        "bestOdds": {
+            "bets": {
+                "entities": {"1": {"ocBetId": 1, "betName": "Alpha", "marketId": 10}},
+                "ids": [1],
+            },
+            "odds": {"1": {"WH": {"oddsDecimal": 2.0}}},
+            "markets": {
+                "entities": {
+                    "10": {"ocMarketId": 10, "marketTypeName": "Win Market"},
+                    "50": {"ocMarketId": 50, "marketTypeName": "Total Corners"},
+                },
+                "ids": [10, 50],
+            },
+        },
+    }
+    return _json_script(payload)
+
+
+@pytest.mark.asyncio
+async def test_optional_market_api_failure_preserves_mapped_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    calls: list[tuple[str, ...]] = []
+
+    async def fetch(market_ids: list[str], **kwargs: object) -> list[dict[str, object]]:
+        del kwargs
+        ids = tuple(str(market_id) for market_id in market_ids)
+        calls.append(ids)
+        if ids == ("10",):
+            return [_all_odds_payload()[0]]
+        raise OddsCheckerSecurityError("optional response exceeded body ceiling")
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    loader = OddsCheckerLoader(EventDirectory(), capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/x/y/winner",
+        html=_modern_html_with_optional_market(),
+        status_code=200,
+    )
+
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None
+    )
+
+    assert calls == [("10",), ("50",)]
+    assert len(snapshots) == 1
+    assert snapshots[0].market is Market.H2H
+
+
+@pytest.mark.asyncio
+async def test_mapped_market_api_failure_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    async def fetch(market_ids: object, **kwargs: object) -> list[dict[str, object]]:
+        del market_ids, kwargs
+        raise OddsCheckerSecurityError("mapped response exceeded body ceiling")
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    loader = OddsCheckerLoader(EventDirectory(), capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/x/y/winner",
+        html=_modern_html_with_optional_market(),
+        status_code=200,
+    )
+
+    with pytest.raises(OddsCheckerSecurityError, match="mapped response"):
+        await loader._parse_modern_or_legacy_match_page(page, now=None, session=None)
+
+
 @pytest.mark.asyncio
 async def test_for_scheduler_fetch_odds_is_per_sport() -> None:
     """Scheduler mode discovers + parses ONLY the requested pipeline sport."""
@@ -1169,6 +1245,48 @@ async def test_partial_match_failure_is_retained_but_explicitly_incomplete() -> 
     assert len(snapshots) == 1
     assert loader.last_fetch_complete["soccer"] is False
     assert loader.last_fetch_completeness_reason["soccer"] == "1/2 listed match fetch(es) failed"
+
+
+async def test_optional_rows_never_make_cycle_snapshot_ceiling_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    captured_at = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del now, session, markets
+            market = Market.OTHER if url.endswith("/optional") else Market.H2H
+            return [
+                OddsSnapshotIn(
+                    event_id=url,
+                    bookmaker="Betfair Exchange",
+                    market=market,
+                    selection="Alpha",
+                    decimal_odds=2.0,
+                    captured_at=captured_at,
+                    ingested_at=captured_at,
+                    market_detail="oc_archive" if market is Market.OTHER else "h2h",
+                )
+            ]
+
+    monkeypatch.setattr(oc, "MAX_SNAPSHOTS_PER_CYCLE", 1)
+    loader = Loader(EventDirectory())
+    snapshots = await loader._gather_snapshots(
+        [
+            "https://www.oddschecker.com/optional",
+            "https://www.oddschecker.com/mapped",
+        ],
+        None,
+        pipeline_key="soccer",
+    )
+
+    assert [snapshot.market for snapshot in snapshots] == [Market.H2H]
+    assert loader.last_fetch_complete["soccer"] is True
+    assert loader.last_fetch_completeness_reason["soccer"] == ""
 
 
 async def test_gather_match_url_ceiling_is_explicitly_incomplete(
