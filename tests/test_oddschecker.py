@@ -1071,22 +1071,24 @@ async def test_optional_market_api_failure_preserves_mapped_snapshots(
 
 
 @pytest.mark.parametrize(
-    ("optional_selection", "expect_optional"),
+    ("optional_selection", "optional_event_id", "expect_optional"),
     [
-        pytest.param("Over", True, id="success"),
-        pytest.param("x" * 10_000, False, id="parse-error"),
+        pytest.param("Over", 101610031, True, id="success"),
+        pytest.param("x" * 10_000, 101610031, False, id="parse-error"),
+        pytest.param("Over", 999999999, False, id="mismatched-event"),
+        pytest.param("Over", None, False, id="missing-event"),
     ],
 )
 @pytest.mark.asyncio
 async def test_optional_market_metadata_cannot_mutate_mapped_event(
     optional_selection: str,
+    optional_event_id: int | None,
     expect_optional: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.ingestion import oddschecker as oc
 
-    optional_payload = {
-        "subeventId": 101610031,
+    optional_payload: dict[str, object] = {
         "marketId": 50,
         "marketTypeName": "Total Corners",
         "bets": [{"betId": 2, "betName": optional_selection, "line": "9.5"}],
@@ -1101,6 +1103,8 @@ async def test_optional_market_metadata_cannot_mutate_mapped_event(
         # Event metadata is deliberately absent. Optional archive payloads
         # must not replace the mapped response's authoritative team context.
     }
+    if optional_event_id is not None:
+        optional_payload["subeventId"] = optional_event_id
 
     async def fetch(market_ids: list[str], **kwargs: object) -> list[dict[str, object]]:
         del kwargs
@@ -1130,6 +1134,45 @@ async def test_optional_market_metadata_cannot_mutate_mapped_event(
     assert event.starts_at == datetime(2026, 8, 21, 19, 0, tzinfo=UTC)
     expected_markets = {Market.H2H, Market.OTHER} if expect_optional else {Market.H2H}
     assert {snapshot.market for snapshot in snapshots} == expected_markets
+    assert {snapshot.event_id for snapshot in snapshots} == {"oddschecker:101610031"}
+
+
+@pytest.mark.asyncio
+async def test_optional_markets_are_not_fetched_without_a_mapped_event_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    calls: list[tuple[str, ...]] = []
+    mapped_payload = _all_odds_payload()[0]
+    raw_odds = mapped_payload["odds"]
+    assert isinstance(raw_odds, list)
+    mapped_payload["odds"] = [
+        {**raw_odd, "status": "SUSPENDED"} for raw_odd in raw_odds if isinstance(raw_odd, dict)
+    ]
+
+    async def fetch(market_ids: list[str], **kwargs: object) -> list[dict[str, object]]:
+        del kwargs
+        ids = tuple(str(market_id) for market_id in market_ids)
+        calls.append(ids)
+        if ids != ("10",):
+            raise AssertionError("optional markets must not load without mapped identity")
+        return [mapped_payload]
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    loader = OddsCheckerLoader(EventDirectory(), capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/x/y/winner",
+        html=_modern_html_with_optional_market(),
+        status_code=200,
+    )
+
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 7, 5, 10, 0, tzinfo=UTC), session=None
+    )
+
+    assert snapshots == []
+    assert calls == [("10",)]
 
 
 @pytest.mark.asyncio

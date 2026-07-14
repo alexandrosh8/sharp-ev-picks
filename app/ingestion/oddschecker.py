@@ -2257,10 +2257,15 @@ class OddsCheckerLoader:
                     markets=eff_markets,
                 )
 
+        mapped_event_ids = frozenset(snapshot.event_id for snapshot in mapped_snapshots)
         remaining = MAX_SNAPSHOTS_PER_MATCH - len(mapped_snapshots)
-        if not optional_market_ids or remaining <= 0:
+        if not optional_market_ids or remaining <= 0 or not mapped_event_ids:
             if optional_market_ids and remaining <= 0:
                 logger.warning("oddschecker optional market capture skipped (snapshot ceiling)")
+            elif optional_market_ids and not mapped_event_ids:
+                logger.warning(
+                    "oddschecker optional capture skipped (mapped event identity unavailable)"
+                )
             return mapped_snapshots
 
         try:
@@ -2275,7 +2280,7 @@ class OddsCheckerLoader:
             # cannot overwrite the mapped match context, even if parsing raises
             # after registration and the archive exception is isolated below.
             optional_directory = EventDirectory()
-            optional_snapshots = parse_market_api_payloads(
+            parsed_optional_snapshots = parse_market_api_payloads(
                 optional_payloads,
                 url=page.url,
                 directory=optional_directory,
@@ -2285,6 +2290,15 @@ class OddsCheckerLoader:
                 truncate_on_limit=True,
                 max_snapshots=remaining,
             )
+            optional_snapshots = [
+                snapshot
+                for snapshot in parsed_optional_snapshots
+                if snapshot.event_id in mapped_event_ids
+            ]
+            if len(optional_snapshots) != len(parsed_optional_snapshots):
+                logger.warning(
+                    "oddschecker optional market capture discarded (event identity mismatch)"
+                )
         except Exception as exc:
             # OTHER is an archive-only surface. Keep mapped snapshots and emit
             # only the safe exception class (never a URL/body/proxy credential).
