@@ -10,11 +10,14 @@ import pytest
 from app.ingestion.base import EventDirectory, ScraperProxy
 from app.ingestion.oddschecker import (
     OddsCheckerChallenge,
+    OddsCheckerEmptyMarket,
     OddsCheckerError,
     OddsCheckerFetchResult,
     OddsCheckerHTTPError,
     OddsCheckerLoader,
+    OddsCheckerParseError,
     OddsCheckerSecurityError,
+    _find_match_payload,
     _line_bearing_selection,
     _other_market_detail,
     discover_football_daily_match_urls,
@@ -247,6 +250,68 @@ def _match_html() -> str:
         },
     }
     return f"<html><body>{_json_script(header)}{_json_script(odds)}</body></html>"
+
+
+def _empty_odds_html() -> str:
+    """A validly-fetched match page OddsChecker LISTS but has not PRICED yet: the
+    bestOdds structure is present but its odds map is empty. OddsChecker serves
+    these for future/unpriced fixtures (obs: 'FAILED rows have no usable price
+    data'). It is a 200-OK page, not a block or malformed response."""
+    header: dict[str, object] = {
+        "repub": "OC",
+        "eventName": "ATP Tour",
+        "subeventName": "Player A vs Player B",
+        "breadcrumbs": [
+            {
+                "id": 55501,
+                "name": "Player A vs Player B",
+                "url": "tennis/atp/a-v-b/winner",
+                "type": "subevent",
+            },
+        ],
+    }
+    odds: dict[str, object] = {
+        "repub": "OC",
+        "bestOdds": {
+            "bets": {"entities": {}, "ids": []},
+            "odds": {},
+            "markets": {"entities": {}, "ids": []},
+            "bookmakers": {"entities": {}, "ids": []},
+            "subeventConfig": {"subeventId": "55501", "name": "Player A vs Player B"},
+        },
+    }
+    return f"<html><body>{_json_script(header)}{_json_script(odds)}</body></html>"
+
+
+def test_find_match_payload_empty_odds_is_empty_market() -> None:
+    """bestOdds present but odds map empty = a listed-but-unpriced match. This is
+    a legitimate empty result the fetch layer returns [] for, NOT a failed
+    match-page fetch — so it must raise OddsCheckerEmptyMarket, distinct from a
+    genuine parse failure."""
+    with pytest.raises(OddsCheckerEmptyMarket):
+        _find_match_payload(_empty_odds_html())
+
+
+def test_find_match_payload_no_bestodds_is_parse_error_not_empty_market() -> None:
+    """A page with NO bestOdds structure at all is a genuine parse failure
+    (malformed / soft-block), NOT the empty-but-valid case."""
+    html = f"<html><body>{_json_script({'repub': 'OC', 'x': 1})}</body></html>"
+    with pytest.raises(OddsCheckerParseError) as excinfo:
+        _find_match_payload(html)
+    assert not isinstance(excinfo.value, OddsCheckerEmptyMarket)
+
+
+def test_parse_match_page_empty_odds_propagates_empty_market() -> None:
+    """parse_match_page surfaces the empty-market signal so the fetch layer can
+    return [] (no odds priced) instead of dropping to the legacy parser and
+    counting the match as a failed fetch."""
+    with pytest.raises(OddsCheckerEmptyMarket):
+        parse_match_page(
+            _empty_odds_html(),
+            url="https://www.oddschecker.com/tennis/a-v-b/winner",
+            directory=EventDirectory(),
+            now=datetime(2026, 7, 14, 12, 0, tzinfo=UTC),
+        )
 
 
 def test_match_parser_enforces_snapshot_ceiling_before_append() -> None:

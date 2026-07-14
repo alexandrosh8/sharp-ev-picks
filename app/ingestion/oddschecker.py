@@ -192,6 +192,17 @@ class OddsCheckerParseError(OddsCheckerError):
     """The HTML did not contain the expected odds payload shape."""
 
 
+class OddsCheckerEmptyMarket(OddsCheckerParseError):
+    """The page fetched fine (200) and carries a valid bestOdds structure, but no
+    bookmaker has priced any selection yet — OddsChecker lists the fixture with an
+    EMPTY odds map. This is a listed-but-unpriced match, NOT a fetch failure: the
+    fetch layer returns [] for it so it never inflates the failed-match-page count
+    (obs: 'FAILED rows have no usable price data'). Subclasses ParseError so the
+    market-id path that already treats a missing payload as 'no markets' keeps
+    working; the match-page path handles it explicitly to avoid the legacy
+    fallback."""
+
+
 class OddsCheckerSecurityError(OddsCheckerError):
     """A response violated an origin, redirect, or resource ceiling policy."""
 
@@ -810,14 +821,22 @@ def _ids(container: Any) -> list[str]:
 
 def _find_match_payload(html: str, *, prefer_subevent_id: str | None = None) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
+    saw_bestodds = False
     for payload in hypernova_payloads(html):
         best = payload.get("bestOdds")
         if not isinstance(best, Mapping):
             continue
+        saw_bestodds = True
         odds = best.get("odds")
         if isinstance(odds, Mapping) and odds:
             candidates.append(payload)
     if not candidates:
+        if saw_bestodds:
+            # A valid bestOdds structure with an EMPTY odds map: OddsChecker lists
+            # this fixture but no bookmaker has priced any selection yet. That is a
+            # listed-but-unpriced match, not a fetch failure — signal it distinctly
+            # so the fetch layer returns [] instead of counting a failed match page.
+            raise OddsCheckerEmptyMarket("OddsChecker match page carries no priced odds yet")
         raise OddsCheckerParseError("no populated OddsChecker bestOdds payload found")
     # When the page's canonical subevent id is known (from the header breadcrumb),
     # prefer the blob that actually prices THAT match. A page can embed several
@@ -2253,6 +2272,12 @@ class OddsCheckerLoader:
                     now=now,
                     markets=eff_markets,
                 )
+            except OddsCheckerEmptyMarket:
+                # Fetched fine (200) but OddsChecker has not priced this fixture
+                # yet: a listed-but-unpriced match, not a fetch failure. Return an
+                # empty slate so it is NOT counted as a failed match page and does
+                # not drop to the legacy parser (which would then fail for real).
+                return []
             except OddsCheckerParseError:
                 mapped_snapshots = await self._parse_legacy_match_with_linked_markets(
                     page,
