@@ -15,8 +15,8 @@ allowed_tools:
 ## Purpose
 
 Validate strategies with realistic execution assumptions and zero temporal
-leakage. This repository skill and the referenced project ADRs are the
-self-contained source of truth.
+leakage — full methodology lives in the global `walkforward-backtest` skill;
+this encodes the project's specifics.
 
 ## Procedure
 

@@ -47,7 +47,7 @@ AH PRE-REGISTRATION (frozen here BEFORE the test slice is ever read):
                      labeled SELECTED bets — the gate passed and the
                      one-shot EXECUTED on 2026-06-12, CONSUMING the AH
                      2425+2526 domain. Outcome (recorded in
-                     docs/backtesting/consumption/ah-2425-2526.json): thr*=0.015, n=27,
+                     data/ml/AH_ONESHOT_CONSUMED.json): thr*=0.015, n=27,
                      n_labeled=10, ROI -10.96% [boot CI -48.1%, +28.1%],
                      incCLV_max +0.0330 [CI -0.0019, +0.0687],
                      verdict UNDERPOWERED by the frozen pass_rule. AH does
@@ -82,7 +82,7 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET_DEFAULT = REPO_ROOT / "data" / "ml" / "value_candidates_v3.parquet"
-CONSUMPTION_MARKER = REPO_ROOT / "docs" / "backtesting" / "consumption" / "ah-2425-2526.json"
+CONSUMPTION_MARKER = REPO_ROOT / "data" / "ml" / "AH_ONESHOT_CONSUMED.json"
 
 SEED = 20260612
 B_BOOT = 2000
@@ -307,10 +307,7 @@ def choose_ah_threshold(train_sweep: dict[float, Stats]) -> float | None:
 def run_ah_oneshot(test_ah: pd.DataFrame, thr: float, rng: np.random.Generator) -> None:
     """THE pre-registered single look at AH 2425+2526. Consumes the domain."""
     if CONSUMPTION_MARKER.exists():
-        print(
-            "\nREFUSED: AH one-shot already consumed "
-            "(docs/backtesting/consumption/ah-2425-2526.json)."
-        )
+        print("\nREFUSED: AH one-shot already consumed (data/ml/AH_ONESHOT_CONSUMED.json).")
         print("The AH 2425+2526 domain is spent; the next legitimate look is season 2627.")
         return
     # power_gate (see docstring EXECUTION RECORD: the original version of

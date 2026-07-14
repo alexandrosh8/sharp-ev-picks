@@ -1,31 +1,25 @@
 #!/usr/bin/env bash
-# Mac development launcher. Production runs the app in the Compose stack.
+# MAC DEV ONLY — never run this on the VPS. In production the app lives in
+# the compose stack (docs/deployment/openclaw-ubuntu.md): :8000 there is the
+# container's published port, and lsof is not installed on a stock Ubuntu
+# server anyway.
+#
+# The one true way to start the platform locally: frees port 8000 first, then
+# runs uvicorn in THIS terminal. Fixes the recurring "[Errno 48] address
+# already in use" ping-pong.
+#
+# The kill is PORT-scoped (lsof -ti :8000), never a name-matched pkill —
+# 'pkill -f "uvicorn app.main"' could kill another project's uvicorn whose
+# module path merely looks the same.
 
-set -euo pipefail
+REPO="/Users/alexis/code/Betting Picks Bot"
+cd "$REPO" || exit 1
 
-script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1; pwd -P)"
-repo_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null)" || {
-  printf '%s\n' 'run_app: cannot resolve the Git repository root' >&2
-  exit 1
-}
-python_bin="$repo_root/.venv/bin/python"
-
-if [ ! -x "$python_bin" ]; then
-  printf '%s\n' "Missing $python_bin; run scripts/bootstrap_codex.sh first." >&2
-  exit 1
-fi
-if ! command -v lsof >/dev/null 2>&1; then
-  printf '%s\n' 'run_app: lsof is required for the Mac port guard' >&2
-  exit 1
-fi
-
-pids="$(lsof -ti :8000 || true)"
-if [ -n "$pids" ]; then
-  # Word splitting over the newline-delimited PID list is intentional.
-  # shellcheck disable=SC2086
-  kill $pids 2>/dev/null || true
+PIDS="$(lsof -ti :8000)"
+if [ -n "$PIDS" ]; then
+  # shellcheck disable=SC2086 — word-splitting over the PID list is intended
+  kill $PIDS 2>/dev/null
   sleep 1
 fi
 
-cd "$repo_root"
-exec "$python_bin" -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+exec uv run uvicorn app.main:app --host 127.0.0.1 --port 8000

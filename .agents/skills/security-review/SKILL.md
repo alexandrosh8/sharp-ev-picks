@@ -24,11 +24,11 @@ path ever exists.
 3. Sanitizer check: any persisted/logged upstream payload passes redaction
    of keys AND values matching
    `(?i)(token|password|bearer|authorization|apiKey|appKey|secret)`.
-4. **No-autobet audit** (`scripts/safety_audit.sh`): order placement,
-   cancellation, account/login automation, betting-slip submission, and
-   credential storage MUST remain absent. Allowlisted Betfair market-data
-   methods such as `listMarketBook` are read-only JSON-RPC POST operations, not
-   order execution. The locked picks-only settings must remain asserted.
+4. **No-autobet audit** (`scripts/safety_audit.sh`): in `app/`, these greps
+   MUST return nothing: `placeOrder|place_order|place_bet|cancelOrder|
+listMarketBook|betfair.*(order|login)`, `selenium`, `playwright.*(submit|
+click)`, credential-storage patterns. And these MUST hit: the PICKS_ONLY
+   validator in `app/config.py`; `AUTO_BETTING=false` in `.env.example`.
 5. `.env` hygiene: file mode 0600, gitignored, never read outside
    `app/config.py`; `.env.example` carries names only.
 6. Dependency review on every new package: maintenance, install scripts,
@@ -49,7 +49,7 @@ path ever exists.
   not match real key formats (use `test-key-000…` shapes).
 - **`git commit --no-verify` bypasses the hook** — the safety net is
   gitleaks in CI as well, never only the local hook.
-- **Memory files are a leak surface** — `.claude/memory/` is committed;
+- **Memory files are a leak surface** — `.Codex/memory/` is committed;
   it must never contain key fragments, account names, or chat IDs.
 
 ## Forbidden mistakes

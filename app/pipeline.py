@@ -173,15 +173,24 @@ def _record_poll(
     *,
     source_complete: bool = True,
     completeness_reason: str | None = None,
+    incomplete_fetch_ratio: float = 1.0,
+    incomplete_fetch_ratio_warn: float = 0.5,
 ) -> None:
     timestamp = datetime.now(tz=UTC).isoformat()
     started_at = LAST_POLL.get(sport_key, {}).get("started_at")
     listed_without_odds = bool(matches_found) and not snapshots
     stale_starved = stale_candidates > 0 and stale_drop_ratio > stale_drop_ratio_warn
+    # A partially-complete scrape only fails the cycle CLOSED when the failed-fetch
+    # fraction exceeds the tolerance — OddsChecker's expected few-% match-page
+    # timeouts (e.g. 2/19) are partial coverage, not a stale slate, and must not
+    # flip /health to 503 / show the operator a false "odds data is stale" banner.
+    # Default ratio 1.0 = unknown completeness fraction ⇒ fail closed (loaders that
+    # expose only a boolean verdict keep the pre-tolerance behaviour).
+    source_incomplete = not source_complete and incomplete_fetch_ratio > incomplete_fetch_ratio_warn
     degradation_reasons: list[str] = []
     if listed_without_odds:
         degradation_reasons.append("listed_matches_without_odds")
-    if not source_complete:
+    if source_incomplete:
         degradation_reasons.append("source_incomplete")
     if stale_starved:
         degradation_reasons.append("stale_drop_ratio")
@@ -283,6 +292,21 @@ def _loader_cycle_completeness(loader: OddsLoader, sport_key: str) -> tuple[bool
     if not isinstance(reason, str) or not reason.strip():
         reason = "source reported an incomplete cycle"
     return False, reason
+
+
+def _loader_incomplete_fetch_ratio(loader: OddsLoader, sport_key: str) -> float:
+    """Fraction of this cycle's listed match-page fetches that FAILED, when the
+    loader exposes it. Defaults to 1.0 (fully incomplete ⇒ fail closed) for loaders
+    that report only a boolean completeness verdict, preserving pre-tolerance
+    behaviour. _record_poll degrades a source-incomplete cycle only when this
+    exceeds its tolerance, so a few timed-out match pages are partial coverage,
+    not a stale slate."""
+    ratio_by_sport = getattr(loader, "last_fetch_incomplete_ratio", None)
+    if isinstance(ratio_by_sport, Mapping):
+        value = ratio_by_sport.get(sport_key)
+        if isinstance(value, (int, float)) and 0.0 <= float(value) <= 1.0:
+            return float(value)
+    return 1.0
 
 
 def _sport_label(sport_key: str) -> str:
@@ -737,6 +761,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     # during the run — taking now first yields negative odds ages.
     now = datetime.now(tz=UTC)
     source_complete, completeness_reason = _loader_cycle_completeness(deps.loader, sport_key)
+    incomplete_ratio = _loader_incomplete_fetch_ratio(deps.loader, sport_key)
     if sport_key in deps.visibility_only_sports:
         # Defense in depth: a visibility-only sport must mint no pick under
         # ANY strategy. Tennis only runs the value pipeline, but keep the
@@ -765,6 +790,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             snapshots_persisted=persisted,
             source_complete=source_complete,
             completeness_reason=completeness_reason,
+            incomplete_fetch_ratio=incomplete_ratio,
         )
         return []
     if not snapshots:
@@ -779,6 +805,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             _loader_matches_found(deps.loader, sport_key),
             source_complete=source_complete,
             completeness_reason=completeness_reason,
+            incomplete_fetch_ratio=incomplete_ratio,
         )
         return []
 
@@ -795,6 +822,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             snapshots_persisted=persisted,
             source_complete=False,
             completeness_reason=completeness_reason,
+            incomplete_fetch_ratio=incomplete_ratio,
         )
         logger.warning("model pipeline %s withheld picks from incomplete source cycle", sport_key)
         return []
@@ -1569,6 +1597,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # `now` AFTER the fetch — see run_pick_pipeline comment (negative ages).
     now = datetime.now(tz=UTC)
     source_complete, completeness_reason = _loader_cycle_completeness(deps.loader, sport_key)
+    incomplete_ratio = _loader_incomplete_fetch_ratio(deps.loader, sport_key)
 
     if sport_key in deps.visibility_only_sports:
         # VISIBILITY-ONLY sport (e.g. tennis): publish the slate for the
@@ -1598,6 +1627,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             snapshots_persisted=persisted,
             source_complete=source_complete,
             completeness_reason=completeness_reason,
+            incomplete_fetch_ratio=incomplete_ratio,
         )
         logger.info(
             "value pipeline %s: visibility-only (unvalidated) — %d snapshots, no picks",
@@ -1618,6 +1648,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             _loader_matches_found(deps.loader, sport_key),
             source_complete=source_complete,
             completeness_reason=completeness_reason,
+            incomplete_fetch_ratio=incomplete_ratio,
         )
         return []
 
@@ -1636,6 +1667,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             snapshots_persisted=persisted,
             source_complete=False,
             completeness_reason=completeness_reason,
+            incomplete_fetch_ratio=incomplete_ratio,
         )
         logger.warning("value pipeline %s withheld picks from incomplete source cycle", sport_key)
         return []

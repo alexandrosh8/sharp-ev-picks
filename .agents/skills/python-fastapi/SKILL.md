@@ -32,8 +32,8 @@ extra="forbid")` for internal models; `extra="ignore"` for upstream
    sessions; CPU-bound work via `asyncio.to_thread`/executors.
 5. Routes thin: validate → delegate to service function → typed response
    model. No business logic in route bodies.
-6. Bootstrap with `uv sync --frozen --all-extras --all-groups`; use
-   `.venv/bin/python -m ...` for project commands and scripts.
+6. Run everything through uv: `uv sync`, `uv run pytest -q`,
+   `.venv/bin/python -m ...` in scripts.
 
 ## Checklist
 
@@ -44,8 +44,8 @@ extra="forbid")` for internal models; `extra="ignore"` for upstream
 
 ## Gotchas
 
-- **Paths vary by clone** — scripts derive the absolute repository root;
-  project Python commands use `.venv/bin/python` from that root.
+- **The project path contains a space** — shell snippets must quote paths;
+  prefer `uv run` from the project root.
 - **pydantic v2 `frozen=True` raises on mutation, not silently ignores** —
   build new instances with `model_copy(update=...)`.
 - **`asyncio` + APScheduler**: jobs must be `async def` registered on the

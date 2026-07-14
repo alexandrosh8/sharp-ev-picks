@@ -534,7 +534,7 @@ sharp OU/AH closing archive. Using it for CLV still needs (a) extending`resolve_
   consumed = 18 baseline leagues + EC/SC1/SC2/SC3 (1x2+ou25, 2425+2526,
   4 looks), the v2 fresh slice (never-loaded divisions), and — NEW this
   round — **the AH market 2425+2526** (one-shot 2026-06-12, marker
-  `docs/backtesting/consumption/ah-2425-2526.json`). Football-data "new leagues"
+  `data/ml/AH_ONESHOT_CONSUMED.json`). Football-data "new leagues"
   (BRA/ARG/…) carry closing odds only → unusable for the protocol.
   **Remaining legitimate fresh domain: season 2627 ALONE.** Develop only on
   <=2324; pre-register every one-shot in code; 2425/2526 numbers anywhere =
@@ -545,7 +545,7 @@ sharp OU/AH closing archive. Using it for CLV still needs (a) extending`resolve_
   one-shot (`scripts/ml/anchor_ah_backtest.py --oneshot-ah`, criterion
   frozen in code: thr\*=0.015 train-chosen, pass iff n_labeled>=100 and
   incCLV_max−2SE>0 and ROI>0) **executed 2026-06-12 and consumed the AH
-  2425+2526 domain** (marker `docs/backtesting/consumption/ah-2425-2526.json`). Result:
+  2425+2526 domain** (marker `data/ml/AH_ONESHOT_CONSUMED.json`). Result:
   n=27, n_labeled=10, ROI −10.96% [boot CI −48.1%, +28.1%], incCLV_max
   +0.0330 [CI −0.0019, +0.0687] → **verdict UNDERPOWERED — AH does NOT meet
   the premium bar**; a row-count power gate intended to cancel the look had

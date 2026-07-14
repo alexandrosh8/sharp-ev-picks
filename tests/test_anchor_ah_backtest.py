@@ -65,7 +65,7 @@ def _labeled_frame(n_matches: int, n_labeled: int) -> Any:
 @pytest.fixture
 def marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect the consumption marker away from the real (already-consumed)
-    docs/backtesting/consumption/ah-2425-2526.json for every test in this file."""
+    data/ml/AH_ONESHOT_CONSUMED.json for every test in this file."""
     path = tmp_path / "AH_ONESHOT_CONSUMED.json"
     monkeypatch.setattr(aab, "CONSUMPTION_MARKER", path)
     return path

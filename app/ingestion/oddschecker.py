@@ -2069,6 +2069,10 @@ class OddsCheckerLoader:
         # withheld unless every listed match completed successfully.
         self.last_fetch_complete: dict[str, bool] = {}
         self.last_fetch_completeness_reason: dict[str, str] = {}
+        # Fraction of this cycle's listed match-page fetches that FAILED. Read by
+        # the pipeline's completeness tolerance so a few timed-out pages (partial
+        # coverage) do not fail the whole cycle closed. 0.0 = fully complete.
+        self.last_fetch_incomplete_ratio: dict[str, float] = {}
 
     @classmethod
     def football_today_tomorrow(
@@ -2675,6 +2679,15 @@ class OddsCheckerLoader:
             else:
                 reason = ""
             self.last_fetch_completeness_reason[pipeline_key] = reason
+            # A snapshot-ceiling breach fails closed (ratio 1.0); otherwise report
+            # the failed-fetch fraction so the pipeline can tolerate a few timeouts.
+            if complete:
+                incomplete_ratio = 0.0
+            elif snapshot_overflow or not deduped:
+                incomplete_ratio = 1.0
+            else:
+                incomplete_ratio = failures / len(deduped)
+            self.last_fetch_incomplete_ratio[pipeline_key] = incomplete_ratio
             self.last_fetch_event_ids[pipeline_key] = tuple(
                 dict.fromkeys(snapshot.event_id for snapshot in snapshots)
             )

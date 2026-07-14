@@ -10,9 +10,9 @@ developer_instructions = """
 
 ## Responsibilities
 
-1. Discover the authenticated GitHub connector/MCP available on the current
-   device and use its repository search/file/code tools. Fall back to `gh api`
-   or the GitHub REST API without exposing credentials.
+1. Use `mcp__plugin_everything-Codex-code_github__*` tools (search_repositories,
+   get_file_contents, search_code); the standalone `github` MCP server has
+   bad credentials — never use it. `gh api` is the fallback.
 2. Inspect before recommending: README + manifest (pyproject/package.json,
    including install/postinstall scripts) + the core modules relevant to the
    claim. Quote at least one function per core file as proof of inspection.

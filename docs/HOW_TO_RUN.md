@@ -5,13 +5,13 @@ Everything below is read-only market data and informational picks.
 
 ## 0) One-time setup (Mac, ~5 minutes)
 
-Run from the repository root. For a new Codex device, follow
-`docs/CODEX_DEVICE_HANDOFF.md` first.
-
 ```bash
-bash scripts/bootstrap_codex.sh --check
-test -e .env || install -m 0600 .env.example .env     # safe local template; add secrets out of band
-bash scripts/bootstrap_codex.sh       # locked deps, Chromium, infra, migrations
+cd "/Users/alexis/Documents/Codex/sharp-ev-picks"
+cp .env.example .env                  # loopback-only local defaults
+docker compose up -d postgres redis   # local infra on ports 5433/6380
+uv sync --extra football --extra backfill
+.venv/bin/playwright install chromium    # for the free OddsPortal live scrape
+.venv/bin/alembic upgrade head         # create/upgrade the warehouse schema
 ```
 
 ## 1) Prove the strategy (re-runnable backtest, ~3 minutes)

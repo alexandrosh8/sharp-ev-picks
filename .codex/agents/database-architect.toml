@@ -1,5 +1,5 @@
 name = "database-architect"
-description = "Own PostgreSQL schema design — the migrated betting warehouse, Alembic migrations, indexes/uniqueness, NUMERIC discipline, and append-only odds storage. Use for any schema or migration change."
+description = "Own PostgreSQL schema design — the 14-table warehouse, Alembic migrations, indexes/uniqueness, NUMERIC discipline, and append-only odds storage. Use for any schema or migration change."
 developer_instructions = """
 # Database Architect
 
@@ -11,8 +11,10 @@ developer_instructions = """
 
 ## Responsibilities
 
-1. Schema follows the current `docs/db-schema.md` and Alembic head; never
-   rely on a historical fixed table count.
+1. Schema follows `docs/db-schema.md`: sports, leagues, teams, events,
+   odds_snapshots, model_predictions, detected_edges, picks,
+   manual_bet_logs, result_tracking, bankroll_snapshots, alerts,
+   backtest_runs, model_versions.
 2. `odds_snapshots` is append-only with UNIQUE
    (event_id, bookmaker, market, selection, captured_at) and index
    (event_id, market, captured_at DESC) for latest-snapshot queries.

@@ -15,7 +15,7 @@ You review every pick and place any bet yourself — the system never does.
 [![CI](https://github.com/alexandrosh8/sharp-ev-picks/actions/workflows/ci.yml/badge.svg)](https://github.com/alexandrosh8/sharp-ev-picks/actions/workflows/ci.yml)
 [![Safety: picks-only · no auto-bet](https://img.shields.io/badge/safety-picks--only%20%C2%B7%20no%20auto--bet-22c55e)](#-safety--read-this-first)
 
-[Install](#install--run) · [Codex handoff](docs/CODEX_DEVICE_HANDOFF.md) · [How it works](#how-it-works) · [Sports](#sports-coverage) · [Validation](#validation-protocol-adr-0019) · [Dashboard](#dashboard--signaldesk) · [Configuration](#configuration) · [Architecture](#architecture) · [Docs](#documentation)
+[Install](#install--run) · [How it works](#how-it-works) · [Sports](#sports-coverage) · [Validation](#validation-protocol-adr-0019) · [Dashboard](#dashboard--signaldesk) · [Configuration](#configuration) · [Architecture](#architecture) · [Docs](#documentation)
 
 </div>
 
@@ -25,7 +25,7 @@ You review every pick and place any bet yourself — the system never does.
 
 > **This system never places bets.** It surfaces candidate picks for manual review; **you** decide and place any bet personally, on your own accounts.
 >
-> There is **no** bet-execution path, **no** bookmaker login automation, **no** stored betting credentials, and **no** auto-betting flag — by design. Every market-data integration performs **read-only operations**. HTTP feeds use GET; Betfair's allowlisted read-only JSON-RPC market-data calls use POST because the API requires it. A CI safety audit (`scripts/safety_audit.sh`) fails the build if a bet-placement path ever appears. Recommended stakes, edges and EV are informational only — betting involves risk and nothing here is a guarantee of profit.
+> There is **no** bet-execution path, **no** bookmaker login automation, **no** stored betting credentials, and **no** auto-betting flag — by design. Every market-data integration is **read-only (GET)**. A CI safety audit (`scripts/safety_audit.sh`) fails the build if a bet-placement path ever appears. Recommended stakes, edges and EV are informational only — betting involves risk and nothing here is a guarantee of profit.
 
 ## How it works
 
@@ -55,8 +55,6 @@ A sport is *shown* once it is scrapeable; it *mints premium picks* only where th
 
 Both supported paths run the **same code** and serve the dashboard at **http://localhost:8000/**.
 
-> **Continuing development on a new Codex device?** Until this handoff branch is merged, clone `chore/codex-device-handoff` and follow [`docs/CODEX_DEVICE_HANDOFF.md`](docs/CODEX_DEVICE_HANDOFF.md). Repository-local Codex agents, skills, hooks, bootstrap, and verification are versioned with the project; credentials and the production `.env` are not.
-
 ### Option 1 — Your own PC (Windows or Mac)
 
 **Docker Desktop** runs the whole stack (app + Postgres + Redis) with one command:
@@ -64,8 +62,7 @@ Both supported paths run the **same code** and serve the dashboard at **http://l
 ```bash
 git clone https://github.com/alexandrosh8/sharp-ev-picks.git
 cd sharp-ev-picks
-test -e .env || install -m 0600 .env.example .env
-# Windows PowerShell: if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
 # Set POSTGRES_PASSWORD, DASHBOARD_AUTH_PASSWORD_HASH and
 # DASHBOARD_SESSION_SECRET in .env (generation commands are documented there).
 docker compose --profile prod up -d --build
@@ -82,7 +79,8 @@ sudo apt install -y docker.io docker-compose-v2 git
 sudo git clone https://github.com/alexandrosh8/sharp-ev-picks.git /opt/sharp-ev-picks
 sudo chown -R $USER /opt/sharp-ev-picks
 cd /opt/sharp-ev-picks
-test -e .env || install -m 0600 .env.example .env
+cp .env.example .env
+chmod 600 .env
 # edit .env: set COMPOSE_PROFILES=prod, POSTGRES_PASSWORD,
 # DASHBOARD_AUTH_PASSWORD_HASH and DASHBOARD_SESSION_SECRET
 docker compose up -d --build
@@ -90,34 +88,38 @@ docker compose up -d --build
 
 Reach it over an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <vps>`) or through an authenticated TLS reverse proxy. Production binds the app to loopback and rejects direct public binds. Full runbook: [`docs/deployment/openclaw-ubuntu.md`](docs/deployment/openclaw-ubuntu.md).
 
-### Mac / Linux — app native, databases in Docker
+### Mac / Linux — run natively (no Docker)
 
 ```bash
-test -e .env || install -m 0600 .env.example .env
-# Edit .env locally; never copy a production environment through Git.
-uv sync --frozen --all-extras --all-groups
-.venv/bin/playwright install chromium
-docker compose up -d --wait postgres redis
-.venv/bin/alembic upgrade head
-.venv/bin/python -m uvicorn app.main:app --reload  # http://localhost:8000/
+brew install postgresql@16 redis
+brew services start postgresql@16
+brew services start redis
+createdb betting_ai
+
+uv sync --extra football --extra backfill    # NBA: also --extra nba --extra models --extra ml
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload         # http://localhost:8000/
 ```
 
-The FastAPI application runs natively while PostgreSQL and Redis stay in
-loopback-only Compose services. First-time commands live in
-[`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). Dev tasks:
+Prefer not to install the databases? `docker compose up -d postgres redis` and keep the app native. First-time commands live in [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). Dev tasks:
 
 ```bash
-bash scripts/verify_codex_workspace.sh     # complete deterministic quality gate
+uv run pytest -q                          # 3,600+ tests (no network)
+uvx ruff check .                          # lint
+uvx ruff format --check app tests scripts # formatting (CI-gated separately)
+uv run mypy app tests                     # types
+uv run alembic heads                      # single migration head
+bash scripts/safety_audit.sh              # no-autobet + secret-leak greps (CI-gated)
 ```
 
 Evidence/validation tooling (read-only; outputs refuse to overwrite prior runs):
 
 ```bash
-.venv/bin/python scripts/research/sport_quality_report.py --days 30   # per-sport trusted-CLV / freshness / agreement report
-.venv/bin/python scripts/research/devig_comparison.py                 # validation-only devig method comparison
-.venv/bin/python scripts/bsp_inventory.py                             # BSP archive/cache inventory + readiness
-.venv/bin/python scripts/arcadia_anchor_export.py export --from 2026-07-01 --to 2026-12-31
-.venv/bin/python scripts/arcadia_anchor_export.py preflight --dataset <exported.csv>   # prints PASS or DO-NOT-RUN
+uv run python scripts/research/sport_quality_report.py --days 30   # per-sport trusted-CLV / freshness / agreement report
+uv run python scripts/research/devig_comparison.py                 # validation-only devig method comparison
+uv run python scripts/bsp_inventory.py                             # BSP archive/cache inventory + readiness
+uv run python scripts/arcadia_anchor_export.py export --from 2026-07-01 --to 2026-12-31
+uv run python scripts/arcadia_anchor_export.py preflight --dataset <exported.csv>   # prints PASS or DO-NOT-RUN
 ```
 
 ## Validation protocol (ADR-0019)
@@ -176,7 +178,7 @@ Proven open-source engines bound into one pipeline:
 - **Settlement** — automatic from free results feeds with wrong-game guards; tennis follows the declared `pinnacle_one_set` convention (below); anything unclassifiable is left for manual entry, never guessed.
 - **Evidence & validation** — trusted-CLV true-up with independence/tautology/circularity exclusions; the pre-registered ARCADIA/BSP validation harness (`app/backtesting/`, `scripts/arcadia_anchor_export.py`) with preflight DO-NOT-RUN and spent-data guards; per-sport quality reporting.
 - **Persistence & serving** — Postgres warehouse (SQLAlchemy 2.0 async + Alembic); APScheduler drives polling, settlement, CLV true-up and sharp-close captures; FastAPI serves SignalDesk.
-- **Agent/skills discipline** — Codex project skills under `.agents/skills/` encode the research, shadow-engineering, matching and CLV-evidence procedures used to maintain the repo.
+- **Agent/skills discipline** — project skills under `.claude/skills/` encode the research, shadow-engineering, matching and CLV-evidence procedures used to maintain the repo.
 
 **Stack:** Python 3.12 · FastAPI · SQLAlchemy 2.0 async + asyncpg · APScheduler · Redis · PostgreSQL · Playwright (Chromium) · Docker Compose. Pure-math modules (`probabilities`, `edge`, `risk`) take no env/DB/HTTP — policies enter as frozen dataclasses at the composition root.
 

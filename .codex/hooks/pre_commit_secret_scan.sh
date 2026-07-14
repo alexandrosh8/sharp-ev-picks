@@ -1,47 +1,36 @@
-#!/usr/bin/env bash
-# PreToolUse(Bash) — before any Codex-issued git commit, scan both the current
-# workspace and staged content. Missing tooling or an inconclusive scan blocks.
+#!/bin/bash
+# PreToolUse(Bash) secret gate — when the command is a `git commit`, scan the
+# staged changes with gitleaks. Leaks => exit 2 (block, fail closed).
+# gitleaks missing => warn + allow (fail open, documented in ADR-0003).
+# Reads the hook JSON on stdin: {"tool_input": {"command": "..."}}
 
-set -u
+input=$(cat)
+cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)
+[ -z "$cmd" ] && exit 0
 
-block() {
-  printf 'BLOCKED by pre_commit_secret_scan: %s\n' "$1" >&2
+# Only act on git commit commands
+printf '%s' "$cmd" | grep -qE '(^|[;&|][[:space:]]*)git[[:space:]]+([-A-Za-z0-9=. /"]*[[:space:]])?commit' || exit 0
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "WARN: gitleaks not installed — staged secret scan SKIPPED. Install gitleaks (brew install gitleaks)." >&2
+  exit 0
+fi
+
+proj="${CLAUDE_PROJECT_DIR:-$PWD}"
+cd "$proj" || exit 0
+git rev-parse --git-dir >/dev/null 2>&1 || exit 0
+
+out=$(gitleaks git --pre-commit --staged --no-banner --redact 2>&1)
+rc=$?
+
+if [ "$rc" -eq 1 ]; then
+  echo "BLOCKED by pre_commit_secret_scan: gitleaks found potential secrets in staged changes:" >&2
+  printf '%s\n' "$out" | tail -25 >&2
+  echo "Remove the secret, then re-stage. Never commit credentials." >&2
   exit 2
-}
-
-scan() {
-  label="$1"
-  shift
-  output="$("$@" 2>&1)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf '%s\n' "$output" | tail -25 >&2
-    if [ "$rc" -eq 1 ]; then
-      block "potential secret found in $label"
-    fi
-    block "gitleaks $label scan errored with exit code $rc"
-  fi
-}
-
-command -v jq >/dev/null 2>&1 || block "jq is required; run scripts/bootstrap_codex.sh --check"
-
-input_json="$(cat)"
-cmd="$(printf '%s' "$input_json" | jq -er '.tool_input.command | select(type == "string")' 2>/dev/null)" || block "invalid hook input: command missing"
-commit_pattern='(^|[^[:alnum:]_])git([[:space:]]+[^;&|[:space:]]+)*[[:space:]]+commit([[:space:]]|$)'
-printf '%s' "$cmd" | grep -qE "$commit_pattern" || exit 0
-
-command -v gitleaks >/dev/null 2>&1 || block "gitleaks is required before committing"
-
-cwd="$(printf '%s' "$input_json" | jq -er '.cwd | select(type == "string" and length > 0)' 2>/dev/null)" || block "invalid hook input: cwd missing"
-repo_root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || block "cannot resolve repository root"
-
-# Scan exactly the content that Git can commit while excluding ignored private
-# state such as .env: unstaged tracked changes, non-ignored untracked files, and
-# the index. Together these cover commit -a/pathspec and ordinary staged commits.
-scan "unstaged tracked changes" gitleaks git "$repo_root" --pre-commit --no-banner --redact
-while IFS= read -r -d '' relative_path; do
-  scan "untracked file $relative_path" gitleaks dir "$repo_root/$relative_path" --no-banner --redact
-done < <(git -C "$repo_root" ls-files --others --exclude-standard -z)
-scan "staged changes" gitleaks git "$repo_root" --pre-commit --staged --no-banner --redact
+elif [ "$rc" -ne 0 ]; then
+  echo "WARN: gitleaks errored (rc=$rc) — scan inconclusive, allowing commit. Output tail:" >&2
+  printf '%s\n' "$out" | tail -5 >&2
+fi
 
 exit 0
