@@ -87,6 +87,15 @@ def test_games_fetch_does_not_block_initial_core_hydration() -> None:
     assert 'gamesPendingWithoutCache() ? "Fixtures loading"' in text
 
 
+def test_cached_games_remain_trusted_while_refresh_is_pending() -> None:
+    text = _text()
+    assert (
+        "const sourceTrusted = healthIsTrusted(health) && state.gamesErr === null && "
+        "!gamesPendingWithoutCache();"
+    ) in text
+    assert "state.gamesErr === null && !state.gamesLoading" not in text
+
+
 def test_proxy_pool_rendered_from_health_payload() -> None:
     text = _text()
     assert "function renderProxyRow" in text

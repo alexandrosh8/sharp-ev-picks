@@ -2763,7 +2763,7 @@
           const oddsSrcLabel = oddsSrc === "oddschecker" ? "OddsChecker scrape"
             : oddsSrc === "oddsportal" ? "OddsPortal scrape"
             : oddsSrc === "odds_api" ? "The Odds API" : "Odds feed";
-          const sourceTrusted = healthIsTrusted(health) && state.gamesErr === null && !state.gamesLoading;
+          const sourceTrusted = healthIsTrusted(health) && state.gamesErr === null && !gamesPendingWithoutCache();
           const sourceFixtures = gamesPendingWithoutCache() ? "Loading fixtures…" :
             gamesUnavailableWithoutCache() ? "—" : String(state.games.length) + (state.gamesErr ? " cached fixtures" : " fixtures");
           const sourceStatus = gamesPendingWithoutCache() ? "Pending" : sourceTrusted ? "Nominal" : "Source Degraded";

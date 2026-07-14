@@ -451,6 +451,26 @@ async def _mocked_regressions(
         await fixtures_page.locator(
             '#today-stats .stat:last-child .sk:text-is("Fixtures tracked")'
         ).wait_for(state="visible", timeout=10000)
+
+        # A later slow refresh must keep the already-verified fixture cache
+        # trusted instead of flashing a false Source Degraded verdict.
+        await fixtures_page.locator('[data-testid="rail-nav-sources"]').click()
+        async with fixtures_page.expect_request(
+            lambda request: urlparse(request.url).path == "/games",
+            timeout=10000,
+        ):
+            await fixtures_page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        await fixtures_page.wait_for_timeout(250)
+        source_verdict = fixtures_page.locator(
+            '#source-rows tr:first-child td[data-label="Verdict"] .tag'
+        )
+        verdict_text = await source_verdict.inner_text()
+        verdict_class = await source_verdict.get_attribute("class") or ""
+        assert verdict_text == "NOMINAL", f"cached refresh verdict was {verdict_text!r}"
+        assert "tag-success" in verdict_class, f"cached refresh verdict class was {verdict_class!r}"
+        await fixtures_page.locator(
+            '#source-rows tr:first-child td[data-label="Verdict"] .tag:text-is("Nominal")'
+        ).wait_for(state="visible", timeout=10000)
         await fixtures_page.close()
         state["slow_games"] = False
         report.append("mocked_fixture_critical_path: PASS")
