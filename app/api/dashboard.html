@@ -813,7 +813,9 @@
       /* Fix 2026-07-10 #5: long values (reasons, refs) must wrap, never force
          a horizontal scrollbar in the detail panel. */
       .mv { font-family: var(--font-mono); color: var(--text); text-align: right; min-width: 0; overflow-wrap: anywhere; }
-      .metric .mk { flex: none; }
+      /* Metric labels can be longer than the mobile panel. Let the label column
+         shrink and wrap instead of widening the document. */
+      .metric .mk { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; }
       /* Fix 2026-07-10 #5: the expanded raw-reason <pre> wraps in place. */
       .raw-reason pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; color: var(--text2); }
       .edge-detail-grid > section { min-width: 0; }

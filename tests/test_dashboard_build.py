@@ -82,6 +82,13 @@ def test_reviewable_sources_have_no_embedded_fonts_or_external_code() -> None:
     assert shell.count(build_dashboard.SCRIPT_MARKER) == 1
 
 
+def test_metric_labels_shrink_and_wrap_on_narrow_viewports() -> None:
+    styles = build_dashboard.STYLES_PATH.read_text(encoding="utf-8")
+
+    assert ".metric .mk { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; }" in styles
+    assert ".metric .mk { flex: none; }" not in styles
+
+
 @pytest.mark.parametrize(
     ("fragment", "expected_error"),
     [
