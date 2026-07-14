@@ -37,13 +37,13 @@
   GastonDeMichele/Polymarket-Sports-Bot does not even exist (404). Any future
   repo from this cluster needs install-script scrutiny BEFORE cloning; never
   run their code. See betting-repo-research.md Wave 4.
-- **Project path contains a space** (`Betting Picks Bot`) — always quote
-  `"$CLAUDE_PROJECT_DIR"` in hooks/scripts; absolute quoted paths in shell.
-- **Standalone `github` MCP server has bad credentials** — use the
-  `mcp__plugin_everything-claude-code_github__*` server or `gh` CLI instead.
-- **ruff is not on PATH** — use `uvx ruff` or the project venv.
-- **GateGuard hook** blocks the first Write to every new file path; retry
-  passes. Budget for prime+write when scaffolding many files.
+- **Clone paths vary by device** — scripts derive the absolute repository
+  root from their own location and quote every path; never hard-code a home path.
+- **GitHub connector names/auth vary by device** — discover an authenticated
+  connector capability at runtime; use authenticated `gh api` as fallback.
+- **Use locked project tooling** — run Ruff as `.venv/bin/python -m ruff`.
+- **Historical GateGuard behavior was Claude-only.** It is not a current
+  repository Codex hook and must not drive retry behavior.
 - **gitleaks v8.30 syntax**: staged scan is `gitleaks git --pre-commit --staged`
   (not `protect`).
 - No `&&` in shell commands (user hard rule + pre_bash_guard hook blocks it).
@@ -53,7 +53,7 @@
   to root (`/models/`, `/data/`). Verify with a throwaway `git clone` of HEAD.
 - **OddsHarvester loader**: pass `date=None` (general upcoming page) for live
   odds — pinning `date=today` filters to that exact date and usually returns
-  0 matches. Needs `uv run playwright install chromium`.
+  0 matches. Needs `.venv/bin/playwright install chromium`.
 
 - **OddsPortal timestamps inherit the scraping BROWSER's timezone** (found
   2026-06-10): the page's embedded `startDate` epoch is pre-shifted to the
@@ -63,7 +63,7 @@
   pick scripts). Verified vs published WC2026 kickoffs. This was also the
   root cause of the "future captured_at" clamp.
 
-- **OddsHarvester 0.3.0 quirk patches live in app/ingestion/oddsportal.py**
+- **OddsHarvester 0.4.0 quirk patches live in app/ingestion/oddsportal.py**
   (`_patch_upstream_quirks`, 2026-06-11): the PyPI package is patched at
   runtime, NOT forked. Fixes: OneTrust consent DOM (hidden `ot-*` nodes)
   polluting tab/More selectors — the 'More' fallback clicked the consent

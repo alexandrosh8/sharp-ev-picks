@@ -19,11 +19,13 @@ key, or storing duplicate/stale snapshots.
 
 ## Procedure
 
-1. **GET-only** — no POST/PUT/DELETE to any bookmaker, exchange, or odds
-   provider. This is a hard safety boundary, not a style rule.
+1. **Read-only operations** — HTTP sources use GET by default. Betfair may
+   POST only its explicit read-only JSON-RPC allowlist; no order/account calls.
+   This is a hard safety boundary, not a style rule.
 2. Client shape: `httpx.AsyncClient` with explicit `timeout`, tenacity
-   retry (exponential backoff + jitter) on transport errors ONLY — 4xx
-   never retries; 429 rotates key (if multi-key) and backs off.
+   retry (exponential backoff + jitter) on transport errors, 429, and the
+   source-approved transient 5xx set. Permanent/ordinary 4xx never retry; 429
+   rotates a key when a multi-key source supports it.
 3. Respect documented rate budgets per source; centralize the budget in the
    client config, not call sites.
 4. Snapshot writes are append-only with the uniqueness key

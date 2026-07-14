@@ -17,8 +17,9 @@ Use/Reject scoring tables with zero hallucinated contents.
 
 ## Procedure
 
-1. Load tools: ToolSearch
-   `select:mcp__plugin_everything-Codex-code_github__search_repositories,mcp__plugin_everything-Codex-code_github__get_file_contents,mcp__plugin_everything-Codex-code_github__search_code`.
+1. Discover the authenticated GitHub connector/MCP available on the current
+   device and load its repository search, file-content, and code-search tools.
+   If none is available, use authenticated `gh api` or GitHub REST requests.
 2. For each candidate: fetch README → manifest (pyproject.toml /
    package.json, including install/postinstall scripts) → the core modules
    behind the repo's claim. Quote one function per core file as inspection
@@ -42,10 +43,9 @@ Use/Reject scoring tables with zero hallucinated contents.
 
 ## Gotchas
 
-- **The standalone `github` MCP server has bad credentials** — it returns
-  "Authentication Failed". Always use the
-  `mcp__plugin_everything-Codex-code_github__*` server; `gh api` is the
-  fallback.
+- **Connector names and auth are device-local.** Detect capabilities rather
+  than hard-coding an MCP server name. Authenticate out of band and never put
+  tokens or user config in the repository.
 - **search_code requires being authenticated and indexes default branches
   only** — absence of search hits is not absence of code; fall back to
   directory listing via get_file_contents on a path of `""` or the tree.

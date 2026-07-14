@@ -17,8 +17,9 @@ deterministic, measurable, and safe.
 - `tests/test_dashboard_contract.py` and `tests/test_api.py`: executable UI contract.
 - `scripts/dashboard_qa.py` and `scripts/dashboard_qa.sh`: browser sweep.
 
-Use the accessibility-compliance skills for WCAG reviews and browser QA tooling
-for viewport, console, network, and interaction verification.
+Use the repository `webapp-testing` skill plus
+`docs/frontend-qa-checklist.md` for WCAG, viewport, console, network, and
+interaction verification.
 
 ## Locked output contract
 

@@ -1,6 +1,6 @@
 ---
 name: docker-deployment
-description: "Docker and deployment conventions. Use when changing docker-compose.yml, Dockerfile, CI infrastructure, or preparing the Ubuntu/OpenClaw deployment."
+description: "Docker and deployment conventions. Use when changing docker-compose.yml, Dockerfile, CI infrastructure, or the deployed Ubuntu production stack."
 allowed_tools:
   - Read
   - Write
@@ -14,48 +14,48 @@ allowed_tools:
 
 ## Purpose
 
-One container story that runs identically on the Mac dev machine and the
-Ubuntu/OpenClaw production VPS.
+Keep local Compose infrastructure and the deployed Ubuntu production stack
+reproducible, least-privileged, migration-safe, and free of secret leakage.
 
 ## Procedure
 
-1. Local dev: `docker compose up -d postgres redis`; the app runs on the
-   host via `uv run` against compose-exposed localhost ports.
-2. Compose services: postgres:16-alpine + redis:7-alpine, healthchecks
-   (pg_isready / redis-cli ping), named volumes, `env_file: .env`,
-   `restart: unless-stopped`, ports bound to 127.0.0.1.
-3. Dockerfile: python:3.11-slim, `ENV TZ=UTC`, non-root `app` user,
-   uv-based dependency install (copy pyproject + lock first for layer
-   caching), `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0"]`.
-4. Production (Ubuntu): full compose (app + postgres + redis), secrets via
-   `.env` on the host (0600), logs to stdout collected by Docker.
-5. Verify every change with `docker compose config -q` before commit.
-6. Deployment runbooks in `docs/deployment/` list commands one per line
-   (no `&&` chains).
+1. Local dev: `docker compose up -d --wait postgres redis`; run the app on the
+   host with `.venv/bin/python -m uvicorn ...` against loopback ports.
+2. Compose: PostgreSQL 16 + Redis 7 healthchecks, named volumes,
+   `restart: unless-stopped`, bounded logs, and loopback-only published ports.
+3. Dockerfile: `python:3.12-slim`, pinned uv, frozen production extras,
+   Playwright Chromium with Linux dependencies, and non-root `appuser`.
+4. Preserve `scripts/docker_entrypoint.sh`: it runs Alembic migrations before
+   execing uvicorn. Never replace it with a direct Dockerfile CMD.
+5. Production is already deployed on Ubuntu. Preserve the server-side `.env`
+   in place, build/recreate only intended services, and keep a rollback target.
+6. Verify with `docker compose --env-file .env.example config --quiet`, image
+   build/smoke tests, migration head, health endpoints, and the safety audit.
 
 ## Checklist
 
-- [ ] `docker compose config -q` passes
-- [ ] No secrets in images, compose, or CI logs
-- [ ] Healthchecks present; restart policy set
-- [ ] Works without any macOS-specific path or service
+- [ ] Compose configuration and service healthchecks pass
+- [ ] No secrets in images, compose, Git, or logs
+- [ ] Runtime user remains `appuser`; application/venv stay root-owned
+- [ ] Entrypoint migration ordering and one-app-instance invariant remain intact
+- [ ] PostgreSQL, Redis, and app ports remain loopback-only in production
+- [ ] No macOS-only runtime paths or mechanisms enter production
 
 ## Gotchas
 
-- **The project directory name contains a space** — compose project name
-  derives from it; set `name: betting-ai` at the top of compose to avoid
-  volume/network names with spaces.
-- **asyncpg connects to `localhost` from the host but `postgres` (service
-  name) from inside the app container** — keep DATABASE_URL host
-  overridable via env, don't hardcode either.
-- **uv inside Docker**: copy `pyproject.toml` + `uv.lock` and run
-  `uv sync --frozen` before copying source, or every code change busts the
-  dependency layer.
-- **OpenClaw coexistence**: bind app/postgres/redis ports to localhost and
-  pick non-default host ports if OpenClaw already claims them.
+- Host tools dial loopback ports; containers dial Compose service names. Keep
+  the intentional Compose URL override rather than hard-coding either shape.
+- Docker dependency layers copy `pyproject.toml` + `uv.lock` before source and
+  use frozen syncs so source edits do not invalidate dependency layers.
+- The in-process scheduler and exposure ledger require exactly one app replica;
+  never scale the app service horizontally without redesigning those contracts.
+- Chromium requires the hardened seccomp profile and must retain its process
+  sandbox; never restore upstream `--no-sandbox` switches.
 
 ## Forbidden mistakes
 
-- Baking `.env` or any credential into an image layer.
-- Exposing postgres/redis publicly in production compose.
-- macOS-only mechanisms (launchd, /Users paths) in production configs.
+- Baking `.env` or credentials into an image layer.
+- Replacing, deleting, printing, or committing the server `.env`.
+- Exposing PostgreSQL/Redis publicly or binding the production app directly to
+  a public interface.
+- Skipping migrations, health checks, or rollback preparation during deploy.

@@ -1,5 +1,5 @@
 name = "docker-devops-engineer"
-description = "Own containerization and deployment — docker compose (postgres/redis), Dockerfile hardening, Mac-dev to Ubuntu/OpenClaw portability, restart policies, and logging. Use for any change to Docker, CI infrastructure, or deployment docs."
+description = "Own containerization and deployment — Docker Compose, Dockerfile hardening, CI, deployed Ubuntu operations, restart policies, rollback, and logging."
 developer_instructions = """
 # Docker & DevOps Engineer
 
@@ -7,14 +7,15 @@ developer_instructions = """
 
 - Any change to `docker-compose.yml`, `Dockerfile`, `.github/workflows/`,
   or `docs/deployment/`.
-- Preparing the Ubuntu/OpenClaw migration.
+- Maintaining or deploying the existing Ubuntu production stack.
 
 ## Responsibilities
 
 1. `docker-compose.yml`: postgres:16 + redis:7 with healthchecks, named
    volumes, `env_file: .env`, and restart policies (`unless-stopped`).
-2. `Dockerfile`: python:3.11-slim base, non-root user, uv-based install,
-   no secrets baked into layers, `TZ=UTC`.
+2. `Dockerfile`: python:3.12-slim, pinned/frozen uv install, non-root
+   `appuser`, Playwright dependencies, and the migration-first entrypoint.
+   No secrets are baked into layers.
 3. Nothing macOS-only: paths, services, and scripts must run unchanged on
    Ubuntu; launchd is out of scope (systemd/Docker restart policies are
    the production mechanism).
