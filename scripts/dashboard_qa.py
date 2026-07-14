@@ -174,7 +174,12 @@ async def _mocked_regressions(
     report: list[str],
     hard_failures: list[str],
 ) -> None:
-    state = {"premium_failure": False, "health_mode": "normal", "slow_core": False}
+    state = {
+        "premium_failure": False,
+        "health_mode": "normal",
+        "slow_core": False,
+        "slow_games": False,
+    }
     premium = [_pick(index) for index in range(1, 11)]
     performance = {
         "n_sharp_close": 0,
@@ -222,7 +227,14 @@ async def _mocked_regressions(
         parsed = urlparse(route.request.url)
         path = parsed.path
         query = parse_qs(parsed.query)
-        if state["slow_core"] and path in {"/picks", "/games", "/performance", "/health"}:
+        if state["slow_games"] and path == "/games":
+            await asyncio.sleep(1.2)
+        elif state["slow_core"] and path in {
+            "/picks",
+            "/games",
+            "/performance",
+            "/health",
+        }:
             await asyncio.sleep(0.35)
         if path == "/":
             await route.fulfill(status=200, body=dashboard_html, content_type="text/html")
@@ -423,6 +435,25 @@ async def _mocked_regressions(
         assert logout_height >= 44
 
         await page.screenshot(path=str(OUT / "mocked_regressions.png"), full_page=True)
+
+        stage = "fixtures-off-critical-path"
+        # A slow operational fixture query must not delay picks/health/performance
+        # hydration. The cold state stays explicit until fixtures merge later.
+        state["slow_games"] = True
+        fixtures_page = await context.new_page()
+        await fixtures_page.goto(MOCK_ORIGIN, wait_until="domcontentloaded", timeout=30000)
+        await fixtures_page.locator('#view-today[aria-busy="false"]').wait_for(
+            state="attached", timeout=10000
+        )
+        fixture_stat = fixtures_page.locator("#today-stats .stat").last
+        assert await fixture_stat.locator(".sv").inner_text() == "—"
+        assert await fixture_stat.locator(".sk").inner_text() == "FIXTURES LOADING"
+        await fixtures_page.locator(
+            '#today-stats .stat:last-child .sk:text-is("Fixtures tracked")'
+        ).wait_for(state="visible", timeout=10000)
+        await fixtures_page.close()
+        state["slow_games"] = False
+        report.append("mocked_fixture_critical_path: PASS")
 
         stage = "responsive-runtime"
         state["slow_core"] = True

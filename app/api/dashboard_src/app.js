@@ -302,6 +302,7 @@
           volumeLastGoodAt: null,
           games: [],
           gamesErr: null,
+          gamesLoading: true,
           gamesLastGoodAt: null,
           perf: null,
           perfErr: null,
@@ -579,15 +580,6 @@
           }
           return rows;
         }
-        async function jsonOf(settled, validator) {
-          if (settled.status === "rejected") throw settled.reason;
-          return readJson(settled.value, validator);
-        }
-        async function healthOf(settled) {
-          if (settled.status === "rejected") throw settled.reason;
-          return readHealthJson(settled.value);
-        }
-
         let loadSeq = 0, loadInFlight = false;
         async function load() { if (loadInFlight) return; loadInFlight = true; try { await loadOnce(); } finally { loadInFlight = false; } }
 
@@ -599,6 +591,13 @@
         function coreRefreshHasErrors() {
           return state.premiumErr !== null || state.volumeErr !== null ||
             state.gamesErr !== null || state.perfErr !== null;
+        }
+        function gamesPendingWithoutCache() {
+          return state.gamesLoading && state.gamesLastGoodAt === null;
+        }
+        function gamesUnavailableWithoutCache() {
+          return gamesPendingWithoutCache() ||
+            (state.gamesErr !== null && state.gamesLastGoodAt === null);
         }
         function systemCondition(health) {
           // Keep transport/schema uncertainty distinct from a backend-declared
@@ -658,28 +657,36 @@
 
         async function loadOnce() {
           const seq = ++loadSeq;
-          const [premiumR, volumeR, gamesR, perfR, healthR] = await Promise.allSettled([
-            fetchGuarded("/picks?limit=200&tier=premium"),
-            fetchGuarded("/picks?limit=200&tier=volume"),
-            fetchGuarded("/games?limit=1000"),
-            fetchGuarded("/performance"),
-            fetchGuarded("/health"),
-          ]);
-          // Consume every body concurrently. Serial JSON reads let an early
-          // slow body spend the other responses' deadlines before their readers
-          // even started, despite all five requests having completed headers.
-          const [premiumBodyR, volumeBodyR, gamesBodyR, perfBodyR, healthBodyR] = await Promise.allSettled([
-            jsonOf(premiumR, (body) => validatePicksPayload(body, "premium")),
-            jsonOf(volumeR, (body) => validatePicksPayload(body, "volume")),
-            jsonOf(gamesR, (body) => expectArrayPayload(body, "Games")),
-            jsonOf(perfR, (body) => expectObjectPayload(body, "Performance")),
-            healthOf(healthR),
+          state.gamesLoading = true;
+          // Start every request together and consume each body as soon as its
+          // headers arrive. Fixtures are operational context, not a dependency
+          // of picks/health/performance: a slow /games query must not hold the
+          // entire first dashboard paint hostage.
+          const premiumBodyP = fetchGuarded("/picks?limit=200&tier=premium")
+            .then((res) => readJson(res, (body) => validatePicksPayload(body, "premium")));
+          const volumeBodyP = fetchGuarded("/picks?limit=200&tier=volume")
+            .then((res) => readJson(res, (body) => validatePicksPayload(body, "volume")));
+          const gamesBodyP = fetchGuarded("/games?limit=1000")
+            .then((res) => readJson(res, (body) => expectArrayPayload(body, "Games")));
+          // Attach both handlers immediately so a fast fixture failure cannot
+          // become an unhandled rejection while the critical responses settle.
+          const gamesResultP = gamesBodyP.then(
+            (value) => ({ status: "fulfilled", value }),
+            (reason) => ({ status: "rejected", reason })
+          );
+          const perfBodyP = fetchGuarded("/performance")
+            .then((res) => readJson(res, (body) => expectObjectPayload(body, "Performance")));
+          const healthBodyP = fetchGuarded("/health").then((res) => readHealthJson(res));
+          const [premiumBodyR, volumeBodyR, perfBodyR, healthBodyR] = await Promise.allSettled([
+            premiumBodyP,
+            volumeBodyP,
+            perfBodyP,
+            healthBodyP,
           ]);
           const valueOrNull = (result) => result.status === "fulfilled" ? result.value : null;
           const errorOrNull = (result) => result.status === "rejected" ? result.reason : null;
           const premiumRows = valueOrNull(premiumBodyR), premiumErr = errorOrNull(premiumBodyR);
           const volumeRows = valueOrNull(volumeBodyR), volumeErr = errorOrNull(volumeBodyR);
-          const games = valueOrNull(gamesBodyR), gamesErr = errorOrNull(gamesBodyR);
           const perf = valueOrNull(perfBodyR), perfErr = errorOrNull(perfBodyR);
           const health = valueOrNull(healthBodyR), healthErr = errorOrNull(healthBodyR);
           if (seq !== loadSeq) return;
@@ -696,8 +703,6 @@
           state.picks = (premiumRows || oldPremium).concat(volumeRows || oldVolume);
           state.picksErr = premiumErr !== null && volumeErr !== null ? premiumErr : null;
 
-          state.gamesErr = gamesErr;
-          if (gamesErr === null) { state.games = games; state.gamesLastGoodAt = loadedAt; }
           state.perfErr = perfErr;
           if (perfErr === null) { state.perf = perf; state.perfLastGoodAt = loadedAt; }
           state.healthErr = healthErr;
@@ -706,9 +711,6 @@
             if (healthHasCompletedPoll(health) && health.status === "ok") state.healthLastGoodAt = loadedAt;
           }
           state.coreLoaded = true;
-          const allCoreSucceeded = premiumErr === null && volumeErr === null && gamesErr === null &&
-            perfErr === null && healthErr === null && healthIsTrusted(state.health);
-          if (allCoreSucceeded) state.lastOkAt = loadedAt;
           renderGlobalDegradedBanner();
 
           renderPill();
@@ -728,6 +730,32 @@
               !$("edge-detail").contains(document.activeElement)) {
             $("edge-back").focus({ preventScroll: true });
           }
+
+          // Merge fixtures when they finish without re-rendering unrelated
+          // edge/detail state (which could overwrite an operator's active
+          // drawer form). Existing last-good fixtures remain intact on error.
+          const gamesBodyR = await gamesResultP;
+          if (seq !== loadSeq) return;
+          const gamesLoadedAt = new Date();
+          const games = valueOrNull(gamesBodyR), gamesErr = errorOrNull(gamesBodyR);
+          state.gamesLoading = false;
+          state.gamesErr = gamesErr;
+          if (gamesErr === null) {
+            state.games = games;
+            state.gamesLastGoodAt = gamesLoadedAt;
+          }
+          const allCoreSucceeded = premiumErr === null && volumeErr === null && gamesErr === null &&
+            perfErr === null && healthErr === null && healthIsTrusted(state.health);
+          if (allCoreSucceeded) state.lastOkAt = gamesLoadedAt;
+
+          const gamesFocusBeforeRender = captureFocusState();
+          renderGlobalDegradedBanner();
+          renderPill();
+          renderToday();
+          renderViewHeaders();
+          if (activeView === "radar") renderRadar();
+          if (activeView === "sources") renderSources();
+          restoreFocusState(gamesFocusBeforeRender);
         }
 
         // ===== lazy /resolution/match-rate loader (Radar + Sources only) =====
@@ -1286,9 +1314,10 @@
           stripBox.appendChild(mkStat(perf ? nSharp + "/" + floorN : "—", "Trusted sharp closes",
             state.perfErr ? "warn" : perf && perf.sharp_status === "ok" ? "pos" : "warn"));
           stripBox.appendChild(mkStat(
-            state.gamesErr && state.gamesLastGoodAt === null ? "—" : String(state.games.length),
-            state.gamesErr && state.gamesLastGoodAt ? "Fixtures cached" : "Fixtures tracked",
-            state.gamesErr ? "warn" : null));
+            gamesUnavailableWithoutCache() ? "—" : String(state.games.length),
+            gamesPendingWithoutCache() ? "Fixtures loading" :
+              state.gamesErr && state.gamesLastGoodAt ? "Fixtures cached" : "Fixtures tracked",
+            state.gamesErr || gamesPendingWithoutCache() ? "warn" : null));
 
           // ---- system-health strip ----
           const healthBox = $("today-health"); healthBox.replaceChildren();
@@ -1310,9 +1339,11 @@
           mkCell("Proxy pool", pc.level, pc.label,
             pool ? "healthy " + fmt(pool.healthy) + "/" + fmt(pool.configured) + " · dead " + fmt(pool.dead) : pc.detail);
           const sportCount = health && health.polls ? Object.keys(health.polls).length : 0;
-          const fixtureValue = state.gamesErr && state.gamesLastGoodAt === null ? "—" : String(state.games.length);
-          mkCell("Sources", state.gamesErr ? "warn" : "ok",
-            fixtureValue + (state.gamesErr && state.gamesLastGoodAt ? " cached fixtures" : " fixtures"),
+          const fixtureValue = gamesUnavailableWithoutCache() ? "—" : String(state.games.length);
+          const fixtureLabel = gamesPendingWithoutCache() ? "loading fixtures" :
+            fixtureValue + (state.gamesErr && state.gamesLastGoodAt ? " cached fixtures" : " fixtures");
+          mkCell("Sources", state.gamesErr || gamesPendingWithoutCache() ? "warn" : "ok",
+            fixtureLabel,
             sportCount > 0 ? sportCount + " sport poll" + (sportCount === 1 ? "" : "s") + " active" : ((health && health.odds_source) || "odds") + " feed");
           mkCell("Odds staleness", staleH ? "warn" : "ok",
             staleH ? "Stale — picks not current" : "Within freshness window",
@@ -1328,8 +1359,7 @@
             t.append(kk, b); tick.appendChild(t);
           };
           mkTick(conditionH.dot, "feed", conditionH.label.toLowerCase() + " · " + ageTxt);
-          mkTick(state.gamesErr ? "warn" : null, "sources",
-            fixtureValue + (state.gamesErr && state.gamesLastGoodAt ? " cached fixtures" : " fixtures"));
+          mkTick(state.gamesErr || gamesPendingWithoutCache() ? "warn" : null, "sources", fixtureLabel);
           mkTick(pc.level, "proxy", pc.label);
           if (perf) mkTick(perf.sharp_status === "ok" ? "ok" : "warn", "sharp clv", nSharp + "/" + floorN);
 
@@ -2096,8 +2126,9 @@
             });
           };
           fill("radar-summary", [
-            [state.gamesErr ? "warn" : "ok", "fixtures",
-              state.gamesErr && state.gamesLastGoodAt === null ? "—" : state.games.length + (state.gamesErr ? " cached" : "")],
+            [state.gamesErr || gamesPendingWithoutCache() ? "warn" : "ok", "fixtures",
+              gamesPendingWithoutCache() ? "loading" :
+                gamesUnavailableWithoutCache() ? "—" : state.games.length + (state.gamesErr ? " cached" : "")],
             [null, "sport polls", sportCount || "—"],
             [null, "feed", feedName],
           ]);
@@ -2149,6 +2180,10 @@
           }
 
           const box = $("radar-bands"); box.replaceChildren();
+          if (gamesPendingWithoutCache()) {
+            const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "Loading fixtures…";
+            box.appendChild(p0); return;
+          }
           if (state.gamesErr !== null && state.gamesLastGoodAt === null) {
             const p0 = document.createElement("p"); p0.className = "muted"; p0.textContent = "Could not load games.";
             box.appendChild(p0); return;
@@ -2728,10 +2763,11 @@
           const oddsSrcLabel = oddsSrc === "oddschecker" ? "OddsChecker scrape"
             : oddsSrc === "oddsportal" ? "OddsPortal scrape"
             : oddsSrc === "odds_api" ? "The Odds API" : "Odds feed";
-          const sourceTrusted = healthIsTrusted(health) && state.gamesErr === null;
-          const sourceFixtures = state.gamesErr && state.gamesLastGoodAt === null
-            ? "—" : String(state.games.length) + (state.gamesErr ? " cached fixtures" : " fixtures");
-          tb.appendChild(sourceRow(oddsSrcLabel, pollAge, sourceFixtures, sourceTrusted ? "Nominal" : "Source Degraded", "Live odds feed — active provider: " + (oddsSrc || "—") + ".", sourceTrusted ? "tag-success" : "tag-danger"));
+          const sourceTrusted = healthIsTrusted(health) && state.gamesErr === null && !state.gamesLoading;
+          const sourceFixtures = gamesPendingWithoutCache() ? "Loading fixtures…" :
+            gamesUnavailableWithoutCache() ? "—" : String(state.games.length) + (state.gamesErr ? " cached fixtures" : " fixtures");
+          const sourceStatus = gamesPendingWithoutCache() ? "Pending" : sourceTrusted ? "Nominal" : "Source Degraded";
+          tb.appendChild(sourceRow(oddsSrcLabel, pollAge, sourceFixtures, sourceStatus, "Live odds feed — active provider: " + (oddsSrc || "—") + ".", sourceTrusted ? "tag-success" : gamesPendingWithoutCache() ? "tag-neutral" : "tag-danger"));
 
           const mr = state.matchRate;
           // 2026-07-12: coverage cells show SLATE coverage "X% (sharp/soft)" —

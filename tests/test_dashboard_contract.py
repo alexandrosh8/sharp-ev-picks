@@ -71,6 +71,22 @@ def test_match_rate_is_lazy_with_its_own_timeout() -> None:
     assert "/resolution/match-rate" not in load_once
 
 
+def test_games_fetch_does_not_block_initial_core_hydration() -> None:
+    text = _text()
+    load_once = text[
+        text.index("async function loadOnce") : text.index("// ===== lazy /resolution")
+    ]
+    critical_wait = load_once[
+        load_once.index("const [premiumBodyR") : load_once.index("const valueOrNull")
+    ]
+    assert "gamesBodyP" not in critical_wait
+    assert "const gamesResultP = gamesBodyP.then(" in load_once
+    assert load_once.index("state.coreLoaded = true") < load_once.index(
+        "const gamesBodyR = await gamesResultP"
+    )
+    assert 'gamesPendingWithoutCache() ? "Fixtures loading"' in text
+
+
 def test_proxy_pool_rendered_from_health_payload() -> None:
     text = _text()
     assert "function renderProxyRow" in text
@@ -600,8 +616,12 @@ def test_response_deadline_covers_streamed_body_and_caps_json_size() -> None:
     assert "received > MAX_JSON_BYTES" in text
     assert '"PayloadTooLargeError"' in text
     assert "releaseResponseGuard(res)" in text
-    assert "const [premiumBodyR, volumeBodyR, gamesBodyR, perfBodyR, healthBodyR]" in text
-    assert "jsonOf(premiumR" in text and "healthOf(healthR)" in text
+    assert "const [premiumBodyR, volumeBodyR, perfBodyR, healthBodyR]" in text
+    assert 'fetchGuarded("/picks?limit=200&tier=premium")' in text
+    assert '.then((res) => readJson(res, (body) => validatePicksPayload(body, "premium")))' in text
+    assert 'fetchGuarded("/games?limit=1000")' in text
+    assert '.then((res) => readJson(res, (body) => expectArrayPayload(body, "Games")))' in text
+    assert 'fetchGuarded("/health").then((res) => readHealthJson(res))' in text
     # One raw network primitive remains, inside fetchGuarded only.
     assert text.count("fetch(") == 1
 
