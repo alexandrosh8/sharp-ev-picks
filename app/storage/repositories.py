@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from sqlalchemy.sql import Select
 
 from app.backtesting.clv import mean_significance, wilson_interval
 from app.identity import (
@@ -1162,6 +1163,136 @@ def _is_unvalidated_sport(sport_key: str) -> bool:
     return not sport_key.startswith(_VALIDATED_SPORT_PREFIXES)
 
 
+def _latest_available_games_statement(
+    *,
+    limit: int,
+    sport: str | None,
+    as_of: datetime,
+) -> Select[Any]:
+    """Build the restart-durability query without aggregating rejected events.
+
+    ``odds_snapshots`` is append-only and can contain thousands of observations
+    per fixture.  The former statement joined that history before GROUP BY and
+    LIMIT, so PostgreSQL repeated the wide event/team/league columns for every
+    observation and sorted the full eligible slate even when callers requested
+    only a handful of games.  Select and limit the identically ordered event
+    candidates first, then aggregate history for only those event ids.
+
+    The recent-odds ``EXISTS`` preserves the old SQL's three-valued predicate:
+    scheduled events qualify from ``starts_at`` alone, while a NULL/TBD kickoff
+    qualifies only when it has an odds row ingested in the last 24 hours.
+    """
+    event_cutoff = as_of - timedelta(hours=12)
+    recent_odds_cutoff = as_of - timedelta(hours=24)
+    in_play_grace = as_of - timedelta(hours=3, minutes=30)
+
+    home = aliased(Team)
+    away = aliased(Team)
+    has_recent_odds = (
+        select(OddsSnapshot.id)
+        .where(
+            OddsSnapshot.event_id == Event.id,
+            OddsSnapshot.ingested_at >= recent_odds_cutoff,
+        )
+        .exists()
+    )
+
+    candidate_stmt = (
+        select(
+            Event.id.label("event_pk"),
+            Sport.key.label("sport_key"),
+            Sport.name.label("sport_name"),
+            Event.external_ref.label("external_ref"),
+            home.name.label("home_name"),
+            away.name.label("away_name"),
+            League.name.label("league_name"),
+            Event.starts_at.label("starts_at"),
+        )
+        .join(Sport, Event.sport_id == Sport.id)
+        .join(League, Event.league_id == League.id)
+        .join(home, Event.home_team_id == home.id)
+        .join(away, Event.away_team_id == away.id)
+        .where(
+            (Event.starts_at >= event_cutoff) | has_recent_odds,
+            (Event.starts_at.is_(None)) | (Event.starts_at > in_play_grace),
+        )
+    )
+    if sport is None:
+        candidate_stmt = candidate_stmt.where(
+            (Sport.key == "soccer")
+            | Sport.key.startswith("soccer_")
+            | (Sport.key == "basketball")
+            | Sport.key.startswith("basketball_")
+            | (Sport.key == "tennis")
+            | Sport.key.startswith("tennis_")
+            | (Sport.key == "american_football")
+            | Sport.key.startswith("american_football_")
+        )
+    else:
+        candidate_stmt = candidate_stmt.where(
+            (Sport.key == sport) | Sport.key.startswith(f"{sport}_")
+        )
+
+    candidates = (
+        candidate_stmt.order_by(
+            Event.starts_at.is_(None),
+            Event.starts_at,
+            home.name,
+            away.name,
+        )
+        .limit(limit)
+        .cte("available_game_candidates")
+    )
+    odds = (
+        select(
+            OddsSnapshot.event_id.label("event_pk"),
+            func.count(OddsSnapshot.id).label("snapshot_count"),
+            func.min(OddsSnapshot.captured_at).label("first_captured_at"),
+            func.max(OddsSnapshot.captured_at).label("last_captured_at"),
+            func.max(OddsSnapshot.ingested_at).label("updated_at"),
+            func.array_agg(OddsSnapshot.market.distinct())
+            .filter(OddsSnapshot.market.is_not(None))
+            .label("markets"),
+            func.array_agg(OddsSnapshot.bookmaker.distinct())
+            .filter(OddsSnapshot.bookmaker.is_not(None))
+            .label("bookmakers"),
+        )
+        .join(candidates, candidates.c.event_pk == OddsSnapshot.event_id)
+        # Preserve the former outer-join WHERE semantics: a scheduled event
+        # aggregates all history, while a NULL/TBD kickoff retains recent rows.
+        .where(
+            (candidates.c.starts_at >= event_cutoff)
+            | (OddsSnapshot.ingested_at >= recent_odds_cutoff)
+        )
+        .group_by(OddsSnapshot.event_id)
+        .cte("available_game_odds")
+    )
+    return (
+        select(
+            candidates.c.sport_key,
+            candidates.c.sport_name,
+            candidates.c.external_ref,
+            candidates.c.home_name,
+            candidates.c.away_name,
+            candidates.c.league_name,
+            candidates.c.starts_at,
+            odds.c.snapshot_count,
+            odds.c.first_captured_at,
+            odds.c.last_captured_at,
+            odds.c.updated_at,
+            odds.c.markets,
+            odds.c.bookmakers,
+        )
+        .outerjoin(odds, odds.c.event_pk == candidates.c.event_pk)
+        .order_by(
+            candidates.c.starts_at.is_(None),
+            candidates.c.starts_at,
+            candidates.c.home_name,
+            candidates.c.away_name,
+        )
+    )
+
+
 async def latest_available_games_with_events(
     session: AsyncSession,
     limit: int = 1000,
@@ -1179,85 +1310,12 @@ async def latest_available_games_with_events(
     apply pick status, edge, tier, exposure, or odds-age gates.
     """
     as_of = now or datetime.now(tz=UTC)
-    event_cutoff = as_of - timedelta(hours=12)
-    recent_odds_cutoff = as_of - timedelta(hours=24)
     # Hide already-FINISHED games: a fixture whose kickoff is more than this long
     # ago is over and must not render as bettable in GET /games (the old query had
     # NO upper bound, so kicked-off events with recent odds leaked in). A NULL
     # kickoff (TBD) is kept — it has no finish to be past. 3h30m covers a full
     # match incl. stoppage/extra-time/penalties so a live fixture is never hidden.
-    in_play_grace = as_of - timedelta(hours=3, minutes=30)
-
-    home = aliased(Team)
-    away = aliased(Team)
-    market_values = (
-        func.array_agg(OddsSnapshot.market.distinct())
-        .filter(OddsSnapshot.market.is_not(None))
-        .label("markets")
-    )
-    bookmaker_values = (
-        func.array_agg(OddsSnapshot.bookmaker.distinct())
-        .filter(OddsSnapshot.bookmaker.is_not(None))
-        .label("bookmakers")
-    )
-
-    stmt = (
-        select(
-            Sport.key,
-            Sport.name,
-            Event.external_ref,
-            home.name,
-            away.name,
-            League.name,
-            Event.starts_at,
-            func.count(OddsSnapshot.id).label("snapshot_count"),
-            func.min(OddsSnapshot.captured_at).label("first_captured_at"),
-            func.max(OddsSnapshot.captured_at).label("last_captured_at"),
-            func.max(OddsSnapshot.ingested_at).label("updated_at"),
-            market_values,
-            bookmaker_values,
-        )
-        .join(Sport, Event.sport_id == Sport.id)
-        .join(League, Event.league_id == League.id)
-        .join(home, Event.home_team_id == home.id)
-        .join(away, Event.away_team_id == away.id)
-        .outerjoin(OddsSnapshot, OddsSnapshot.event_id == Event.id)
-        .where(
-            (Event.starts_at >= event_cutoff) | (OddsSnapshot.ingested_at >= recent_odds_cutoff),
-            (Event.starts_at.is_(None)) | (Event.starts_at > in_play_grace),
-        )
-        .group_by(
-            Sport.key,
-            Sport.name,
-            Event.external_ref,
-            home.name,
-            away.name,
-            League.name,
-            Event.starts_at,
-        )
-        .order_by(Event.starts_at.is_(None), Event.starts_at, home.name, away.name)
-        .limit(limit)
-    )
-    if sport is None:
-        # Include the validated alerting sports AND visibility-only sports
-        # (tennis, american_football): the in-memory pipeline publishes these to
-        # AVAILABLE GAMES, so the restart-durability fallback must too — otherwise
-        # they vanish from the view (with their UNVALIDATED badge) until the first
-        # poll. Visibility-only membership is enforced elsewhere
-        # (_VALIDATED_SPORT_PREFIXES); this query only decides what to DISPLAY.
-        stmt = stmt.where(
-            (Sport.key == "soccer")
-            | Sport.key.startswith("soccer_")
-            | (Sport.key == "basketball")
-            | Sport.key.startswith("basketball_")
-            | (Sport.key == "tennis")
-            | Sport.key.startswith("tennis_")
-            | (Sport.key == "american_football")
-            | Sport.key.startswith("american_football_")
-        )
-    else:
-        stmt = stmt.where((Sport.key == sport) | Sport.key.startswith(f"{sport}_"))
-
+    stmt = _latest_available_games_statement(limit=limit, sport=sport, as_of=as_of)
     rows = await session.execute(stmt)
     payload: list[dict[str, Any]] = []
     for (

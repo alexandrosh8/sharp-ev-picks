@@ -11,6 +11,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams
@@ -19,6 +20,7 @@ from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.models import Event, ModelVersion, OddsSnapshot, Pick, Sport
 from app.storage.repositories import (
     PickRepriced,
+    _latest_available_games_statement,
     latest_available_games_with_events,
     latest_picks_with_events,
     persist_pick,
@@ -28,6 +30,25 @@ from app.storage.repositories import (
 from tests.database import TEST_DATABASE_URL
 
 DB_URL = TEST_DATABASE_URL
+
+
+def test_available_games_limits_candidates_before_snapshot_aggregation() -> None:
+    statement = _latest_available_games_statement(
+        limit=20,
+        sport=None,
+        as_of=datetime(2026, 7, 14, 0, 0, tzinfo=UTC),
+    )
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    candidate_sql, aggregate_sql = sql.split("available_game_odds AS", maxsplit=1)
+
+    assert "LIMIT 20" in candidate_sql
+    assert "LEFT OUTER JOIN odds_snapshots" not in candidate_sql
+    assert "JOIN available_game_candidates" in aggregate_sql
 
 
 def make_pick(
