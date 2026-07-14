@@ -1457,6 +1457,119 @@ def test_poll_record_stale_drop_at_or_below_threshold_stays_healthy() -> None:
         LAST_POLL.clear()
 
 
+def test_poll_record_source_incomplete_below_threshold_stays_healthy() -> None:
+    """A handful of listed match-page fetches timing out (OddsChecker's expected
+    few-% scrape gaps) is PARTIAL COVERAGE, not a stale/broken slate: the raw
+    loader verdict stays source_complete=False for the dashboard's coverage note,
+    but the cycle must NOT read degraded — otherwise /health flips to 503 and the
+    operator sees a false 'odds data is stale' banner while odds are fresh. Only a
+    failed-fetch fraction ABOVE the tolerance threshold fails the cycle closed."""
+    from app.pipeline import LAST_POLL, _record_poll
+
+    LAST_POLL.clear()
+    try:
+        _record_poll(
+            "soccer",
+            [],
+            0,
+            0,
+            source_complete=False,
+            completeness_reason="2/19 listed match fetch(es) failed",
+            incomplete_fetch_ratio=2 / 19,
+            incomplete_fetch_ratio_warn=0.5,
+        )
+        assert LAST_POLL["soccer"]["degraded"] is False
+        assert LAST_POLL["soccer"]["degradation_reasons"] == []
+        # Raw loader verdict preserved so the dashboard can still show partial coverage.
+        assert LAST_POLL["soccer"]["source_complete"] is False
+
+        # A largely broken scrape (most listed matches failed) MUST still fail closed.
+        _record_poll(
+            "soccer",
+            [],
+            0,
+            0,
+            source_complete=False,
+            completeness_reason="15/19 listed match fetch(es) failed",
+            incomplete_fetch_ratio=15 / 19,
+            incomplete_fetch_ratio_warn=0.5,
+        )
+        assert LAST_POLL["soccer"]["degraded"] is True
+        assert LAST_POLL["soccer"]["degradation_reasons"] == ["source_incomplete"]
+    finally:
+        LAST_POLL.clear()
+
+
+def test_poll_record_source_incomplete_unknown_ratio_fails_closed() -> None:
+    """When the loader reports incompleteness WITHOUT a fetch ratio, the default
+    must fail closed (degrade) — an unknown completeness fraction is never assumed
+    safe. Preserves the pre-tolerance behaviour for loaders that only expose a
+    boolean completeness verdict."""
+    from app.pipeline import LAST_POLL, _record_poll
+
+    LAST_POLL.clear()
+    try:
+        _record_poll(
+            "soccer",
+            [],
+            0,
+            0,
+            source_complete=False,
+            completeness_reason="source reported an incomplete cycle",
+        )
+        assert LAST_POLL["soccer"]["degraded"] is True
+        assert LAST_POLL["soccer"]["degradation_reasons"] == ["source_incomplete"]
+    finally:
+        LAST_POLL.clear()
+
+
+async def test_value_pipeline_tolerates_small_loader_incomplete_fetch_ratio() -> None:
+    """End-to-end: a loader reporting an incomplete cycle with a SMALL failed-fetch
+    ratio (OddsChecker's expected few-% match-page timeouts) must record a healthy
+    poll — the tolerance ratio is threaded from the loader through the pipeline, so
+    the live cycle no longer flips /health to degraded over 2/19 timeouts."""
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    try:
+        sink = RecordingSink()
+        loader = FakeLoader(market_snapshots())
+        loader.last_fetch_complete["soccer"] = False
+        loader.last_fetch_completeness_reason["soccer"] = "2/19 listed match fetch(es) failed"
+        loader.last_fetch_incomplete_ratio = {"soccer": 2 / 19}
+        deps = make_deps(sink, loader)
+        await run_value_pipeline(deps, "soccer")
+        poll = LAST_POLL["soccer"]
+        # Raw loader verdict preserved for the dashboard's partial-coverage note...
+        assert poll["source_complete"] is False
+        # ...but the cycle is NOT degraded, so /health stays green.
+        assert poll["degraded"] is False
+        assert "source_incomplete" not in poll["degradation_reasons"]
+    finally:
+        LAST_POLL.clear()
+
+
+async def test_value_pipeline_degrades_on_large_loader_incomplete_fetch_ratio() -> None:
+    """A loader reporting a mostly-failed cycle (ratio above tolerance) must still
+    fail the poll CLOSED with a source_incomplete reason."""
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    try:
+        sink = RecordingSink()
+        loader = FakeLoader(market_snapshots())
+        loader.last_fetch_complete["soccer"] = False
+        loader.last_fetch_completeness_reason["soccer"] = "15/19 listed match fetch(es) failed"
+        loader.last_fetch_incomplete_ratio = {"soccer": 15 / 19}
+        deps = make_deps(sink, loader)
+        await run_value_pipeline(deps, "soccer")
+        poll = LAST_POLL["soccer"]
+        assert poll["degraded"] is True
+        assert "source_incomplete" in poll["degradation_reasons"]
+    finally:
+        LAST_POLL.clear()
+
+
 async def test_value_pipeline_skips_started_events() -> None:
     """In-play gate: matches flip in-play between page listing and scrape
     (long cycles); OddsPortal then serves in-play prices. A started event
