@@ -306,8 +306,9 @@ class Settings(BaseSettings):
     # Stale-starvation alarm: when MORE than this fraction of a cycle's mintable
     # candidates are dropped SOLELY by the odds-age gate (the scrape outran the
     # ~5-minute freshness window above), the pipeline logs a WARNING "picks
-    # starving" line and the ratio rides on LAST_POLL for the self-audit/alert
-    # layer. 0.5 = warn once a slow cycle costs us over half the slate. Pass into
+    # starving" line and the ratio rides on LAST_POLL; an over-threshold cycle
+    # also marks health/readiness degraded. 0.5 = warn once a slow cycle costs
+    # us over half the slate. Pass into
     # PipelineDeps.stale_drop_ratio_warn at the composition root (app/scheduler.py)
     # to override the deps' matching 0.5 default with this env-tunable value.
     stale_drop_ratio_warn_threshold: float = Field(default=0.5, gt=0.0, le=1.0)

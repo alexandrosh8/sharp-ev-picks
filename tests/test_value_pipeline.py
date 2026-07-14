@@ -1336,8 +1336,8 @@ async def test_stale_drop_ratio_observable_and_warns_on_starvation(
     """H2 (holes audit): when a slow cycle drops most mintable candidates for
     staleness the slate silently STARVES of picks — visible before only as the
     unalerted stale_candidates count. Expose the per-cycle STALE-DROP RATIO on
-    LAST_POLL and emit a loud WARNING when it exceeds the configured threshold,
-    so the self-audit layer can alert on starvation."""
+    LAST_POLL, emit a loud WARNING, and fail health closed when it exceeds the
+    configured threshold."""
     import logging as _logging
 
     from app.pipeline import LAST_POLL
@@ -1348,6 +1348,9 @@ async def test_stale_drop_ratio_observable_and_warns_on_starvation(
     with caplog.at_level(_logging.WARNING, logger="app.pipeline"):
         await run_value_pipeline(deps, "soccer")
     assert LAST_POLL["soccer"]["stale_drop_ratio"] == pytest.approx(1.0)
+    assert LAST_POLL["soccer"]["stale_drop_ratio_warn_threshold"] == pytest.approx(0.5)
+    assert LAST_POLL["soccer"]["degraded"] is True
+    assert LAST_POLL["soccer"]["degradation_reasons"] == ["stale_drop_ratio"]
     assert any("starv" in r.getMessage().lower() for r in caplog.records)
 
     # Fresh slate: ratio 0.0 and NO starvation warning.
@@ -1356,7 +1359,40 @@ async def test_stale_drop_ratio_observable_and_warns_on_starvation(
     with caplog.at_level(_logging.WARNING, logger="app.pipeline"):
         await run_value_pipeline(deps2, "soccer")
     assert LAST_POLL["soccer"]["stale_drop_ratio"] == pytest.approx(0.0)
+    assert LAST_POLL["soccer"]["degraded"] is False
+    assert LAST_POLL["soccer"]["degradation_reasons"] == []
     assert not any("starv" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_poll_record_stale_drop_at_or_below_threshold_stays_healthy() -> None:
+    from app.pipeline import LAST_POLL, _record_poll
+
+    LAST_POLL.clear()
+    try:
+        _record_poll(
+            "soccer",
+            [],
+            0,
+            0,
+            stale_candidates=1,
+            stale_drop_ratio=0.5,
+            stale_drop_ratio_warn=0.5,
+        )
+        assert LAST_POLL["soccer"]["degraded"] is False
+        assert LAST_POLL["soccer"]["degradation_reasons"] == []
+
+        _record_poll(
+            "soccer",
+            [],
+            0,
+            0,
+            stale_candidates=0,
+            stale_drop_ratio=0.0,
+            stale_drop_ratio_warn=0.5,
+        )
+        assert LAST_POLL["soccer"]["degraded"] is False
+    finally:
+        LAST_POLL.clear()
 
 
 async def test_value_pipeline_skips_started_events() -> None:

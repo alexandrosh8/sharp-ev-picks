@@ -312,6 +312,37 @@ def test_explicit_degraded_cycle_is_unhealthy_even_when_fresh() -> None:
         LAST_POLL.clear()
 
 
+def test_stale_starvation_cycle_is_unhealthy_and_next_healthy_cycle_recovers() -> None:
+    from app.pipeline import LAST_POLL
+
+    now = datetime.now(tz=UTC).isoformat()
+    LAST_POLL.clear()
+    try:
+        LAST_POLL["soccer"] = {
+            "finished_at": now,
+            "degraded": True,
+            "stale_candidates": 107,
+            "stale_drop_ratio": 0.87,
+            "stale_drop_ratio_warn_threshold": 0.5,
+            "degradation_reasons": ["stale_drop_ratio"],
+        }
+        response = TestClient(make_app()).get("/health")
+        assert response.status_code == 503
+        assert response.json()["polls"]["soccer"]["degradation_reasons"] == ["stale_drop_ratio"]
+
+        LAST_POLL["soccer"] = {
+            "finished_at": datetime.now(tz=UTC).isoformat(),
+            "degraded": False,
+            "stale_candidates": 0,
+            "stale_drop_ratio": 0.0,
+            "stale_drop_ratio_warn_threshold": 0.5,
+            "degradation_reasons": [],
+        }
+        assert TestClient(make_app()).get("/health").status_code == 200
+    finally:
+        LAST_POLL.clear()
+
+
 def test_health_exposes_poll_liveness_payload() -> None:
     # The dashboard renders a degraded state (selector break / anti-bot wall:
     # matches listed, zero odds parsed) straight from the polls payload —

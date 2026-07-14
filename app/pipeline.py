@@ -167,12 +167,22 @@ def _record_poll(
     volume_picks: int = 0,
     stale_candidates: int = 0,
     stale_drop_ratio: float = 0.0,
+    stale_drop_ratio_warn: float = 0.5,
     *,
     source_complete: bool = True,
     completeness_reason: str | None = None,
 ) -> None:
     timestamp = datetime.now(tz=UTC).isoformat()
     started_at = LAST_POLL.get(sport_key, {}).get("started_at")
+    listed_without_odds = bool(matches_found) and not snapshots
+    stale_starved = stale_candidates > 0 and stale_drop_ratio > stale_drop_ratio_warn
+    degradation_reasons: list[str] = []
+    if listed_without_odds:
+        degradation_reasons.append("listed_matches_without_odds")
+    if not source_complete:
+        degradation_reasons.append("source_incomplete")
+    if stale_starved:
+        degradation_reasons.append("stale_drop_ratio")
     per_market: dict[str, int] = {}
     for snap in snapshots:
         key = snap.market_detail or str(snap.market)
@@ -206,16 +216,20 @@ def _record_poll(
         # Fraction of this cycle's mintable candidates dropped SOLELY for
         # staleness (n_stale / candidates reaching the freshness gate). 0.0 when
         # nothing was mintable. A value near 1.0 means the scrape outran the
-        # freshness window and the slate is STARVING — the self-audit/alert layer
-        # watches this to catch a too-slow cycle that stale_candidates alone hides.
+        # freshness window and the slate is STARVING — health/readiness consume
+        # the degraded flag below so a too-slow cycle cannot look green.
         "stale_drop_ratio": stale_drop_ratio,
+        "stale_drop_ratio_warn_threshold": stale_drop_ratio_warn,
         # Source completeness is an explicit loader verdict. Partial JSON
         # cycles remain persisted/visible as evidence, but may never mint picks.
         "source_complete": source_complete,
         "completeness_reason": completeness_reason if not source_complete else None,
-        # Listings parsed but ZERO odds rows, or an explicit partial-cycle
-        # verdict: finished_at alone would look healthy — flag it explicitly.
-        "degraded": (bool(matches_found) and not snapshots) or not source_complete,
+        # Listings parsed but ZERO odds rows, an explicit partial-cycle verdict,
+        # or a cycle that discarded most mintable candidates as already stale:
+        # finished_at alone would look healthy — flag it explicitly so /health
+        # and /ready fail closed until a healthy cycle replaces this record.
+        "degradation_reasons": degradation_reasons,
+        "degraded": bool(degradation_reasons),
     }
 
 
@@ -505,7 +519,8 @@ class PipelineDeps:
     # Stale-starvation alarm threshold: when MORE than this fraction of a cycle's
     # mintable candidates are dropped SOLELY for staleness (the scrape outran the
     # freshness window), run_value_pipeline logs a WARNING-level "picks starving"
-    # line and the ratio rides on LAST_POLL for the self-audit/alert layer. Set
+    # line and the ratio rides on LAST_POLL; an over-threshold cycle also marks
+    # the poll degraded so /health and /ready fail closed. Set
     # from Settings.stale_drop_ratio_warn_threshold at the composition root; the
     # 0.5 default means "warn once a slow cycle costs us over half the slate".
     stale_drop_ratio_warn: float = 0.5
@@ -2658,6 +2673,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         volume_picks=n_volume,
         stale_candidates=n_stale,
         stale_drop_ratio=stale_drop_ratio,
+        stale_drop_ratio_warn=deps.stale_drop_ratio_warn,
     )
     return picks
 
