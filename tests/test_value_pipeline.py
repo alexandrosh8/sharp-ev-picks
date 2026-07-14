@@ -57,6 +57,7 @@ class FakeLoader:
         self.last_fetch_event_ids: dict[str, tuple[str, ...]] = {}
         self.last_fetch_complete: dict[str, bool] = {}
         self.last_fetch_completeness_reason: dict[str, str] = {}
+        self.last_fetch_incomplete_ratio: dict[str, float] = {}
 
     async def fetch_odds(self, sport_key: str) -> Sequence[OddsSnapshotIn]:
         self.last_fetch_matches[sport_key] = len({s.event_id for s in self.snapshots})
