@@ -301,6 +301,24 @@ def test_find_match_payload_no_bestodds_is_parse_error_not_empty_market() -> Non
     assert not isinstance(excinfo.value, OddsCheckerEmptyMarket)
 
 
+def test_find_match_payload_no_subevent_match_is_empty_market() -> None:
+    """Populated bestOdds blobs exist but NONE prices the page's canonical subevent
+    (OddsChecker served a flaky/partial page carrying only accumulator/related-match
+    odds). Our target match is not priced on this fetch — that is EmptyMarket
+    (fetch layer returns []), NOT a hard failure. The wrong-game guard is preserved:
+    a mismatched blob is still never returned."""
+    with pytest.raises(OddsCheckerEmptyMarket):
+        # _match_html prices subeventId "101610031"; ask for a different canonical id.
+        _find_match_payload(_match_html(), prefer_subevent_id="999999999")
+
+
+def test_find_match_payload_subevent_match_still_returns_payload() -> None:
+    """When a populated blob DOES match the canonical subevent id, it is returned
+    (regression guard: the empty-market change must not break the happy path)."""
+    payload = _find_match_payload(_match_html(), prefer_subevent_id="101610031")
+    assert payload["bestOdds"]["subeventConfig"]["subeventId"] == "101610031"
+
+
 def test_parse_match_page_empty_odds_propagates_empty_market() -> None:
     """parse_match_page surfaces the empty-market signal so the fetch layer can
     return [] (no odds priced) instead of dropping to the legacy parser and

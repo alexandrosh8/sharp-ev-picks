@@ -850,7 +850,13 @@ def _find_match_payload(html: str, *, prefer_subevent_id: str | None = None) -> 
                 and str(config.get("subeventId") or "").strip() == prefer_subevent_id
             ):
                 return payload
-        raise OddsCheckerParseError(
+        # Populated blobs exist but none prices THIS match: OddsChecker served a
+        # partial page carrying only accumulator / related-match odds (the target
+        # fixture is not priced on this fetch). That is a listed-but-unpriced match,
+        # not a fetch failure — signal EmptyMarket so the fetch layer returns []
+        # rather than counting a failure. The wrong-game guard still holds: a
+        # mismatched blob is never returned.
+        raise OddsCheckerEmptyMarket(
             "no populated bestOdds payload matches the page's canonical subevent id"
         )
 
