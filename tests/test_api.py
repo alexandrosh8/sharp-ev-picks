@@ -619,21 +619,12 @@ def test_games_endpoint_skips_warehouse_for_healthy_published_slates(
 
 
 @pytest.mark.parametrize(
-    "poll_overrides",
-    [
-        {"source_complete": False, "degraded": True},
-        {
-            "state": "failed",
-            "failure_reason": "timeout",
-            "source_complete": True,
-            "degraded": True,
-        },
-    ],
-    ids=["source-incomplete", "failed"],
+    "poll_state",
+    ["source-incomplete", "failed", "fresh-active-with-stale-publication"],
 )
 def test_games_endpoint_keeps_one_warehouse_query_for_unhealthy_slates(
     monkeypatch: pytest.MonkeyPatch,
-    poll_overrides: dict[str, object],
+    poll_state: str,
 ) -> None:
     from app.api import routes
     from app.pipeline import AVAILABLE_GAMES, LAST_POLL
@@ -643,7 +634,30 @@ def test_games_endpoint_keeps_one_warehouse_query_for_unhealthy_slates(
     AVAILABLE_GAMES.clear()
     LAST_POLL.clear()
     AVAILABLE_GAMES["soccer"] = [_available_game_row()]
-    LAST_POLL["soccer"] = {**_healthy_available_games_poll(), **poll_overrides}
+    poll = _healthy_available_games_poll()
+    if poll_state == "source-incomplete":
+        poll.update({"source_complete": False, "degraded": True})
+    elif poll_state == "failed":
+        poll.update(
+            {
+                "state": "failed",
+                "failure_reason": "timeout",
+                "source_complete": True,
+                "degraded": True,
+            }
+        )
+    else:
+        fresh_start = datetime.now(tz=UTC)
+        poll.update(
+            {
+                "started_at": fresh_start.isoformat(),
+                "heartbeat_at": fresh_start.isoformat(),
+                "finished_at": (fresh_start - timedelta(days=7)).isoformat(),
+                "state": "in_progress",
+                "in_progress": True,
+            }
+        )
+    LAST_POLL["soccer"] = poll
     calls: list[tuple[int, str | None]] = []
 
     class FakeSessionFactory:

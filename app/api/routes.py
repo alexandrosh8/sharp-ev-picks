@@ -8,6 +8,7 @@ place a bet.
 import asyncio
 import contextlib
 import logging
+import math
 import secrets
 import time
 from collections.abc import Mapping
@@ -938,6 +939,18 @@ def _memory_games_cover_request(
     if not requested:
         return False
 
+    from app.config import get_settings
+
+    settings = get_settings()
+    now = datetime.now(tz=UTC)
+    # _poll_health intentionally judges an active cycle by started_at, but
+    # AVAILABLE_GAMES is still the prior completed publication. Bound that
+    # retained finish independently so a fresh restart cannot bless days-old rows.
+    retained_finish_ceiling = _poll_freshness_ceiling(
+        settings.poll_interval_seconds,
+        len(expected),
+        settings.poll_cycle_timeout_seconds,
+    )
     requested_polls: dict[str, Mapping[str, Any]] = {}
     for sport_key in requested:
         poll = last_poll.get(sport_key)
@@ -947,22 +960,24 @@ def _memory_games_cover_request(
         has_consistent_state = (state == "completed" and poll.get("in_progress") is False) or (
             state == "in_progress" and poll.get("in_progress") is True
         )
+        retained_finish = _parse_poll_finish(poll.get("finished_at"))
+        retained_finish_age = (
+            (now - retained_finish).total_seconds() if retained_finish is not None else math.inf
+        )
         if (
             poll.get("source_complete") is not True
             or bool(poll.get("degraded"))
             or poll.get("failure_reason") is not None
             or not has_consistent_state
-            or _parse_poll_finish(poll.get("finished_at")) is None
+            or retained_finish_age < -60.0
+            or retained_finish_age > retained_finish_ceiling
         ):
             return False
         requested_polls[sport_key] = poll
 
-    from app.config import get_settings
-
-    settings = get_settings()
     status, _, _ = _poll_health(
         requested_polls,
-        datetime.now(tz=UTC),
+        now,
         settings.poll_interval_seconds,
         expected_sport_count=len(expected),
         cycle_timeout_seconds=settings.poll_cycle_timeout_seconds,
