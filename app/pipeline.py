@@ -68,6 +68,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+CandidateFreshnessBasis = Literal["provider", "observation"]
+
 # Liveness registry, surfaced by GET /health and the dashboard banner: the
 # difference between "engine alive, no new value found" and "engine dead,
 # showing day-old picks" must be visible. In-memory; repopulated each cycle.
@@ -524,6 +526,14 @@ class PipelineDeps:
     # from Settings.stale_drop_ratio_warn_threshold at the composition root; the
     # 0.5 default means "warn once a slow cycle costs us over half the slate".
     stale_drop_ratio_warn: float = 0.5
+    # Which timestamp proves a live quote is actionable. Most feeds expose a
+    # provider observation timestamp, so the conservative default remains
+    # ``captured_at``. OddsChecker's ``betFeedTimestamp`` is instead the price's
+    # last-change time: a freshly fetched ACTIVE/notExpired static quote can be
+    # hours old by that clock. Its composition root explicitly selects the local
+    # ``ingested_at`` observation time while preserving captured_at unchanged for
+    # warehouse/CLV/steam provenance.
+    candidate_freshness_basis: CandidateFreshnessBasis = "provider"
     # OPTIONAL value-gate refinements (app/edge/value_policy.py): per-market
     # premium floors, raw-odds bands, per-market min book counts. The default
     # all-empty policy is a strict no-op — current behavior, untouched. Built
@@ -829,7 +839,10 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 # to now — taken AFTER the fetch — is provider clock skew, not
                 # a fresh price. The raw signed age_seconds() let the negative
                 # age sail through the odds-age gate; +inf always drops it.
-                odds_age_seconds=_candidate_age_seconds(now, snap.captured_at),
+                odds_age_seconds=_candidate_age_seconds(
+                    now,
+                    _snapshot_freshness_time(snap, deps.candidate_freshness_basis),
+                ),
                 liquidity=snap.liquidity or 0.0,
                 bookmaker=snap.bookmaker,
             )
@@ -1705,6 +1718,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     kickoff_by_event = await _load_kickoffs(deps, {s.event_id for s in anchor_snapshots})
     anchor_snapshots = drop_post_kickoff_snapshots(anchor_snapshots, kickoff_by_event)
     grouped = group_market_prices(anchor_snapshots)
+    freshness_by_market = group_market_freshness_times(
+        anchor_snapshots,
+        basis=deps.candidate_freshness_basis,
+    )
     fair = event_fair_probs(
         grouped,
         deps.devig_method,
@@ -1819,7 +1836,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         ml_manifest_created_utc=ml_created_utc,
         ml_threshold=ml_threshold,
     )
-    for (event_id, market, detail), (prices, captured) in grouped.items():
+    for (event_id, market, detail), (prices, _captured) in grouped.items():
+        freshness_times = freshness_by_market.get((event_id, market, detail), {})
         if event_id in started or event_id in unknown_kickoff:
             continue  # started/unknown: cannot prove a pre-game actionable quote
         # NON-SETTLEABLE market drop: period (half/quarter/set), corner, and
@@ -1908,8 +1926,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # the mintable universe — count it so the stale-drop RATIO below is
             # measured against the right denominator).
             n_freshness_candidates += 1
-            cap = captured.get((v.selection, v.best_book))
-            age = _candidate_age_seconds(now, cap)
+            freshness_at = freshness_times.get((v.selection, v.best_book))
+            age = _candidate_age_seconds(now, freshness_at)
             if age > deps.gate_policy.max_odds_age_seconds:
                 n_stale += 1
                 continue
@@ -2683,6 +2701,11 @@ GroupedMarkets = dict[
     tuple[dict[str, dict[str, float]], dict[tuple[str, str], datetime]],
 ]
 
+MarketFreshnessTimes = dict[
+    tuple[str, Market, str | None],
+    dict[tuple[str, str], datetime],
+]
+
 
 def coalesce_market_snapshots(snapshots: Sequence[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
     """One deterministic newest observation per qualified bookmaker outcome.
@@ -2719,6 +2742,32 @@ def coalesce_market_snapshots(snapshots: Sequence[OddsSnapshotIn]) -> list[OddsS
         if previous is None or _rank(snap) > _rank(previous):
             newest[key] = snap
     return list(newest.values())
+
+
+def _snapshot_freshness_time(
+    snapshot: OddsSnapshotIn,
+    basis: CandidateFreshnessBasis,
+) -> datetime:
+    """Timestamp used only by the live actionability age gate.
+
+    Provider provenance remains on ``captured_at`` regardless of this choice.
+    ``observation`` means the current response's local ingestion wall clock.
+    """
+    return snapshot.ingested_at if basis == "observation" else snapshot.captured_at
+
+
+def group_market_freshness_times(
+    snapshots: Sequence[OddsSnapshotIn],
+    *,
+    basis: CandidateFreshnessBasis,
+) -> MarketFreshnessTimes:
+    """Freshness timestamp for the exact row selected by market coalescing."""
+    out: MarketFreshnessTimes = {}
+    for snap in coalesce_market_snapshots(snapshots):
+        key = (snap.event_id, snap.market, snap.market_detail)
+        observation_key = (snap.selection, snap.bookmaker)
+        out.setdefault(key, {})[observation_key] = _snapshot_freshness_time(snap, basis)
+    return out
 
 
 def group_market_prices(snapshots: Sequence[OddsSnapshotIn]) -> GroupedMarkets:

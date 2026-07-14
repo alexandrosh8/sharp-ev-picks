@@ -786,6 +786,13 @@ def build_scheduler(
             value_volume_min_edge=settings.value_volume_min_edge,
             value_min_odds=settings.value_min_odds,
             stale_drop_ratio_warn=settings.stale_drop_ratio_warn_threshold,
+            # OddsChecker's betFeedTimestamp is the quote's last-change time,
+            # not proof that the current ACTIVE/notExpired response is old.
+            # Gate that source on the freshly observed ingestion clock while
+            # every other provider keeps the conservative provider timestamp.
+            candidate_freshness_basis=(
+                "observation" if settings.odds_source == "oddschecker" else "provider"
+            ),
             # optional per-market/odds-band/book-count refinements — the
             # default (all env knobs empty) is the all-empty no-op policy
             value_policy=value_policy(settings),

@@ -198,6 +198,27 @@ async def test_model_pipeline_drops_future_captured_at() -> None:
     assert sink.sent == []
 
 
+async def test_model_pipeline_observation_basis_uses_ingested_at() -> None:
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    now = datetime.now(tz=UTC)
+    provider_time = now - timedelta(hours=1)
+    observed_time = now - timedelta(seconds=30)
+    deps.loader.snapshots = [  # type: ignore[attr-defined]
+        snapshot.model_copy(update={"captured_at": provider_time, "ingested_at": observed_time})
+        for snapshot in deps.loader.snapshots  # type: ignore[attr-defined]
+    ]
+    deps.candidate_freshness_basis = "observation"
+
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+
+    assert len(picks) == 1
+    assert all(  # provider/CLV provenance is untouched by the live age basis
+        snapshot.captured_at == provider_time
+        for snapshot in deps.loader.snapshots  # type: ignore[attr-defined]
+    )
+
+
 async def test_model_pipeline_alert_key_includes_strategy_identity() -> None:
     sink = RecordingSink()
     deps = make_deps(sink)

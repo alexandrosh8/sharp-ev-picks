@@ -55,6 +55,8 @@ class FakeLoader:
         # Mirrors OddsPortalLoader's liveness contract read by _record_poll.
         self.last_fetch_matches: dict[str, int] = {}
         self.last_fetch_event_ids: dict[str, tuple[str, ...]] = {}
+        self.last_fetch_complete: dict[str, bool] = {}
+        self.last_fetch_completeness_reason: dict[str, str] = {}
 
     async def fetch_odds(self, sport_key: str) -> Sequence[OddsSnapshotIn]:
         self.last_fetch_matches[sport_key] = len({s.event_id for s in self.snapshots})
@@ -1223,9 +1225,69 @@ async def test_volume_to_premium_upgrade_alerts_and_reserves(
 async def test_value_pipeline_skips_stale_odds() -> None:
     sink = RecordingSink()
     deps = make_deps(sink, FakeLoader(market_snapshots(age_s=400.0)))  # > 300s gate
+    assert deps.candidate_freshness_basis == "provider"
     picks = await run_value_pipeline(deps, "soccer")
     assert picks == []
     assert sink.sent == []
+
+
+async def test_value_observation_basis_is_fresh_and_preserves_provider_time() -> None:
+    from app.pipeline import LAST_POLL
+
+    now = datetime.now(tz=UTC)
+    provider_time = now - timedelta(hours=1)
+    observed_time = now - timedelta(seconds=30)
+    snapshots = [
+        snapshot.model_copy(update={"captured_at": provider_time, "ingested_at": observed_time})
+        for snapshot in market_snapshots()
+    ]
+    deps = make_deps(RecordingSink(), FakeLoader(snapshots))
+    deps.candidate_freshness_basis = "observation"
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert len(picks) == 1
+    assert LAST_POLL["soccer"]["stale_candidates"] == 0
+    assert LAST_POLL["soccer"]["degraded"] is False
+    assert all(snapshot.captured_at == provider_time for snapshot in snapshots)
+
+
+async def test_value_observation_basis_still_drops_an_old_observation() -> None:
+    from app.pipeline import LAST_POLL
+
+    now = datetime.now(tz=UTC)
+    observed_time = now - timedelta(seconds=400)
+    snapshots = [
+        snapshot.model_copy(
+            update={
+                "captured_at": observed_time - timedelta(hours=1),
+                "ingested_at": observed_time,
+            }
+        )
+        for snapshot in market_snapshots()
+    ]
+    deps = make_deps(RecordingSink(), FakeLoader(snapshots))
+    deps.candidate_freshness_basis = "observation"
+
+    assert await run_value_pipeline(deps, "soccer") == []
+    assert LAST_POLL["soccer"]["stale_candidates"] == 1
+    assert LAST_POLL["soccer"]["degraded"] is True
+
+
+async def test_observation_basis_keeps_incomplete_source_fail_closed() -> None:
+    from app.pipeline import LAST_POLL
+
+    loader = FakeLoader(market_snapshots(age_s=400.0))
+    loader.last_fetch_complete["soccer"] = False
+    loader.last_fetch_completeness_reason["soccer"] = "1/6 match fetches failed"
+    deps = make_deps(RecordingSink(), loader)
+    deps.candidate_freshness_basis = "observation"
+
+    assert await run_value_pipeline(deps, "soccer") == []
+    poll = LAST_POLL["soccer"]
+    assert poll["source_complete"] is False
+    assert poll["degraded"] is True
+    assert poll["degradation_reasons"] == ["source_incomplete"]
 
 
 async def test_stale_age_gate_discards_are_counted_and_logged(
