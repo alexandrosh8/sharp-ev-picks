@@ -13,12 +13,13 @@ Invariants (kestrel-settlement discipline):
 import logging
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import httpx
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -339,6 +340,168 @@ def _selection_dedup_key(selection: str) -> str:
     return normalize_name(base) or base
 
 
+@dataclass(frozen=True, slots=True)
+class _SettlementCandidate:
+    """One score-aware open-pick row prepared for the settlement decision."""
+
+    pick: Pick
+    home_name: str
+    away_name: str
+    starts_at: datetime
+    external_ref: str
+    sport_key: str
+    sport_id: int
+    pair: frozenset[str] | None
+    score: FinalScore | None
+    tennis_game_line_set_score: bool
+
+
+_SETTLED_SIBLING_PREFETCH_CHUNK_SIZE = 1_000
+
+type _SettlementFingerprint = tuple[int, str, str | None, int, str, frozenset[str]]
+
+
+def _settlement_fingerprint(
+    *,
+    sport_id: int,
+    market: str,
+    market_detail: str | None,
+    model_version_id: int,
+    selection: str,
+    pair: frozenset[str],
+) -> _SettlementFingerprint:
+    return (
+        sport_id,
+        market,
+        market_detail,
+        model_version_id,
+        _selection_dedup_key(selection),
+        pair,
+    )
+
+
+async def _prefetch_settled_sibling_candidate_ids(
+    session: AsyncSession,
+    candidates: Sequence[_SettlementCandidate],
+) -> set[int]:
+    """Bulk hint for candidates that may already have a settled source twin.
+
+    One bounded settled-results query per candidate chunk replaces the old two
+    round trips per open pick. SQL constrains sport, kickoff range, market,
+    market_detail, and model; Python then applies the exact spelling-insensitive
+    selection and fixture fingerprints used by the authoritative check. No
+    candidate×settled SQL join is emitted, so query output grows with settled
+    rows rather than their Cartesian product with a large open backlog.
+
+    This is deliberately only a hint: every positive is rechecked while holding
+    the advisory lock before a status change, and every score-bearing automatic
+    settlement lock/rechecks independently of this snapshot. Chunking bounds
+    query parameters and in-memory maps for an unexpectedly large backlog.
+    """
+    eligible = [candidate for candidate in candidates if candidate.pair is not None]
+    possible: set[int] = set()
+    for offset in range(0, len(eligible), _SETTLED_SIBLING_PREFETCH_CHUNK_SIZE):
+        chunk = eligible[offset : offset + _SETTLED_SIBLING_PREFETCH_CHUNK_SIZE]
+        windows = [
+            (
+                candidate.starts_at - _dedup_tolerance(candidate.sport_key),
+                candidate.starts_at + _dedup_tolerance(candidate.sport_key),
+            )
+            for candidate in chunk
+        ]
+        market_details = {candidate.pick.market_detail for candidate in chunk}
+        non_null_details = sorted(detail for detail in market_details if detail is not None)
+        detail_predicates = []
+        if non_null_details:
+            detail_predicates.append(Pick.market_detail.in_(non_null_details))
+        if None in market_details:
+            detail_predicates.append(Pick.market_detail.is_(None))
+
+        home_t, away_t = aliased(Team), aliased(Team)
+        rows = (
+            await session.execute(
+                select(
+                    Pick.id,
+                    Pick.event_id,
+                    Event.sport_id,
+                    Pick.market,
+                    Pick.market_detail,
+                    Pick.model_version_id,
+                    Pick.selection,
+                    Event.starts_at,
+                    home_t.name,
+                    away_t.name,
+                )
+                .select_from(ResultTracking)
+                .join(Pick, ResultTracking.pick_id == Pick.id)
+                .join(Event, Pick.event_id == Event.id)
+                .join(home_t, Event.home_team_id == home_t.id)
+                .join(away_t, Event.away_team_id == away_t.id)
+                .where(
+                    Event.sport_id.in_(sorted({candidate.sport_id for candidate in chunk})),
+                    Event.starts_at.is_not(None),
+                    Event.starts_at >= min(window_start for window_start, _ in windows),
+                    Event.starts_at <= max(window_end for _, window_end in windows),
+                    Pick.market.in_(sorted({candidate.pick.market for candidate in chunk})),
+                    or_(*detail_predicates),
+                    Pick.model_version_id.in_(
+                        sorted({candidate.pick.model_version_id for candidate in chunk})
+                    ),
+                )
+            )
+        ).all()
+
+        settled_by_fingerprint: dict[_SettlementFingerprint, list[tuple[int, int, datetime]]] = {}
+        for (
+            sibling_pick_id,
+            sibling_event_id,
+            sibling_sport_id,
+            sibling_market,
+            sibling_market_detail,
+            sibling_model_version_id,
+            sibling_selection,
+            sibling_starts_at,
+            sibling_home,
+            sibling_away,
+        ) in rows:
+            sibling_pair = fixture_pair_key(sibling_home, sibling_away)
+            if sibling_pair is None:
+                continue
+            fingerprint = _settlement_fingerprint(
+                sport_id=sibling_sport_id,
+                market=sibling_market,
+                market_detail=sibling_market_detail,
+                model_version_id=sibling_model_version_id,
+                selection=sibling_selection,
+                pair=sibling_pair,
+            )
+            settled_by_fingerprint.setdefault(fingerprint, []).append(
+                (sibling_pick_id, sibling_event_id, sibling_starts_at)
+            )
+
+        for candidate in chunk:
+            assert candidate.pair is not None  # eligible partition invariant
+            fingerprint = _settlement_fingerprint(
+                sport_id=candidate.sport_id,
+                market=candidate.pick.market,
+                market_detail=candidate.pick.market_detail,
+                model_version_id=candidate.pick.model_version_id,
+                selection=candidate.pick.selection,
+                pair=candidate.pair,
+            )
+            tolerance = _dedup_tolerance(candidate.sport_key)
+            if any(
+                sibling_pick_id != candidate.pick.id
+                and sibling_event_id != candidate.pick.event_id
+                and abs(sibling_starts_at - candidate.starts_at) <= tolerance
+                for sibling_pick_id, sibling_event_id, sibling_starts_at in (
+                    settled_by_fingerprint.get(fingerprint, ())
+                )
+            ):
+                possible.add(candidate.pick.id)
+    return possible
+
+
 async def _settled_sibling_exists(
     session: AsyncSession,
     *,
@@ -441,6 +604,49 @@ async def _lock_settlement_instrument(
     )
 
 
+async def _supersede_if_settled_sibling(
+    session: AsyncSession, candidate: _SettlementCandidate
+) -> bool:
+    """Lock+authoritatively recheck one candidate; supersede only on proof."""
+    if candidate.pair is None:
+        return False
+    pick = candidate.pick
+    await _lock_settlement_instrument(
+        session,
+        sport_id=candidate.sport_id,
+        market=pick.market,
+        market_detail=pick.market_detail,
+        selection=pick.selection,
+        model_version_id=pick.model_version_id,
+        target_pair=candidate.pair,
+    )
+    if not await _settled_sibling_exists(
+        session,
+        pick_id=pick.id,
+        event_id=pick.event_id,
+        sport_id=candidate.sport_id,
+        starts_at=candidate.starts_at,
+        market=pick.market,
+        market_detail=pick.market_detail,
+        selection=pick.selection,
+        model_version_id=pick.model_version_id,
+        target_pair=candidate.pair,
+        sport_key=candidate.sport_key,
+    ):
+        return False
+    # Terminal duplicate: no result row, so it never enters pnl/ROI/CLV and
+    # never appears pending again.
+    pick.status = "superseded"
+    logger.info(
+        "settlement: superseded duplicate pick %d (%s %s) — a sibling of "
+        "the same fixture is already settled (cross-source event dedup)",
+        pick.id,
+        pick.market,
+        pick.selection,
+    )
+    return True
+
+
 async def settle_open_picks(
     session: AsyncSession,
     book: ScoreBook,
@@ -495,76 +701,80 @@ async def settle_open_picks(
         )
     ).all()
 
-    settled = 0
-    superseded = 0
+    # Resolve scores once, before deciding whether a row needs the expensive
+    # advisory-lock + authoritative sibling query. Rows with no score — and
+    # tennis game lines for which the available final is only a set score —
+    # cannot write P&L, so a negative bulk sibling snapshot safely skips both
+    # per-row round trips. A concurrently-settled twin is picked up next cycle;
+    # the manual path itself still lock/rechecks before writing any result.
+    candidates: list[_SettlementCandidate] = []
     for pick, home_name, away_name, starts_at, external_ref, sport_key, sport_id in rows:
         if starts_at > now - settle_delay_for(sport_key, delay):
             continue  # sport floor not reached — the game may still be in play
-        # DEDUP GUARD (runs BEFORE the score lookup): cross-source event dedup can
-        # mint this SAME bet on a second event row of one fixture.
-        # uq_result_tracking_pick is per pick_id, so both would settle and BOTH
-        # count into pnl/ROI/CLV. If an equivalent pick on a sibling event of the
-        # same fixture already settled, supersede this one — never write the
-        # phantom second result row. Placed BEFORE the score lookup so a duplicate
-        # whose OWN event never gets a matched score (an [In Running]-forked event
-        # the score book cannot match) is still closed, not left pending forever; a
-        # settled sibling already proves the fixture finished. Fail-safe (see
-        # DEDUP_FIXTURE_TOLERANCE): only supersedes a true duplicate.
-        pair = fixture_pair_key(home_name, away_name)
-        if pair is not None:
-            await _lock_settlement_instrument(
-                session,
-                sport_id=sport_id,
-                market=pick.market,
-                market_detail=pick.market_detail,
-                selection=pick.selection,
-                model_version_id=pick.model_version_id,
-                target_pair=pair,
-            )
-        if pair is not None and await _settled_sibling_exists(
-            session,
-            pick_id=pick.id,
-            event_id=pick.event_id,
-            sport_id=sport_id,
-            starts_at=starts_at,
-            market=pick.market,
-            market_detail=pick.market_detail,
-            selection=pick.selection,
-            model_version_id=pick.model_version_id,
-            target_pair=pair,
-            sport_key=sport_key,
-        ):
-            # Close the duplicate TERMINALLY as 'superseded' (the same status a
-            # strategy-version bump uses for a duplicate open row), NOT left
-            # 'alerted' — an alerted past-kickoff row lingers on the dashboard as
-            # a pending pick asking for a manual result even though its twin has
-            # already settled. 'superseded' writes NO result_tracking row, so it
-            # never enters pnl/ROI/CLV, and settle_open_picks (status=='alerted')
-            # never revisits it.
-            pick.status = "superseded"
-            superseded += 1
-            logger.info(
-                "settlement: superseded duplicate pick %d (%s %s) — a sibling of "
-                "the same fixture is already settled (cross-source event dedup)",
-                pick.id,
+        score = book.lookup(home_name, away_name, starts_at)
+        tennis_game_line_set_score = (
+            score is not None
+            and score.completion == "full"
+            and sport_key == "tennis"
+            and tennis_set_score_ungradeable(
                 pick.market,
                 pick.selection,
+                score.home_score,
+                score.away_score,
             )
+        )
+        candidates.append(
+            _SettlementCandidate(
+                pick=pick,
+                home_name=home_name,
+                away_name=away_name,
+                starts_at=starts_at,
+                external_ref=external_ref,
+                sport_key=sport_key,
+                sport_id=sport_id,
+                pair=fixture_pair_key(home_name, away_name),
+                score=score,
+                tennis_game_line_set_score=tennis_game_line_set_score,
+            )
+        )
+
+    gradeable = [
+        candidate
+        for candidate in candidates
+        if candidate.score is not None and not candidate.tennis_game_line_set_score
+    ]
+    deferred = [
+        candidate
+        for candidate in candidates
+        if candidate.score is None or candidate.tennis_game_line_set_score
+    ]
+
+    settled = 0
+    superseded = 0
+    tennis_manual_ids: list[int] = []
+
+    # Phase 1: every row capable of writing a result ALWAYS lock+rechecks,
+    # independent of any snapshot. Doing real work first also preserves the old
+    # same-pass behavior when only one cross-source twin has a matched score:
+    # its scoreless twin is visible to the deferred bulk snapshot below.
+    for candidate in gradeable:
+        pick = candidate.pick
+        score = candidate.score
+        assert score is not None  # gradeable partition invariant
+        if await _supersede_if_settled_sibling(session, candidate):
+            superseded += 1
             continue
-        score = book.lookup(home_name, away_name, starts_at)
-        if score is None:
-            continue  # close_pending — stays open, retried next cycle
         if await _settle_one(
             session,
             pick,
-            home_name,
-            away_name,
+            candidate.home_name,
+            candidate.away_name,
             score.home_score,
             score.away_score,
             now,
             completion=score.completion,
             winner_side=score.winner_side,
-            sport_key=sport_key,
+            sport_key=candidate.sport_key,
         ):
             settled += 1
             # Snapshot close AFTER the status flip, same transaction: the
@@ -576,14 +786,46 @@ async def settle_open_picks(
                 await finalize_closing_from_snapshots(
                     session,
                     pick,
-                    external_ref,
-                    starts_at,
+                    candidate.external_ref,
+                    candidate.starts_at,
                     devig_method,
                     use_pinnacle_archive=use_pinnacle_archive,
                     use_betfair_exchange=use_betfair_exchange,
                     sharp_close_echo_gate=sharp_close_echo_gate,
                     value_policy=value_policy,
                 )
+
+    # Make phase-1 result/status writes visible before taking the bulk snapshot.
+    # ResultTracking inserts execute immediately, but the explicit flush makes
+    # this sequencing invariant independent of future _settle_one internals.
+    if settled or superseded:
+        await session.flush()
+
+    # Phase 2: rows that cannot write automatic P&L only lock+exact-recheck when
+    # the bounded bulk hint found a possible settled sibling. A negative hint is
+    # safe: a concurrent manual settlement is discovered next cycle, while this
+    # row writes no result in the meantime.
+    possible_sibling_ids = await _prefetch_settled_sibling_candidate_ids(session, deferred)
+    for candidate in deferred:
+        pick = candidate.pick
+        if pick.id in possible_sibling_ids and await _supersede_if_settled_sibling(
+            session, candidate
+        ):
+            superseded += 1
+            continue
+        if candidate.tennis_game_line_set_score:
+            # The automatic caller aggregates these deterministic refusals.
+            # _settle_one retains its per-request guard/log for manual/direct
+            # callers, preserving the manual safety path.
+            tennis_manual_ids.append(pick.id)
+
+    if tennis_manual_ids:
+        logger.info(
+            "settlement refusal summary: reason=tennis_game_line_set_score "
+            "count=%d sample_pick_ids=%s — left open for manual settlement",
+            len(tennis_manual_ids),
+            sorted(tennis_manual_ids)[:3],
+        )
     if settled or superseded:
         await session.flush()  # status flips visible to the caller's transaction
         logger.info(

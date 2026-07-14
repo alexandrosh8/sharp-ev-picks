@@ -19,8 +19,9 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import delete, select, update
+from sqlalchemy import event as sa_event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
@@ -309,6 +310,93 @@ async def test_concurrent_sibling_settlement_serializes_to_one_result() -> None:
         await engine.dispose()
 
 
+async def test_scored_row_always_lock_rechecks_when_bulk_snapshot_is_empty(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gradeable score can write P&L, so the bulk hint can never bypass locking."""
+    await session.execute(
+        update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    pick = await seed_pick(session, "evt-score-always-recheck")
+    calls = {"prefetch": 0, "lock": 0, "recheck": 0}
+
+    async def empty_prefetch(*args: object, **kwargs: object) -> set[int]:
+        del args, kwargs
+        calls["prefetch"] += 1
+        return set()
+
+    async def tracked_lock(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        calls["lock"] += 1
+
+    async def tracked_recheck(*args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        calls["recheck"] += 1
+        return False
+
+    monkeypatch.setattr(
+        "app.settlement.engine._prefetch_settled_sibling_candidate_ids", empty_prefetch
+    )
+    monkeypatch.setattr("app.settlement.engine._lock_settlement_instrument", tracked_lock)
+    monkeypatch.setattr("app.settlement.engine._settled_sibling_exists", tracked_recheck)
+
+    assert await settle_open_picks(session, book_with_score(), NOW) == 1
+    assert calls == {"prefetch": 1, "lock": 1, "recheck": 1}
+    assert len(await _result_rows(session, pick.id)) == 1
+
+
+async def test_prefetched_siblings_cross_chunk_boundary_still_supersede(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every bounded fingerprint chunk returns positive hints; no tail is dropped."""
+    await session.execute(
+        update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    duplicates: list[Pick] = []
+    for index in range(3):
+        canonical = await seed_pick(
+            session,
+            f"evt-chunk-canonical-{index}",
+            home=f"Chunk Home {index}",
+            away=f"Chunk Away {index}",
+        )
+        await _mark_settled(session, canonical)
+        duplicates.append(
+            await _insert_dup_pick(session, canonical, f"evt-chunk-duplicate-{index}")
+        )
+
+    monkeypatch.setattr("app.settlement.engine._SETTLED_SIBLING_PREFETCH_CHUNK_SIZE", 2)
+    statements: list[str] = []
+
+    def count_statement(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del connection, cursor, parameters, context, executemany
+        statements.append(statement)
+
+    connection = await session.connection()
+    sa_event.listen(connection.sync_connection, "before_cursor_execute", count_statement)
+    try:
+        no_fixture_score = ScoreBook(
+            [FinalScore("Unrelated Home", "Unrelated Away", KICKOFF.date(), 1, 0)]
+        )
+        assert await settle_open_picks(session, no_fixture_score, NOW) == 0
+    finally:
+        sa_event.remove(connection.sync_connection, "before_cursor_execute", count_statement)
+
+    assert sum("FROM result_tracking JOIN picks" in statement for statement in statements) == 2
+    assert sum("pg_advisory_xact_lock" in statement for statement in statements) == 3
+    for duplicate in duplicates:
+        await session.refresh(duplicate)
+        assert duplicate.status == "superseded"
+        assert len(await _result_rows(session, duplicate.id)) == 0
+
+
 async def test_duplicate_skipped_across_settlement_cycles(session) -> None:  # type: ignore[no-untyped-def]
     """The already-settled sibling can come from a PRIOR cycle: settle p1, then a
     duplicate p2 alerts — p2 must be skipped, not double-settled."""
@@ -393,6 +481,31 @@ async def test_duplicate_superseded_even_without_own_score(session) -> None:  # 
     assert n == 0  # clean already settled; dup has no own score to settle from
     await session.refresh(dup)
     assert dup.status == "superseded", "duplicate must supersede without its own score"
+
+
+async def test_scored_twin_supersedes_scoreless_twin_in_same_pass(session) -> None:  # type: ignore[no-untyped-def]
+    """Phase 1 must settle before the deferred bulk snapshot is taken."""
+    clean = await seed_pick(session, "evt-one-score-clean")
+    fork = await _insert_dup_pick(
+        session,
+        clean,
+        "evt-one-score-fork",
+        away_name=f"{AWAY} [In Running]",
+    )
+    final = FinalScore(HOME, AWAY, KICKOFF.date(), 2, 1)
+
+    class CanonicalOnlyScoreBook(ScoreBook):
+        def lookup(self, home: str, away: str, kickoff_utc: datetime) -> FinalScore | None:
+            if (home, away) != (HOME, AWAY):
+                return None
+            return super().lookup(home, away, kickoff_utc)
+
+    assert await settle_open_picks(session, CanonicalOnlyScoreBook([final]), NOW) == 1
+    await session.refresh(clean)
+    await session.refresh(fork)
+    assert clean.status == "settled"
+    assert fork.status == "superseded"
+    assert len(await _result_rows(session, clean.id, fork.id)) == 1
 
 
 async def test_distinct_fixtures_both_settle(session) -> None:  # type: ignore[no-untyped-def]
