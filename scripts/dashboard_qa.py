@@ -174,7 +174,7 @@ async def _mocked_regressions(
     report: list[str],
     hard_failures: list[str],
 ) -> None:
-    state = {"premium_failure": False, "health_mode": "normal"}
+    state = {"premium_failure": False, "health_mode": "normal", "slow_core": False}
     premium = [_pick(index) for index in range(1, 11)]
     performance = {
         "n_sharp_close": 0,
@@ -182,6 +182,33 @@ async def _mocked_regressions(
         "sharp_status": "insufficient",
         "roi_status": "insufficient",
         "by_sport": {},
+    }
+    long_evidence_id = "ultra_long_unbroken_source_evidence_identifier_" * 4
+    promotion = {
+        "ok_n": 30,
+        "cells": [
+            {
+                "sport": long_evidence_id,
+                "market": long_evidence_id,
+                "n_trusted": 4,
+                "status": "accruing",
+                "est_days_to_threshold": 42,
+                "mean_clv_log": None,
+            }
+        ],
+        "promotion_readiness": {
+            "needed_n": 50,
+            "cells": [
+                {
+                    "sport": long_evidence_id,
+                    "market": long_evidence_id,
+                    "n_trusted": 4,
+                    "ci_low_gt_zero": None,
+                    "coverage_pct": 8,
+                    "ready": False,
+                }
+            ],
+        },
     }
 
     async def json_response(route: Route, payload: Any, status: int = 200) -> None:
@@ -195,6 +222,8 @@ async def _mocked_regressions(
         parsed = urlparse(route.request.url)
         path = parsed.path
         query = parse_qs(parsed.query)
+        if state["slow_core"] and path in {"/picks", "/games", "/performance", "/health"}:
+            await asyncio.sleep(0.35)
         if path == "/":
             await route.fulfill(status=200, body=dashboard_html, content_type="text/html")
         elif path == "/picks":
@@ -210,6 +239,8 @@ async def _mocked_regressions(
         elif path == "/health":
             status, payload = _health(str(state["health_mode"]))
             await json_response(route, payload, status=status)
+        elif path == "/lab/promotion-distance":
+            await json_response(route, promotion)
         elif path.startswith("/events/") and path.endswith("/result"):
             await json_response(route, {"settled": 2, "skipped": 0})
         elif path == "/sw.js":
@@ -223,6 +254,16 @@ async def _mocked_regressions(
         viewport={"width": 1440, "height": 900},
         accept_downloads=True,
         service_workers="block",
+    )
+    await context.add_init_script(
+        """
+        window.__initialCls = 0;
+        new PerformanceObserver((entries) => {
+          for (const entry of entries.getEntries()) {
+            if (!entry.hadRecentInput) window.__initialCls += entry.value;
+          }
+        }).observe({type: 'layout-shift', buffered: true});
+        """
     )
     await context.route(f"{MOCK_ORIGIN}/**", handler)
     page: Page = await context.new_page()
@@ -382,6 +423,71 @@ async def _mocked_regressions(
         assert logout_height >= 44
 
         await page.screenshot(path=str(OUT / "mocked_regressions.png"), full_page=True)
+
+        stage = "responsive-runtime"
+        state["slow_core"] = True
+        responsive_errors: list[str] = []
+        responsive_results: list[str] = []
+        for width, height in ((390, 844), (768, 1024)):
+            responsive_page = await context.new_page()
+            responsive_page.on(
+                "pageerror",
+                lambda error: responsive_errors.append(str(error)),
+            )
+            await responsive_page.set_viewport_size({"width": width, "height": height})
+            await responsive_page.goto(MOCK_ORIGIN, wait_until="networkidle", timeout=30000)
+            await responsive_page.wait_for_timeout(500)
+            initial_cls = float(await responsive_page.evaluate("window.__initialCls"))
+            document_width = int(
+                await responsive_page.evaluate(
+                    "Math.max(document.body.scrollWidth, document.documentElement.scrollWidth)"
+                )
+            )
+            assert initial_cls < 0.1, f"{width}px initial CLS was {initial_cls:.4f}"
+            assert document_width <= width, f"{width}px Today widened to {document_width}px"
+
+            await responsive_page.locator("#system-pill").click()
+            await responsive_page.locator("#system-popover").wait_for(state="visible")
+            await responsive_page.wait_for_timeout(50)
+            assert (
+                await responsive_page.evaluate(
+                    "document.activeElement && document.activeElement.id"
+                )
+                == "system-popover"
+            )
+            await responsive_page.keyboard.press("Escape")
+            await responsive_page.locator("#system-popover").wait_for(state="hidden")
+            await responsive_page.wait_for_timeout(50)
+            assert (
+                await responsive_page.evaluate(
+                    "document.activeElement && document.activeElement.id"
+                )
+                == "system-pill"
+            )
+
+            await responsive_page.locator('[data-testid="dock-nav-lab"]').click()
+            await responsive_page.locator("#promo-distance .kickoff-row").first.wait_for(
+                state="visible", timeout=10000
+            )
+            document_width = int(
+                await responsive_page.evaluate(
+                    "Math.max(document.body.scrollWidth, document.documentElement.scrollWidth)"
+                )
+            )
+            assert document_width <= width, f"{width}px Lab widened to {document_width}px"
+            await responsive_page.screenshot(
+                path=str(OUT / f"mocked_responsive_{width}.png"), full_page=True
+            )
+
+            await responsive_page.locator('[data-testid="dock-nav-edges"]').click()
+            assert await responsive_page.locator("#edge-list").get_attribute("role") is None
+            assert await responsive_page.locator('#edge-list [role="listitem"]').count() == 0
+            responsive_results.append(f"{width}px CLS={initial_cls:.4f} width={document_width}px")
+            await responsive_page.close()
+        state["slow_core"] = False
+        assert not responsive_errors, f"responsive page errors: {responsive_errors}"
+        report.append("mocked_responsive: PASS (" + "; ".join(responsive_results) + ")")
+
         if page_errors:
             raise AssertionError(f"mock page errors: {page_errors}")
         unexpected_console = [

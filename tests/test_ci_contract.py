@@ -8,6 +8,7 @@ CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 PYPROJECT = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+ENTRYPOINT = (ROOT / "scripts" / "docker_entrypoint.sh").read_text(encoding="utf-8")
 LOCK = (ROOT / "uv.lock").read_text(encoding="utf-8")
 SECCOMP = json.loads((ROOT / "docker" / "seccomp_profile.json").read_text(encoding="utf-8"))
 
@@ -71,6 +72,7 @@ def test_container_runtime_is_immutable_and_unprivileged() -> None:
         "tmpfs:",
     ):
         assert contract in COMPOSE
+    assert "--no-server-header" in ENTRYPOINT
 
 
 def test_compose_requires_an_explicit_postgres_password() -> None:

@@ -19,7 +19,10 @@ DEFAULT_SECURITY_HEADERS: Mapping[str, str] = {
     "Strict-Transport-Security": "max-age=31536000",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
+    "X-Robots-Tag": "noindex, nofollow, noarchive",
 }
+
+_PRIVATE_NO_STORE = "private, no-store"
 
 
 class SecurityHeadersMiddleware:
@@ -45,6 +48,15 @@ class SecurityHeadersMiddleware:
                     # This is an application invariant, not a route default: a
                     # handler must not accidentally weaken the global policy.
                     headers[name] = value
+                # Authenticated picks/performance/bankroll responses must never
+                # enter browser or intermediary caches. Preserve an explicit
+                # revalidation policy (the public manifest/service worker use
+                # ``no-cache``), but make absent or route-level bare ``no-store``
+                # policies private and legacy-proxy compatible.
+                cache_control = headers.get("Cache-Control")
+                if cache_control is None or cache_control.strip().casefold() == "no-store":
+                    headers["Cache-Control"] = _PRIVATE_NO_STORE
+                    headers["Pragma"] = "no-cache"
             await send(message)
 
         await self._app(scope, receive, send_with_headers)

@@ -379,6 +379,7 @@
         transition: background-color 0.15s ease-out;
       }
       .stat:hover { background: var(--panel2); }
+      .stat-loading > * { visibility: hidden; }
       .stat.primary {
         background: linear-gradient(180deg, var(--cyan-dim), var(--panel) 85%);
         box-shadow: inset 0 2px 0 var(--cyan);
@@ -413,6 +414,12 @@
         margin-bottom: 22px;
       }
       .today-board { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); }
+      /* The first core fetch hydrates several independently-sized panels at
+         once. Keep the unhydrated panel chrome out of the paint tree so it
+         cannot be counted as content that shifts out of the viewport. */
+      #view-today[aria-busy="true"] > .today-board,
+      #view-today[aria-busy="true"] > .panel.solo,
+      #view-today[aria-busy="true"] > .desk-foot { visibility: hidden; }
       /* Fix 2026-07-10 #26: the two Today columns flow independently — the
          board's own hairline chrome moves onto each column so a shorter
          column never leaves a dead slab where grid rows used to height-match. */
@@ -1074,11 +1081,21 @@
         .lab-board .panel { grid-column: 1 / -1 !important; }
         .health-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .viewbar { flex-direction: column; align-items: flex-start; }
-        .desk-ticker { margin-left: 0; }
+        .desk-ticker { margin-left: 0; min-height: 22px; }
+        /* Tablet Lab rows use a single bounded track just like mobile. Long
+           evidence/source identifiers must wrap rather than size the page. */
+        .lab-board .kickoff-row { grid-template-columns: minmax(0, 1fr); }
+        .lab-board .kickoff-row .kr-t {
+          min-width: 0;
+          white-space: normal;
+          overflow-wrap: anywhere;
+        }
       }
       @media (max-width: 760px) {
         body { font-size: 13.5px; }
         .signal-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .signal-board .stat { min-height: 84px; }
+        .desk-ticker { min-height: 46px; }
         .edge-tools { flex-wrap: wrap; }
         .edge-tools input[type="search"] { flex: 1 1 100%; }
         .edge-tools select { flex: 1; }

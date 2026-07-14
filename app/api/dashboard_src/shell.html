@@ -172,7 +172,7 @@
           <button id="logout-btn" class="icon-btn" type="button" aria-label="Log out" title="Log out" data-testid="logout-button">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
           </button>
-          <div id="system-popover" class="popover" role="dialog" aria-label="System status detail" hidden>
+          <div id="system-popover" class="popover" role="dialog" aria-label="System status detail" tabindex="-1" hidden>
             <div class="metric-list" id="popover-body"></div>
           </div>
         </header>
@@ -184,12 +184,21 @@
           </div>
 
           <!-- ================= TODAY — the control room ==================== -->
-          <section class="view" id="view-today" data-view-key="today" data-testid="view-today">
+          <section class="view" id="view-today" data-view-key="today" aria-busy="true" data-testid="view-today">
             <div class="viewbar">
               <div class="view-h"><h2>Today</h2><span class="eyebrow" id="today-asof"></span></div>
               <div class="desk-ticker" id="desk-ticker" role="status" aria-live="polite" aria-label="Desk vitals"></div>
             </div>
-            <div class="signal-board" id="today-stats" data-testid="today-kpi-board"></div>
+            <div class="signal-board" id="today-stats" aria-busy="true" data-testid="today-kpi-board">
+              <!-- Reserve the hydrated six-cell footprint to prevent a severe
+                   mobile/tablet layout shift while the initial APIs load. -->
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+            </div>
             <!-- Fix 2026-07-10 #26: two INDEPENDENT columns — each panel
                  sizes to its own content; no cross-column row height coupling. -->
             <div class="board today-board">
@@ -258,7 +267,7 @@
               </select>
               <button id="eq-export" type="button" class="eq-export" aria-label="Export the current edges view to CSV" data-testid="edges-export">⤓ CSV</button>
             </div>
-            <div id="edge-list" role="list" aria-label="Edges" data-testid="edges-list"></div>
+            <div id="edge-list" data-testid="edges-list"></div>
             <div class="edge-backdrop" id="edge-backdrop" data-testid="edge-detail-backdrop" hidden></div>
             <div class="edge-detail" id="edge-detail" role="dialog" aria-modal="true" aria-labelledby="edge-detail-title" aria-hidden="true" tabindex="-1" data-testid="edge-detail-drawer">
               <div class="edge-detail-head">

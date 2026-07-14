@@ -233,6 +233,27 @@ def test_accessibility_markers() -> None:
     assert 'role="alert"' in text
     assert ":focus-visible" in text
     assert "@media (prefers-reduced-motion: reduce)" in text
+    assert 'id="edge-list" role="list"' not in text
+    assert 'setAttribute("role", "listitem")' not in text
+    assert 'id="system-popover" class="popover" role="dialog"' in text
+    assert 'tabindex="-1" hidden' in text
+    assert 'ev.key === "Escape" && !$("system-popover").hidden' in text
+
+
+def test_initial_kpi_skeleton_reserves_hydrated_layout() -> None:
+    text = _text()
+    assert 'id="view-today" data-view-key="today" aria-busy="true"' in text
+    assert 'id="today-stats" aria-busy="true"' in text
+    assert text.count('class="stat stat-loading"') == 6
+    assert 'stripBox.setAttribute("aria-busy", "false")' in text
+    assert '$("view-today").setAttribute("aria-busy", "false")' in text
+    assert ".stat-loading > * { visibility: hidden; }" in text
+
+
+def test_mobile_lab_rows_wrap_without_document_overflow() -> None:
+    text = _text()
+    assert ".lab-board .kickoff-row { grid-template-columns: minmax(0, 1fr); }" in text
+    assert ".lab-board .kickoff-row .kr-t" in text
 
 
 def test_mobile_breakpoints_and_dock_touch_targets() -> None:

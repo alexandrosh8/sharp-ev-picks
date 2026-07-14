@@ -417,6 +417,7 @@
         transition: background-color 0.15s ease-out;
       }
       .stat:hover { background: var(--panel2); }
+      .stat-loading > * { visibility: hidden; }
       .stat.primary {
         background: linear-gradient(180deg, var(--cyan-dim), var(--panel) 85%);
         box-shadow: inset 0 2px 0 var(--cyan);
@@ -451,6 +452,12 @@
         margin-bottom: 22px;
       }
       .today-board { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); }
+      /* The first core fetch hydrates several independently-sized panels at
+         once. Keep the unhydrated panel chrome out of the paint tree so it
+         cannot be counted as content that shifts out of the viewport. */
+      #view-today[aria-busy="true"] > .today-board,
+      #view-today[aria-busy="true"] > .panel.solo,
+      #view-today[aria-busy="true"] > .desk-foot { visibility: hidden; }
       /* Fix 2026-07-10 #26: the two Today columns flow independently — the
          board's own hairline chrome moves onto each column so a shorter
          column never leaves a dead slab where grid rows used to height-match. */
@@ -1112,11 +1119,21 @@
         .lab-board .panel { grid-column: 1 / -1 !important; }
         .health-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .viewbar { flex-direction: column; align-items: flex-start; }
-        .desk-ticker { margin-left: 0; }
+        .desk-ticker { margin-left: 0; min-height: 22px; }
+        /* Tablet Lab rows use a single bounded track just like mobile. Long
+           evidence/source identifiers must wrap rather than size the page. */
+        .lab-board .kickoff-row { grid-template-columns: minmax(0, 1fr); }
+        .lab-board .kickoff-row .kr-t {
+          min-width: 0;
+          white-space: normal;
+          overflow-wrap: anywhere;
+        }
       }
       @media (max-width: 760px) {
         body { font-size: 13.5px; }
         .signal-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .signal-board .stat { min-height: 84px; }
+        .desk-ticker { min-height: 46px; }
         .edge-tools { flex-wrap: wrap; }
         .edge-tools input[type="search"] { flex: 1 1 100%; }
         .edge-tools select { flex: 1; }
@@ -1354,7 +1371,7 @@
           <button id="logout-btn" class="icon-btn" type="button" aria-label="Log out" title="Log out" data-testid="logout-button">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
           </button>
-          <div id="system-popover" class="popover" role="dialog" aria-label="System status detail" hidden>
+          <div id="system-popover" class="popover" role="dialog" aria-label="System status detail" tabindex="-1" hidden>
             <div class="metric-list" id="popover-body"></div>
           </div>
         </header>
@@ -1366,12 +1383,21 @@
           </div>
 
           <!-- ================= TODAY — the control room ==================== -->
-          <section class="view" id="view-today" data-view-key="today" data-testid="view-today">
+          <section class="view" id="view-today" data-view-key="today" aria-busy="true" data-testid="view-today">
             <div class="viewbar">
               <div class="view-h"><h2>Today</h2><span class="eyebrow" id="today-asof"></span></div>
               <div class="desk-ticker" id="desk-ticker" role="status" aria-live="polite" aria-label="Desk vitals"></div>
             </div>
-            <div class="signal-board" id="today-stats" data-testid="today-kpi-board"></div>
+            <div class="signal-board" id="today-stats" aria-busy="true" data-testid="today-kpi-board">
+              <!-- Reserve the hydrated six-cell footprint to prevent a severe
+                   mobile/tablet layout shift while the initial APIs load. -->
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+              <div class="stat stat-loading" aria-hidden="true"><div class="sv">&nbsp;</div><div class="sk">&nbsp;</div></div>
+            </div>
             <!-- Fix 2026-07-10 #26: two INDEPENDENT columns — each panel
                  sizes to its own content; no cross-column row height coupling. -->
             <div class="board today-board">
@@ -1440,7 +1466,7 @@
               </select>
               <button id="eq-export" type="button" class="eq-export" aria-label="Export the current edges view to CSV" data-testid="edges-export">⤓ CSV</button>
             </div>
-            <div id="edge-list" role="list" aria-label="Edges" data-testid="edges-list"></div>
+            <div id="edge-list" data-testid="edges-list"></div>
             <div class="edge-backdrop" id="edge-backdrop" data-testid="edge-detail-backdrop" hidden></div>
             <div class="edge-detail" id="edge-detail" role="dialog" aria-modal="true" aria-labelledby="edge-detail-title" aria-hidden="true" tabindex="-1" data-testid="edge-detail-drawer">
               <div class="edge-detail-head">
@@ -2778,16 +2804,26 @@
           const pool = health && health.proxy_pool;
           row("Proxy verdict", pool ? fmt(pool.verdict) : "—");
         }
-        $("system-pill").addEventListener("click", () => {
-          const pop = $("system-popover");
-          const open = pop.hidden;
+        function setSystemPopover(open, restoreFocus) {
+          const pop = $("system-popover"), pill = $("system-pill");
           pop.hidden = !open;
-          $("system-pill").setAttribute("aria-expanded", String(open));
+          pill.setAttribute("aria-expanded", String(open));
+          if (open) requestAnimationFrame(() => pop.focus({ preventScroll: true }));
+          else if (restoreFocus) requestAnimationFrame(() => pill.focus({ preventScroll: true }));
+        }
+        $("system-pill").addEventListener("click", () => {
+          setSystemPopover($("system-popover").hidden, false);
         });
         document.addEventListener("click", (ev) => {
           const pop = $("system-popover"), pill = $("system-pill");
           if (!pop.hidden && !pop.contains(ev.target) && !pill.contains(ev.target)) {
-            pop.hidden = true; pill.setAttribute("aria-expanded", "false");
+            setSystemPopover(false, false);
+          }
+        });
+        document.addEventListener("keydown", (ev) => {
+          if (ev.key === "Escape" && !$("system-popover").hidden) {
+            ev.preventDefault();
+            setSystemPopover(false, true);
           }
         });
         $("logout-btn").addEventListener("click", () => {
@@ -3008,6 +3044,7 @@
             ? fmtRelAge(new Date(Date.now() - Number(health.newest_poll_age_seconds) * 1000).toISOString())
             : "—";
           const stripBox = $("today-stats"); stripBox.replaceChildren();
+          stripBox.setAttribute("aria-busy", "false");
           const mkStat = (val, label, cls, primary) => {
             const c = document.createElement("div"); c.className = "stat" + (primary ? " primary" : "");
             const v = document.createElement("div"); v.className = "sv" + (cls ? " " + cls : ""); v.textContent = val;
@@ -3079,6 +3116,7 @@
           foot.append(safe, sep(), fMeta("feed", feedName), sep(),
             fMeta("window", fmtNum(verifiedWindowMs(health) / 60000, 0) + "m"), sep(),
             fMeta("data age", ageTxt));
+          $("view-today").setAttribute("aria-busy", "false");
         }
 
         // ===== EDGES — list ====================================================
@@ -3138,7 +3176,7 @@
         }
         function edgeRowEl(p, health) {
           const row = document.createElement("button");
-          row.type = "button"; row.className = "edge-row " + (tierOf(p) === "volume" ? "tier-shadow" : "tier-premium"); row.setAttribute("role", "listitem");
+          row.type = "button"; row.className = "edge-row " + (tierOf(p) === "volume" ? "tier-shadow" : "tier-premium");
           row.dataset.id = String(p.id);
           row.dataset.focusKey = "pick-" + String(p.id);
           if (String(p.id) === String(selectedId)) row.classList.add("active");

@@ -1030,16 +1030,26 @@
           const pool = health && health.proxy_pool;
           row("Proxy verdict", pool ? fmt(pool.verdict) : "—");
         }
-        $("system-pill").addEventListener("click", () => {
-          const pop = $("system-popover");
-          const open = pop.hidden;
+        function setSystemPopover(open, restoreFocus) {
+          const pop = $("system-popover"), pill = $("system-pill");
           pop.hidden = !open;
-          $("system-pill").setAttribute("aria-expanded", String(open));
+          pill.setAttribute("aria-expanded", String(open));
+          if (open) requestAnimationFrame(() => pop.focus({ preventScroll: true }));
+          else if (restoreFocus) requestAnimationFrame(() => pill.focus({ preventScroll: true }));
+        }
+        $("system-pill").addEventListener("click", () => {
+          setSystemPopover($("system-popover").hidden, false);
         });
         document.addEventListener("click", (ev) => {
           const pop = $("system-popover"), pill = $("system-pill");
           if (!pop.hidden && !pop.contains(ev.target) && !pill.contains(ev.target)) {
-            pop.hidden = true; pill.setAttribute("aria-expanded", "false");
+            setSystemPopover(false, false);
+          }
+        });
+        document.addEventListener("keydown", (ev) => {
+          if (ev.key === "Escape" && !$("system-popover").hidden) {
+            ev.preventDefault();
+            setSystemPopover(false, true);
           }
         });
         $("logout-btn").addEventListener("click", () => {
@@ -1260,6 +1270,7 @@
             ? fmtRelAge(new Date(Date.now() - Number(health.newest_poll_age_seconds) * 1000).toISOString())
             : "—";
           const stripBox = $("today-stats"); stripBox.replaceChildren();
+          stripBox.setAttribute("aria-busy", "false");
           const mkStat = (val, label, cls, primary) => {
             const c = document.createElement("div"); c.className = "stat" + (primary ? " primary" : "");
             const v = document.createElement("div"); v.className = "sv" + (cls ? " " + cls : ""); v.textContent = val;
@@ -1331,6 +1342,7 @@
           foot.append(safe, sep(), fMeta("feed", feedName), sep(),
             fMeta("window", fmtNum(verifiedWindowMs(health) / 60000, 0) + "m"), sep(),
             fMeta("data age", ageTxt));
+          $("view-today").setAttribute("aria-busy", "false");
         }
 
         // ===== EDGES — list ====================================================
@@ -1390,7 +1402,7 @@
         }
         function edgeRowEl(p, health) {
           const row = document.createElement("button");
-          row.type = "button"; row.className = "edge-row " + (tierOf(p) === "volume" ? "tier-shadow" : "tier-premium"); row.setAttribute("role", "listitem");
+          row.type = "button"; row.className = "edge-row " + (tierOf(p) === "volume" ? "tier-shadow" : "tier-premium");
           row.dataset.id = String(p.id);
           row.dataset.focusKey = "pick-" + String(p.id);
           if (String(p.id) === String(selectedId)) row.classList.add("active");

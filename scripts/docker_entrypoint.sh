@@ -32,4 +32,7 @@ until "$VENV/bin/alembic" upgrade head; do
 done
 
 echo "[entrypoint] migrations at head — starting uvicorn"
-exec "$VENV/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+exec "$VENV/bin/python" -m uvicorn app.main:app \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --no-server-header

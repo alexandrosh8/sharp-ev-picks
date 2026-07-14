@@ -25,6 +25,14 @@ def _middleware_app() -> FastAPI:
     async def large() -> PlainTextResponse:
         return PlainTextResponse("x" * 8192, headers={"X-Frame-Options": "SAMEORIGIN"})
 
+    @app.get("/revalidate")
+    async def revalidate() -> PlainTextResponse:
+        return PlainTextResponse("manifest", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/no-store")
+    async def no_store() -> PlainTextResponse:
+        return PlainTextResponse("dashboard", headers={"Cache-Control": "no-store"})
+
     return app
 
 
@@ -52,6 +60,27 @@ def test_large_responses_are_compressed_and_hardened() -> None:
         assert response.headers[name] == expected
     assert response.headers["strict-transport-security"] == "max-age=31536000"
     assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow, noarchive"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
+
+
+def test_explicit_revalidation_cache_policy_is_preserved() -> None:
+    with TestClient(_middleware_app()) as client:
+        response = client.get("/revalidate")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+    assert "pragma" not in response.headers
+
+
+def test_bare_no_store_policy_is_made_private_and_proxy_safe() -> None:
+    with TestClient(_middleware_app()) as client:
+        response = client.get("/no-store")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
 
 
 def test_application_installs_all_http_middlewares() -> None:
