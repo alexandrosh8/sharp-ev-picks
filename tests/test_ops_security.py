@@ -389,3 +389,18 @@ def test_setup_is_disabled_in_production_even_on_loopback(monkeypatch) -> None: 
         ).status_code
         == 404
     )
+
+
+def test_health_exposes_freshness_to_anonymous_when_auth_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The dashboard's "are picks current?" check needs freshness metadata. Exposing
+    # it publicly stops an anonymous / expired-session fetch from fail-closing to a
+    # FALSE "odds data is stale" banner — while sensitive detail stays hidden.
+    settings = _auth_enabled_settings()
+    set_active_credentials("admin", "not-a-real-hash", _SESSION_SECRET)
+    app = _make_app(monkeypatch, settings)
+    body = TestClient(app, client=_LOOPBACK).get("/health").json()
+    assert "has_completed_poll" in body
+    assert "newest_poll_age_seconds" in body
+    assert "max_odds_age_seconds" in body
+    for key in _DETAIL_KEYS:  # sensitive detail still never leaks
+        assert key not in body

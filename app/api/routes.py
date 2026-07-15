@@ -713,7 +713,20 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
     # dashboard auth is disabled (local dev keeps the full payload) and False
     # for anonymous visitors once auth is enabled (public Traefik exposure).
     if not is_authenticated(request):
-        return {"status": status, "mode": "picks-only"}
+        # Freshness metadata is NOT sensitive (no poll internals / URLs / edge
+        # floors): it is exactly what the dashboard's "are picks current?" check
+        # needs. Without it, an anonymous / expired-session /health fetch made the
+        # dashboard fail-closed to a FALSE "odds data is stale" banner even when
+        # the backend is healthy and freshly polled. The sensitive DETAIL below
+        # (polls, upstream, quarantine, proxy pool, edge floors) stays gated.
+        return {
+            "status": status,
+            "mode": "picks-only",
+            "newest_poll_age_seconds": newest_age,
+            "poll_max_age_seconds": poll_max_age,
+            "max_odds_age_seconds": settings.max_odds_age_seconds,
+            "has_completed_poll": newest_age is not None,
+        }
     return {
         "status": status,
         "mode": "picks-only",

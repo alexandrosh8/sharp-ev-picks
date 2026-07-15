@@ -427,7 +427,13 @@
           if (!health || health.newest_poll_age_seconds === null ||
               typeof health.newest_poll_age_seconds !== "number" ||
               !Number.isFinite(health.newest_poll_age_seconds) ||
-              health.newest_poll_age_seconds < 0 || !isRecord(health.polls)) return false;
+              health.newest_poll_age_seconds < 0) return false;
+          // The public (redacted, unauthenticated) /health payload carries no
+          // per-poll `polls` detail but reports has_completed_poll — a valid
+          // completed cycle exists. Trust it so an anonymous / expired-session
+          // fetch does not fail-closed to a false "odds data is stale" banner.
+          if (health.has_completed_poll === true) return true;
+          if (!isRecord(health.polls)) return false;
           return Object.values(health.polls).some((poll) => {
             const finishedAt = isRecord(poll) ? timestampMs(poll.finished_at) : NaN;
             return Number.isFinite(finishedAt) && finishedAt <= Date.now();
