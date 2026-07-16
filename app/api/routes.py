@@ -1127,6 +1127,10 @@ _MATCH_RATE_CACHE_TTL_S = 60.0
 _MATCH_RATE_INFLIGHT: dict[int | None, asyncio.Task[dict[str, Any]]] = {}
 
 
+class _MatchRateComputeError(RuntimeError):
+    """Sanitized detached-compute failure: message is the original type name only."""
+
+
 async def _compute_resolution_match_rate(
     request: Request,
     session: AsyncSession | None,
@@ -1278,7 +1282,17 @@ async def resolution_match_rate(
 
     task = _MATCH_RATE_INFLIGHT.get(days)
     if task is None:
-        task = asyncio.create_task(_compute_resolution_match_rate(request, None, days))
+
+        async def _detached_compute() -> dict[str, Any]:
+            try:
+                return await _compute_resolution_match_rate(request, None, days)
+            except Exception as exc:
+                # asyncio itself logs this task's exception (shield's
+                # cancelled-waiter path), so the exception object must never
+                # carry query/credential text — keep only the type name.
+                raise _MatchRateComputeError(type(exc).__name__) from None
+
+        task = asyncio.create_task(_detached_compute())
         _MATCH_RATE_INFLIGHT[days] = task
 
         def _finalize(done: asyncio.Task[dict[str, Any]]) -> None:
@@ -1292,9 +1306,11 @@ async def resolution_match_rate(
             except Exception as exc:
                 # Retrieve every detached-task exception (request cancellation
                 # may leave no waiter) without logging query/credential text.
+                # _MatchRateComputeError's message is the sanitized original
+                # exception type name.
                 logger.error(
                     "resolution match-rate background compute failed: %s",
-                    type(exc).__name__,
+                    str(exc) if isinstance(exc, _MatchRateComputeError) else type(exc).__name__,
                 )
                 return
             # The originating request may have disconnected while the shared
