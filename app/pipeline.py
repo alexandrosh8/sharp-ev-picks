@@ -160,6 +160,15 @@ def _sweep_odds_seen(cache: OddsSeenCache, now: datetime, max_size: int = ODDS_S
             del cache[key]
 
 
+# Failed-fetch fraction above which an incomplete cycle is treated as a stale
+# slate: /health degrades AND the pick pipelines withhold minting. At or below
+# it (OddsChecker's expected few-% match-page timeouts) the cycle is partial
+# coverage — health stays green and picks mint from the matches that DID fetch.
+# Health and minting must share one threshold: a split lets a permanently
+# partial source read healthy while silently minting zero picks.
+INCOMPLETE_FETCH_RATIO_WARN = 0.5
+
+
 def _record_poll(
     sport_key: str,
     snapshots: Sequence[OddsSnapshotIn],
@@ -174,7 +183,7 @@ def _record_poll(
     source_complete: bool = True,
     completeness_reason: str | None = None,
     incomplete_fetch_ratio: float = 1.0,
-    incomplete_fetch_ratio_warn: float = 0.5,
+    incomplete_fetch_ratio_warn: float = INCOMPLETE_FETCH_RATIO_WARN,
 ) -> None:
     timestamp = datetime.now(tz=UTC).isoformat()
     started_at = LAST_POLL.get(sport_key, {}).get("started_at")
@@ -810,7 +819,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
         return []
 
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
-    if not source_complete:
+    if not source_complete and incomplete_ratio > INCOMPLETE_FETCH_RATIO_WARN:
         _record_available_games(
             sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
         )
@@ -995,6 +1004,9 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
         len(picks),
         _loader_matches_found(deps.loader, sport_key),
         snapshots_persisted=persisted,
+        source_complete=source_complete,
+        completeness_reason=completeness_reason,
+        incomplete_fetch_ratio=incomplete_ratio,
     )
     return picks
 
@@ -1652,7 +1664,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         )
         return []
 
-    if not source_complete:
+    if not source_complete and incomplete_ratio > INCOMPLETE_FETCH_RATIO_WARN:
         persisted = await _persist_snapshots(
             deps, snapshots, sport_key, deps.league or sport_key, now
         )
@@ -2724,6 +2736,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         stale_candidates=n_stale,
         stale_drop_ratio=stale_drop_ratio,
         stale_drop_ratio_warn=deps.stale_drop_ratio_warn,
+        source_complete=source_complete,
+        completeness_reason=completeness_reason,
+        incomplete_fetch_ratio=incomplete_ratio,
     )
     return picks
 

@@ -1291,6 +1291,40 @@ async def test_observation_basis_keeps_incomplete_source_fail_closed() -> None:
     assert poll["degradation_reasons"] == ["source_incomplete"]
 
 
+async def test_tolerated_partial_cycle_still_mints_picks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An incomplete cycle BELOW the failed-fetch tolerance is partial
+    coverage, not a stale slate (e65222c) — health stays green, so the
+    pipeline must mint from it too. Withholding here while /health reports
+    healthy is a silent minting outage: days of zero picks with every
+    operator-facing surface green. Loaders that expose only a boolean verdict
+    keep fail-closed withholding (ratio defaults to 1.0)."""
+    from app.pipeline import LAST_POLL
+
+    loader = FakeLoader(market_snapshots())
+    loader.last_fetch_complete["soccer"] = False
+    loader.last_fetch_completeness_reason["soccer"] = "2/19 match fetches failed"
+    loader.last_fetch_incomplete_ratio["soccer"] = 2 / 19
+    deps = make_deps(RecordingSink(), loader)
+
+    with caplog.at_level("WARNING"):
+        picks = await run_value_pipeline(deps, "soccer")
+    assert picks  # minted from the tolerated-partial slate
+    poll = LAST_POLL["soccer"]
+    assert poll["degraded"] is False
+    assert "withheld picks" not in caplog.text
+
+    # ABOVE the tolerance the cycle still withholds and degrades.
+    loader2 = FakeLoader(market_snapshots())
+    loader2.last_fetch_complete["soccer"] = False
+    loader2.last_fetch_completeness_reason["soccer"] = "15/19 match fetches failed"
+    loader2.last_fetch_incomplete_ratio["soccer"] = 15 / 19
+    deps2 = make_deps(RecordingSink(), loader2)
+    assert await run_value_pipeline(deps2, "soccer") == []
+    assert LAST_POLL["soccer"]["degraded"] is True
+
+
 async def test_stale_age_gate_discards_are_counted_and_logged(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
