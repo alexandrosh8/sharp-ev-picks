@@ -288,8 +288,12 @@ class Settings(BaseSettings):
     # above): without it a wedged/partitioned DB stalls a shielded
     # _persist_and_reserve forever, and the poll_odds watchdog — which awaits the
     # shielded task's completion — can never fire, wedging the whole poll loop.
-    # 0 disables (asyncpg default). Generous enough for the heaviest settle query.
-    db_command_timeout_seconds: float = Field(default=30.0, ge=0)
+    # 0 disables (asyncpg default). Set well ABOVE the heaviest legitimate
+    # statement — the settlement cycle's bulk backlog work runs tens of seconds,
+    # so a too-tight bound (e.g. 30s) aborts and rolls back real settlement. The
+    # goal is a finite ceiling vs an infinite hang, not a tight SLA; 300s bounds
+    # a true blackhole while never touching healthy bulk work.
+    db_command_timeout_seconds: float = Field(default=300.0, ge=0)
     # Mirrors docker-compose.yml's host-side app bind. It does not configure
     # uvicorn inside the container; it exists so public Docker binds fail fast
     # unless dashboard auth is enabled.
