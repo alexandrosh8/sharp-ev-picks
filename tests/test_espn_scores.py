@@ -191,6 +191,61 @@ async def test_fetch_espn_scores_applies_ninety_minute_gate_to_soccer() -> None:
     assert len(basketball) == 1  # non-soccer team sports keep OT-inclusive finals
 
 
+def test_wnba_source_tags_women_marker_so_w_suffixed_picks_settle() -> None:
+    """OddsChecker labels WNBA teams '<team> W' (women); ESPN's WNBA feed —
+    already a women's-only league — returns bare names, so the settlement
+    marker veto rejected every WNBA match. WNBA has no men's counterpart, so
+    the ESPN side is tagged with the women marker to agree. Regression for 23
+    WNBA picks stuck open despite an exact ESPN score."""
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from app.settlement.results import ScoreBook
+
+    data = {
+        "events": [
+            {
+                "date": "2026-07-04T23:00Z",
+                "competitions": [
+                    {
+                        "status": {"type": {"name": "STATUS_FINAL", "completed": True}},
+                        "competitors": [
+                            {
+                                "homeAway": "home",
+                                "score": "98",
+                                "team": {"displayName": "Las Vegas Aces"},
+                            },
+                            {
+                                "homeAway": "away",
+                                "score": "90",
+                                "team": {"displayName": "Chicago Sky"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    scores = parse_team_scoreboard(data, women_marker=True)
+    assert scores[0].home_team == "Las Vegas Aces W"
+    assert scores[0].away_team == "Chicago Sky W"
+    book = ScoreBook(scores)
+    assert (
+        book.lookup("Las Vegas Aces W", "Chicago Sky W", _dt(2026, 7, 4, 23, 0, tzinfo=_UTC))
+        is not None
+    )
+    # WNBA source is registered women=True so fetch tags it.
+    from app.ingestion.espn_scores import SPORT_ESPN_SOURCES
+
+    wnba = [s for s in SPORT_ESPN_SOURCES["basketball"] if s.league == "wnba"]
+    assert wnba and wnba[0].women is True
+    assert all(
+        not getattr(s, "women", False)
+        for s in SPORT_ESPN_SOURCES["basketball"]
+        if s.league != "wnba"
+    )
+
+
 def test_soccer_espn_sources_cover_qualifiers() -> None:
     """Soccer must be registered with the UEFA-qualifier + World Cup + secondary
     slugs — the leagues football-data does NOT cover, which dominate the settlement

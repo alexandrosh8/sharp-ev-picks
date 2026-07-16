@@ -38,6 +38,10 @@ class EspnSource:
     sport: str
     league: str
     kind: str = "team"
+    # A women's-only feed (WNBA): OddsChecker labels its teams "<team> W" but
+    # ESPN returns bare names, so the settlement marker veto rejected every
+    # match. Tag the ESPN side with the women marker (safe — no men's twin).
+    women: bool = False
 
 
 def _match_date(iso: str) -> date | None:
@@ -89,7 +93,9 @@ def _is_ninety_minute_final(competition: dict) -> bool:
     )
 
 
-def parse_team_scoreboard(data: dict, *, ninety_minute_only: bool = False) -> list[FinalScore]:
+def parse_team_scoreboard(
+    data: dict, *, ninety_minute_only: bool = False, women_marker: bool = False
+) -> list[FinalScore]:
     """FinalScores from a team-sport ESPN scoreboard (basketball / football).
 
     Only FINAL competitions with both a home and away competitor carrying an
@@ -117,6 +123,8 @@ def parse_team_scoreboard(data: dict, *, ninety_minute_only: bool = False) -> li
                     sides[ha] = (str(name), pts)
             if md is not None and "home" in sides and "away" in sides:
                 (hn, hs), (an, a_s) = sides["home"], sides["away"]
+                if women_marker:
+                    hn, an = f"{hn} W", f"{an} W"
                 scores.append(FinalScore(hn, an, md, hs, a_s))
     if beyond_ninety:
         logger.info(
@@ -261,7 +269,13 @@ async def fetch_espn_scores(
             return parse_tennis_scoreboard(data)
         # Soccer 1X2/totals settle on the 90-minute result; ESPN's soccer
         # score is ET-inclusive, so AET/pens finals must not grade them.
-        return parse_team_scoreboard(data, ninety_minute_only=source.sport == "soccer")
+        # WNBA teams carry a redundant "W" in OddsChecker names — tag the
+        # ESPN side so the marker veto agrees.
+        return parse_team_scoreboard(
+            data,
+            ninety_minute_only=source.sport == "soccer",
+            women_marker=source.women,
+        )
 
     out: list[FinalScore] = []
     for d in dates:
@@ -293,7 +307,7 @@ async def fetch_espn_scores(
 SPORT_ESPN_SOURCES: dict[str, tuple[EspnSource, ...]] = {
     "basketball": (
         EspnSource("basketball", "nba"),
-        EspnSource("basketball", "wnba"),
+        EspnSource("basketball", "wnba", women=True),
         EspnSource("basketball", "nbl"),
     ),
     "soccer": (
