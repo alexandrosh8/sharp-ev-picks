@@ -91,3 +91,21 @@ def test_names_match_recovers_provider_variants() -> None:
     assert m("FC Sheriff", "Sheriff Tiraspol")
     assert not m("Dinamo Tirana", "Dinamo Minsk")
     assert not m("Real Madrid", "Atletico Madrid")
+
+
+def test_names_match_keeps_digit_distinguisher_between_clubs() -> None:
+    """A multi-digit token is frequently the ONLY thing separating two clubs
+    ('1860 Munich' vs 'Bayern Munich' once the shared city token is compared).
+    Dropping it let the shorter name settle from the other club's game. The
+    digit must count as a distinguishing token — while a one-sided trailing
+    number ('Shkendija 79' vs 'Shkendija') still recovers via subset."""
+    from app.settlement.results import _names_match, normalize_team
+
+    def m(a: str, b: str) -> bool:
+        return _names_match(normalize_team(a), normalize_team(b))
+
+    assert not m("1860 Munich", "Bayern Munich")
+    assert not m("Hansa 1965", "Hansa 2000")
+    # one-sided trailing/lead number is still the SAME club (subset recovery)
+    assert m("Shkendija 79", "Shkendija")
+    assert m("FC 03 Differdange", "FC Differdange 03")

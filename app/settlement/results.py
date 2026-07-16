@@ -147,11 +147,12 @@ _CLUB_TOKENS = frozenset(
 
 
 def _core_tokens(normalized: str) -> frozenset[str]:
-    """Distinguishing tokens of an already-normalized name: drop club-type tokens,
-    single letters (the ``d`` of "d'Escaldes"), and pure numbers ("Shkendija 79")."""
-    return frozenset(
-        t for t in normalized.split() if t not in _CLUB_TOKENS and len(t) > 1 and not t.isdigit()
-    )
+    """Distinguishing tokens of an already-normalized name: drop club-type tokens
+    and single letters (the ``d`` of "d'Escaldes"). Multi-digit tokens are KEPT —
+    they are frequently the only thing separating two clubs ("1860 Munich" vs
+    "Bayern Munich"); a one-sided trailing number ("Shkendija 79" vs "Shkendija")
+    still recovers through the subset relation in _names_match."""
+    return frozenset(t for t in normalized.split() if t not in _CLUB_TOKENS and len(t) > 1)
 
 
 def _names_match(ours: str, theirs: str) -> bool:
