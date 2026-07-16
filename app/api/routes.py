@@ -309,9 +309,13 @@ async def login_submit(payload: _LoginIn, request: Request) -> Response:
 
 
 @router.post("/logout", include_in_schema=False)
-async def logout() -> Response:
+async def logout(request: Request) -> Response:
     resp = RedirectResponse("/login", status_code=303)
-    resp.delete_cookie(SESSION_COOKIE, path="/")
+    # Clear the session only when the request actually carries it. A cross-site
+    # forced POST arrives WITHOUT the Lax cookie, so it cannot log the operator
+    # out; a genuine same-site logout always carries it.
+    if SESSION_COOKIE in request.cookies:
+        resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp
 
 

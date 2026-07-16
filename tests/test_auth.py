@@ -205,6 +205,18 @@ def test_logout_clears_cookie_and_redirects(monkeypatch) -> None:  # type: ignor
     assert SESSION_COOKIE in set_cookie
 
 
+def test_logout_without_session_cookie_is_a_noop(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A cross-site forced POST /logout arrives WITHOUT the Lax session cookie
+    (Lax cookies are not sent on cross-site POSTs). It must not emit the
+    cookie-clearing Set-Cookie — otherwise any web page can forcibly log the
+    operator out at will."""
+    client = TestClient(_make_auth_app(monkeypatch), follow_redirects=False)
+    res = client.post("/logout")  # no login: no bp_session cookie on the request
+    assert res.status_code == 303
+    assert res.headers["location"] == "/login"
+    assert SESSION_COOKIE not in res.headers.get("set-cookie", "")
+
+
 def test_password_hash_round_trips_and_rejects_wrong_password() -> None:
     stored = hash_password(_TEST_PW)
     assert verify_password(_TEST_PW, stored) is True
