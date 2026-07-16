@@ -556,6 +556,36 @@ async def test_closing_odds_from_snapshots_last_row_per_book(session) -> None:  
     assert by_sel[HOME].event_id == ref
 
 
+async def test_closing_odds_from_snapshots_skips_out_of_range_stored_odds(session) -> None:  # type: ignore[no-untyped-def]
+    """A stored snapshot whose decimal_odds exceed the model cap (>1000 — 6.5k
+    such rows exist in prod from a pre-validation insert path) must be SKIPPED,
+    never crash the whole settlement cycle with a ValidationError. Regression:
+    one bad row was rolling back EVERY settlement, freezing the backlog."""
+    pick = await seed_pick(session, "evt-snapclose-outofrange")
+    await seed_1x2_snaps(
+        session, pick.event_id, "bet365", (2.20, 3.40, 3.30), KICKOFF - timedelta(hours=2)
+    )
+    session.add(
+        OddsSnapshot(
+            event_id=pick.event_id,
+            bookmaker="LongshotBook",
+            market="1x2",
+            selection=HOME,
+            decimal_odds=Decimal("1001.0"),  # exceeds MAX_DECIMAL_ODDS (1000)
+            captured_at=KICKOFF - timedelta(hours=1),
+            ingested_at=KICKOFF - timedelta(hours=1),
+        )
+    )
+    await session.flush()
+    ref = await event_ref_of(session, pick)
+
+    # Must NOT raise — the out-of-range row is skipped, valid rows still returned.
+    snaps, _ = await closing_odds_from_snapshots(session, pick.event_id, ref, KICKOFF)
+    assert all(s.decimal_odds <= 1000 for s in snaps)
+    assert not any(s.bookmaker == "LongshotBook" for s in snaps)
+    assert any(s.bookmaker == "bet365" for s in snaps)
+
+
 async def test_coverage_clock_excludes_dedicated_capture_rows(session) -> None:  # type: ignore[no-untyped-def]
     """Audit 2026-07-10 (M-clv-1297): the event-wide last-capture clock feeds
     the soft_fresh coverage verdict — DEDICATED-capture rows (liquidity set,

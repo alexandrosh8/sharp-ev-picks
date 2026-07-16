@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
+from pydantic import ValidationError
 from sqlalchemy import Text, and_, case, func, select, text, true, union_all
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
@@ -3048,23 +3049,38 @@ async def closing_odds_from_snapshots(
     # path has its own freshness check in finalize_closing_from_snapshots.
     last_capture = max((row.captured_at for row in rows if row.liquidity is None), default=None)
     snaps: list[OddsSnapshotIn] = []
+    skipped = 0
     for row in rows:
         mapped = market_from_snapshot_key(row.market)
         if mapped is None or row.decimal_odds <= 1:
             continue  # unknown legacy key / degenerate price: skip, never guess
         market, detail = mapped
-        snaps.append(
-            OddsSnapshotIn(
-                event_id=external_ref,
-                bookmaker=row.bookmaker,
-                market=market,
-                selection=row.selection,
-                decimal_odds=float(row.decimal_odds),
-                liquidity=float(row.liquidity) if row.liquidity is not None else None,
-                captured_at=row.captured_at,
-                ingested_at=row.ingested_at,
-                market_detail=detail,
+        try:
+            snaps.append(
+                OddsSnapshotIn(
+                    event_id=external_ref,
+                    bookmaker=row.bookmaker,
+                    market=market,
+                    selection=row.selection,
+                    decimal_odds=float(row.decimal_odds),
+                    liquidity=float(row.liquidity) if row.liquidity is not None else None,
+                    captured_at=row.captured_at,
+                    ingested_at=row.ingested_at,
+                    market_detail=detail,
+                )
             )
+        except ValidationError:
+            # A stored row can violate the model's bounds (thousands of legacy
+            # snapshots carry decimal_odds > MAX_DECIMAL_ODDS from a
+            # pre-validation insert path). Skip the single bad row — it must
+            # NEVER raise here, which would roll back the whole settlement cycle
+            # and freeze every pick's settlement.
+            skipped += 1
+    if skipped:
+        logger.warning(
+            "closing_odds_from_snapshots(%s): skipped %d snapshot(s) failing model bounds",
+            external_ref,
+            skipped,
         )
     return snaps, last_capture
 
