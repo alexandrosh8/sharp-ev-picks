@@ -113,6 +113,84 @@ def test_parse_team_scoreboard_empty_when_no_events() -> None:
     assert parse_team_scoreboard({}) == []
 
 
+def _soccer_final(status_type: dict) -> dict:
+    return {
+        "events": [
+            {
+                "date": "2026-07-10T18:00Z",
+                "competitions": [
+                    {
+                        "status": {"type": {"completed": True, **status_type}},
+                        "competitors": [
+                            {
+                                "homeAway": "home",
+                                "score": "2",
+                                "team": {"displayName": "Shamrock Rovers"},
+                            },
+                            {
+                                "homeAway": "away",
+                                "score": "1",
+                                "team": {"displayName": "Vikingur Reykjavik"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_soccer_ninety_minute_only_skips_extra_time_and_shootout_finals() -> None:
+    """1X2/totals settle on the 90-minute result. An ESPN soccer 'score' is
+    ET-inclusive, so an AET/pens final must NOT be graded from it — the pick
+    stays open for another source or manual entry (same doctrine as the
+    martj42 ninety_minute_only gate and the OddsPortal ET/pens marker veto)."""
+    for status_type in (
+        {"name": "STATUS_FINAL_AET", "detail": "FT-ET"},
+        {"name": "STATUS_FINAL_PEN", "detail": "FT-Pens"},
+        {"name": "STATUS_FULL_TIME", "detail": "Full Time (AET)"},
+        {"name": "STATUS_ABANDONED", "detail": "Abandoned"},
+    ):
+        assert parse_team_scoreboard(_soccer_final(status_type), ninety_minute_only=True) == []
+
+
+def test_soccer_ninety_minute_only_keeps_normal_full_time() -> None:
+    scores = parse_team_scoreboard(
+        _soccer_final({"name": "STATUS_FULL_TIME", "detail": "FT"}), ninety_minute_only=True
+    )
+    assert scores == [FinalScore("Shamrock Rovers", "Vikingur Reykjavik", date(2026, 7, 10), 2, 1)]
+    # generic STATUS_FINAL without ET/pens markers also passes (some feeds use it)
+    assert parse_team_scoreboard(
+        _soccer_final({"name": "STATUS_FINAL", "detail": "FT"}), ninety_minute_only=True
+    ) == [FinalScore("Shamrock Rovers", "Vikingur Reykjavik", date(2026, 7, 10), 2, 1)]
+
+
+def test_team_scoreboard_default_keeps_overtime_finals() -> None:
+    """Basketball/NFL markets INCLUDE overtime — the guard must be soccer-only."""
+    ot = _soccer_final({"name": "STATUS_FINAL", "detail": "Final/OT"})
+    assert parse_team_scoreboard(ot) == [
+        FinalScore("Shamrock Rovers", "Vikingur Reykjavik", date(2026, 7, 10), 2, 1)
+    ]
+
+
+async def test_fetch_espn_scores_applies_ninety_minute_gate_to_soccer() -> None:
+    aet = _soccer_final({"name": "STATUS_FINAL_AET", "detail": "FT-ET"})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=aet)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        soccer = await fetch_espn_scores(
+            client, EspnSource(sport="soccer", league="uefa.champions_qual"), [date(2026, 7, 10)]
+        )
+        basketball = await fetch_espn_scores(
+            client, EspnSource(sport="basketball", league="nba"), [date(2026, 7, 10)]
+        )
+    assert soccer == []  # AET final withheld from 90-minute settlement
+    assert len(basketball) == 1  # non-soccer team sports keep OT-inclusive finals
+
+
 def test_soccer_espn_sources_cover_qualifiers() -> None:
     """Soccer must be registered with the UEFA-qualifier + World Cup + secondary
     slugs — the leagues football-data does NOT cover, which dominate the settlement

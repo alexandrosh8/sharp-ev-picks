@@ -62,16 +62,50 @@ def _int_or_none(value: object) -> int | None:
         return None
 
 
-def parse_team_scoreboard(data: dict) -> list[FinalScore]:
+# A soccer final decided beyond 90 minutes (or not decided by normal play at
+# all). ESPN's soccer 'score' is extra-time-INCLUSIVE (only shootout goals are
+# split into shootoutScore), while 1X2/totals settle on the 90-minute result —
+# the same hazard the martj42 ninety_minute_only gate and the OddsPortal
+# ET/pens marker veto already guard on the other soccer result paths.
+_EXTENDED_PLAY_RE = re.compile(
+    r"(?i)(\baet\b|extra\s*time|\bft-?et\b|penalt|\bpens?\b|shootout"
+    r"|abandon|awarded|postpon|cancel|suspend)"
+)
+_NINETY_MINUTE_STATUS_NAMES = ("STATUS_FULL_TIME", "STATUS_FINAL")
+
+
+def _is_ninety_minute_final(competition: dict) -> bool:
+    """True only when a completed soccer match affirmatively looks like a
+    normal full-time result: an allowlisted status name AND no ET/pens/
+    abnormal marker in any status text field. Fail-closed — an unknown or
+    missing status name is NOT graded (the pick stays open for another
+    source or manual entry)."""
+    status_type = competition.get("status", {}).get("type", {})
+    if str(status_type.get("name") or "") not in _NINETY_MINUTE_STATUS_NAMES:
+        return False
+    return not any(
+        _EXTENDED_PLAY_RE.search(str(status_type.get(key) or ""))
+        for key in ("name", "detail", "shortDetail", "description")
+    )
+
+
+def parse_team_scoreboard(data: dict, *, ninety_minute_only: bool = False) -> list[FinalScore]:
     """FinalScores from a team-sport ESPN scoreboard (basketball / football).
 
     Only FINAL competitions with both a home and away competitor carrying an
     integer score and a team displayName are emitted; anything else is skipped.
+    With ninety_minute_only (soccer), finals decided beyond 90 minutes
+    (AET / shootout / awarded) are withheld — ESPN's score would grade
+    90-minute 1X2/totals with an ET-inclusive result.
     """
     scores: list[FinalScore] = []
+    beyond_ninety = 0
     for event in data.get("events") or []:
         for comp in event.get("competitions") or []:
             if not _is_final(comp):
+                continue
+            if ninety_minute_only and not _is_ninety_minute_final(comp):
+                beyond_ninety += 1
                 continue
             md = _match_date(comp.get("date") or event.get("date") or "")
             sides: dict[str, tuple[str, int]] = {}
@@ -84,6 +118,12 @@ def parse_team_scoreboard(data: dict) -> list[FinalScore]:
             if md is not None and "home" in sides and "away" in sides:
                 (hn, hs), (an, a_s) = sides["home"], sides["away"]
                 scores.append(FinalScore(hn, an, md, hs, a_s))
+    if beyond_ninety:
+        logger.info(
+            "team scoreboard: %d final(s) decided beyond 90 minutes (AET/pens/"
+            "awarded) withheld from 90-minute settlement",
+            beyond_ninety,
+        )
     return scores
 
 
@@ -215,7 +255,14 @@ async def fetch_espn_scores(
     A failing date is logged (exception TYPE only — never the URL) and skipped;
     the hourly settle cycle retries. Read-only GET, no key, no login.
     """
-    parse = parse_tennis_scoreboard if source.kind == "tennis" else parse_team_scoreboard
+
+    def parse(data: dict) -> list[FinalScore]:
+        if source.kind == "tennis":
+            return parse_tennis_scoreboard(data)
+        # Soccer 1X2/totals settle on the 90-minute result; ESPN's soccer
+        # score is ET-inclusive, so AET/pens finals must not grade them.
+        return parse_team_scoreboard(data, ninety_minute_only=source.sport == "soccer")
+
     out: list[FinalScore] = []
     for d in dates:
         url = f"{ESPN_BASE}/{source.sport}/{source.league}/scoreboard"
