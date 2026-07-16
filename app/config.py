@@ -284,6 +284,12 @@ class Settings(BaseSettings):
     # INDEFINITELY inside the event loop. Connect + per-op read/write bounds.
     redis_socket_connect_timeout_seconds: float = Field(default=5.0, gt=0)
     redis_socket_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Bounded Postgres per-statement timeout (same blackhole class as Redis
+    # above): without it a wedged/partitioned DB stalls a shielded
+    # _persist_and_reserve forever, and the poll_odds watchdog — which awaits the
+    # shielded task's completion — can never fire, wedging the whole poll loop.
+    # 0 disables (asyncpg default). Generous enough for the heaviest settle query.
+    db_command_timeout_seconds: float = Field(default=30.0, ge=0)
     # Mirrors docker-compose.yml's host-side app bind. It does not configure
     # uvicorn inside the container; it exists so public Docker binds fail fast
     # unless dashboard auth is enabled.

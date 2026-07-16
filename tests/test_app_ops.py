@@ -49,6 +49,46 @@ async def test_redis_client_built_with_socket_timeouts() -> None:
         await client.aclose()
 
 
+def test_postgres_engine_built_with_command_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bounded per-statement timeout is passed to asyncpg so a wedged DB cannot
+    blackhole a shielded persist forever (and thus wedge the poll watchdog). The
+    arg is asyncpg-only — omitted for other drivers and when disabled (0)."""
+    import app.database as database
+
+    captured: dict[str, Any] = {}
+
+    def _fake_create(url: str, **kwargs: Any) -> str:
+        captured.clear()
+        captured.update(kwargs)
+        return "engine"
+
+    monkeypatch.setattr(database, "create_async_engine", _fake_create)
+
+    database.create_engine(
+        Settings.model_construct(
+            database_url="postgresql+asyncpg://u:p@localhost:5432/db",
+            db_command_timeout_seconds=25.0,
+        )
+    )
+    assert captured["connect_args"] == {"command_timeout": 25.0}
+
+    database.create_engine(
+        Settings.model_construct(
+            database_url="postgresql+asyncpg://u:p@localhost:5432/db",
+            db_command_timeout_seconds=0.0,
+        )
+    )
+    assert captured["connect_args"] == {}  # disabled
+
+    database.create_engine(
+        Settings.model_construct(
+            database_url="sqlite+aiosqlite:///:memory:",
+            db_command_timeout_seconds=25.0,
+        )
+    )
+    assert captured["connect_args"] == {}  # non-asyncpg driver never gets the arg
+
+
 # --- fix 4: bounded graceful shutdown ---------------------------------------- #
 
 
