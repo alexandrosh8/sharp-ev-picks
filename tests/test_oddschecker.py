@@ -319,6 +319,23 @@ def test_find_match_payload_subevent_match_still_returns_payload() -> None:
     assert payload["bestOdds"]["subeventConfig"]["subeventId"] == "101610031"
 
 
+async def test_empty_market_pages_are_counted_for_observability() -> None:
+    """The empty-market path returns [] as a clean success (no failure count,
+    no incomplete ratio), so the per-cycle counter is the ONLY signal that
+    distinguishes genuinely unpriced fixtures from a provider payload drift
+    silently emptying the slate — it must increment."""
+    loader = OddsCheckerLoader(EventDirectory())
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/tennis/a-v-b/winner",
+        html=_empty_odds_html(),
+        status_code=200,
+    )
+    assert loader._cycle_empty_markets == 0
+    result = await loader._parse_modern_or_legacy_match_page(page, now=None, session=None)
+    assert result == []
+    assert loader._cycle_empty_markets == 1
+
+
 def test_parse_match_page_empty_odds_propagates_empty_market() -> None:
     """parse_match_page surfaces the empty-market signal so the fetch layer can
     return [] (no odds priced) instead of dropping to the legacy parser and

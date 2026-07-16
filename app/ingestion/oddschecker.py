@@ -2098,6 +2098,12 @@ class OddsCheckerLoader:
         # the pipeline's completeness tolerance so a few timed-out pages (partial
         # coverage) do not fail the whole cycle closed. 0.0 = fully complete.
         self.last_fetch_incomplete_ratio: dict[str, float] = {}
+        # Listed-but-unpriced match pages this cycle (OddsCheckerEmptyMarket ->
+        # []). These count as clean successes in failures/incomplete_ratio, so
+        # this counter is the ONLY signal separating genuinely unpriced fixtures
+        # from a provider payload drift that empties the slate.
+        self.last_fetch_empty_markets: dict[str, int] = {}
+        self._cycle_empty_markets = 0
 
     @classmethod
     def football_today_tomorrow(
@@ -2283,6 +2289,7 @@ class OddsCheckerLoader:
                 # yet: a listed-but-unpriced match, not a fetch failure. Return an
                 # empty slate so it is NOT counted as a failed match page and does
                 # not drop to the legacy parser (which would then fail for real).
+                self._cycle_empty_markets += 1
                 return []
             except OddsCheckerParseError:
                 mapped_snapshots = await self._parse_legacy_match_with_linked_markets(
@@ -2623,6 +2630,7 @@ class OddsCheckerLoader:
         mapped_snapshots: list[OddsSnapshotIn] = []
         optional_snapshots: list[OddsSnapshotIn] = []
         failures = 0
+        self._cycle_empty_markets = 0
         snapshot_overflow = False
         optional_truncated = False
         if len(deduped) > MAX_MATCH_URLS_PER_CYCLE:
@@ -2719,6 +2727,14 @@ class OddsCheckerLoader:
             else:
                 incomplete_ratio = failures / len(deduped)
             self.last_fetch_incomplete_ratio[pipeline_key] = incomplete_ratio
+            self.last_fetch_empty_markets[pipeline_key] = self._cycle_empty_markets
+            if self._cycle_empty_markets:
+                logger.info(
+                    "oddschecker %s: %d/%d listed match page(s) unpriced (empty-market) this cycle",
+                    pipeline_key,
+                    self._cycle_empty_markets,
+                    len(deduped),
+                )
             self.last_fetch_event_ids[pipeline_key] = tuple(
                 dict.fromkeys(snapshot.event_id for snapshot in snapshots)
             )
