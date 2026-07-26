@@ -763,6 +763,87 @@ async def test_client_mapping_rows_missing_required_schema_fail_closed() -> None
 
 
 # --------------------------------------------------------------------------- #
+# Live schema drift observed 2026-07 (probe 2026-07-26): /markets/straight now
+# interleaves markets for type=="special" matchups. These rows carry NO
+# "status"/"isAlternate" (and sometimes no "version") and price by
+# participantId only. They are valid siblings the extractors deliberately
+# ignore — one of them must never poison the whole sport's response.
+# --------------------------------------------------------------------------- #
+def _specials_market_row(mid: int = 777, *, with_version: bool = False) -> dict:
+    row = {
+        "cutoffAt": "2026-06-17T08:00:00+00:00",
+        "key": "s;0;m",
+        "limits": [{"amount": 500, "type": "maxRiskStake"}],
+        "matchupId": mid,
+        "period": 0,
+        "prices": [
+            {"participantId": 1001, "price": 7503},
+            {"participantId": 1002, "price": 1272},
+        ],
+        "type": "moneyline",
+    }
+    if with_version:
+        row["version"] = 30
+    return row
+
+
+async def test_client_specials_market_rows_without_status_are_valid_siblings() -> None:
+    normal = _ml_market(
+        1631935448,
+        [{"designation": "home", "price": -1997}, {"designation": "away", "price": 890}],
+        version=42,
+    )
+    payload = [_specials_market_row(777), _specials_market_row(778, with_version=True), normal]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload))
+
+    client = _make_client(handler)
+    rows = await client.fetch_straight_markets(SPORT_IDS["basketball"])
+    assert rows == payload
+
+
+def test_extract_ignores_specials_market_rows_keeps_matchup_quote() -> None:
+    matchups = parse_matchups([_tennis_matchup()], now=NOW, horizon_end=HORIZON_END)
+    markets = [
+        _specials_market_row(777),
+        _ml_market(
+            1631935448,
+            [{"designation": "home", "price": -1997}, {"designation": "away", "price": 890}],
+            version=42,
+        ),
+    ]
+    quotes = extract_market_quotes(matchups, markets, now=NOW)
+    assert [q.event_id for q in quotes] == ["1631935448"]
+
+
+async def test_market_rows_missing_status_and_core_fields_still_schema_fail() -> None:
+    # The specials tolerance is narrow: a statusless row still needs the core
+    # identifying fields; dropping one of them stays a schema failure.
+    bad = _specials_market_row(777)
+    del bad["prices"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[bad])
+
+    client = _make_client(handler)
+    with pytest.raises(PinnacleArcadiaSchemaError, match="malformed rows"):
+        await client.fetch_straight_markets(33)
+
+
+def test_response_ceilings_cover_live_2026_07_slate() -> None:
+    # Probe 2026-07-26 (read-only, via the app's own client): soccer
+    # /matchups = 17,931,555 bytes (6,046 rows incl. specials) and soccer
+    # /markets/straight = 28,826 rows. The old 16 MiB / 25,000 ceilings
+    # rejected the whole soccer slate. Require ~2x headroom over the
+    # measured live sizes so DoS bounds stay bounded but honest.
+    from app.ingestion import pinnacle_arcadia
+
+    assert pinnacle_arcadia.MAX_RESPONSE_BYTES >= 2 * 17_931_555
+    assert pinnacle_arcadia.MAX_RESPONSE_ROWS >= 2 * 28_826
+
+
+# --------------------------------------------------------------------------- #
 # Transient HTTP-status retry (429 / 5xx) — robustness, no live network.
 # tenacity's backoff sleeps via asyncio.sleep; neutralize it so the retry
 # attempts run instantly without any real wall-clock wait.

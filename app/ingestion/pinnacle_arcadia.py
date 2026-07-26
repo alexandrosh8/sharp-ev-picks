@@ -66,8 +66,12 @@ BOOKMAKER = "Pinnacle"  # contains "pinnacle" -> top-priority sharp anchor (valu
 # site Referer present; it is NOT an anti-bot bypass (GET-only, no challenge
 # solving) and carries no credential, so it is a plain public constant.
 _PINNACLE_REFERER = "https://www.pinnacle.com/"
-MAX_RESPONSE_BYTES = 16 * 1024 * 1024
-MAX_RESPONSE_ROWS = 25_000
+# DoS bounds, sized against the live slate (read-only probe 2026-07-26):
+# soccer /matchups = 17.9 MB / 6,046 rows and soccer /markets/straight =
+# 28,826 rows now that specials interleave. The old 16 MiB / 25,000 ceilings
+# rejected the entire soccer capture; keep ~2x+ headroom over measured live.
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_RESPONSE_ROWS = 100_000
 MAX_SPORT_ROWS = 1_000
 ARCADIA_ALLOWED_HOSTS: frozenset[str] = frozenset({"guest.api.arcadia.pinnacle.com"})
 ARCADIA_CONFIG_ALLOWED_HOSTS: frozenset[str] = frozenset({"www.pinnacle.com"})
@@ -447,7 +451,7 @@ def _valid_matchup_response_row(row: Mapping[str, Any]) -> bool:
 def _valid_market_response_row(row: Mapping[str, Any]) -> bool:
     matchup_id = row.get("matchupId")
     prices = row.get("prices")
-    return (
+    if not (
         isinstance(matchup_id, (str, int))
         and not isinstance(matchup_id, bool)
         and isinstance(row.get("key"), str)
@@ -455,11 +459,18 @@ def _valid_market_response_row(row: Mapping[str, Any]) -> bool:
         and isinstance(row.get("type"), str)
         and isinstance(row.get("period"), int)
         and not isinstance(row.get("period"), bool)
-        and isinstance(row.get("status"), str)
-        and _is_int_price(row.get("version"))
         and isinstance(prices, Sequence)
         and not isinstance(prices, (str, bytes, bytearray))
-    )
+    ):
+        return False
+    if row.get("status") is None:
+        # Since ~2026-07 /markets/straight interleaves markets for
+        # type=="special" matchups (futures/props): no "status"/"isAlternate",
+        # sometimes no "version", prices keyed by participantId only. Valid
+        # siblings the extractors deliberately ignore (status != "open") —
+        # never schema drift, so they must not poison the sport's response.
+        return True
+    return isinstance(row.get("status"), str) and _is_int_price(row.get("version"))
 
 
 def _validated_response_rows(
