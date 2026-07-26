@@ -91,6 +91,15 @@ class MatchRow:
     betfair_exchange_closing_home: float | None = None
     betfair_exchange_closing_draw: float | None = None
     betfair_exchange_closing_away: float | None = None
+    # Match statistics (HS/AS/HST/AST/HC/AC) — present in the main-league
+    # CSVs (~2000s onward), absent in older files and the new-leagues feed.
+    # Inputs to the Wheatcroft GAP shots/corners OU2.5 shadow screen.
+    home_shots: int | None = None
+    away_shots: int | None = None
+    home_shots_on_target: int | None = None
+    away_shots_on_target: int | None = None
+    home_corners: int | None = None
+    away_corners: int | None = None
 
 
 def season_url(league_code: str, season: str) -> str:
@@ -143,6 +152,12 @@ def parse_season_csv(text: str) -> list[MatchRow]:
                     betfair_exchange_closing_home=_opt_float(raw.get("BFECH")),
                     betfair_exchange_closing_draw=_opt_float(raw.get("BFECD")),
                     betfair_exchange_closing_away=_opt_float(raw.get("BFECA")),
+                    home_shots=_opt_int(raw.get("HS")),
+                    away_shots=_opt_int(raw.get("AS")),
+                    home_shots_on_target=_opt_int(raw.get("HST")),
+                    away_shots_on_target=_opt_int(raw.get("AST")),
+                    home_corners=_opt_int(raw.get("HC")),
+                    away_corners=_opt_int(raw.get("AC")),
                 )
             )
         except (KeyError, ValueError) as exc:
@@ -211,6 +226,18 @@ def _parse_date(raw: str) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _opt_int(raw: str | None) -> int | None:
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        # some files carry stats as "7.0" — accept but keep integer semantics
+        return int(float(raw))
+    except (ValueError, OverflowError):
+        # OverflowError: 'inf'/'1e999' cells — degrade to None, never escape
+        # the caller's (KeyError, ValueError) per-row catch.
+        return None
 
 
 def _opt_float(raw: str | None) -> float | None:
