@@ -516,6 +516,42 @@ def global_odds_ceiling_violation(bet: ValueBet, *, max_odds: float) -> bool:
     return max_odds > 0.0 and bet.best_odds >= max_odds
 
 
+# Named gate reason for the soccer DRAW-selection demotion (logged/audited
+# wherever the gate demotes a candidate — the pipeline's demotion chain).
+DRAW_SELECTION_DEMOTION_REASON = "draw_selection_demotion"
+
+
+def draw_selection_demotion(market: str, selection: str) -> bool:
+    """SOCCER DRAW-selection predicate — trusted-CLV audit 2026-07-26.
+
+    Draw-leg picks measure -0.273 trusted CLV (17/21 negative, n=21), consistent
+    with the favourite-longshot-bias literature loading margin onto the draw. The
+    pipeline DEMOTES a matching PREMIUM candidate to the volume (shadow) tier —
+    persisted + CLV-tracked, never alerted, NEVER a drop — with the named reason
+    ``DRAW_SELECTION_DEMOTION_REASON`` (exact mechanism of the moneyline ceiling;
+    soccer-scoped at the call site). True when the selection carries a draw leg:
+
+      * ``h2h`` (1X2): the canonical bare "Draw" selection; or
+      * ``double_chance``: any draw-containing leg — the canonical minted forms
+        "``{home}`` or Draw" / "Draw or ``{away}``" (OddsPortal 1X/X2 mapping,
+        the only forms live picks carry — DB audit 2026-07-26) plus the compact
+        "1X"/"X2" vocabulary defensively. "``{home}`` or ``{away}``" (12) never
+        matches — the token "draw" must be a whole " or "-separated leg, so a
+        club whose NAME merely contains "Draw" cannot false-positive.
+
+    Every other market returns False. Pure function (stdlib only, no IO);
+    informational-only platform — nothing here places a bet.
+    """
+    normalized = selection.strip().casefold()
+    if market == "h2h":
+        return normalized == "draw"
+    if market == "double_chance":
+        if normalized in ("1x", "x2"):
+            return True
+        return "draw" in (leg.strip() for leg in normalized.split(" or "))
+    return False
+
+
 def structural_sanity_violation(
     bet: ValueBet,
     *,

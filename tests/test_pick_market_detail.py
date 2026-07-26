@@ -154,4 +154,4 @@ def test_migration_imports_cleanly_and_chains_off_prior_head() -> None:
 def test_alembic_graph_has_single_head() -> None:
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["c4d8e2f6a1b3"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["d5a1c7f3e9b2"]

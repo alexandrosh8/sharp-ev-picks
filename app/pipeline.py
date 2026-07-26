@@ -965,6 +965,10 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 ),
                 odds_age_seconds=max(candidate.odds_age_seconds, 0.0),
                 liquidity=snap.liquidity,
+                # TIMING TELEMETRY (2026-07-26): mint-to-kickoff hours from the
+                # same best-known kickoff the in-play gate used (None = unknown
+                # — never fabricated; the pick then predates the column's gate).
+                hours_to_kickoff=_hours_to_kickoff(kickoff_by_event.get(event_id), now),
                 reason_summary=(
                     f"model {prediction.probability:.3f} vs fair {fair_p:.3f} "
                     f"({deps.devig_method}) at {snap.bookmaker}"
@@ -1136,6 +1140,38 @@ def _is_tennis_game_line_group(
     if sport_key != "tennis" or market not in (Market.TOTALS, Market.SPREADS):
         return False
     return any(is_tennis_game_line(str(market), sel) for sel in prices)
+
+
+# Named gate reason for the tennis game-line candidate drop above: 97% of the
+# game-line picks minted before the gate existed EXPIRED VOID (the set-score
+# settlement guard held them for manual entry forever), so the drop is a
+# settleability gate, logged under this slug wherever it fires. Set-plausible
+# tennis lines (sets total 2.5 / set spread 1.5) keep minting.
+TENNIS_GAME_LINE_UNSETTLEABLE_REASON = "tennis_game_line_unsettleable"
+
+# Named gate reason for the SHARP-ANCHOR-ONLY sports drop (trusted evidence
+# 2026-07-26: the tennis consensus-anchored cell runs -37.9% ROI). For a sport
+# in value_policy.sharp_anchor_only_sports, the require-sharp-anchor branch
+# HARD-DROPS a tripped premium candidate under this slug instead of demoting
+# it to the volume (shadow) tier.
+CONSENSUS_ANCHOR_DROPPED_REASON = "consensus_anchor_dropped"
+
+# Named gate reason for the premium MINT-TIMING ceiling (INERT scaffolding:
+# value_policy.premium_max_hours_to_kickoff defaults math.inf = no gating; a
+# future config flip arms the demote-not-drop branch against the forward
+# hours_to_kickoff telemetry).
+PREMIUM_MINT_TOO_EARLY_REASON = "premium_mint_too_early"
+
+
+def _hours_to_kickoff(starts_at: datetime | None, now: datetime) -> float | None:
+    """Hours between mint (``now``) and the event's best-known kickoff.
+
+    Positive = minted before kickoff. None when the kickoff is unknown — the
+    stamp is NULL, never fabricated (and the inert premium mint-timing ceiling
+    never demotes on an unknown kickoff). Pure helper (no IO)."""
+    if starts_at is None:
+        return None
+    return (starts_at - now).total_seconds() / 3600.0
 
 
 # INTEGER-line totals gate (audit 2026-07-10 observation 3232): a full-match
@@ -1646,12 +1682,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     """
     from app.edge.value import (
         CONSENSUS_ANCHOR,
+        DRAW_SELECTION_DEMOTION_REASON,
         GLOBAL_ODDS_CEILING_REASON,
         SHARP_BOOKS,
         SHARP_MISS_NO_FULL_MARKET,
         ah_candidate_plausible,
         anchor_type_for,
         dc_candidate_plausible,
+        draw_selection_demotion,
         find_value_bets_with_fair,
         global_odds_ceiling_violation,
         is_sharp_anchored,
@@ -1904,6 +1942,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_dc_rejected = 0
     n_moneyline_capped = 0
     n_sanity_demoted = 0
+    n_draw_demoted = 0
+    n_consensus_anchor_dropped = 0
+    n_too_early_demoted = 0
     # Task 8 probe (Buchalter bet-volume smoke detector, log-only): market
     # groups that reached the value scan this cycle (anchored fair present).
     n_eligible_markets = 0
@@ -1946,6 +1987,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         freshness_times = freshness_by_market.get((event_id, market, detail), {})
         if event_id in started or event_id in unknown_kickoff:
             continue  # started/unknown: cannot prove a pre-game actionable quote
+        # TIMING TELEMETRY (2026-07-26): mint-to-kickoff hours from the SAME
+        # best-known kickoff the in-play gate used (persisted-preferred).
+        # Stamped on every pick minted from this group; the INERT premium
+        # mint-timing ceiling below reads the same number. Kickoff is known
+        # here by construction (unknown_kickoff already skipped), but the
+        # helper stays None-safe (a NULL stamp is honest, never fabricated).
+        hours_to_kickoff = _hours_to_kickoff(kickoff_by_event.get(event_id), now)
         # NON-SETTLEABLE market drop: period (half/quarter/set), corner, and
         # card/booking sub-markets have no score in the results feed, so any pick
         # on them can only ever void (or mis-grade as full-match). Drop the whole
@@ -2117,6 +2165,49 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 tier = "volume"
                 n_moneyline_capped += 1
                 moneyline_note = " | 1X2 longshot > odds ceiling: capped at volume (shadow)"
+            # SOCCER DRAW-SELECTION DEMOTION (trusted-CLV audit 2026-07-26:
+            # draw-leg picks -0.273 trusted CLV, 17/21 negative, n=21 — the FLB
+            # literature loads margin onto the draw). A PREMIUM soccer candidate
+            # on the 1X2 "Draw" or a draw-containing double-chance leg ("{home}
+            # or Draw" / "Draw or {away}" / "1X"/"X2") is DEMOTED to the volume
+            # (shadow) tier — persisted + CLV-tracked, NEVER alerted, NEVER
+            # dropped (the band keeps accruing forward evidence). Named reason
+            # 'draw_selection_demotion' (app/edge/value.draw_selection_demotion
+            # — the pure predicate; soccer scoping lives here). Policy default
+            # False = gate OFF (inert bare policy); Settings default True.
+            draw_note = ""
+            if (
+                tier == "premium"
+                and deps.value_policy.demote_draw_selections
+                # startswith: odds_api polls per-league keys ("soccer_epl"),
+                # which must not silently bypass the soccer-scoped gate.
+                and sport_key.startswith("soccer")
+                and draw_selection_demotion(str(market), v.selection)
+            ):
+                tier = "volume"
+                n_draw_demoted += 1
+                draw_note = " | draw selection (CLV-negative band): demoted to volume (shadow)"
+            # PREMIUM MINT-TIMING CEILING (INERT scaffolding, 2026-07-26): a
+            # PREMIUM candidate minted MORE than premium_max_hours_to_kickoff
+            # hours before kickoff is DEMOTED to the volume (shadow) tier —
+            # named reason 'premium_mint_too_early', never alerted, NEVER
+            # dropped. The policy default math.inf means NO gating (this branch
+            # is dead until a config flip arms it against the hours_to_kickoff
+            # telemetry stamped on every pick); an unknown kickoff (None) never
+            # demotes — honest, never fabricated.
+            timing_note = ""
+            if (
+                tier == "premium"
+                and hours_to_kickoff is not None
+                and hours_to_kickoff > deps.value_policy.premium_max_hours_to_kickoff
+            ):
+                tier = "volume"
+                n_too_early_demoted += 1
+                timing_note = (
+                    f" | minted {hours_to_kickoff:.1f}h before kickoff (> "
+                    f"{deps.value_policy.premium_max_hours_to_kickoff:g}h ceiling): "
+                    "demoted to volume (shadow)"
+                )
             # Major-league gate: a PREMIUM candidate whose scraped league is not
             # in the configured major set is DEMOTED to the volume (shadow) tier
             # — persisted + CLV-tracked, never alerted, never reserving exposure.
@@ -2159,6 +2250,17 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 and deps.value_policy.require_sharp_anchor
                 and not is_sharp_anchored(anchor_book)
             ):
+                # SHARP-ANCHOR-ONLY sports (trusted evidence 2026-07-26: the
+                # tennis consensus-anchored cell runs -37.9% ROI). For a sport
+                # in the configured set the tripped candidate is HARD-DROPPED
+                # at this branch — named reason 'consensus_anchor_dropped',
+                # counted + logged below, never a silent drop — instead of
+                # demoted: a consensus-anchored would-be-premium pick for that
+                # sport is never minted at all. Other sports keep the
+                # demote-to-volume path unchanged.
+                if sport_key in deps.value_policy.sharp_anchor_only_sports:
+                    n_consensus_anchor_dropped += 1
+                    continue
                 tier = "volume"
                 n_no_sharp_demoted += 1
                 sharp_miss_cause = sharp_miss_by_market.get(
@@ -2393,6 +2495,11 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 # Task 6 anchor-thinness telemetry (log-only; the age half is
                 # steam_anchor_age_seconds below).
                 anchor_book_count=anchor_book_count,
+                # TIMING TELEMETRY (2026-07-26): mint-to-kickoff hours (None =
+                # unknown kickoff — never fabricated). Persisted at INSERT so
+                # the inert premium mint-timing ceiling can be armed later
+                # against honest forward evidence.
+                hours_to_kickoff=hours_to_kickoff,
                 odds_age_seconds=age,
                 liquidity=None,
                 reason_summary=(
@@ -2410,6 +2517,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     + market_floor_note
                     + visibility_note
                     + moneyline_note
+                    + draw_note
+                    + timing_note
                     + major_note
                     + sharp_note
                     + experimental_note
@@ -2478,6 +2587,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 audit_reasons.append("visibility_only")
             if moneyline_note:
                 audit_reasons.append("odds_ceiling")
+            if draw_note:
+                audit_reasons.append(DRAW_SELECTION_DEMOTION_REASON)
+            if timing_note:
+                audit_reasons.append(PREMIUM_MINT_TOO_EARLY_REASON)
             if major_note:
                 audit_reasons.append("non_major_league")
             if sharp_note:
@@ -2726,6 +2839,41 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             sport_key,
             n_moneyline_capped,
         )
+    if n_draw_demoted:
+        # The draw-selection gate is never silent: these premium soccer candidates
+        # carried a draw leg (1X2 Draw / draw-containing double-chance) — the
+        # trusted-CLV-negative band (-0.273, 17/21 negative) — and were DEMOTED to
+        # the volume (shadow) tier, never alerted, never dropped.
+        logger.info(
+            "value pipeline %s: %s demoted %d draw-leg premium candidate(s) to volume (shadow)",
+            sport_key,
+            DRAW_SELECTION_DEMOTION_REASON,
+            n_draw_demoted,
+        )
+    if n_consensus_anchor_dropped:
+        # The sharp-anchor-only drop is never silent: these would-be-premium
+        # candidates for a VALUE_SHARP_ANCHOR_ONLY_SPORTS sport were anchored on
+        # the soft consensus median (no Pinnacle/Betfair) and were HARD-DROPPED
+        # at the require-sharp-anchor branch (the tennis consensus-anchored
+        # cell's -37.9% ROI kill switch) — no pick minted, premium OR shadow.
+        logger.info(
+            "value pipeline %s: %s dropped %d consensus-anchored premium candidate(s)",
+            sport_key,
+            CONSENSUS_ANCHOR_DROPPED_REASON,
+            n_consensus_anchor_dropped,
+        )
+    if n_too_early_demoted:
+        # The premium mint-timing ceiling is never silent: these premium
+        # candidates were minted further from kickoff than the configured
+        # VALUE_PREMIUM_MAX_HOURS_TO_KICKOFF ceiling and were DEMOTED to the
+        # volume (shadow) tier (inert at the default — this only fires once a
+        # config flip arms the ceiling).
+        logger.info(
+            "value pipeline %s: %s demoted %d premium candidate(s) to volume (shadow)",
+            sport_key,
+            PREMIUM_MINT_TOO_EARLY_REASON,
+            n_too_early_demoted,
+        )
     if n_sanity_demoted:
         # FIX 1 — the structural-sanity backstop is never silent: these premium
         # candidates carried a structurally impossible (fair, offered, edge)
@@ -2774,10 +2922,11 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         )
     if n_tennis_game_line:
         logger.info(
-            "value pipeline %s: %d tennis game-line market group(s) dropped "
+            "value pipeline %s: %s dropped %d tennis game-line market group(s) "
             "(results feed carries set scores only — a game-line pick can never "
-            "auto-settle honestly)",
+            "auto-settle honestly; 97%% of pre-gate game-line picks expired void)",
             sport_key,
+            TENNIS_GAME_LINE_UNSETTLEABLE_REASON,
             n_tennis_game_line,
         )
     if n_integer_line_totals:

@@ -72,6 +72,11 @@ CANDIDATE_EVALUATION_REASONS: frozenset[str] = frozenset(
         "thin_books",
         "ah_implausible",
         "dc_implausible",
+        "global_odds_ceiling",
+        "draw_selection_demotion",
+        "premium_mint_too_early",
+        "consensus_anchor_dropped",
+        "tennis_game_line_unsettleable",
     }
 )
 

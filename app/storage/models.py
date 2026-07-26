@@ -456,6 +456,14 @@ class Pick(Base):
     # anchor thinness is already carried by steam_anchor_age_seconds above.
     # NULL = model-strategy pick or pre-column row. Additive + nullable.
     anchor_book_count: Mapped[int | None] = mapped_column(SmallInteger)
+    # TIMING TELEMETRY (2026-07-26, observability first — nothing gates on the
+    # stored value): hours between MINT (created_at) and the event's best-known
+    # kickoff (starts_at), positive = minted before kickoff. Stamped by the
+    # pipeline at INSERT only (the original mint's timing, never rewritten by a
+    # re-price/upgrade), so the inert premium_max_hours_to_kickoff ceiling can
+    # be armed later against honest forward evidence. NULL = kickoff unknown at
+    # mint or a pre-column row. Additive + nullable, no backfill.
+    hours_to_kickoff: Mapped[Decimal | None] = mapped_column(METRIC)
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)

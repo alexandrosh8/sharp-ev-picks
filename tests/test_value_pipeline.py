@@ -544,6 +544,275 @@ async def test_require_sharp_anchor_disabled_keeps_consensus_premium() -> None:
     assert all(p.anchor_type == "consensus" for p in picks)
 
 
+# --- TASK G gates (2026-07-26): draw demotion · sharp-anchor-only drop ·
+# --- premium mint-timing ceiling (inert) · hours_to_kickoff telemetry --------
+
+
+def draw_market_snapshots(age_s: float = 30.0) -> list[OddsSnapshotIn]:
+    # Pinnacle prices a tight 3-way; SoftBook is generous ONLY on the Draw
+    # (3.80 vs fair ~3.38) — the Draw is the sole +EV candidate (~12% edge,
+    # below the 0.15 sanity ceiling; raw 3.80 below the 4.0 ceilings).
+    return [
+        snap("Pinnacle", "Home FC", 2.50, age_s),
+        snap("Pinnacle", "Draw", 3.30, age_s),
+        snap("Pinnacle", "Away FC", 3.10, age_s),
+        snap("SoftBook", "Home FC", 2.40, age_s),
+        snap("SoftBook", "Draw", 3.80, age_s),
+        snap("SoftBook", "Away FC", 2.95, age_s),
+    ]
+
+
+def dc_market_snapshots(generous: str, generous_odds: float) -> list[OddsSnapshotIn]:
+    # Pinnacle 1X2 anchors the DERIVED double-chance fair (pair-sum); SoftBook
+    # quotes all three DC legs at no-value prices except ``generous`` — the
+    # single +EV DC candidate (~7% edge, ratio << the 1.5 DC guard).
+    dc_prices = {"Home FC or Draw": 1.42, "Home FC or Away FC": 1.36, "Draw or Away FC": 1.55}
+    dc_prices[generous] = generous_odds
+    return [
+        snap("Pinnacle", "Home FC", 2.50),
+        snap("Pinnacle", "Draw", 3.30),
+        snap("Pinnacle", "Away FC", 3.10),
+        *(
+            group_snap("SoftBook", sel, odds, Market.DOUBLE_CHANCE, "double_chance")
+            for sel, odds in dc_prices.items()
+        ),
+    ]
+
+
+async def test_draw_demotion_h2h_draw_premium_to_shadow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Gate ON: the premium 1X2 "Draw" candidate (trusted CLV -0.273, 17/21
+    # negative) is DEMOTED to the volume (shadow) tier — never alerted, never
+    # dropped — under the named reason 'draw_selection_demotion'.
+    import logging
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(draw_market_snapshots()),
+        league="Premier League",
+        value_policy=ValuePolicy(demote_draw_selections=True),
+    )
+    with caplog.at_level(logging.INFO):
+        await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # demoted: never alerted
+    assert LAST_POLL["soccer"]["picks"] == 0  # n_premium == 0 (shadow, not dropped)
+    assert "draw_selection_demotion" in caplog.text  # the named gate reason
+
+
+async def test_draw_demotion_gate_off_keeps_draw_premium() -> None:
+    # Bare-policy default (demote_draw_selections=False) is inert: the same
+    # Draw candidate stays premium and alerts.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(draw_market_snapshots()),
+        league="Premier League",
+        value_policy=ValuePolicy(),
+    )
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["soccer"]["picks"] == 1
+    assert picks[0].selection == "Draw"
+
+
+@pytest.mark.parametrize(
+    ("generous", "generous_odds"),
+    [
+        ("Home FC or Draw", 1.56),  # 1X canonical form
+        ("Draw or Away FC", 1.75),  # X2 canonical form
+    ],
+)
+async def test_draw_demotion_double_chance_draw_forms_to_shadow(
+    caplog: pytest.LogCaptureFixture,
+    generous: str,
+    generous_odds: float,
+) -> None:
+    # Each canonical minted double-chance DRAW form ("{home} or Draw" /
+    # "Draw or {away}") is demoted exactly like the 1X2 Draw.
+    import logging
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(dc_market_snapshots(generous, generous_odds)),
+        league="Premier League",
+        value_policy=ValuePolicy(demote_draw_selections=True),
+    )
+    with caplog.at_level(logging.INFO):
+        await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []
+    assert LAST_POLL["soccer"]["picks"] == 0
+    assert "draw_selection_demotion" in caplog.text
+
+
+async def test_draw_demotion_leaves_no_draw_double_chance_premium() -> None:
+    # The draw-free "12" leg ("{home} or {away}") is NOT a draw form: it stays
+    # premium and alerts with the gate ON.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(dc_market_snapshots("Home FC or Away FC", 1.52)),
+        league="Premier League",
+        value_policy=ValuePolicy(demote_draw_selections=True),
+    )
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["soccer"]["picks"] == 1
+    assert picks[0].selection == "Home FC or Away FC"
+
+
+async def test_draw_demotion_soccer_scoped_other_sport_unaffected() -> None:
+    # The gate is SOCCER-scoped: an identical draw-selection slate for another
+    # sport still alerts even with the policy knob ON.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(draw_market_snapshots()),
+        league="Some League",
+        value_policy=ValuePolicy(demote_draw_selections=True),
+    )
+    await run_value_pipeline(deps, "basketball")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["basketball"]["picks"] == 1
+
+
+async def test_tennis_sharp_anchor_only_drops_consensus_candidate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # sharp_anchor_only_sports={'tennis'}: a consensus-anchored would-be-premium
+    # TENNIS candidate is HARD-DROPPED at the require-sharp-anchor branch —
+    # named reason 'consensus_anchor_dropped' — instead of demoted to shadow
+    # (the consensus-anchored tennis cell runs -37.9% ROI).
+    import logging
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(consensus_market_snapshots()),
+        league="ATP Challenger Somewhere",
+        value_policy=ValuePolicy(
+            require_sharp_anchor=True,
+            sharp_anchor_only_sports=frozenset({"tennis"}),
+        ),
+    )
+    with caplog.at_level(logging.INFO):
+        picks = await run_value_pipeline(deps, "tennis")
+    assert sink.sent == []
+    assert picks == []  # dropped outright: no premium, no shadow pick
+    assert LAST_POLL["tennis"]["picks"] == 0
+    assert "consensus_anchor_dropped" in caplog.text  # the named gate reason
+    # The demote path did NOT fire for this candidate — it was dropped.
+    assert "require-sharp-anchor gate demoted" not in caplog.text
+
+
+async def test_sharp_anchor_only_leaves_other_sports_demoting(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The SAME policy for a sport OUTSIDE the set (soccer) keeps the existing
+    # demote-to-volume behavior: no drop reason, the demote log fires.
+    import logging
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(consensus_market_snapshots()),
+        league="GFA League",
+        value_policy=ValuePolicy(
+            require_sharp_anchor=True,
+            sharp_anchor_only_sports=frozenset({"tennis"}),
+        ),
+    )
+    with caplog.at_level(logging.INFO):
+        await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # still demoted (not alerted)
+    assert "require-sharp-anchor gate demoted" in caplog.text
+    assert "consensus_anchor_dropped" not in caplog.text
+
+
+async def test_tennis_sharp_anchor_only_keeps_sharp_anchored_premium() -> None:
+    # A Pinnacle-anchored TENNIS candidate is untouched by the drop: the gate
+    # only fires where the require-sharp-anchor branch trips (consensus).
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(market_snapshots()),  # Pinnacle anchors the market
+        league="ATP Somewhere",
+        value_policy=ValuePolicy(
+            require_sharp_anchor=True,
+            sharp_anchor_only_sports=frozenset({"tennis"}),
+        ),
+    )
+    await run_value_pipeline(deps, "tennis")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["tennis"]["picks"] == 1
+
+
+async def test_hours_to_kickoff_stamped_on_value_pick() -> None:
+    # TIMING TELEMETRY: every minted value pick carries mint-to-kickoff hours
+    # (make_deps registers starts_at = now + 6h, so the stamp sits just under 6).
+    sink = RecordingSink()
+    picks = await run_value_pipeline(make_deps(sink, FakeLoader(market_snapshots())), "soccer")
+    assert len(picks) == 1
+    hours = picks[0].hours_to_kickoff
+    assert hours is not None
+    assert 5.9 < hours <= 6.0
+
+
+async def test_premium_mint_timing_ceiling_inert_at_inf() -> None:
+    # The bare-policy default (premium_max_hours_to_kickoff = inf) gates
+    # NOTHING: the standard slate (minted 6h out) alerts exactly as before.
+    import math
+
+    from app.pipeline import LAST_POLL
+
+    assert math.isinf(ValuePolicy().premium_max_hours_to_kickoff)
+    sink = RecordingSink()
+    picks = await run_value_pipeline(make_deps(sink, FakeLoader(market_snapshots())), "soccer")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["soccer"]["picks"] == 1
+    assert all("demoted" not in p.reason_summary for p in picks)
+
+
+async def test_premium_mint_timing_ceiling_armed_demotes_to_shadow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A future config flip (ceiling 1h < the 6h mint distance) DEMOTES the
+    # premium pick to shadow — named reason 'premium_mint_too_early', never
+    # alerted, never dropped.
+    import logging
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(market_snapshots()),
+        league="Premier League",
+        value_policy=ValuePolicy(premium_max_hours_to_kickoff=1.0),
+    )
+    with caplog.at_level(logging.INFO):
+        await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # demoted: never alerted
+    assert LAST_POLL["soccer"]["picks"] == 0  # n_premium == 0 (shadow, not dropped)
+    assert "premium_mint_too_early" in caplog.text  # the named gate reason
+
+
 async def test_sharp_anchor_loader_injects_betfair_as_live_anchor() -> None:
     # A soft-only scrape (no Pinnacle/Betfair in the main table — the real
     # OddsPortal case) anchors on consensus(median). Injecting the captured free
@@ -762,15 +1031,22 @@ def totals_market_snapshots(over: str, under: str) -> list[OddsSnapshotIn]:
     ]
 
 
-async def test_tennis_game_line_totals_candidate_dropped() -> None:
+async def test_tennis_game_line_totals_candidate_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # Our tennis results feed carries SET scores only — a GAME-line totals
-    # candidate ("Over 22.5") can never be auto-settled honestly, so the
-    # candidate gate must drop it before any pick is minted.
+    # candidate ("Over 22.5") can never be auto-settled honestly (97% of the
+    # pre-gate game-line picks expired void), so the candidate gate must drop
+    # it before any pick is minted, under its NAMED reason.
+    import logging
+
     sink = RecordingSink()
     loader = FakeLoader(totals_market_snapshots("Over 22.5", "Under 22.5"))
-    picks = await run_value_pipeline(make_deps(sink, loader), "tennis")
+    with caplog.at_level(logging.INFO):
+        picks = await run_value_pipeline(make_deps(sink, loader), "tennis")
     assert picks == []
     assert sink.sent == []
+    assert "tennis_game_line_unsettleable" in caplog.text  # the named gate reason
 
 
 async def test_tennis_set_line_totals_candidate_kept() -> None:

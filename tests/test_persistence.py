@@ -1363,6 +1363,11 @@ async def test_live_evidence_rows_reduce_settled_picks_to_floats(session) -> Non
     assert r.closing_anchor_type == "pinnacle"
     assert r.has_snapshot_close is True
     assert r.sharp_close is True
+    # TASK TL dimensions: market key + scraped league name ride each row so the
+    # (sport, market) trusted-close coverage counter and the major/non-major
+    # trusted-CLV split can classify it (test league -> non_major).
+    assert r.market == "h2h"
+    assert r.league_name == "test-league-persist"
 
 
 async def test_anchor_type_roundtrips_and_serializes(session) -> None:  # type: ignore[no-untyped-def]

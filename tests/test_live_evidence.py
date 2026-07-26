@@ -39,6 +39,8 @@ def row(
     close_fell_back: bool | None = None,
     decimal_odds: float | None = None,
     minted_at: datetime | None = None,
+    market: str | None = None,
+    league: str | None = None,
 ) -> SettledPickRow:
     return SettledPickRow(
         decimal_odds=decimal_odds,
@@ -58,6 +60,8 @@ def row(
         mint_devig_fell_back=mint_fell_back,
         close_devig_fell_back=close_fell_back,
         minted_at=minted_at,
+        market=market,
+        league_name=league,
     )
 
 
@@ -876,3 +880,126 @@ def test_mc_null_rides_the_trusted_subset_in_the_report() -> None:
     untrusted = [row(clv=0.01, closing_anchor="consensus", has_snapshot=True, decimal_odds=2.0)]
     rep = live_evidence_report(trusted + untrusted, ml_threshold=None, min_n=1)
     assert rep["mc_null"]["n"] == 3  # only the trusted subset is resampled
+
+
+# --------------------------------------------------------------------------- #
+# TASK TL (2026-07-26) — trusted-close coverage gap per (sport, market)
+# --------------------------------------------------------------------------- #
+
+
+def test_trusted_close_gap_counts_settled_without_trusted_close() -> None:
+    # Per-(sport, market) counter of settled picks WITHOUT a trusted sharp
+    # close — the promotion-blocking denominator (basketball spreads needs
+    # n_trusted >= 100; this cell shows where the trusted sample is leaking).
+    rows = [
+        # basketball spreads: 3 settled, 1 trusted sharp close -> gap 2
+        row(sport="basketball", market="spreads", closing_anchor="pinnacle", has_snapshot=True),
+        row(sport="basketball", market="spreads", closing_anchor="consensus", has_snapshot=True),
+        row(sport="basketball", market="spreads", clv=None, beat=None, has_snapshot=False),
+        # soccer h2h: 1 settled, 0 trusted
+        row(sport="soccer", market="h2h", closing_anchor="pinnacle", has_snapshot=False),
+    ]
+    rep = live_evidence_report(rows, ml_threshold=None, min_n=1)
+    cells = rep["trusted_close_gap_by_sport_market"]
+    assert [(c["sport"], c["market"]) for c in cells] == [
+        ("basketball", "spreads"),
+        ("soccer", "h2h"),
+    ]
+    bball = cells[0]
+    assert bball["n_settled"] == 3
+    assert bball["n_trusted_close"] == 1
+    assert bball["n_missing_trusted_close"] == 2
+    assert bball["sufficient"] is True  # min_n=1: one trusted close reaches the floor
+    assert cells[1] == {
+        "sport": "soccer",
+        "market": "h2h",
+        "n_settled": 1,
+        "n_trusted_close": 0,
+        "n_missing_trusted_close": 1,
+        "sufficient": False,
+    }
+
+
+def test_trusted_close_gap_carries_insufficient_below_default_floor() -> None:
+    # Honesty floor: at the DEFAULT min_n=50, a cell with 48 trusted closes
+    # (the live basketball-spreads state) must carry the existing insufficient
+    # status pattern — never a bare number without the flag.
+    rows = [
+        row(sport="basketball", market="spreads", closing_anchor="pinnacle", has_snapshot=True)
+        for _ in range(48)
+    ]
+    rep = live_evidence_report(rows, ml_threshold=None)
+    cell = rep["trusted_close_gap_by_sport_market"][0]
+    assert cell["n_trusted_close"] == 48
+    assert cell["n_missing_trusted_close"] == 0
+    assert cell["sufficient"] is False  # 48 < MIN_STRATUM_N
+
+
+def test_trusted_close_gap_is_feature_detected() -> None:
+    # Mirrors by_sport/by_anchor: until a row carries BOTH sport and market the
+    # dimension is None ("not available"), never an empty list.
+    rep = live_evidence_report([row(sport="soccer"), row(market="h2h")], ml_threshold=None, min_n=1)
+    assert rep["trusted_close_gap_by_sport_market"] is None
+
+
+# --------------------------------------------------------------------------- #
+# TASK TL (2026-07-26) — league-tier (major/non-major) trusted-CLV split
+# --------------------------------------------------------------------------- #
+
+
+def test_trusted_clv_by_league_tier_splits_major_vs_non_major() -> None:
+    def trusted_row(league: str | None, clv: float) -> SettledPickRow:
+        return row(league=league, clv=clv, closing_anchor="pinnacle", has_snapshot=True)
+
+    rows = [
+        trusted_row("Premier League", 0.02),
+        # normalize_league semantics: accents fold, case folds — "Série A"
+        # normalizes onto the listed "Serie A".
+        trusted_row("Série A", 0.04),
+        trusted_row("GFA League", -0.10),
+        # unknown league (dimension not joined): assigned to NEITHER bucket
+        trusted_row(None, 0.09),
+        # untrusted close: never enters the trusted-CLV scorecard at all
+        row(league="Premier League", clv=0.30, closing_anchor="consensus", has_snapshot=True),
+    ]
+    lt = live_evidence_report(rows, ml_threshold=None, min_n=2)["trusted_clv_ci"]["by_league_tier"]
+    assert set(lt) == {"major", "non_major"}
+    assert lt["major"]["n"] == 2
+    assert lt["major"]["sufficient"] is True
+    assert lt["major"]["mean_clv_log"] == pytest.approx(0.03)
+    assert lt["non_major"]["n"] == 1
+    assert lt["non_major"]["sufficient"] is False
+    assert lt["non_major"]["mean_clv_log"] is None  # nulled at the source
+
+
+def test_trusted_clv_by_league_tier_honesty_floor_and_empty_shape() -> None:
+    # Both buckets are ALWAYS present (like premium_cohorts) with the standard
+    # insufficient pattern below min_n — even on an empty report.
+    lt = live_evidence_report([], ml_threshold=None)["trusted_clv_ci"]["by_league_tier"]
+    assert set(lt) == {"major", "non_major"}
+    for entry in lt.values():
+        assert entry["n"] == 0
+        assert entry["sufficient"] is False
+        assert entry["mean_clv_log"] is None
+        assert entry["ci_low"] is None
+        assert entry["ci_high"] is None
+        assert entry["significant"] is False
+
+
+def test_major_leagues_constant_matches_commented_flag_value() -> None:
+    # The module constant must mirror the commented VALUE_MAJOR_LEAGUES value
+    # (.env.example) — the flag itself stays disabled; this list is a
+    # MEASUREMENT dimension only.
+    from app.backtesting.live_evidence import MAJOR_LEAGUES
+
+    assert MAJOR_LEAGUES == (
+        "Premier League",
+        "LaLiga",
+        "Serie A",
+        "Bundesliga",
+        "Ligue 1",
+        "UEFA Champions League",
+        "UEFA Europa League",
+        "NBA",
+        "EuroLeague",
+    )

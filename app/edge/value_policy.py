@@ -218,6 +218,41 @@ class ValuePolicy:
     # never a hard drop). Stale/missing verdicts NEVER demote.
     betfair_staleness_guard: bool = False
     betfair_staleness_shadow: bool = True
+    # SOCCER DRAW-SELECTION DEMOTION (trusted-CLV audit 2026-07-26: draw-leg
+    # picks measure -0.273 trusted CLV, 17/21 negative, n=21; FLB literature
+    # loads margin onto the draw). When True, a PREMIUM soccer candidate whose
+    # selection carries a draw leg — 1X2 "Draw" or a draw-containing
+    # double-chance form ("{home} or Draw" / "Draw or {away}" / "1X"/"X2") —
+    # is DEMOTED to the volume (shadow) tier with the named reason
+    # 'draw_selection_demotion': persisted + CLV-tracked, never alerted, NEVER
+    # dropped (the forward evidence keeps flowing). False = gate OFF (the
+    # inert empty-policy default); set from Settings.value_demote_draw_selections
+    # (default True) at the composition root. The pure predicate is
+    # app/edge/value.draw_selection_demotion; soccer scoping lives in the
+    # pipeline (sport_key).
+    demote_draw_selections: bool = False
+    # SHARP-ANCHOR-ONLY sports (trusted evidence 2026-07-26: the tennis
+    # consensus-anchored cell runs -37.9% ROI). For a sport in this set, the
+    # require-sharp-anchor gate HARD-DROPS a tripped PREMIUM candidate at the
+    # pipeline's demotion branch — named reason 'consensus_anchor_dropped' —
+    # instead of demoting it to the volume (shadow) tier: a consensus-anchored
+    # would-be-premium pick for these sports is never minted at all. Sports
+    # OUTSIDE the set keep the demote-to-volume behavior unchanged. Inert when
+    # require_sharp_anchor is False (the branch never fires). Empty frozenset =
+    # gate OFF (the inert empty-policy default); built from the CSV
+    # Settings.value_sharp_anchor_only_sports (default 'tennis') at the
+    # composition root, lowercased to match the pipeline's sport_key.
+    sharp_anchor_only_sports: frozenset[str] = frozenset()
+    # PREMIUM MINT-TIMING CEILING (hours to kickoff) — INERT scaffolding behind
+    # the hours_to_kickoff telemetry stamp. A PREMIUM candidate minted MORE than
+    # this many hours before kickoff is DEMOTED to the volume (shadow) tier with
+    # the named reason 'premium_mint_too_early' — persisted + CLV-tracked, never
+    # alerted, NEVER dropped. math.inf = gate OFF (the default here AND the
+    # Settings default — no gating until forward hours_to_kickoff evidence
+    # defines a threshold; a future config flip activates the ready branch).
+    # Set from Settings.value_premium_max_hours_to_kickoff at the composition
+    # root. An unknown kickoff (hours_to_kickoff None) never demotes.
+    premium_max_hours_to_kickoff: float = math.inf
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:

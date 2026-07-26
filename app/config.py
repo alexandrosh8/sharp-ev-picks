@@ -184,6 +184,19 @@ def parse_book_allowlist(raw: str) -> frozenset[str]:
     return frozenset(name.strip().lower() for name in raw.split(",") if name.strip())
 
 
+def parse_sharp_anchor_only_sports(raw: str) -> frozenset[str]:
+    """VALUE_SHARP_ANCHOR_ONLY_SPORTS csv of pipeline sport keys.
+
+    For a sport in this set the require-sharp-anchor branch HARD-DROPS a
+    tripped PREMIUM candidate (named reason 'consensus_anchor_dropped') instead
+    of demoting it to the volume (shadow) tier — the tennis consensus-anchored
+    cell's -37.9% ROI kill switch (2026-07-26). Empty = OFF (every sport keeps
+    the demote-to-volume behavior). Lowercased (strip + lower) to match the
+    pipeline's ``sport_key``; blank entries dropped.
+    """
+    return frozenset(sport.strip().lower() for sport in raw.split(",") if sport.strip())
+
+
 def parse_visibility_only_markets(raw: str) -> tuple[str, ...]:
     """VALUE_VISIBILITY_ONLY_MARKETS csv of market keys CAPPED at the volume tier.
 
@@ -622,6 +635,35 @@ class Settings(BaseSettings):
     # demote-to-shadow path stays in place for its own band) to every market.
     # 0 disables the gate.
     value_max_odds: float = Field(default=4.0, ge=0.0)
+    # SOCCER DRAW-SELECTION DEMOTION (trusted-CLV audit 2026-07-26): draw-leg
+    # picks measure -0.273 trusted CLV (17/21 negative, n=21) — the
+    # favourite-longshot-bias literature loads margin onto the draw. When True
+    # (the default), a PREMIUM soccer candidate on the 1X2 "Draw" or a
+    # draw-containing double-chance leg ("{home} or Draw" / "Draw or {away}" /
+    # "1X"/"X2") is DEMOTED to the volume (shadow) tier with the named reason
+    # 'draw_selection_demotion' — persisted + CLV-tracked, never alerted, NEVER
+    # dropped, so the band keeps accruing forward evidence (see
+    # app/edge/value.draw_selection_demotion). False disables the gate.
+    value_demote_draw_selections: bool = True
+    # SHARP-ANCHOR-ONLY sports, csv of pipeline sport keys (trusted evidence
+    # 2026-07-26: the tennis consensus-anchored cell runs -37.9% ROI). For a
+    # sport listed here, the require-sharp-anchor branch HARD-DROPS a tripped
+    # PREMIUM candidate — named reason 'consensus_anchor_dropped' — instead of
+    # demoting it to the volume (shadow) tier, so a consensus-anchored
+    # would-be-premium pick for that sport is never minted at all. Sports NOT
+    # listed keep the demote-to-volume behavior. Inert unless
+    # VALUE_REQUIRE_SHARP_ANCHOR is on. Empty = OFF (every sport demotes).
+    value_sharp_anchor_only_sports: str = "tennis"
+    # PREMIUM MINT-TIMING CEILING, hours to kickoff (INERT scaffolding behind
+    # the picks.hours_to_kickoff telemetry stamp). A PREMIUM candidate minted
+    # MORE than this many hours before kickoff is DEMOTED to the volume
+    # (shadow) tier with the named reason 'premium_mint_too_early' — never
+    # alerted, never dropped. 0 = gate OFF (the default — mapped to the
+    # policy's math.inf ceiling at the composition root; Settings floats must
+    # stay finite): no gating until forward hours_to_kickoff evidence defines
+    # a threshold. An unknown kickoff never demotes. Flip via
+    # VALUE_PREMIUM_MAX_HOURS_TO_KICKOFF (e.g. 48).
+    value_premium_max_hours_to_kickoff: float = Field(default=0.0, ge=0.0)
     # EXCHANGE ANCHOR LIQUIDITY FLOOR (WP5) — £ matched best-back size, the
     # unit the dedicated Betfair capture writes into odds_snapshots.liquidity
     # (app/ingestion/betfair_api.py "best-back available £"). An exchange row
@@ -1791,6 +1833,17 @@ def value_policy(settings: Settings) -> ValuePolicy:
         dc_max_sharp_soft_ratio=settings.value_dc_max_sharp_soft_ratio,
         moneyline_max_odds=settings.value_moneyline_max_odds,
         max_odds=settings.value_max_odds,
+        demote_draw_selections=settings.value_demote_draw_selections,
+        sharp_anchor_only_sports=parse_sharp_anchor_only_sports(
+            settings.value_sharp_anchor_only_sports
+        ),
+        # Settings floats must stay finite; 0.0 is the OFF sentinel and maps to
+        # the policy's inert math.inf ceiling (no gating).
+        premium_max_hours_to_kickoff=(
+            settings.value_premium_max_hours_to_kickoff
+            if settings.value_premium_max_hours_to_kickoff > 0.0
+            else math.inf
+        ),
         exchange_min_liquidity=settings.value_exchange_min_liquidity,
         betfair_api_promote=settings.value_betfair_api_promote,
         betfair_staleness_guard=settings.value_betfair_staleness_guard,

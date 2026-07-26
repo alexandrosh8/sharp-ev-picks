@@ -140,6 +140,21 @@ def test_tennis_game_line_groups_are_filtered() -> None:
     assert _is_tennis_game_line_group("tennis", Market.H2H, {"A": {"b": 2.0}}) is False
 
 
+def test_hours_to_kickoff_helper() -> None:
+    """TIMING TELEMETRY (2026-07-26): mint-to-kickoff hours — positive before
+    kickoff, negative after, and None (NULL stamp, never fabricated) when the
+    kickoff is unknown."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.pipeline import _hours_to_kickoff
+
+    now = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
+    assert _hours_to_kickoff(None, now) is None  # missing starts_at -> NULL
+    assert _hours_to_kickoff(now + timedelta(minutes=90), now) == pytest.approx(1.5)
+    assert _hours_to_kickoff(now + timedelta(days=2), now) == pytest.approx(48.0)
+    assert _hours_to_kickoff(now - timedelta(hours=1), now) == pytest.approx(-1.0)
+
+
 async def test_pipeline_produces_pick_and_alert() -> None:
     sink = RecordingSink()
     picks = await run_pick_pipeline(make_deps(sink), "soccer_epl")

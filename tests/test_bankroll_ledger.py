@@ -59,7 +59,7 @@ def test_migration_chains_off_prior_head_single_head() -> None:
     assert callable(mod.downgrade)
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["c4d8e2f6a1b3"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["d5a1c7f3e9b2"]
 
 
 def test_setting_ships_off_by_default() -> None:

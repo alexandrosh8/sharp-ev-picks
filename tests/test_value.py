@@ -991,6 +991,56 @@ def test_global_odds_ceiling_property_trips_iff_at_or_above_ceiling(raw_odds: fl
     assert global_odds_ceiling_violation(_ceiling_bet(raw_odds), max_odds=4.0) == (raw_odds >= 4.0)
 
 
+# --- soccer DRAW-selection demotion (trusted-CLV audit 2026-07-26) -----------
+# Draw-leg picks measure -0.273 trusted CLV (17/21 negative, n=21; the FLB
+# literature loads margin onto the draw). The pure predicate matches the 1X2
+# "Draw" and every draw-containing double-chance leg; the pipeline DEMOTES a
+# matching premium soccer candidate to shadow under the named reason.
+
+
+def test_draw_selection_demotion_named_reason_and_h2h_draw() -> None:
+    from app.edge.value import DRAW_SELECTION_DEMOTION_REASON, draw_selection_demotion
+
+    assert DRAW_SELECTION_DEMOTION_REASON == "draw_selection_demotion"
+    assert draw_selection_demotion("h2h", "Draw")
+    assert draw_selection_demotion("h2h", " draw ")  # normalized, whitespace-safe
+    assert not draw_selection_demotion("h2h", "Home FC")
+    assert not draw_selection_demotion("h2h", "Away FC")
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "Home FC or Draw",  # OddsPortal 1X canonical form
+        "Draw or Away FC",  # OddsPortal X2 canonical form
+        "NEFC or Draw",  # live-DB forms (audit 2026-07-26)
+        "Draw or Villa San Carlos",
+        "1X",  # compact vocabulary, defensively covered
+        "X2",
+        "x2",
+    ],
+)
+def test_draw_selection_demotion_double_chance_draw_forms(selection: str) -> None:
+    from app.edge.value import draw_selection_demotion
+
+    assert draw_selection_demotion("double_chance", selection)
+
+
+@pytest.mark.parametrize(
+    ("market", "selection"),
+    [
+        ("double_chance", "Home FC or Away FC"),  # 12 — no draw leg
+        ("double_chance", "Drawsburg FC or Away FC"),  # club NAME containing 'draw'
+        ("totals", "Over 2.5"),  # other markets never match
+        ("spreads", "Draw (+0.5)"),  # draw-handicap rides spreads, not this gate
+    ],
+)
+def test_draw_selection_demotion_never_matches_non_draw_legs(market: str, selection: str) -> None:
+    from app.edge.value import draw_selection_demotion
+
+    assert not draw_selection_demotion(market, selection)
+
+
 # --- A4: close_exclusion_reason — the closed-vocabulary classifier -----------
 # One test per branch (first guard wins); the persisted reason is FINER than
 # the close_independent_of_fill boolean it annotates.

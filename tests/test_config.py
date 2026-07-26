@@ -1,5 +1,6 @@
 """Settings safety validator: tampering with picks-only flags is fatal."""
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -719,13 +720,21 @@ def test_premium_adjustment_knobs_default_to_current_behavior() -> None:
     # (50.0 £ best-back — WP5: a KNOWN-thin exchange line never anchors; unknown
     # liquidity stays eligible so main-scrape Betfair coverage is untouched);
     # and the GLOBAL odds ceiling (4.0 — HARD-DROPS the CLV-negative odds>=4.0
-    # tail on EVERY market, trusted-CLV audit 2026-07-26; 0 disables).
+    # tail on EVERY market, trusted-CLV audit 2026-07-26; 0 disables); the
+    # soccer DRAW-selection demotion (ON — trusted CLV -0.273, 17/21 negative,
+    # n=21: draw-leg premiums demote to shadow, named reason
+    # 'draw_selection_demotion'); and the tennis sharp-anchor-only DROP
+    # ('tennis' — the consensus-anchored cell's -37.9% ROI kill switch, named
+    # reason 'consensus_anchor_dropped'). The mint-timing ceiling stays INERT
+    # (Settings 0 = OFF maps to the policy's math.inf — telemetry only).
     assert value_policy(s) == ValuePolicy(
         max_edge=0.20,
         moneyline_max_odds=4.0,
         max_odds=4.0,
         require_sharp_anchor=True,
         exchange_min_liquidity=50.0,
+        demote_draw_selections=True,
+        sharp_anchor_only_sports=frozenset({"tennis"}),
     )
     stakes = stake_policy(s)
     assert stakes.max_drawdown is None
@@ -743,6 +752,46 @@ def test_value_max_odds_defaults_and_threads_into_policy() -> None:
     off = make_settings(value_max_odds="0")
     assert value_policy(off).max_odds == 0.0
     assert ValuePolicy().max_odds == 0.0
+
+
+def test_value_demote_draw_selections_defaults_and_threads_into_policy() -> None:
+    # TASK G gate 1 (2026-07-26): Settings default ON (trusted CLV -0.273,
+    # 17/21 negative, n=21); the bare-policy default stays inert (False).
+    s = make_settings()
+    assert s.value_demote_draw_selections is True
+    assert value_policy(s).demote_draw_selections is True
+    assert _example_env_value("VALUE_DEMOTE_DRAW_SELECTIONS") == "true"
+    off = make_settings(value_demote_draw_selections="false")
+    assert value_policy(off).demote_draw_selections is False
+    assert ValuePolicy().demote_draw_selections is False
+
+
+def test_value_sharp_anchor_only_sports_defaults_and_parses_csv() -> None:
+    # TASK G gate 2 (2026-07-26): default 'tennis' (the consensus-anchored
+    # tennis cell runs -37.9% ROI); CSV parsed to a lowercased frozenset at
+    # the composition root; the bare-policy default stays inert (empty).
+    s = make_settings()
+    assert s.value_sharp_anchor_only_sports == "tennis"
+    assert value_policy(s).sharp_anchor_only_sports == frozenset({"tennis"})
+    assert _example_env_value("VALUE_SHARP_ANCHOR_ONLY_SPORTS") == "tennis"
+    multi = make_settings(value_sharp_anchor_only_sports=" Tennis, basketball ,")
+    assert value_policy(multi).sharp_anchor_only_sports == frozenset({"tennis", "basketball"})
+    off = make_settings(value_sharp_anchor_only_sports="")
+    assert value_policy(off).sharp_anchor_only_sports == frozenset()
+    assert ValuePolicy().sharp_anchor_only_sports == frozenset()
+
+
+def test_value_premium_max_hours_to_kickoff_inert_default_maps_to_inf() -> None:
+    # TASK G gate 4 (2026-07-26, INERT scaffolding): Settings 0 = OFF (floats
+    # must stay finite) maps to the policy's math.inf ceiling — no gating; a
+    # positive value threads through unchanged to arm the demote branch.
+    s = make_settings()
+    assert s.value_premium_max_hours_to_kickoff == 0.0
+    assert math.isinf(value_policy(s).premium_max_hours_to_kickoff)
+    assert _example_env_value("VALUE_PREMIUM_MAX_HOURS_TO_KICKOFF") == "0"
+    armed = make_settings(value_premium_max_hours_to_kickoff="48")
+    assert value_policy(armed).premium_max_hours_to_kickoff == 48.0
+    assert math.isinf(ValuePolicy().premium_max_hours_to_kickoff)
 
 
 def test_value_policy_parses_market_maps_and_bands() -> None:

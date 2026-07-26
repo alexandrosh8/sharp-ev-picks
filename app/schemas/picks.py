@@ -126,6 +126,13 @@ class PickOut(InternalModel):
     # Pick.mint_devig_fell_back so the trusted CLV subset can drop ASYMMETRIC
     # mint/close fallbacks. None = model-strategy pick / pre-column row.
     mint_devig_fell_back: bool | None = None
+    # TIMING TELEMETRY (2026-07-26, observability first): hours between MINT
+    # (created_at) and the event's best-known kickoff (starts_at) — positive =
+    # minted before kickoff. Stamped at mint by both strategies; None = kickoff
+    # unknown at mint (never fabricated) or a pre-column row. The INERT
+    # premium_max_hours_to_kickoff policy ceiling reads this same number when a
+    # future config flip arms it (named reason 'premium_mint_too_early').
+    hours_to_kickoff: float | None = None
     # Final score of the settled game ("HOME-AWAY", e.g. "2-1"). None until the
     # pick settles (or when no score was recorded). Surfaced in the dashboard
     # SETTLED view; /picks serializes the repo dict, so this keeps the contract
