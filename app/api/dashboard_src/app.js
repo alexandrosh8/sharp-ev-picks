@@ -447,6 +447,17 @@
           if (!healthHasCompletedPoll(health)) return true;
           return Number(health.newest_poll_age_seconds) * 1000 > verifiedWindowMs(health);
         }
+        const COVERAGE_INCOMPLETE_COPY = "Source coverage incomplete — some fixtures may be missing or unverified.";
+        function staleIsCoverageOnly(health) {
+          // Task F 2026-07-26 #2 — COPY ONLY, gating unchanged: any status
+          // !== "ok" (including the upcoming backend "partial") still fails
+          // closed via dataIsStale(). But when the payload proves a completed
+          // poll INSIDE the freshness window, "stale odds" is the wrong
+          // diagnosis — prices are current; source coverage is what's degraded.
+          return state.healthErr === null && !!health && health.status !== "ok" &&
+            healthHasCompletedPoll(health) &&
+            Number(health.newest_poll_age_seconds) * 1000 <= verifiedWindowMs(health);
+        }
         function healthIsTrusted(health) {
           return !dataIsStale(health) && state.healthErr === null && health && health.status === "ok";
         }
@@ -651,7 +662,9 @@
           } else if (!state.healthErr && state.health && !healthHasCompletedPoll(state.health)) {
             messages.push("System health is unverified — no completed poll cycle yet.");
           } else if (!state.healthErr && state.health && dataIsStale(state.health)) {
-            messages.push("Odds data is stale — cached prices are not actionable.");
+            messages.push(staleIsCoverageOnly(state.health)
+              ? COVERAGE_INCOMPLETE_COPY
+              : "Odds data is stale — cached prices are not actionable.");
           }
           if (state.premiumErr && state.volumeErr && !premiumCached && !volumeCached) {
             messages.unshift("Could not load picks.");
@@ -1094,7 +1107,12 @@
         });
 
         function renderStaleBanner() {
-          $("stale-banner").classList.toggle("show", dataIsStale(state.health));
+          const banner = $("stale-banner");
+          banner.classList.toggle("show", dataIsStale(state.health));
+          // Task F 2026-07-26 #2: copy tracks the diagnosis — visibility gating above is unchanged.
+          banner.textContent = staleIsCoverageOnly(state.health)
+            ? COVERAGE_INCOMPLETE_COPY
+            : "Odds data is stale. Picks should not be treated as current.";
         }
 
         // Fix 2026-07-10 #9/#13 — ONE shared row-open mechanism: navigating to
@@ -1163,7 +1181,9 @@
           // needs-attention derived queue
           const attn = [];
           if (health && health.status === "degraded") attn.push("Source Degraded — ingestion health degraded.");
-          if (dataIsStale(health)) attn.push("Source Degraded — odds data is stale.");
+          if (dataIsStale(health)) attn.push(staleIsCoverageOnly(health)
+            ? COVERAGE_INCOMPLETE_COPY
+            : "Source Degraded — odds data is stale.");
           if (health && health.proxy_pool && health.proxy_pool.verdict === "Proxy pool degraded") attn.push("Source Degraded — proxy pool degraded.");
           // Fix 2026-07-10 #10: the two "Low Evidence" lines merely restated
           // the Qualified Now empty state / evidence-position panel — this
@@ -1450,14 +1470,24 @@
           const tier = document.createElement("span"); tier.className = "er-tier tag " + (tierOf(p) === "volume" ? "tag-warm" : "tag-cyan");
           tier.textContent = tierOf(p) === "volume" ? "Shadow" : "Premium";
           const sel = document.createElement("span"); sel.className = "er-sel mono";
-          const eff = numOf(p.current_edge == null ? p.edge : p.current_edge);
+          // Task F 2026-07-26 #1: a closed/settled/void row shows its MINT
+          // edge (+ settled P&L when known) — a live re-priced current_edge
+          // on a dead market is meaningless and floated void picks to the top.
+          const closed = edgeGroupOf(p) === "closed";
+          const eff = closed ? numOf(p.edge) : numOf(p.current_edge == null ? p.edge : p.current_edge);
           sel.appendChild(document.createTextNode(selLabel(p) + " @ " + fmtOdds(p.decimal_odds) + " · "));
           // Fix 2026-07-10 #3: a negative edge keeps its minus sign and is
           // styled as negative — never rendered like a normal positive edge.
           const effEl = document.createElement("span");
           effEl.className = "er-edge" + (isFinite(eff) && eff < 0 ? " neg" : "");
-          effEl.textContent = fmtSignedPct(eff);
+          effEl.textContent = (closed ? "mint " : "") + fmtSignedPct(eff);
           sel.appendChild(effEl);
+          if (closed) {
+            const pnl = p.pnl != null ? p.pnl : p.provisional_pnl;
+            if (pnl != null && isFinite(Number(pnl))) {
+              sel.appendChild(document.createTextNode(" · P&L " + (Number(pnl) >= 0 ? "+" : "") + Number(pnl).toFixed(2)));
+            }
+          }
           const trust = document.createElement("span"); trust.className = "er-trust"; trust.textContent = trustGlyph(p); trust.title = anchorLabel(p);
           row.append(ko, ev, tier, sel, trust);
           // Task 5: same-game correlation chip (premium); Task 4: demotion-note
@@ -1540,7 +1570,9 @@
             ["closed", "Closed"],
           ];
           const sortMode = ($("eq-sort") && $("eq-sort").value) || "edge";
-          const edgeVal = (p) => { const v = numOf(p.current_edge == null ? p.edge : p.current_edge); return Number.isFinite(v) ? v : -1e9; };
+          // Task F 2026-07-26 #1: closed rows sort by MINT edge — never by a
+          // live re-priced current_edge on a finished market.
+          const edgeVal = (p) => { const v = numOf(edgeGroupOf(p) === "closed" || p.current_edge == null ? p.edge : p.current_edge); return Number.isFinite(v) ? v : -1e9; };
           const koVal = (p) => new Date(p.starts_at || 8e15).getTime();
           // Fix 2026-07-10 #17: sport precedence first, then the selected
           // comparator within each sport.
@@ -1601,7 +1633,9 @@
           const q = ($("eq-search").value || "").trim().toLowerCase();
           const tierWant = $("eq-tier").value, statusWant = $("eq-status").value;
           const sortMode = ($("eq-sort") && $("eq-sort").value) || "edge";
-          const edgeVal = (p) => numOf(p.current_edge == null ? p.edge : p.current_edge);
+          // Task F 2026-07-26 #1: CSV keeps both edge columns, but a closed
+          // row's primary (sort) edge is its MINT edge, matching the list.
+          const edgeVal = (p) => numOf(edgeGroupOf(p) === "closed" || p.current_edge == null ? p.edge : p.current_edge);
           const match = (p) => {
             if (tierWant && tierOf(p) !== tierWant) return false;
             if (statusWant && edgeGroupOf(p) !== statusWant) return false;
@@ -2783,12 +2817,26 @@
             slateCov && rate != null && den != null
               ? fmtPct(rate) + " (" + (Number(num) || 0) + "/" + (Number(den) || 0) + ")"
               : (mr ? "n/a (no soft slate)" : (state.matchRateErr ? "Could not load coverage." : "Computing coverage… (~15s)"));
+          // Task F 2026-07-26 #3: the verdict chip must follow the coverage
+          // rate — "Nominal" over "0.0% (0/14)" was a contradiction. 0% =
+          // DARK (alert), <20% = Low Coverage (warn); no measurable rate
+          // keeps the prior Nominal/Pending labels.
+          const covVerdict = (rate) => {
+            if (!mr) return ["Pending", "tag-neutral"];
+            const r = numOf(rate);
+            if (!isFinite(r)) return ["Nominal", "tag-success"];
+            if (r <= 0) return ["DARK", "tag-danger"];
+            if (r < 0.2) return ["Low Coverage", "tag-warm"];
+            return ["Nominal", "tag-success"];
+          };
           const pinRate = slateCell(slateCov && slateCov.pinnacle_events, slateCov && slateCov.soft_events, slateCov && slateCov.pinnacle_rate);
-          tb.appendChild(sourceRow("Pinnacle ARCADIA", "—", pinRate, mr ? "Nominal" : "Pending", "Sharp-close archive · share of soft-scraped events also priced by Pinnacle.", mr ? "tag-success" : "tag-neutral"));
+          const pinV = covVerdict(slateCov && slateCov.pinnacle_rate);
+          tb.appendChild(sourceRow("Pinnacle ARCADIA", "—", pinRate, pinV[0], "Sharp-close archive · share of soft-scraped events also priced by Pinnacle.", pinV[1]));
 
           const bfRate = slateCell(slateCov && slateCov.betfair_events, slateCov && slateCov.soft_events, slateCov && slateCov.betfair_rate);
           const bfSrc = (health && health.betfair_source) || "Betfair EXCHANGE share of soft-scraped events (Sportsbook is soft, not counted).";
-          tb.appendChild(sourceRow("Betfair Exchange", "—", bfRate, mr ? "Nominal" : "Pending", bfSrc, mr ? "tag-success" : "tag-neutral"));
+          const bfV = covVerdict(slateCov && slateCov.betfair_rate);
+          tb.appendChild(sourceRow("Betfair Exchange", "—", bfRate, bfV[0], bfSrc, bfV[1]));
 
           const stale = mr && mr.betfair_staleness;
           tb.appendChild(sourceRow("Betfair API", "—", "—", "Monitor-only", stale ? "fresh decisions — " + fmtDecisions(stale.fresh_decisions) : "Monitor-only — not a pick-feeding read.", "tag-neutral"));
