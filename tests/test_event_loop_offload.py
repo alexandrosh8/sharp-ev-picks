@@ -40,6 +40,7 @@ async def test_oddschecker_match_page_parse_runs_off_the_event_loop(
         *,
         markets: Sequence[Market] | None = None,
         include_other: bool = False,
+        payloads: list[dict[str, Any]] | None = None,
     ) -> list[str]:
         seen["supported_market_ids"] = threading.current_thread().name
         return []
@@ -52,6 +53,7 @@ async def test_oddschecker_match_page_parse_runs_off_the_event_loop(
         now: datetime | None = None,
         markets: Sequence[Market] | None = None,
         max_snapshots: int = oc.MAX_SNAPSHOTS_PER_MATCH,
+        payloads: list[dict[str, Any]] | None = None,
     ) -> list[OddsSnapshotIn]:
         seen["parse_match_page"] = threading.current_thread().name
         return []

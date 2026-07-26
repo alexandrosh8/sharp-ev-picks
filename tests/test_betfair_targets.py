@@ -382,3 +382,63 @@ async def test_null_kickoff_excluded(factory) -> None:  # type: ignore[no-untype
         factory, sport="soccer", now=NOW, window=timedelta(days=3), limit=20
     )
     assert url not in {t.external_ref for t in targets}
+
+
+# --------------------------------------------------------------------------- #
+# TASK PERF (2026-07-26): the Betfair API SHADOW matcher's candidate universe.
+# After the oddschecker migration canonical soccer refs are "oddschecker:<id>",
+# not navigable http URLs — the default http%-only filter (correct for the
+# page-scraping exchange reader) starved the API shadow matcher to 0 candidates
+# and a 0% match rate. ref_likes widens eligibility per caller.
+# --------------------------------------------------------------------------- #
+async def test_oddschecker_ref_excluded_by_default_http_filter(factory) -> None:  # type: ignore[no-untyped-def]
+    ref = f"oddschecker:{uuid4().int % 10**9}"
+    await _create_soccer_event(
+        factory, url=ref, home="Arsenal", away="Coventry", starts_at=NOW + timedelta(hours=3)
+    )
+    targets = await select_betfair_targets(
+        factory, sport="soccer", now=NOW, window=timedelta(days=3), limit=20
+    )
+    assert ref not in {t.external_ref for t in targets}
+
+
+async def test_oddschecker_ref_included_when_ref_likes_widened(factory) -> None:  # type: ignore[no-untyped-def]
+    ref = f"oddschecker:{uuid4().int % 10**9}"
+    await _create_soccer_event(
+        factory, url=ref, home="Arsenal", away="Coventry", starts_at=NOW + timedelta(hours=3)
+    )
+    targets = await select_betfair_targets(
+        factory,
+        sport="soccer",
+        now=NOW,
+        window=timedelta(days=3),
+        limit=20,
+        ref_likes=("http%", "oddschecker:%"),
+    )
+    hit = {t.external_ref for t in targets}
+    assert ref in hit
+    # Synthetic "home|away|date" ids stay excluded either way.
+    synth = f"Alpha|Beta|{uuid4()}"
+    await _create_soccer_event(
+        factory, url=synth, home="Alpha", away="Beta", starts_at=NOW + timedelta(hours=4)
+    )
+    widened = await select_betfair_targets(
+        factory,
+        sport="soccer",
+        now=NOW,
+        window=timedelta(days=3),
+        limit=20,
+        ref_likes=("http%", "oddschecker:%"),
+    )
+    assert synth not in {t.external_ref for t in widened}
+
+
+async def test_empty_ref_likes_falls_back_to_navigable_default(factory) -> None:  # type: ignore[no-untyped-def]
+    url = f"https://www.oddsportal.com/football/eng/{uuid4()}"
+    await _create_soccer_event(
+        factory, url=url, home="England", away="Ghana", starts_at=NOW + timedelta(hours=3)
+    )
+    targets = await select_betfair_targets(
+        factory, sport="soccer", now=NOW, window=timedelta(days=3), limit=20, ref_likes=()
+    )
+    assert url in {t.external_ref for t in targets}

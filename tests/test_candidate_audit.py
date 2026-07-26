@@ -72,6 +72,7 @@ def test_documented_reason_vocabulary_covers_pipeline_gates() -> None:
         "premium_mint_too_early",
         "consensus_anchor_dropped",
         "tennis_game_line_unsettleable",
+        "shots_totals_veto",
     } == set(CANDIDATE_EVALUATION_REASONS)
 
 

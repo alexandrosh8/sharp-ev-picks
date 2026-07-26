@@ -835,3 +835,22 @@ def test_no_order_or_account_methods_in_module() -> None:
     ]
     present = [token for token in forbidden if token in source]
     assert present == [], f"forbidden order/account identifiers in module: {present}"
+
+
+async def test_shadow_matches_oddschecker_era_canonical_refs() -> None:
+    """TASK PERF (2026-07-26): the matcher is ref-form-agnostic — an
+    oddschecker-era canonical ref ("oddschecker:<id>", the post-migration event
+    identity) must match exactly like the legacy OddsPortal URL refs. The 0%
+    match rate was the CANDIDATE QUERY (http%-only ref filter starved the
+    universe), never the matcher; this pins the re-pointed contract end-to-end:
+    oddschecker-ref candidate in -> matched shadow rows out."""
+    candidates = [
+        EventCandidate(
+            ref="oddschecker:101610031", home="Alpha FC", away="Beta United", kickoff=KICKOFF
+        )
+    ]
+    report = await _shadow_capture(_full_odds_mock(), candidates).capture_once()
+    assert report.markets_fetched == 1
+    assert report.matched == 1
+    assert report.match_rate > 0
+    assert {s.event_id for s in report.snapshots} == {"oddschecker:101610031"}

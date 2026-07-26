@@ -106,9 +106,12 @@ def test_tennis_all_leagues_within_budget_loads() -> None:
 def test_nfl_polling_on_by_default_with_nfl_slug() -> None:
     # American football ships ON by default (leagues="nfl,ncaa" — NFL + NCAA + CFL + UFL);
     # off-season the dated scrape simply yields no events. Stays VISIBILITY-ONLY.
+    # 2026-07-26 season prep: markets mirror the basketball loader-ready
+    # wildcard pattern (whole totals/spread half-line ladders in one GET per
+    # family) — a VISIBILITY/volume widening only, no pipeline/gating change.
     s = make_settings()
     assert s.oddsportal_nfl_leagues == "nfl,ncaa,cfl,ufl"
-    assert s.oddsportal_nfl_markets == "home_away"
+    assert s.oddsportal_nfl_markets == "home_away,over_under_games,asian_handicap_games"
 
 
 def test_nfl_all_leagues_market_budget_is_enforced() -> None:

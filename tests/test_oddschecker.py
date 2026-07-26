@@ -2368,3 +2368,69 @@ async def test_linked_legacy_pages_honor_per_call_market_override(
     )
 
     assert parsed_scopes == [(Market.TOTALS,), (Market.TOTALS,)]
+
+
+# --------------------------------------------------------------------------- #
+# TASK PERF (2026-07-26): the full-page Hypernova parse (BeautifulSoup +
+# json.loads over every application/json script) must run ONCE per fetched
+# match page. Previously supported_market_ids_from_match_page and the
+# parse_match_page fallback each re-ran it (header + bestOdds lookups), i.e.
+# 4 identical full-page parses per page — ~1s of duplicated CPU.
+# --------------------------------------------------------------------------- #
+async def test_match_page_hypernova_parse_runs_once_per_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.ingestion.oddschecker as oc
+
+    calls = {"n": 0}
+    real = oc.hypernova_payloads
+
+    def counting(html: str) -> list[dict[str, object]]:
+        calls["n"] += 1
+        return real(html)
+
+    async def no_api_rows(
+        market_ids: object, *, referer: object, session: object = None, proxy: object = None
+    ) -> list[dict[str, object]]:
+        return []  # force the parse_match_page embedded fallback too
+
+    monkeypatch.setattr(oc, "hypernova_payloads", counting)
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", no_api_rows)
+    loader = OddsCheckerLoader(EventDirectory(), markets=(Market.H2H,))
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/english/premier-league/arsenal-v-coventry/winner",
+        html=_match_html(),
+        status_code=200,
+    )
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page,
+        now=datetime(2026, 7, 5, 10, 10, tzinfo=UTC),
+        session=None,
+    )
+    assert snapshots, "embedded fallback must still produce rows"
+    assert calls["n"] == 1, f"hypernova_payloads ran {calls['n']}x for one page fetch"
+
+
+def test_parse_helpers_reuse_supplied_payloads_without_reparse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a pre-parsed payload list supplied, neither helper may re-parse."""
+    import app.ingestion.oddschecker as oc
+
+    html = _match_html()
+    payloads = oc.hypernova_payloads(html)
+
+    def boom(_html: str) -> list[dict[str, object]]:
+        raise AssertionError("hypernova_payloads must not be re-invoked")
+
+    monkeypatch.setattr(oc, "hypernova_payloads", boom)
+    ids = supported_market_ids_from_match_page(html, markets=(Market.H2H,), payloads=payloads)
+    assert ids == ["10"]
+    snapshots = parse_match_page(
+        html,
+        url="https://www.oddschecker.com/football/english/premier-league/arsenal-v-coventry/winner",
+        directory=EventDirectory(),
+        now=datetime(2026, 7, 5, 10, 10, tzinfo=UTC),
+        payloads=payloads,
+    )
+    assert snapshots

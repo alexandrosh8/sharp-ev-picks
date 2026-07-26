@@ -828,3 +828,95 @@ def test_cached_core_and_lazy_panels_surface_refresh_failures() -> None:
         "Could not refresh games — showing last loaded fixtures",
     ):
         assert copy in text
+
+
+def test_evidence_cells_panel_league_tier_gaps_and_bb_spreads_progress() -> None:
+    """TASK DASH 1 (2026-07-26): the Lab EVIDENCE panel renders the ADDITIVE
+    /performance live_evidence fields — basketball-spreads trusted-close
+    progress toward the 100-close promotion-consideration bar, the
+    major/non-major league-tier trusted-CLV split (95% CI + n, insufficient
+    below the floor via the ONE shared CI formatter), and the per-(sport,
+    market) trusted-close coverage gap cells — all with honest
+    insufficient/empty states and NO new fetch."""
+    text = _text()
+    assert 'id="evidence-cells"' in text
+    assert "function renderEvidenceCells" in text
+    assert "trusted_close_gap_by_sport_market" in text
+    assert "by_league_tier" in text
+    assert "const BASKETBALL_SPREADS_PROMOTION_N = 100" in text
+    assert "Basketball spreads — promotion progress" in text
+    # honest states for every sub-block
+    assert "No settled basketball-spreads picks yet." in text
+    assert "Close-coverage cells not yet reported." in text
+    assert "League-tier split not yet reported." in text
+    # the split labels + shared CI-entry formatter (nulled below the floor)
+    assert "Trusted CLV — major leagues" in text
+    assert "Trusted CLV — non-major (obscure) leagues" in text
+    assert "function ciEntryText" in text
+    assert "missing trusted close" in text
+    # never a promotion — measurement framing stays explicit
+    assert "Progress toward the promotion-consideration bar only" in text
+
+
+def test_gate_reason_widget_lazy_states_and_new_slugs() -> None:
+    """TASK DASH 2 (2026-07-26): the 'why picks did not mint' widget is a lazy
+    Lab loader targeting the proposed read-only GET /lab/gate-reasons (no
+    backend route exposes candidate_evaluations reason counts yet — the widget
+    renders an explicit honest state on HTTP 404 until it ships), never in the
+    boot-time loadOnce() cycle, and decomposes no_sharp_anchor:* sub-reasons
+    under their parent slug."""
+    text = _text()
+    assert 'id="gate-reasons"' in text
+    assert "function renderGateReasons" in text
+    assert "function loadGateReasons" in text
+    assert re.search(r'fetchGuarded\("/lab/gate-reasons"\)', text)
+    load_once = text[
+        text.index("async function loadOnce") : text.index("async function loadOnce") + 2000
+    ]
+    assert "/lab/gate-reasons" not in load_once
+    # honest states, incl. the explicit route-not-yet-deployed state on 404
+    assert "Loading gate reasons…" in text
+    assert "Could not load gate reasons." in text
+    assert "Gate-reason telemetry endpoint is not available yet" in text
+    assert "No candidate evaluations in the window." in text
+    assert "Could not refresh gate reasons — showing last loaded data." in text
+    # no_sharp_anchor:<cause> sub-reasons group under the parent slug
+    assert '"no_sharp_anchor:"' in text
+    # the 2026-07 reason slugs are documented at the render site
+    for slug in (
+        "draw_selection_demotion",
+        "consensus_anchor_dropped",
+        "tennis_game_line_unsettleable",
+        "global_odds_ceiling",
+    ):
+        assert slug in text, slug
+    # measurement-only framing — a demoted candidate still mints in shadow
+    assert "still mints in the shadow tier" in text
+
+
+def test_mint_lead_hours_on_card_and_ticket() -> None:
+    """TASK DASH 3 (2026-07-26): mint lead (hours to kickoff at mint) on the
+    ticket + the card kickoff cell's tooltip. Prefers the server-persisted
+    hours_to_kickoff once /picks serializes it (the Pick column exists but is
+    NOT in the payload yet); until then derived from created_at → starts_at
+    and labelled derived — provenance is never silent."""
+    text = _text()
+    assert "function mintLeadHours" in text
+    assert "hours_to_kickoff" in text
+    assert '"Mint lead"' in text
+    assert "before kickoff" in text
+    assert "derived from mint and kickoff times" in text
+    assert '"minted ~"' in text
+
+
+def test_needs_attention_folds_unsettleable_league_gaps() -> None:
+    """TASK DASH 4 (2026-07-26): the per-league unsettleable/results-gap
+    backlog folds into the Today needs-attention queue, rendered ONLY when
+    /health serializes it (unsettleable_leagues — the settlement engine's
+    currently logs-only report); an absent field renders nothing, never a
+    fabricated row."""
+    text = _text()
+    assert "unsettleable_leagues" in text
+    assert '"Results gap — "' in text
+    assert "picks past kickoff with no result source." in text
+    assert "more leagues with results gaps." in text

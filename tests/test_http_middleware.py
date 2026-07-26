@@ -1,5 +1,6 @@
 """HTTP compression, request-size, and browser-security middleware contracts."""
 
+import re
 from collections import deque
 from typing import Any
 
@@ -11,8 +12,15 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import Message, Scope
 
 from app.api.request_limits import MAX_REQUEST_BODY_BYTES, RequestBodyLimitMiddleware
-from app.api.security_headers import DEFAULT_SECURITY_HEADERS, SecurityHeadersMiddleware
+from app.api.security_headers import (
+    CSP_NONCE_PLACEHOLDER,
+    DEFAULT_SECURITY_HEADERS,
+    SecurityHeadersMiddleware,
+)
 from app.main import create_app
+
+# base64url charset — what secrets.token_urlsafe() emits; CSP nonce grammar.
+_NONCE_RE = re.compile(r"'nonce-([A-Za-z0-9_-]{16,})'")
 
 
 def _middleware_app() -> FastAPI:
@@ -57,8 +65,20 @@ def test_large_responses_are_compressed_and_hardened() -> None:
     assert "Accept-Encoding" in response.headers["vary"]
     assert int(response.headers["content-length"]) < 8192
     for name, expected in DEFAULT_SECURITY_HEADERS.items():
-        assert response.headers[name] == expected
-    assert response.headers["strict-transport-security"] == "max-age=31536000"
+        if name == "Content-Security-Policy":
+            # The placeholder is replaced with a fresh per-response nonce.
+            nonce_match = _NONCE_RE.search(response.headers[name])
+            assert nonce_match is not None
+            assert response.headers[name] == expected.replace(
+                CSP_NONCE_PLACEHOLDER, nonce_match.group(1)
+            )
+        else:
+            assert response.headers[name] == expected
+    csp = response.headers["content-security-policy"]
+    script_src = next(d for d in csp.split(";") if d.strip().startswith("script-src"))
+    assert "'unsafe-inline'" not in script_src
+    assert CSP_NONCE_PLACEHOLDER not in csp
+    assert response.headers["strict-transport-security"] == "max-age=31536000; includeSubDomains"
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["x-robots-tag"] == "noindex, nofollow, noarchive"
     assert response.headers["cache-control"] == "private, no-store"
@@ -81,6 +101,74 @@ def test_bare_no_store_policy_is_made_private_and_proxy_safe() -> None:
     assert response.status_code == 200
     assert response.headers["cache-control"] == "private, no-store"
     assert response.headers["pragma"] == "no-cache"
+
+
+def test_csp_nonce_is_fresh_per_response() -> None:
+    with TestClient(_middleware_app()) as client:
+        first = client.get("/revalidate")
+        second = client.get("/revalidate")
+
+    nonce_a = _NONCE_RE.search(first.headers["content-security-policy"])
+    nonce_b = _NONCE_RE.search(second.headers["content-security-policy"])
+    assert nonce_a is not None
+    assert nonce_b is not None
+    assert nonce_a.group(1) != nonce_b.group(1)
+
+
+def _shell_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    """Real router + real SecurityHeadersMiddleware; auth stubbed so / serves
+    the dashboard shell and /login serves the login shell."""
+    from app.api.auth import require_dashboard_auth
+    from app.api.routes import router
+    from app.config import Settings
+
+    settings = Settings.model_construct(dashboard_auth_enabled=False, app_env="local")
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.api.routes.is_authenticated", lambda _request: False)
+
+    app = FastAPI()
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.include_router(router)
+    app.dependency_overrides[require_dashboard_auth] = lambda: None
+    return app
+
+
+@pytest.mark.parametrize("path", ["/", "/login"])
+def test_served_shells_carry_the_header_nonce_on_their_inline_script(
+    path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with TestClient(_shell_app(monkeypatch)) as client:
+        response = client.get(path)
+
+    assert response.status_code == 200
+    csp = response.headers["content-security-policy"]
+    script_src = next(d for d in csp.split(";") if d.strip().startswith("script-src"))
+    assert "'unsafe-inline'" not in script_src
+    nonce_match = _NONCE_RE.search(script_src)
+    assert nonce_match is not None
+    # The shell's single inline <script> carries the SAME nonce as the header,
+    # and no un-nonced <script> tag remains.
+    assert f'<script nonce="{nonce_match.group(1)}">' in response.text
+    assert "<script>" not in response.text
+
+
+def test_setup_shell_inline_script_is_nonced() -> None:
+    # /setup is the third server-rendered shell but only serves 200 on a
+    # non-prod, unconfigured, direct-loopback request — too conditional for the
+    # unconditional /,/login parametrize above. Cover the actual regression risk
+    # (its inline <script> losing the nonce) at the _nonced_shell chokepoint.
+    from starlette.requests import Request
+
+    from app.api.routes import _SETUP_HTML, _nonced_shell
+
+    scope = {
+        "type": "http",
+        "headers": [],
+        "state": {"csp_nonce": "test-setup-nonce"},
+    }
+    rendered = bytes(_nonced_shell(_SETUP_HTML, Request(scope)).body).decode("utf-8")
+    assert '<script nonce="test-setup-nonce">' in rendered
+    assert "<script>" not in rendered
 
 
 def test_application_installs_all_http_middlewares() -> None:
