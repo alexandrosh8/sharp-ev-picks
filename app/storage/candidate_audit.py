@@ -77,6 +77,10 @@ CANDIDATE_EVALUATION_REASONS: frozenset[str] = frozenset(
         "premium_mint_too_early",
         "consensus_anchor_dropped",
         "tennis_game_line_unsettleable",
+        # shots-totals GAP-screen veto (SHADOW-FIRST, ships OFF): premium soccer
+        # totals-2.5 candidate demoted because the shots screen leans the other
+        # way (app/pipeline SHOTS_TOTALS_VETO_REASON).
+        "shots_totals_veto",
     }
 )
 

@@ -291,6 +291,18 @@
         const EDGE_CHUNK = 30;              // edges rendered per group before "Show more"
         let edgeCaps = {};                  // per-group reveal cap; reset on filter/sort change
         const clvPctFromLog = (log) => (Math.exp(Number(log)) - 1) * 100;
+        // ONE shared trusted-CLV CI-entry formatter (tier scorecard, ADR-0022
+        // cohorts, and the TASK DASH league-tier cells render identically):
+        // estimates arrive NULLED at the source below the min_n floor — below
+        // it only the n and the insufficient state survive, never a number.
+        function ciEntryText(e) {
+          return e.mean_clv_log != null && e.ci_low != null && e.ci_high != null
+            ? fmtSignedPct(clvPctFromLog(e.mean_clv_log) / 100)
+              + " (95% CI " + fmtSignedPct(clvPctFromLog(e.ci_low) / 100)
+              + " … " + fmtSignedPct(clvPctFromLog(e.ci_high) / 100)
+              + ", n=" + (Number(e.n) || 0) + ")"
+            : "n=" + (Number(e.n) || 0) + " — insufficient";
+        }
 
         // ===== shared state ===================================================
         const state = {
@@ -329,6 +341,10 @@
           bankrollErr: null,
           bankrollLoading: false,
           bankrollAt: null,
+          gateReasons: null,
+          gateReasonsErr: null,
+          gateReasonsLoading: false,
+          gateReasonsAt: null,
           lastOkAt: null,
           globalDegraded: true,
           coreLoaded: false,
@@ -403,6 +419,20 @@
         function hasFutureKickoff(p) {
           const kickoff = timestampMs(p && p.starts_at);
           return Number.isFinite(kickoff) && kickoff > Date.now();
+        }
+        // TASK DASH 3 (2026-07-26): mint lead — how many hours before kickoff
+        // the pick was minted. Prefers the server-persisted hours_to_kickoff
+        // (Pick.hours_to_kickoff exists in the DB but /picks does NOT
+        // serialize it yet — see integration notes); until then it is derived
+        // from created_at → starts_at and labelled as derived, so provenance
+        // is never silent. null = kickoff or mint time unknown.
+        function mintLeadHours(p) {
+          const direct = numOf(p && p.hours_to_kickoff);
+          if (isFinite(direct)) return { hours: direct, derived: false };
+          const ko = timestampMs(p && p.starts_at);
+          const mint = timestampMs(p && p.created_at);
+          if (!Number.isFinite(ko) || !Number.isFinite(mint)) return null;
+          return { hours: (ko - mint) / 3.6e6, derived: true };
         }
         function hasQualifyingEdgeNow(p, health) {
           // "Qualified now" requires an actual live re-price. Falling back to
@@ -1026,6 +1056,74 @@
             .finally(() => { state.bankrollLoading = false; if (activeView === "lab") renderBankroll(); });
         }
 
+        // ===== lazy /lab/gate-reasons loader (TASK DASH 2 — Lab view only) ===
+        // "Why picks did not mint": aggregated candidate_evaluations reason
+        // telemetry over a trailing window, incl. the 2026-07 slugs —
+        // no_sharp_anchor:* sub-reasons, draw_selection_demotion,
+        // consensus_anchor_dropped, tennis_game_line_unsettleable,
+        // global_odds_ceiling. NO backend route exposes these counts yet:
+        // this loader targets the PROPOSED tiny read-only GET /lab/gate-reasons
+        // (payload { window_hours, n_evaluations, n_clean_premium,
+        // reasons: {slug: count} }) and renders an explicit honest state on
+        // HTTP 404 until it ships. Measurement only — a demoted candidate
+        // still mints in the shadow tier; a rejected one never minted.
+        const GATE_REASONS_TTL_MS = 5 * 60 * 1000;
+        function renderGateReasons() {
+          const box = $("gate-reasons"); box.replaceChildren();
+          const p0 = document.createElement("p"); p0.className = "muted";
+          if (state.gateReasonsLoading && !state.gateReasons) { p0.textContent = "Loading gate reasons…"; box.appendChild(p0); return; }
+          if (state.gateReasonsErr && !state.gateReasons) {
+            p0.textContent = state.gateReasonsErr.httpStatus === 404
+              ? "Gate-reason telemetry endpoint is not available yet (read-only /lab/gate-reasons pending)."
+              : "Could not load gate reasons.";
+            box.appendChild(p0); return;
+          }
+          if (!state.gateReasons) { p0.textContent = "Not loaded yet."; box.appendChild(p0); return; }
+          if (state.gateReasonsErr) box.appendChild(staleNoticeEl("Could not refresh gate reasons — showing last loaded data."));
+          const g = state.gateReasons;
+          const reasons = isRecord(g.reasons) ? g.reasons : {};
+          const keys = Object.keys(reasons);
+          if (keys.length === 0) { p0.textContent = "No candidate evaluations in the window."; box.appendChild(p0); return; }
+          const head = document.createElement("p"); head.className = "muted";
+          head.textContent = fmt(g.n_evaluations) + " candidate evaluations in the last "
+            + fmt(g.window_hours) + "h · " + fmt(g.n_clean_premium) + " clean premium keeps.";
+          box.appendChild(head);
+          // Parent slugs by count; "no_sharp_anchor:<cause>" sub-reasons render
+          // indented under their parent so the anchor-miss cliff decomposition
+          // stays legible next to the legacy bare slug.
+          const byCount = (a, b) => (Number(reasons[b]) || 0) - (Number(reasons[a]) || 0);
+          const subs = keys.filter((k) => k.indexOf("no_sharp_anchor:") === 0).sort(byCount);
+          const parents = keys.filter((k) => k.indexOf("no_sharp_anchor:") !== 0).sort(byCount);
+          const ml = document.createElement("div"); ml.className = "metric-list";
+          parents.forEach((k) => {
+            ml.appendChild(metricEl(k.replace(/_/g, " "), String(Number(reasons[k]) || 0)));
+            if (k === "no_sharp_anchor") {
+              subs.forEach((s) => {
+                ml.appendChild(metricEl("· no sharp anchor — "
+                  + s.slice("no_sharp_anchor:".length).replace(/_/g, " "),
+                String(Number(reasons[s]) || 0)));
+              });
+            }
+          });
+          if (parents.indexOf("no_sharp_anchor") === -1) {
+            subs.forEach((s) => {
+              ml.appendChild(metricEl(s.replace(/_/g, " ").replace(":", " — "), String(Number(reasons[s]) || 0)));
+            });
+          }
+          box.appendChild(ml);
+        }
+        function loadGateReasons() {
+          const fresh = state.gateReasonsAt != null && Date.now() - state.gateReasonsAt < GATE_REASONS_TTL_MS;
+          if ((state.gateReasons && fresh) || state.gateReasonsLoading) return;
+          state.gateReasonsLoading = true;
+          if (activeView === "lab") renderGateReasons();
+          fetchGuarded("/lab/gate-reasons")
+            .then((res) => readJson(res, (body) => expectObjectPayload(body, "Gate reasons")))
+            .then((body) => { state.gateReasons = body; state.gateReasonsErr = null; state.gateReasonsAt = Date.now(); })
+            .catch((e) => { state.gateReasonsErr = e; state.gateReasonsAt = Date.now(); })
+            .finally(() => { state.gateReasonsLoading = false; if (activeView === "lab") renderGateReasons(); });
+        }
+
         // ===== lazy /resolution/match-ceiling browse (B3 — Sources disclosure)
         // Collapsed by default; fetched ONLY on first expand (timeout-guarded
         // like match-rate). Live decomposition — never a static artifact.
@@ -1207,6 +1305,22 @@
             ? COVERAGE_INCOMPLETE_COPY
             : "Source Degraded — odds data is stale.");
           if (health && health.proxy_pool && health.proxy_pool.verdict === "Proxy pool degraded") attn.push("Source Degraded — proxy pool degraded.");
+          // TASK DASH 4 (2026-07-26): per-league unsettleable/results-gap
+          // backlog, folded from the settlement engine's currently logs-only
+          // report (report_and_expire_no_result_picks: gap backlog by
+          // (sport, league)). Rendered ONLY once /health serializes it as
+          // unsettleable_leagues: [{sport, league, n}] — an absent field
+          // renders nothing, never a fabricated row.
+          const resultGaps = (health && Array.isArray(health.unsettleable_leagues)
+            ? health.unsettleable_leagues : [])
+            .filter((g) => isRecord(g) && Number(g.n) > 0);
+          resultGaps.slice(0, 3).forEach((g) => {
+            attn.push("Results gap — " + String(fmt(g.sport)).replace(/_/g, " ") + " / " + fmt(g.league)
+              + ": " + Number(g.n) + " picks past kickoff with no result source.");
+          });
+          if (resultGaps.length > 3) {
+            attn.push("Results gap — " + (resultGaps.length - 3) + " more leagues with results gaps.");
+          }
           // Fix 2026-07-10 #10: the two "Low Evidence" lines merely restated
           // the Qualified Now empty state / evidence-position panel — this
           // queue is reserved for real actionable alerts.
@@ -1488,6 +1602,13 @@
             (!hasFutureKickoff(p) || !isRevalidationFresh(p, health));
           if (stale || dataIsStale(health)) row.classList.add("is-stale");
           const ko = document.createElement("span"); ko.className = "er-ko mono"; ko.textContent = hasStarted(p) ? "started" : fmtCountdown(p.starts_at);
+          // TASK DASH 3: mint lead on the card too — as the kickoff cell's
+          // tooltip so the dense row layout stays untouched.
+          const koLead = mintLeadHours(p);
+          if (koLead) {
+            ko.title = "minted ~" + fmtNum(koLead.hours, 1) + "h before kickoff"
+              + (koLead.derived ? " (derived)" : "");
+          }
           const ev = document.createElement("span"); ev.className = "er-event"; ev.textContent = eventLabel(p.event);
           const tier = document.createElement("span"); tier.className = "er-tier tag " + (tierOf(p) === "volume" ? "tag-warm" : "tag-cyan");
           tier.textContent = tierOf(p) === "volume" ? "Shadow" : "Premium";
@@ -2056,6 +2177,13 @@
           const floor = edgeFloorOf(p, state.health);
           ml.appendChild(metricEl("Edge vs tier floor",
             isFinite(floor) ? fmtSignedPct(eff - floor) : naEl("no tier floor available")));
+          // TASK DASH 3: hours to kickoff at mint — persisted field preferred,
+          // derived (created_at → starts_at) until /picks serializes it.
+          const lead = mintLeadHours(p);
+          ml.appendChild(metricEl("Mint lead", lead
+            ? fmtNum(lead.hours, 1) + "h before kickoff"
+              + (lead.derived ? " (derived from mint and kickoff times)" : "")
+            : naEl("kickoff or mint time unknown")));
           body.appendChild(ml);
           // Task 3: provenance one-liner — where "mint" vs "now" figures live.
           const prov = document.createElement("p"); prov.className = "muted";
@@ -2421,6 +2549,96 @@
             box.appendChild(sm);
           }
         }
+        // TASK DASH 1 (2026-07-26): EVIDENCE panel — the ADDITIVE /performance
+        // live_evidence cells, rendered with NO new fetch:
+        //   - basketball-spreads trusted-close accrual toward the 100-close
+        //     promotion-consideration bar (the promotion-critical cell in
+        //     live_evidence's trusted-close gap counter);
+        //   - the major vs non-major (obscure) league trusted-CLV split of the
+        //     SAME trusted subset (95% t-CI + n; estimates arrive nulled at
+        //     the source below the min_n floor);
+        //   - per-(sport, market) trusted-close coverage gaps — settled picks
+        //     accruing NO trusted CLV evidence.
+        // Measurement only — promotion stays gated by SportMarketClvGate and
+        // operator ADR sign-off.
+        const BASKETBALL_SPREADS_PROMOTION_N = 100;
+        function renderEvidenceCells() {
+          const box = $("evidence-cells"); box.replaceChildren();
+          const perf = state.perf;
+          const p0 = document.createElement("p"); p0.className = "muted";
+          if (!perf) { p0.textContent = "Could not load performance data."; box.appendChild(p0); return; }
+          const le = perf.live_evidence;
+          if (!le) { p0.textContent = "Not yet reported."; box.appendChild(p0); return; }
+          const mutedP = (t) => { const m = document.createElement("p"); m.className = "muted"; m.textContent = t; return m; };
+          const eyebrowP = (t) => { const h = document.createElement("p"); h.className = "eyebrow"; h.textContent = t; return h; };
+          const gaps = Array.isArray(le.trusted_close_gap_by_sport_market)
+            ? le.trusted_close_gap_by_sport_market : null;
+
+          // --- basketball-spreads promotion progress (n_trusted toward 100) --
+          box.appendChild(eyebrowP("Basketball spreads — promotion progress"));
+          if (gaps === null) {
+            box.appendChild(mutedP("Close-coverage cells not yet reported."));
+          } else {
+            const bb = gaps.filter((c) => String(c.sport).indexOf("basketball") === 0
+              && String(c.market).indexOf("spreads") === 0);
+            if (bb.length === 0) {
+              box.appendChild(mutedP("No settled basketball-spreads picks yet."));
+            } else {
+              const nTrusted = bb.reduce((a, c) => a + (Number(c.n_trusted_close) || 0), 0);
+              const nSettled = bb.reduce((a, c) => a + (Number(c.n_settled) || 0), 0);
+              box.appendChild(mutedP(nTrusted + " / " + BASKETBALL_SPREADS_PROMOTION_N
+                + " trusted closes accrued (" + nSettled + " settled · " + (nSettled - nTrusted)
+                + " missing trusted close). Progress toward the promotion-consideration bar only — never a promotion."));
+              box.appendChild(progressBarEl(nTrusted, BASKETBALL_SPREADS_PROMOTION_N,
+                "Basketball-spreads trusted closes"));
+            }
+          }
+
+          // --- major vs non-major league trusted-CLV split -------------------
+          box.appendChild(eyebrowP("League tier — trusted CLV"));
+          const lt = le.trusted_clv_ci && le.trusted_clv_ci.by_league_tier;
+          if (!lt) {
+            box.appendChild(mutedP("League-tier split not yet reported."));
+          } else {
+            const ml = document.createElement("div"); ml.className = "metric-list";
+            [["major", "Trusted CLV — major leagues"],
+             ["non_major", "Trusted CLV — non-major (obscure) leagues"]].forEach(([k, label]) => {
+              if (!lt[k]) return;
+              ml.appendChild(metricEl(label, ciEntryText(lt[k])));
+            });
+            box.appendChild(ml);
+            box.appendChild(mutedP("Major = the commented VALUE_MAJOR_LEAGUES set, on the same trusted "
+              + "subset — measurement only, never a gate; unknown-league rows enter neither bucket."));
+          }
+
+          // --- per-(sport, market) trusted-close coverage gaps ----------------
+          box.appendChild(eyebrowP("Trusted-close coverage gaps — sport / market"));
+          if (gaps === null) {
+            box.appendChild(mutedP("Close-coverage cells not yet reported."));
+          } else if (gaps.length === 0) {
+            box.appendChild(mutedP("No settled sport/market cells yet."));
+          } else {
+            gaps.slice()
+              .sort((a, b) => (Number(b.n_missing_trusted_close) || 0) - (Number(a.n_missing_trusted_close) || 0))
+              .slice(0, 10)
+              .forEach((c) => {
+                const r = document.createElement("div"); r.className = "kickoff-row";
+                const nm = document.createElement("span"); nm.className = "kr-t mono";
+                nm.textContent = String(fmt(c.sport)).replace(/_/g, " ") + " · " + marketLabel(c.market);
+                const s = document.createElement("span"); s.className = "kr-s";
+                s.textContent = "missing " + (Number(c.n_missing_trusted_close) || 0) + " of "
+                  + (Number(c.n_settled) || 0) + " settled · trusted " + (Number(c.n_trusted_close) || 0);
+                const tag = document.createElement("span");
+                tag.className = "tag " + (c.sufficient === true ? "tag-success" : "tag-warm");
+                tag.textContent = c.sufficient === true
+                  ? "n ≥ floor"
+                  : "n=" + (Number(c.n_trusted_close) || 0) + " — insufficient";
+                r.append(nm, s, tag); box.appendChild(r);
+              });
+            box.appendChild(mutedP("A missing trusted close is evidence that never accrues — the "
+              + "SportMarketClvGate denominator leak, per cell."));
+          }
+        }
         function claimRow(can, text) {
           const r = document.createElement("div"); r.className = "claim " + (can ? "can" : "cannot");
           const mk = document.createElement("span"); mk.className = "claim-mk"; mk.textContent = can ? "Can claim" : "Cannot claim yet";
@@ -2618,15 +2836,8 @@
           } else {
             const ml = document.createElement("div"); ml.className = "metric-list"; ml.style.marginTop = "8px";
             const tierName = { premium: "Premium", volume: "Shadow" };
-            // ONE shared CI-entry formatter: tier rows and the ADR-0022 cohort
-            // rows render identically (estimates arrive nulled below the floor).
-            const ciEntryText = (e) =>
-              e.mean_clv_log != null && e.ci_low != null && e.ci_high != null
-                ? fmtSignedPct(clvPctFromLog(e.mean_clv_log) / 100)
-                  + " (95% CI " + fmtSignedPct(clvPctFromLog(e.ci_low) / 100)
-                  + " … " + fmtSignedPct(clvPctFromLog(e.ci_high) / 100)
-                  + ", n=" + (Number(e.n) || 0) + ")"
-                : "n=" + (Number(e.n) || 0) + " — insufficient";
+            // Rows render through the shared module-level ciEntryText formatter
+            // (estimates arrive nulled below the floor).
             const tiers = le.trusted_clv_ci.by_tier || {};
             const tierKeys = Object.keys(tiers).sort();
             if (tierKeys.length === 0) {
@@ -2694,6 +2905,8 @@
           renderCloseQualityBySport();
           renderCloseCoverageSla();
           renderSteamShadow();
+          renderEvidenceCells();
+          renderGateReasons();
           renderPromotionDistance();
           renderBankroll();
         }
@@ -2970,7 +3183,7 @@
           if (location.hash.replace(/^#\/?/, "").split("/")[0] !== view) location.hash = "#/" + view;
           if (view === "radar") renderRadar();
           if (view === "sources") renderSources();
-          if (view === "lab") { loadPromotionDistance(); loadBankroll(); }
+          if (view === "lab") { loadPromotionDistance(); loadBankroll(); loadGateReasons(); }
           window.scrollTo(0, 0);
         }
         document.querySelectorAll("#rail button[data-view], #dock button[data-view]").forEach((b) =>

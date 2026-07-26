@@ -39,15 +39,17 @@ from app.edge.value_policy import (
 )
 from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
 from app.models.base import ProbabilityModel
+from app.models.football_shots import ShotsTotalsSignal
 from app.models.value_filter import ValueFilterModel, live_features
 from app.notifications.base import CORRELATED_EXPOSURE_WARNING, build_pick_alert
 from app.notifications.dispatcher import AlertDispatcher
 from app.probabilities.devig import (
     EXPECTED_FALLBACKS,
     DevigMethod,
+    devig,
     devig_with_diagnostics,
 )
-from app.risk.exposure import DailyExposureLedger
+from app.risk.exposure import DailyExposureLedger, same_event_stake_multipliers
 from app.risk.staking import (
     StakeBreakdown,
     StakePolicy,
@@ -513,6 +515,20 @@ StalenessVerdictLoader = Callable[[str], Awaitable[Mapping[str, str]]]
 #: isolated (type-only log) and NEVER blocks minting.
 NEffLookup = Callable[[str, str, str], int | None]
 
+#: SHOTS-TOTALS shadow-screen source (PipelineDeps.shots_signal_lookup):
+#: SYNCHRONOUS, CHEAP (in-memory GapRatings — never a per-pick blocking query)
+#: lookup ``(home_team, away_team, pick_side) -> ShotsTotalsSignal | None``
+#: for one soccer TOTALS-2.5 candidate (pick_side "over"|"under"). The
+#: composition root owns building per-league GapRatings state from settled
+#: football-data history AND the football_dc-style alias normalization of the
+#: pipeline's scraped team names — an unmatched name must return the
+#: insufficient_data no-op signal (or None). None (the default) leaves the
+#: screen fully unwired: byte-identical behavior. A lookup failure is isolated
+#: (type-only log) and NEVER blocks minting. SHADOW-ONLY consumer contract:
+#: the signal tags/demotes — it is never a fair-price source, never an alert
+#: trigger.
+ShotsSignalLookup = Callable[[str, str, str], "ShotsTotalsSignal | None"]
+
 
 class ShrinkAnnotatedStakeBreakdownOut(StakeBreakdownOut):
     """StakeBreakdownOut + the Task 5 uncertainty-shrink SHADOW annotation.
@@ -664,6 +680,15 @@ class PipelineDeps:
     # Task 5 n_eff source (see NEffLookup above). None (default) => the shadow
     # annotation records n_eff=None/phi=None — no hot-path queries, ever.
     stake_neff_lookup: NEffLookup | None = None
+    # SHOTS-TOTALS shadow screen source (see ShotsSignalLookup above). None
+    # (the default) = screen unwired: byte-identical behavior. When wired, the
+    # signal ANNOTATES every soccer totals-2.5 candidate (p_over25/lean/reason
+    # ride reason_summary) and, ONLY when the veto is armed (signal.veto from
+    # the module's ShotsPolicy OR value_policy.shots_totals_veto), a
+    # disagreeing PREMIUM candidate is DEMOTED to volume (shadow) — named
+    # reason 'shots_totals_veto', never alerted, never dropped, never a fair
+    # source.
+    shots_signal_lookup: ShotsSignalLookup | None = None
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
@@ -1246,6 +1271,93 @@ def canonical_market_detail(detail: str | None) -> str | None:
     if im:
         return f"totals_{im.group(1)}"
     return detail
+
+
+SHOTS_TOTALS_VETO_REASON = "shots_totals_veto"
+
+
+def _shots_pick_side(market: Market, detail: str | None, selection: str) -> str | None:
+    """``"over"``/``"under"`` when this candidate is in the shots screen's ONLY
+    scope — a full-match soccer TOTALS group on the 2.5 line — else None.
+
+    Detail-carrying groups are judged on the canonical detail token
+    ("totals_2_5", folding "over_under_2_5"); lineless (None-detail) groups on
+    the selection tail (" 2.5"), mirroring _is_integer_line_totals_group. Any
+    other line, market, or selection shape opts out (None) — the screen never
+    sees candidates it was not evaluated on.
+    """
+    if market is not Market.TOTALS:
+        return None
+    sel = selection.strip().lower()
+    canon = canonical_market_detail(detail)
+    if canon is not None:
+        if canon != "totals_2_5":
+            return None
+    elif not sel.endswith(" 2.5"):
+        return None
+    if sel.startswith("over"):
+        return "over"
+    if sel.startswith("under"):
+        return "under"
+    return None
+
+
+# Devig methods whose per-selection fair disagreement proxies edge-ESTIMATE
+# uncertainty (parity with app/models/value_filter._SPREAD_METHODS).
+_EDGE_VARIANCE_METHODS = (DevigMethod.MULTIPLICATIVE, DevigMethod.SHIN, DevigMethod.POWER)
+
+
+def _candidate_edge_variance(
+    prices: Mapping[str, Mapping[str, float]],
+    fair_by_sel: Mapping[str, float],
+    anchor_book: str,
+    selection: str,
+) -> float:
+    """Per-pick edge-ESTIMATE variance proxy for the B6 Baker-McHale shrink.
+
+    Two probability-scale-squared components, summed:
+      * ``(devig_spread / 2)^2`` — half the max disagreement between the
+        multiplicative/Shin/power devigs of the ANCHOR's full market at this
+        selection (the value filter's devig_spread feature), read as ~1 std
+        of the fair-prob estimate;
+      * the population variance of the quoting books' implied probabilities
+        (1/odds) for this selection — cross-book fair disagreement.
+
+    Fail-soft: a missing anchor side, a devig error, or < 2 quoting books
+    contribute 0.0 (their term vanishes — LESS shrink, never more), so the
+    shrink input can never block or inflate a stake. Only consulted when
+    StakePolicy.edge_uncertainty_coef is armed (default None = never called).
+    """
+    variance = 0.0
+    selections = list(fair_by_sel)
+    anchor_norm = anchor_book.strip().lower()
+    anchor_odds: list[float] = []
+    for sel in selections:
+        odds = next(
+            (
+                o
+                for b, o in (prices.get(sel) or {}).items()
+                if b.strip().lower() == anchor_norm and o > 1.0
+            ),
+            None,
+        )
+        if odds is None:
+            anchor_odds = []
+            break
+        anchor_odds.append(odds)
+    if anchor_odds and selection in fair_by_sel:
+        i = selections.index(selection)
+        try:
+            spreads = [devig(anchor_odds, method=m) for m in _EDGE_VARIANCE_METHODS]
+            devig_spread = max(abs(a[i] - b[i]) for a in spreads for b in spreads)
+            variance += (devig_spread / 2.0) ** 2
+        except Exception:  # noqa: BLE001 — fail-soft: a devig error adds no shrink
+            pass
+    implied = [1.0 / o for o in (prices.get(selection) or {}).values() if o > 1.0]
+    if len(implied) >= 2:
+        mean = sum(implied) / len(implied)
+        variance += sum((p - mean) ** 2 for p in implied) / len(implied)
+    return variance
 
 
 def _is_asian_handicap(market_detail: str | None) -> bool:
@@ -1943,6 +2055,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_moneyline_capped = 0
     n_sanity_demoted = 0
     n_draw_demoted = 0
+    n_shots_demoted = 0
+    n_shots_tagged = 0
     n_consensus_anchor_dropped = 0
     n_too_early_demoted = 0
     # Task 8 probe (Buchalter bet-volume smoke detector, log-only): market
@@ -2187,6 +2301,64 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 tier = "volume"
                 n_draw_demoted += 1
                 draw_note = " | draw selection (CLV-negative band): demoted to volume (shadow)"
+            # SHOTS-TOTALS SHADOW SCREEN (Wheatcroft GAP shots ratings,
+            # app/models/football_shots — SHADOW-FIRST mandate). Scope: soccer
+            # full-match TOTALS on the 2.5 line ONLY, and only when the
+            # composition root wired deps.shots_signal_lookup (None = the
+            # screen is absent, byte-identical). The signal ANNOTATES every
+            # in-scope candidate (p_over25/lean/reason ride reason_summary as
+            # shadow tags — NEVER a fair price, NEVER an alert trigger); a
+            # DISAGREEING lean DEMOTES a premium candidate to volume (shadow)
+            # — named reason 'shots_totals_veto', never alerted, NEVER dropped
+            # — only when the veto is armed (the module's ShotsPolicy.
+            # veto_enabled via signal.veto, OR value_policy.shots_totals_veto;
+            # both default OFF). A lookup failure or insufficient-data signal
+            # is a no-op (type-only log / no tag) and never blocks minting.
+            shots_note = ""
+            shots_demote = False
+            shots_lookup = deps.shots_signal_lookup
+            shots_side = (
+                _shots_pick_side(market, detail, v.selection)
+                if shots_lookup is not None and sport_key.startswith("soccer")
+                else None
+            )
+            if shots_side is not None and shots_lookup is not None and deps.directory is not None:
+                shots_signal: ShotsTotalsSignal | None = None
+                shots_teams = deps.directory.lookup(event_id)
+                if shots_teams is not None:
+                    try:
+                        shots_signal = shots_lookup(shots_teams.home, shots_teams.away, shots_side)
+                    except Exception as exc:  # the screen must NEVER break minting
+                        logger.error(
+                            "shots signal lookup failed for %s/%s: %s",
+                            sport_key,
+                            event_id,
+                            type(exc).__name__,
+                        )
+                if shots_signal is not None and shots_signal.p_over25 is not None:
+                    n_shots_tagged += 1
+                    shots_tag = (
+                        f" | shots(shadow): p_over25={shots_signal.p_over25:.3f} "
+                        f"lean={shots_signal.lean or 'none'} ({shots_signal.reason})"
+                    )
+                    disagrees = shots_signal.reason in (
+                        "shadow_tag_disagrees",
+                        "veto_disagrees",
+                    )
+                    if (
+                        tier == "premium"
+                        and disagrees
+                        and (shots_signal.veto or deps.value_policy.shots_totals_veto)
+                    ):
+                        tier = "volume"
+                        n_shots_demoted += 1
+                        shots_demote = True
+                        shots_note = (
+                            f" | shots veto (lean {shots_signal.lean} vs pick "
+                            f"{shots_side}): demoted to volume (shadow)" + shots_tag
+                        )
+                    else:
+                        shots_note = shots_tag
             # PREMIUM MINT-TIMING CEILING (INERT scaffolding, 2026-07-26): a
             # PREMIUM candidate minted MORE than premium_max_hours_to_kickoff
             # hours before kickoff is DEMOTED to the volume (shadow) tier —
@@ -2423,8 +2595,22 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # daily-exposure ledger is consumed AFTER persistence (below), and
             # ONLY for brand-new premium detections — so the pick is built with
             # the per-bet-capped breakdown.final and a re-alert can reproduce it.
+            # B6 edge-uncertainty shrink input: computed ONLY when the coef
+            # knob is armed (StakePolicy.edge_uncertainty_coef, default None =
+            # bit-identical — recommended_stake ignores edge_variance without
+            # it). The variance is a per-pick edge-ESTIMATE noise proxy
+            # (anchor devig-method spread + cross-book implied disagreement);
+            # the correction can only SHRINK the stake, never raise it.
+            edge_variance = (
+                _candidate_edge_variance(prices, fair_by_sel, anchor_book, v.selection)
+                if deps.stake_policy.edge_uncertainty_coef is not None
+                else 0.0
+            )
             breakdown = recommended_stake(
-                v.sharp_fair_prob, v.best_odds_effective, deps.stake_policy
+                v.sharp_fair_prob,
+                v.best_odds_effective,
+                deps.stake_policy,
+                edge_variance=edge_variance,
             )
             # Task 5 uncertainty-shrink SHADOW annotation (default: final
             # unchanged; phi/n_eff/shrunk ride stake_breakdown only).
@@ -2518,6 +2704,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     + visibility_note
                     + moneyline_note
                     + draw_note
+                    + shots_note
                     + timing_note
                     + major_note
                     + sharp_note
@@ -2589,6 +2776,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 audit_reasons.append("odds_ceiling")
             if draw_note:
                 audit_reasons.append(DRAW_SELECTION_DEMOTION_REASON)
+            if shots_demote:  # DEMOTE only — the shadow tag is not a demotion reason
+                audit_reasons.append(SHOTS_TOTALS_VETO_REASON)
             if timing_note:
                 audit_reasons.append(PREMIUM_MINT_TOO_EARLY_REASON)
             if major_note:
@@ -2639,6 +2828,40 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # (persist -> reserve -> skip-on-None -> append-on-new-outcome -> dispatch).
     # raw_kelly derives only from already-computed fair/price (no leakage) and the
     # cap accounting and persistence remain atomic inside _persist_and_reserve.
+    # B7 SAME-EVENT CORRELATION HAIRCUT (default OFF — rho 0.0 keeps every
+    # stake bit-for-bit): the N premium candidates minted on the SAME event
+    # THIS cycle are correlated legs, so each of their per-bet-capped stakes
+    # is multiplied by 1/sqrt(1 + (N-1)*rho) BEFORE the ledger reserve
+    # (app/risk/exposure.same_event_stake_multipliers). The haircut can only
+    # SHRINK the simultaneous-event stake sum, never raise it; single-leg
+    # events keep multiplier 1.0. The per-event ledger sub-cap stays in force
+    # on top (the tighter bound still binds).
+    if deps.value_policy.stake_same_event_rho > 0.0 and premium_candidates:
+        haircut_multipliers = same_event_stake_multipliers(
+            # Only staked legs count toward N — a zero-stake leg must not
+            # inflate the per-event count and over-shrink its siblings.
+            [eid for _, bd, eid in premium_candidates if bd.final > 0.0],
+            deps.value_policy.stake_same_event_rho,
+        )
+        haircut_candidates: list[tuple[PickOut, StakeBreakdown, str]] = []
+        for pick, breakdown, event_id in premium_candidates:
+            mult = haircut_multipliers[event_id]
+            if mult < 1.0 and breakdown.final > 0.0:
+                haircut_final = breakdown.final * mult
+                breakdown = replace(breakdown, final=haircut_final)
+                pick = pick.model_copy(
+                    update={
+                        "recommended_stake_fraction": haircut_final,
+                        "recommended_stake_amount": stake_amount(haircut_final, deps.bankroll),
+                        "stake_breakdown": pick.stake_breakdown.model_copy(
+                            update={"final": haircut_final}
+                        ),
+                        "reason_summary": pick.reason_summary
+                        + f" | same-event correlation haircut x{mult:.3f}",
+                    }
+                )
+            haircut_candidates.append((pick, breakdown, event_id))
+        premium_candidates = haircut_candidates
     premium_candidates.sort(key=lambda c: c[1].raw_kelly, reverse=True)
     n_unpersisted_withheld = 0
     for pick, breakdown, event_id in premium_candidates:
@@ -2849,6 +3072,27 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             sport_key,
             DRAW_SELECTION_DEMOTION_REASON,
             n_draw_demoted,
+        )
+    if n_shots_demoted:
+        # The shots-totals veto is never silent: these premium soccer totals-2.5
+        # candidates disagreed with the GAP shots screen's lean and were DEMOTED
+        # to the volume (shadow) tier — never alerted, never dropped, never a
+        # fair-price change (SHADOW-FIRST: the veto ships OFF; this fires only
+        # once VALUE_SHOTS_TOTALS_VETO / ShotsPolicy.veto_enabled arms it).
+        logger.info(
+            "value pipeline %s: %s demoted %d premium candidate(s) to volume (shadow)",
+            sport_key,
+            SHOTS_TOTALS_VETO_REASON,
+            n_shots_demoted,
+        )
+    if n_shots_tagged:
+        # SHADOW visibility: how many totals-2.5 candidates the screen priced
+        # this cycle (tag-only unless the veto above is armed) — the forward
+        # sample-size counter the promotion review reads.
+        logger.info(
+            "value pipeline %s: shots screen tagged %d totals-2.5 candidate(s) (shadow)",
+            sport_key,
+            n_shots_tagged,
         )
     if n_consensus_anchor_dropped:
         # The sharp-anchor-only drop is never silent: these would-be-premium

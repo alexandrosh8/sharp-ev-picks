@@ -848,10 +848,15 @@ def _ids(container: Any) -> list[str]:
     return [str(value) for value in ids]
 
 
-def _find_match_payload(html: str, *, prefer_subevent_id: str | None = None) -> dict[str, Any]:
+def _find_match_payload(
+    html: str,
+    *,
+    prefer_subevent_id: str | None = None,
+    payloads: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     saw_bestodds = False
-    for payload in hypernova_payloads(html):
+    for payload in payloads if payloads is not None else hypernova_payloads(html):
         best = payload.get("bestOdds")
         if not isinstance(best, Mapping):
             continue
@@ -906,8 +911,8 @@ def _find_match_payload(html: str, *, prefer_subevent_id: str | None = None) -> 
     return max(candidates, key=_payload_score)
 
 
-def _find_header_payload(html: str) -> dict[str, Any]:
-    for payload in hypernova_payloads(html):
+def _find_header_payload(html: str, payloads: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    for payload in payloads if payloads is not None else hypernova_payloads(html):
         if "subeventStartTime" in payload and "subeventName" in payload:
             return payload
     return {}
@@ -1212,11 +1217,19 @@ def parse_match_page(
     now: datetime | None = None,
     markets: Sequence[Market] | None = None,
     max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
+    payloads: list[dict[str, Any]] | None = None,
 ) -> list[OddsSnapshotIn]:
-    """Parse one OddsChecker match page into normalized odds snapshots."""
+    """Parse one OddsChecker match page into normalized odds snapshots.
+
+    ``payloads`` (optional) is the page's pre-parsed Hypernova payload list —
+    pass it when the caller already ran ``hypernova_payloads(html)`` so the
+    full-page BeautifulSoup pass runs once per fetch, not once per helper."""
     ingested_at = now or _utcnow()
-    header = _find_header_payload(html)
-    payload = _find_match_payload(html, prefer_subevent_id=_header_subevent_id(header))
+    page_payloads = payloads if payloads is not None else hypernova_payloads(html)
+    header = _find_header_payload(html, payloads=page_payloads)
+    payload = _find_match_payload(
+        html, prefer_subevent_id=_header_subevent_id(header), payloads=page_payloads
+    )
     best = payload["bestOdds"]
     if not isinstance(best, Mapping):
         raise OddsCheckerParseError("bestOdds payload is not an object")
@@ -1367,17 +1380,25 @@ def supported_market_ids_from_match_page(
     *,
     markets: Sequence[Market] | None = None,
     include_other: bool = False,
+    payloads: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Return market ids exposed in a modern match page payload.
 
     Mapped (devig-sound) markets always. With ``include_other`` (and no
     ``markets`` filter) ALSO returns unmapped, non-boost market ids so the
     all-odds API can be queried for capture-only OTHER markets — the OTHER
-    emission is still sharp-anchor-gated in ``parse_market_api_payloads``."""
+    emission is still sharp-anchor-gated in ``parse_market_api_payloads``.
+
+    ``payloads`` (optional) is the page's pre-parsed Hypernova payload list —
+    pass it when the caller already ran ``hypernova_payloads(html)`` so the
+    full-page BeautifulSoup pass runs once per fetch, not once per helper."""
     wanted = set(markets) if markets is not None else None
+    page_payloads = payloads if payloads is not None else hypernova_payloads(html)
     try:
-        header = _find_header_payload(html)
-        payload = _find_match_payload(html, prefer_subevent_id=_header_subevent_id(header))
+        header = _find_header_payload(html, payloads=page_payloads)
+        payload = _find_match_payload(
+            html, prefer_subevent_id=_header_subevent_id(header), payloads=page_payloads
+        )
     except OddsCheckerParseError:
         return []
     best = payload.get("bestOdds")
@@ -2269,6 +2290,12 @@ class OddsCheckerLoader:
         # pure CPU per pass on real page sizes. Run inline they froze the event
         # loop (and every concurrent HTTP response) for seconds per poll cycle,
         # so each pass is offloaded to a worker thread via asyncio.to_thread.
+        # PARSE MEMO (TASK PERF 2026-07-26): the dominant cost inside those
+        # helpers is hypernova_payloads (full-page BeautifulSoup + json.loads),
+        # which each helper re-ran — 2-3 identical parses per page. Parse ONCE
+        # here (still off-loop) and thread the payload list through; the memo
+        # lives only for this call, never across fetches/cycles.
+        page_payloads = await asyncio.to_thread(hypernova_payloads, page.html)
         # Fetch mapped, pick-critical markets independently. Optional OTHER
         # capture must never turn a healthy mapped match into an incomplete one.
         mapped_market_ids = await asyncio.to_thread(
@@ -2276,6 +2303,7 @@ class OddsCheckerLoader:
             page.html,
             markets=eff_markets,
             include_other=False,
+            payloads=page_payloads,
         )
         optional_market_ids: list[str] = []
         if self._capture_other and eff_markets is None:
@@ -2285,6 +2313,7 @@ class OddsCheckerLoader:
                     page.html,
                     markets=None,
                     include_other=True,
+                    payloads=page_payloads,
                 )
             except OddsCheckerSecurityError as exc:
                 logger.warning(
@@ -2331,6 +2360,7 @@ class OddsCheckerLoader:
                     directory=self._directory,
                     now=now,
                     markets=eff_markets,
+                    payloads=page_payloads,
                 )
             except OddsCheckerEmptyMarket:
                 # Fetched fine (200) but OddsChecker has not priced this fixture

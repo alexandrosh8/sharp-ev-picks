@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ValidationError
-from sqlalchemy import Text, and_, case, func, select, text, true, union_all
+from sqlalchemy import Text, and_, case, func, or_, select, text, true, union_all
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -195,6 +195,7 @@ async def select_betfair_targets(
     limit: int = 20,
     boost_window: timedelta = BETFAIR_CLOSE_BOOST_WINDOW,
     boost_slots: int = BETFAIR_CLOSE_BOOST_SLOTS,
+    ref_likes: Sequence[str] = ("http%",),
 ) -> list[BetfairTarget]:
     """Bounded, rotating list of canonical ``sport`` events for the Betfair
     Exchange capture to read THIS cycle — read-only (SELECTs only).
@@ -218,8 +219,15 @@ async def select_betfair_targets(
 
     Eligibility — an event qualifies when it:
       * is in ``sport`` (the canonical namespace, e.g. "soccer"),
-      * has a navigable OddsPortal URL ref (``http...``; synthetic
-        "home|away|date" ids are skipped — the reader can't open them),
+      * has an ``external_ref`` matching one of ``ref_likes`` (SQL LIKE
+        patterns). Default ``("http%",)`` keeps the page-scraping Betfair
+        Exchange reader's contract: a navigable OddsPortal URL (synthetic
+        "home|away|date" ids are skipped — the reader can't open them). The
+        Betfair API SHADOW matcher matches by team names + kickoff and never
+        opens the ref, so it widens this to include the oddschecker-era
+        canonical refs (``oddschecker:%``) — without that the candidate list
+        went empty after the oddschecker migration and its match rate pinned
+        at 0%.
       * has a KNOWN kickoff strictly in the future and at most ``window`` ahead
         (NULL kickoff / already-started events are skipped: the pre-match Betfair
         BACK row is gone and re-reading wastes the scarce per-cycle budget),
@@ -235,6 +243,9 @@ async def select_betfair_targets(
     """
     now = now or datetime.now(tz=UTC)
     horizon = now + window
+    # Empty ref_likes would build a degenerate OR (matches nothing / SQLA
+    # warning) — fall back to the navigable-URL default.
+    ref_patterns = tuple(ref_likes) or ("http%",)
     home_t = aliased(Team)
     away_t = aliased(Team)
     # Latest Betfair Exchange capture time for this event (NULL = never): the
@@ -273,7 +284,7 @@ async def select_betfair_targets(
         .join(away_t, Event.away_team_id == away_t.id)
         .where(
             Sport.key == sport,
-            Event.external_ref.like("http%"),
+            or_(*(Event.external_ref.like(pattern) for pattern in ref_patterns)),
             Event.starts_at.is_not(None),
             Event.starts_at > now,
             Event.starts_at <= horizon,

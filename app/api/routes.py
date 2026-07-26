@@ -87,19 +87,32 @@ _AUTH_TEMPLATE_DIR = Path(__file__).with_name("auth_templates")
 _LOGIN_HTML = (_AUTH_TEMPLATE_DIR / "login.html").read_text(encoding="utf-8")
 
 
+def _nonced_shell(html: str, request: Request, headers: dict[str, str] | None = None) -> Response:
+    """Serve an HTML shell with the per-request CSP nonce stamped on its single
+    inline <script> tag (each shell carries exactly one — the dashboard build
+    validates this). The nonce is minted by SecurityHeadersMiddleware, which
+    emits the matching ``script-src 'nonce-...'`` header; without it inline
+    script would be blocked now that 'unsafe-inline' is gone from script-src.
+    When the middleware is absent (router-only unit tests) there is no CSP
+    header either, so the shell is served unmodified."""
+    nonce = getattr(request.state, "csp_nonce", "")
+    if nonce:
+        html = html.replace("<script>", f'<script nonce="{nonce}">', 1)
+    return HTMLResponse(html, headers=headers)
+
+
 @router.get(
     "/",
     response_class=HTMLResponse,
     include_in_schema=False,
     dependencies=[Depends(require_dashboard_auth)],
 )
-async def dashboard(response: Response) -> str:
+async def dashboard(request: Request) -> Response:
     # Never browser-cache the HTML shell: a deploy ships new structure (panels,
     # badges, banner) but the page only reloads on a full refresh — the 60s
     # auto-refresh re-fetches DATA, not the page. A cached shell would mask the
     # update behind a stale tab (and caching auth-gated HTML is undesirable).
-    response.headers["Cache-Control"] = "no-store"
-    return _DASHBOARD_HTML
+    return _nonced_shell(_DASHBOARD_HTML, request, headers={"Cache-Control": "no-store"})
 
 
 # --- Installable-PWA assets (PUBLIC, no auth) -------------------------------
@@ -232,7 +245,7 @@ async def login_form(request: Request) -> Response:
         return RedirectResponse("/setup", status_code=303)
     if is_authenticated(request):
         return RedirectResponse("/", status_code=303)
-    return HTMLResponse(_LOGIN_HTML)
+    return _nonced_shell(_LOGIN_HTML, request)
 
 
 def _session_response(
@@ -416,7 +429,9 @@ async def setup_form(request: Request) -> Response:
     # through an authenticated path, never this unauthenticated endpoint.
     if not settings.dashboard_auth_enabled or auth_is_configured():
         return RedirectResponse("/", status_code=303)
-    return HTMLResponse(_SETUP_HTML)
+    # /setup's inline script needs the nonce too — it is the third (and last)
+    # server-rendered shell, and script-src no longer carries 'unsafe-inline'.
+    return _nonced_shell(_SETUP_HTML, request)
 
 
 @router.post("/setup", include_in_schema=False)

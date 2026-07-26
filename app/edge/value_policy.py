@@ -253,6 +253,28 @@ class ValuePolicy:
     # Set from Settings.value_premium_max_hours_to_kickoff at the composition
     # root. An unknown kickoff (hours_to_kickoff None) never demotes.
     premium_max_hours_to_kickoff: float = math.inf
+    # SHOTS-TOTALS VETO (Wheatcroft GAP shots screen, app/models/football_shots
+    # — SHADOW-FIRST). When True, a PREMIUM soccer TOTALS-2.5 candidate whose
+    # shots-screen lean DISAGREES with the pick side is DEMOTED to the volume
+    # (shadow) tier with the named reason 'shots_totals_veto' — persisted +
+    # CLV-tracked, never alerted, NEVER dropped, and NEVER a fair-price source.
+    # False = gate OFF (the inert default DESPITE the screen beating the
+    # goals-only baseline OOS in all 5 walk-forward leagues, 2026-07-26):
+    # operator mandate keeps new soccer-totals screens tag-only until forward
+    # trusted-CLV evidence; flipping VALUE_SHOTS_TOTALS_VETO is an operator
+    # decision. The tag (p_over25/lean/reason) is annotated regardless of this
+    # flag whenever PipelineDeps.shots_signal_lookup is wired.
+    shots_totals_veto: bool = False
+    # SAME-EVENT CORRELATION HAIRCUT (Busseti-Boyd; app/risk/staking.
+    # correlation_haircut) on SIMULTANEOUS premium picks: when > 0, each of the
+    # N premium candidates minted on the SAME event in ONE cycle has its
+    # recommended stake multiplied by 1/sqrt(1 + (N-1)*rho) BEFORE the ledger
+    # reserve (app/risk/exposure.same_event_stake_multipliers) — independent
+    # Kelly overbets a slate of correlated same-event legs. Can only SHRINK
+    # stakes, never raise them; single-leg events are untouched. 0.0 = OFF
+    # (the inert default — stakes bit-identical); set from
+    # Settings.stake_same_event_rho at the composition root (must be < 1).
+    stake_same_event_rho: float = 0.0
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:

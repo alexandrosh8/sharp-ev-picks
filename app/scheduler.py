@@ -1429,8 +1429,18 @@ def build_scheduler(
             bfapi_http = http_client
 
         async def _betfair_api_candidates() -> list[EventCandidate]:
+            # ref_likes: the SHADOW matcher matches by team names + kickoff and
+            # never navigates the ref, so it accepts BOTH the legacy OddsPortal
+            # URL refs AND the oddschecker-era canonical refs. Without
+            # "oddschecker:%" the candidate universe went empty after the
+            # oddschecker migration (no upcoming soccer event has an http ref)
+            # and the match rate pinned at 0% of ~198 markets/cycle.
             rows = await select_betfair_targets(
-                bfapi_session_factory, sport="soccer", window=bfapi_window, limit=bfapi_limit
+                bfapi_session_factory,
+                sport="soccer",
+                window=bfapi_window,
+                limit=bfapi_limit,
+                ref_likes=("http%", "oddschecker:%"),
             )
             return [
                 EventCandidate(

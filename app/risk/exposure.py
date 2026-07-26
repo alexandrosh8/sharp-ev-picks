@@ -11,8 +11,30 @@ per-event cap (the tighter of the daily and per-event rooms binds). When
 behaves exactly as the plain daily-only ledger.
 """
 
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
+
+from app.risk.staking import correlation_haircut
+
+
+def same_event_stake_multipliers(
+    event_ids: Sequence[str], avg_correlation: float
+) -> dict[str, float]:
+    """Per-event stake multiplier for SIMULTANEOUS same-event picks (B7).
+
+    Independent Kelly sizes each leg as if uncorrelated, which overbets a
+    slate of correlated same-event legs (Busseti-Boyd 2016). For the N legs
+    sharing one event id in ``event_ids`` (one batch of simultaneous premium
+    candidates), the multiplier is ``correlation_haircut(N, avg_correlation)``
+    = ``1/sqrt(1 + (N-1)*rho)`` — 1.0 for single-leg events or ``rho == 0``
+    (bit-identical default path), strictly < 1.0 otherwise. Multipliers can
+    only SHRINK stakes, never raise them: the haircut total stake per event
+    is always <= the unhaired total. Pure; stdlib only.
+    """
+    counts = Counter(event_ids)
+    return {event_id: correlation_haircut(n, avg_correlation) for event_id, n in counts.items()}
 
 
 @dataclass
