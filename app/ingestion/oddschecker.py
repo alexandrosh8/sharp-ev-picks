@@ -15,6 +15,7 @@ import inspect
 import json
 import logging
 import math
+import random
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -396,6 +397,32 @@ async def _wait_before_retry(exc: BaseException) -> None:
     retry_after = exc.retry_after if isinstance(exc, OddsCheckerHTTPError) else None
     if retry_after is not None and retry_after > 0:
         await asyncio.sleep(min(retry_after, 60.0))
+
+
+# Daily discovery gets extra attempts against Cloudflare-challenge bursts: each
+# attempt rotates to a fresh proxy/session, with a small jittered pause between
+# attempts. Other transient failures keep the historical two-attempt budget.
+DISCOVERY_CHALLENGE_MAX_ATTEMPTS = 3
+_DISCOVERY_CHALLENGE_BACKOFF_RANGE: tuple[float, float] = (1.0, 3.0)
+
+
+def _is_challenge_error(exc: BaseException) -> bool:
+    """True when the failure chain contains a challenge/interstitial response."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OddsCheckerChallenge):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+async def _discovery_challenge_backoff() -> None:
+    low, high = _DISCOVERY_CHALLENGE_BACKOFF_RANGE
+    delay = random.uniform(low, high)
+    if delay > 0:
+        await asyncio.sleep(delay)
 
 
 async def fetch_html(
@@ -2499,34 +2526,67 @@ class OddsCheckerLoader:
                 proxy=None if active_session is not None else self._next_proxy(),
             )
 
+        challenge_exhausted: type[BaseException] | None = None
         try:
-            try:
-                match_urls = await _discover(discovery_session)
-            except Exception as exc:
-                if not _is_transient_fetch_error(exc):
-                    raise
-                await _wait_before_retry(exc)
-                logger.warning(
-                    "oddschecker %s daily discovery retrying (%s)",
-                    oc_key,
-                    type(exc).__name__,
-                )
-                if discovery_lease is not None and self._session_pool is not None:
-                    failed_lease = discovery_lease
-                    await self._session_pool.evict(failed_lease)
-                    await self._session_pool.release(failed_lease)
-                    discovery_lease = None
-                    try:
-                        discovery_lease = self._session_pool.acquire_lease(
-                            exclude_indices=frozenset({failed_lease.index})
-                        )
-                    except OddsCheckerError:
-                        discovery_lease = self._session_pool.acquire_lease()
-                    discovery_session = discovery_lease.session
-                match_urls = await _discover(discovery_session)
+            attempt = 1
+            while True:
+                try:
+                    match_urls = await _discover(discovery_session)
+                    break
+                except Exception as exc:
+                    if not _is_transient_fetch_error(exc):
+                        raise
+                    is_challenge = _is_challenge_error(exc)
+                    max_attempts = DISCOVERY_CHALLENGE_MAX_ATTEMPTS if is_challenge else 2
+                    if attempt >= max_attempts:
+                        if not is_challenge:
+                            raise
+                        # A challenge burst is a market-data outage, not a poll
+                        # defect: degrade to a source-incomplete cycle (fail-closed
+                        # withholds picks) instead of hard-failing poll_odds.
+                        challenge_exhausted = type(exc)
+                        match_urls = []
+                        break
+                    attempt += 1
+                    await _wait_before_retry(exc)
+                    if is_challenge:
+                        await _discovery_challenge_backoff()
+                    logger.warning(
+                        "oddschecker %s daily discovery retrying (%s)",
+                        oc_key,
+                        type(exc).__name__,
+                    )
+                    if discovery_lease is not None and self._session_pool is not None:
+                        failed_lease = discovery_lease
+                        await self._session_pool.evict(failed_lease)
+                        await self._session_pool.release(failed_lease)
+                        discovery_lease = None
+                        try:
+                            discovery_lease = self._session_pool.acquire_lease(
+                                exclude_indices=frozenset({failed_lease.index})
+                            )
+                        except OddsCheckerError:
+                            discovery_lease = self._session_pool.acquire_lease()
+                        discovery_session = discovery_lease.session
         finally:
             if discovery_lease is not None and self._session_pool is not None:
                 await self._session_pool.release(discovery_lease)
+        if challenge_exhausted is not None:
+            logger.warning(
+                "oddschecker %s discovery challenge retries exhausted, "
+                "degrading to incomplete (%s)",
+                oc_key,
+                challenge_exhausted.__name__,
+            )
+            self.last_fetch_matches[pipeline_key] = len(match_urls)
+            self.last_fetch_complete[pipeline_key] = False
+            self.last_fetch_completeness_reason[pipeline_key] = (
+                f"daily discovery blocked by challenge "
+                f"({DISCOVERY_CHALLENGE_MAX_ATTEMPTS} attempts)"
+            )
+            self.last_fetch_incomplete_ratio[pipeline_key] = 1.0
+            self.last_fetch_event_ids[pipeline_key] = ()
+            return []
         try:
             deduped = self._dedupe_urls(match_urls)
         except OddsCheckerSecurityError:

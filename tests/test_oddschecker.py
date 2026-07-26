@@ -2000,6 +2000,83 @@ async def test_scheduler_discovery_evicts_failed_pool_lease_and_rotates(
 
 
 @pytest.mark.asyncio
+async def test_scheduler_discovery_survives_two_challenges_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    calls = 0
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls < 3:
+            raise OddsCheckerChallenge("challenge")
+        return []
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory())
+
+    assert await loader._fetch_sport("soccer", None) == []
+    assert calls == 3
+    assert loader.last_fetch_complete["soccer"] is True
+
+
+@pytest.mark.asyncio
+async def test_scheduler_discovery_challenge_exhaustion_degrades_to_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3 challenges must NOT hard-fail the poll: the cycle degrades to
+    source-incomplete (fail-closed withholds picks) instead of raising."""
+    from app.ingestion import oddschecker as oc
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    calls = 0
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise OddsCheckerChallenge("challenge")
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory())
+
+    assert await loader._fetch_sport("soccer", None) == []
+    assert calls == 3
+    assert loader.last_fetch_complete["soccer"] is False
+    assert "challenge" in loader.last_fetch_completeness_reason["soccer"]
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
+    assert loader.last_fetch_matches["soccer"] == 0
+    assert loader.last_fetch_event_ids["soccer"] == ()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_discovery_total_blackout_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-challenge transient blackout (nothing fetchable) keeps raising."""
+    from app.ingestion import oddschecker as oc
+
+    calls = 0
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory())
+
+    with pytest.raises(ConnectionError):
+        await loader._fetch_sport("soccer", None)
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_linked_legacy_pages_honor_per_call_market_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
