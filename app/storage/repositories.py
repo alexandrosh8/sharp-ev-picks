@@ -4351,7 +4351,16 @@ async def sharp_slate_coverage(
     operator's actual question ("soft 10, betfair 5 -> 50%"), unlike
     ``AnchorCoverage`` whose denominator is the dedicated capture's own small
     fixture list. Soft = any bookmaker that is NOT one of the SHARP_BOOKS
-    (Betfair *Sportsbook* is soft — only the *Exchange* is sharp). Read-only."""
+    (Betfair *Sportsbook* is soft — only the *Exchange* is sharp). Read-only.
+
+    Pinnacle coverage counts BOTH forms the capture takes: an inline
+    ``pinnacle%`` row on the canonical event itself (odds_api path) AND a
+    fresh ``pinnacle%`` row on the shadow ``pinnacle_<sport>`` event the
+    canonical event is actively LINKED to via ``event_source_links``
+    (source='pinnacle_arcadia' — arcadia capture; the slate-linkage pass /
+    demand-path resolver mints those links). Without the link arm the panel
+    read "Pinnacle 0%" all day, because arcadia rows never land on the
+    canonical event pre-close."""
     from app.resolution.shadow import SlateSharpCoverage
 
     # NULL-SAFE (mirrors betfair_staleness_metrics): retain a defensive None
@@ -4382,9 +4391,20 @@ async def sharp_slate_coverage(
                       (SELECT count(DISTINCT r.event_id) FROM recent r
                          JOIN soft s ON s.event_id = r.event_id
                          WHERE r.bk = 'betfair exchange') AS betfair_events,
-                      (SELECT count(DISTINCT r.event_id) FROM recent r
-                         JOIN soft s ON s.event_id = r.event_id
-                         WHERE r.bk LIKE 'pinnacle%') AS pinnacle_events
+                      (SELECT count(*) FROM soft s
+                         WHERE EXISTS (
+                             SELECT 1 FROM recent r
+                             WHERE r.event_id = s.event_id
+                               AND r.bk LIKE 'pinnacle%')
+                            OR EXISTS (
+                             SELECT 1
+                             FROM event_source_links l
+                             JOIN events pe ON pe.external_ref = l.source_event_id
+                             JOIN recent r2 ON r2.event_id = pe.id
+                             WHERE l.canonical_event_id = s.event_id
+                               AND l.source = 'pinnacle_arcadia'
+                               AND l.active
+                               AND r2.bk LIKE 'pinnacle%')) AS pinnacle_events
                     """
                 ),
                 {"since": since},
