@@ -437,10 +437,13 @@ class ValueFilterModel:
             return None
         try:
             lgb = importlib.import_module("lightgbm")
-        except ImportError:
+        except (ImportError, OSError):
+            # OSError: the wheel is installed but its native lib can't load
+            # (e.g. libgomp.so.1 absent from a slim image) — same best-effort
+            # degradation as a missing package, never a startup crash.
             logger.warning(
-                "value-filter artifacts present but lightgbm is not installed "
-                "(uv sync --extra ml); scoring disabled"
+                "value-filter artifacts present but lightgbm is not importable "
+                "(uv sync --extra ml + libgomp1); scoring disabled"
             )
             return None
         try:

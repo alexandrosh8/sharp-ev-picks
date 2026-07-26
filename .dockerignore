@@ -21,3 +21,7 @@ tests/
 .DS_Store
 Dockerfile
 docker-compose.yml
+# data/ is excluded above, but the ADOPT'd value-filter artifacts must ship
+# in the image (bind mounts resolve on the daemon host, not this checkout).
+!data/ml/value_filter_manifest.json
+!data/ml/value_filter_model.txt

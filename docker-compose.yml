@@ -107,13 +107,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      # Value-filter ML artifacts (ADOPT'd v1 manifest + LightGBM model).
-      # The loader resolves value_ml_model_dir='data/ml' relative to the
-      # image WORKDIR /srv/betting-ai; without this READ-ONLY bind mount the
-      # artifacts don't exist in the container and every pick's
-      # value_filter_score stays NULL (scheduler warns at startup).
-      - ./data/ml:/srv/betting-ai/data/ml:ro
+    # Value-filter ML artifacts are baked into the image (Dockerfile COPY of
+    # data/ml/value_filter_manifest.json + value_filter_model.txt): the build
+    # context carries them, whereas a ./data/ml bind mount resolves on the
+    # Docker daemon's host filesystem — which is NOT this checkout — and
+    # silently shadows the baked dir with an empty one.
     # Entrypoint (scripts/docker_entrypoint.sh) runs `alembic upgrade head`
     # before uvicorn — migrations apply on every boot, idempotently.
     healthcheck:

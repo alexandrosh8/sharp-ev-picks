@@ -54,7 +54,16 @@ COPY README.md alembic.ini ./
 COPY app ./app
 COPY alembic ./alembic
 COPY scripts ./scripts
-RUN uv sync --frozen --no-dev --extra football --extra backfill
+# Value-filter ML artifacts (ADOPT'd v1) — baked into the image because bind
+# mounts resolve on the Docker daemon's host fs, not this checkout
+# (.dockerignore whitelists exactly these two files out of data/).
+COPY data/ml/value_filter_manifest.json data/ml/value_filter_model.txt ./data/ml/
+# --extra ml: lightgbm + pandas so the baked value-filter artifacts actually
+# score (without it the loader logs 'lightgbm is not installed' and disables).
+# libgomp1 is lightgbm's OpenMP runtime — absent from slim base images; without
+# it the import raises OSError(libgomp.so.1) at startup.
+RUN apt-get update; apt-get install -y --no-install-recommends libgomp1; rm -rf /var/lib/apt/lists/*
+RUN uv sync --frozen --no-dev --extra football --extra backfill --extra ml
 # The deterministic builder enforces this mode too. Keep a build-layer guard
 # so an older/local 0600 artifact can never make the root-owned dashboard
 # unreadable by the unprivileged runtime process.
