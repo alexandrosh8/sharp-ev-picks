@@ -426,6 +426,40 @@ def _build_stake_neff_source(
     return lookup, refresh
 
 
+def _load_value_filter(
+    model_dir: Path,
+    *,
+    manifest_filename: str,
+    model_filename: str,
+    allow_shadow: bool,
+    enforced: bool,
+) -> ValueFilterModel | None:
+    """Load the value-filter meta-model, warning LOUDLY when it cannot score.
+
+    Loading stays best-effort (the value pipeline runs unfiltered on None),
+    but silence is not acceptable: a missing bind mount left value_filter_score
+    NULL on 100% of picks for 30 days with only an INFO line. When enforcement
+    (VALUE_ML_FILTER=true) is on, the composition root raises RuntimeError right
+    after this returns None — no duplicate warning here.
+    """
+    value_filter = ValueFilterModel.load(
+        model_dir,
+        manifest_filename=manifest_filename,
+        model_filename=model_filename,
+        allow_shadow=allow_shadow,
+    )
+    if value_filter is None and not enforced:
+        logger.warning(
+            "value-filter artifacts missing — picks will be unscored "
+            "(value_filter_score stays NULL; expected %s + %s under %s); "
+            "value pipeline continues unfiltered",
+            manifest_filename,
+            model_filename,
+            model_dir,
+        )
+    return value_filter
+
+
 def build_scheduler(
     settings: Settings,
     http_client: httpx.AsyncClient,
@@ -652,11 +686,12 @@ def build_scheduler(
         # is on but nothing loaded, fail LOUDLY at composition time — a
         # silently absent filter must not masquerade as an active one.
         value_filter = (
-            ValueFilterModel.load(
+            _load_value_filter(
                 Path(settings.value_ml_model_dir),
                 manifest_filename=settings.value_ml_manifest_filename,
                 model_filename=settings.value_ml_model_filename,
                 allow_shadow=settings.value_ml_manifest_allow_shadow,
+                enforced=settings.value_ml_filter,
             )
             if use_value
             else None
