@@ -1067,6 +1067,13 @@ async def latest_picks_with_events(
             # unknown / no snapshot close yet. Drives the per-pick CLV tile's trust
             # marker so a circular close is never shown as honest CLV.
             "close_independent_of_fill": p.close_independent_of_fill,
+            # AH-1 (audit 2026-07-26): snapshot-close marker — True only when
+            # finalize_closing_from_snapshots priced the close from a stored
+            # snapshot; the poll-time FALLBACK close writer (app/clv_trueup.py)
+            # stamps close_independent_of_fill WITHOUT it. The dashboard's
+            # per-pick 'Trusted CLV' badge requires it, mirroring the backend
+            # trusted-subset gate. boolean | null (null = unknown/pre-column).
+            "has_snapshot_close": p.has_snapshot_close,
             "created_at": p.created_at.isoformat(),
             "clv_log": str(p.clv_log) if p.clv_log is not None else None,
             "beat_close": p.beat_close,
@@ -2667,12 +2674,21 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
     # minted_at (Pick.created_at): the ADR-0022 pre-/post-selection-fix cohort key.
     minted_at_idx = len(columns)
     columns.append(Pick.created_at)
+    # TASK TL (2026-07-26): market key + scraped league name — the (sport,
+    # market) trusted-close coverage counter and the major/non-major trusted-CLV
+    # split dimensions (app/backtesting/live_evidence.py MAJOR_LEAGUES).
+    market_idx = len(columns)
+    columns.append(Pick.market)
+    league_name_idx = len(columns)
+    columns.append(League.name)
     rows = (
         await session.execute(
             select(*columns)
             .join(Pick, ResultTracking.pick_id == Pick.id)
             .join(Event, Pick.event_id == Event.id)
             .join(Sport, Event.sport_id == Sport.id)
+            # Event.league_id is NOT NULL — an inner join drops no settled pick.
+            .join(League, Event.league_id == League.id)
         )
     ).all()
     return [
@@ -2708,6 +2724,9 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             close_devig_fell_back=row[close_fb_idx] if close_fb_idx is not None else None,
             # ADR-0022 cohort key (TIMESTAMPTZ — always UTC-aware from the DB).
             minted_at=row[minted_at_idx],
+            # TASK TL dimensions: (sport, market) coverage cell + league tier.
+            market=row[market_idx],
+            league_name=row[league_name_idx],
         )
         for row in rows
     ]
@@ -4865,6 +4884,19 @@ async def persist_pick(
             # pipeline's ValuePickOut carries it; plain (model-strategy)
             # PickOut rows stay NULL.
             anchor_book_count=getattr(pick, "anchor_book_count", None),
+            # TIMING TELEMETRY (2026-07-26): hours between mint and the event's
+            # best-known kickoff, stamped at INSERT ONLY — a later re-price/
+            # upgrade never rewrites the ORIGINAL mint's timing, so the inert
+            # premium_max_hours_to_kickoff ceiling can be armed against honest
+            # forward evidence. NULL = kickoff unknown at mint (never fabricated).
+            hours_to_kickoff=(
+                # Clamp into Numeric(12,6) range: a corrupt far-future/past
+                # kickoff must degrade to a saturated stamp, never abort the
+                # whole pick INSERT with a numeric overflow.
+                Decimal(str(round(min(max(pick.hours_to_kickoff, -999_999.0), 999_999.0), 6)))
+                if pick.hours_to_kickoff is not None
+                else None
+            ),
             # P2-2: mint-side devig-fallback provenance (close side stamped by the CLV
             # true-up) — the trusted CLV subset drops asymmetric mint/close fallbacks.
             mint_devig_fell_back=pick.mint_devig_fell_back,

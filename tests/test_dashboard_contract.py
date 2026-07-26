@@ -239,6 +239,35 @@ def test_trusted_clv_rule_pins() -> None:
     assert "TRUSTED_CLOSE_ANCHORS" in text
     assert '"pinnacle"' in text
     assert '"sharp"' in text
+    # AH-1 (audit 2026-07-26): the per-pick badge must require a GENUINE
+    # snapshot close — the fallback close writer stamps
+    # close_independent_of_fill WITHOUT has_snapshot_close, so independence
+    # alone overcounts 'Trusted CLV'.
+    assert "p.has_snapshot_close === true" in text
+
+
+def test_clv_fabrication_mirror_nets_exchange_commission() -> None:
+    """AH-2 (audit 2026-07-26): the JS clvIsFabricated mirror must judge the same
+    COMMISSION-NETTED effective fill as the backend _clv_row_is_fabricated
+    (app/edge/value.py effective_odds) — raw 1/decimal_odds understates the
+    implied probability on exchange fills. Pin JS/Python constant parity so a
+    backend commission change breaks this contract instead of silently drifting."""
+    from app.edge.value import EXCHANGE_COMMISSION
+
+    text = _text()
+    assert "EXCHANGE_COMMISSION" in text
+    assert "function effectiveOddsOf" in text
+    for book, rate in EXCHANGE_COMMISSION.items():
+        assert f'"{book}": {rate}' in text, book
+
+
+def test_edge_copy_uses_mint_edge_for_closed_picks() -> None:
+    """AH-3 (audit 2026-07-26): the drawer edge-copy clipboard text applies the
+    SAME closed-pick guard as the list (mint edge for closed picks, never a live
+    re-priced current_edge on a finished market): list edgeVal x2 + copy handler."""
+    text = _text()
+    guard = 'edgeGroupOf(p) === "closed" || p.current_edge == null ? p.edge : p.current_edge'
+    assert text.count(guard) >= 3
 
 
 def test_nav_contract_five_views() -> None:

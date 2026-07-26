@@ -962,6 +962,112 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
     assert cal["ece"] is None
 
 
+def test_performance_live_evidence_telemetry_is_additive_only(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """TASK TL contract: the trusted-close gap counter and the league-tier
+    trusted-CLV split are ADDITIVE fields on the /performance payload — every
+    pre-existing live_evidence field survives unchanged (the dashboard renders
+    unknown fields as absent, so no app.js change is needed), and the new cells
+    carry the standard insufficient pattern below min_n."""
+    from app.api import routes
+    from app.backtesting.live_evidence import SettledPickRow
+
+    async def fake_perf(session, *, close_coverage_sla=0.85):  # type: ignore[no-untyped-def]
+        return {"n_settled": 3, "tier_scope": "premium"}
+
+    async def fake_rows(session):  # type: ignore[no-untyped-def]
+        trusted = dict(
+            beat_close=True,
+            stake=10.0,
+            pnl=1.0,
+            closing_anchor_type="pinnacle",
+            has_snapshot_close=True,
+            close_independent_of_fill=True,
+        )
+        return [
+            # basketball spreads: 2 settled, 1 trusted (the promotion-critical cell)
+            SettledPickRow(
+                "volume",
+                None,
+                0.02,
+                sport="basketball",
+                market="spreads",
+                league_name="NBL1 East",
+                **trusted,
+            ),
+            SettledPickRow(
+                "volume",
+                None,
+                None,
+                None,
+                10.0,
+                None,
+                sport="basketball",
+                market="spreads",
+                league_name="NBL1 East",
+            ),
+            # soccer h2h major-league trusted close
+            SettledPickRow(
+                "premium",
+                None,
+                0.04,
+                sport="soccer",
+                market="h2h",
+                league_name="Premier League",
+                **trusted,
+            ),
+        ]
+
+    async def fake_band(session):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr(routes, "performance_report", fake_perf)
+    monkeypatch.setattr(routes, "live_evidence_rows", fake_rows)
+    monkeypatch.setattr(routes, "bet_band_observations", fake_band)
+    monkeypatch.setattr(routes, "_ml_operating_point", lambda: None)
+
+    ev = TestClient(make_app()).get("/performance").json()["live_evidence"]
+    # ADDITIVE-ONLY: every pre-existing live_evidence key is still present.
+    legacy_keys = {
+        "n_settled",
+        "q_star",
+        "min_n",
+        "meta_model_calibration",
+        "by_score",
+        "by_tier",
+        "by_anchor",
+        "by_close_anchor",
+        "by_sport",
+        "sharp_close",
+        "trusted_clv_ci",
+        "clv_yield_ratio",
+        "evidence_verdict",
+        "mc_null",
+    }
+    assert legacy_keys <= set(ev)
+    legacy_ci_keys = {"overall", "by_tier", "premium_cohorts"}
+    assert legacy_ci_keys <= set(ev["trusted_clv_ci"])
+    # ...and the pre-existing entry shapes are untouched (spot checks).
+    assert ev["by_tier"]["premium"]["n"] == 1
+    assert ev["trusted_clv_ci"]["overall"]["n"] == 2
+    # NEW 1: per-(sport, market) trusted-close coverage gap cells, each with
+    # the insufficient status pattern (n_trusted_close < 50 -> sufficient false).
+    cells = {(c["sport"], c["market"]): c for c in ev["trusted_close_gap_by_sport_market"]}
+    bball = cells[("basketball", "spreads")]
+    assert bball["n_settled"] == 2
+    assert bball["n_trusted_close"] == 1
+    assert bball["n_missing_trusted_close"] == 1
+    assert bball["sufficient"] is False  # honesty floor: never a bare number
+    assert cells[("soccer", "h2h")]["n_missing_trusted_close"] == 0
+    # NEW 2: league-tier split of the trusted-CLV scorecard, same honesty floor.
+    lt = ev["trusted_clv_ci"]["by_league_tier"]
+    assert set(lt) == {"major", "non_major"}
+    assert lt["major"]["n"] == 1
+    assert lt["non_major"]["n"] == 1
+    for entry in lt.values():
+        assert entry["sufficient"] is False
+        assert entry["mean_clv_log"] is None  # nulled at the source below min_n
+
+
 def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """GET /resolution/match-rate serializes the strict shadow match-rate report
     (overall rate + coverage/alias diagnostic buckets). The DB read is stubbed
@@ -1729,6 +1835,21 @@ def test_picks_serializer_exposes_close_independence_flag() -> None:
     src = inspect.getsource(repositories.latest_picks_with_events)
     assert '"close_independent_of_fill"' in src
     assert "p.close_independent_of_fill" in src
+
+
+def test_picks_serializer_exposes_has_snapshot_close() -> None:
+    """AH-1 (audit 2026-07-26): the GET /picks payload carries has_snapshot_close
+    so the dashboard's per-pick 'Trusted CLV' badge can require a GENUINE snapshot
+    close. The fallback close writer (app/clv_trueup.py) stamps
+    close_independent_of_fill WITHOUT has_snapshot_close, so independence alone
+    overcounts trusted rows. boolean | null (null = unknown / pre-column)."""
+    import inspect
+
+    from app.storage import repositories
+
+    src = inspect.getsource(repositories.latest_picks_with_events)
+    assert '"has_snapshot_close"' in src
+    assert "p.has_snapshot_close" in src
 
 
 def test_health_includes_redacted_proxy_pool() -> None:

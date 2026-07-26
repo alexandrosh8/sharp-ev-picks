@@ -2304,17 +2304,20 @@
           return isFinite(c) && c < 0.92;
         }
         const TRUSTED_CLOSE_ANCHORS = ["pinnacle", "sharp"];
-        // Audit 2026-07-09: mirror the backend trusted-subset gate
-        // (_settled_close_is_trusted, app/storage/repositories.py) as far as
-        // the /picks row exposes it: a MEASURED clv_log, a sharp close anchor,
-        // independence exactly true, and no honesty exclusion (tautological/
-        // circular/fabricated). has_snapshot_close and the devig-fallback
-        // flags are NOT serialized on /picks — close_independent_of_fill is
-        // only ever stamped from a genuine snapshot close (its closest exposed
-        // provenance), and the backend treats missing devig provenance as
-        // symmetric, so omitting both here matches its conservative reading.
+        // Audit 2026-07-09 (updated 2026-07-26 AH-1): mirror the backend
+        // trusted-subset gate (_settled_close_is_trusted,
+        // app/storage/repositories.py) as far as the /picks row exposes it: a
+        // MEASURED clv_log, a GENUINE snapshot close (has_snapshot_close ===
+        // true — the fallback close writer in app/clv_trueup.py stamps
+        // close_independent_of_fill WITHOUT it, so independence alone
+        // overcounts), a sharp close anchor, independence exactly true, and no
+        // honesty exclusion (tautological/circular/fabricated). The
+        // devig-fallback flags are still NOT serialized on /picks; the backend
+        // treats missing devig provenance as symmetric, so omitting them here
+        // matches its conservative reading.
         function isTrustedClv(p) {
           return p.clv_log != null && p.close_independent_of_fill === true &&
+            p.has_snapshot_close === true &&
             TRUSTED_CLOSE_ANCHORS.indexOf(p.closing_anchor_type) !== -1 &&
             clvExclusionOf(p) === null;
         }
@@ -2331,12 +2334,31 @@
         // plausible-close longshot (modest edge but |clv_log| > 0.5) is NOT
         // fabricated. The |clv_log| ceiling is a FALLBACK evaluated only when
         // an input is missing/unusable, where the edge cannot be computed.
+        // AH-2 (audit 2026-07-26): the backend judges the COMMISSION-NETTED
+        // effective fill (app/edge/value.py effective_odds) — raw
+        // 1/decimal_odds understates the implied probability on exchange
+        // fills. Mirror of app/edge/value.py EXCHANGE_COMMISSION (parity
+        // pinned by tests/test_dashboard_contract.py); a null/unknown book
+        // degrades to the raw price, same as the backend.
+        const EXCHANGE_COMMISSION = {
+          "betfair exchange": 0.05,
+          "betfair": 0.05,
+          "smarkets": 0.02,
+          "matchbook": 0.02,
+        };
+        function effectiveOddsOf(book, odds) {
+          const key = String(book == null ? "" : book).trim().toLowerCase();
+          const c = Object.prototype.hasOwnProperty.call(EXCHANGE_COMMISSION, key)
+            ? EXCHANGE_COMMISSION[key] : 0;
+          return 1 + (odds - 1) * (1 - c);
+        }
         function clvIsFabricated(p) {
           if (p.clv_log == null) return false;
           const d = numOf(p.decimal_odds), cf = numOf(p.closing_fair_probability);
           if (isFinite(d) && d > 0 && isFinite(cf)) {
-            // Both real inputs present: judge by the close-implied edge ONLY.
-            return cf - 1 / d > CLOSE_IMPLIED_EDGE_CEILING;
+            // Both real inputs present: judge by the close-implied edge ONLY,
+            // against the commission-netted effective fill.
+            return cf - 1 / effectiveOddsOf(p.bookmaker, d) > CLOSE_IMPLIED_EDGE_CEILING;
           }
           // Fallback (odds or fair prob absent/unusable): |clv_log| tripwire.
           const logv = Number(p.clv_log);
@@ -3894,7 +3916,10 @@
           const p = currentPick();
           const note = $("edge-copy-note");
           if (!p) { note.textContent = "Nothing selected."; return; }
-          const eff = p.current_edge == null ? p.edge : p.current_edge;
+          // AH-3 (audit 2026-07-26): same closed-pick guard as the list —
+          // mint edge for closed picks, never a live re-priced current_edge
+          // on a finished market.
+          const eff = edgeGroupOf(p) === "closed" || p.current_edge == null ? p.edge : p.current_edge;
           const lines = [
             eventLabel(p.event),
             selLabel(p) + " @ " + fmtOdds(p.decimal_odds),
