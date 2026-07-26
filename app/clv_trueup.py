@@ -102,6 +102,22 @@ def _best_soft_book(books: dict[str, float]) -> tuple[str | None, float | None]:
 # close-write paths skip the CLV stamp rather than persist fabricated edge.
 CLV_IMPLAUSIBLE_CLOSE_EDGE = 0.20
 
+# Terminal escalation of the CLV-2 skip (434-warnings/6h finding, 2026-07-26):
+# a pick whose EVERY cycle produces an implausible close-implied edge (a
+# structurally mispriced/mis-oriented feed for that market) used to loop the
+# skip-warning forever. After this many CONSECUTIVE skips the pick is stamped
+# with the TERMINAL no-close state — close_exclusion_reason='fabricated' (the
+# same classification close_exclusion_reason() gives this exact condition) with
+# every close column left NULL, the state shape the wrong_game re-nulled picks
+# already use — and the revalidation loop never re-processes it. Warns once on
+# the transition. NO new schema: the existing A4 reason column is the marker.
+CLV_IMPLAUSIBLE_SKIP_LIMIT = 5
+
+# pick.id -> consecutive implausible-close skips (process-local; a restart
+# merely restarts the count, so at most one extra run of warnings per restart).
+# A plausible CLV write for the pick resets its streak.
+_implausible_skip_streak: dict[int, int] = {}
+
 
 def _is_implausible_final(sport_key: str, home_score: int, away_score: int) -> bool:
     """True if a captured "final" score is physically impossible for the sport and
@@ -460,6 +476,16 @@ async def revalidate_open_picks(
             )
         ).all()
         for pick, external_ref in rows:
+            # TERMINAL no-close state (CLV-2 escalation, 2026-07-26): reason
+            # stamped with the close columns NULL means the implausible-close
+            # guard already gave up on this pick — never re-process, never
+            # re-warn (the wrong_game re-nulled picks share this state shape
+            # and are equally final).
+            if (
+                pick.close_exclusion_reason == "fabricated"
+                and pick.closing_fair_probability is None
+            ):
+                continue
             # Close-side vocabulary fold (mirrors finalize_closing_from_snapshots):
             # legacy BTTS picks stored 'BTTS Yes'/'BTTS No' while every current
             # close group keys the bare 'Yes'/'No' — without the fold their
@@ -506,15 +532,38 @@ async def revalidate_open_picks(
             fill_eff, fill_book, mixed_fill_books = _settlement_fill_for_clv(pick)
             # CLV-2: skip a physically-implausible close rather than store fake CLV.
             if closing_fair - 1.0 / fill_eff > CLV_IMPLAUSIBLE_CLOSE_EDGE:
+                streak = _implausible_skip_streak.get(pick.id, 0) + 1
+                if streak >= CLV_IMPLAUSIBLE_SKIP_LIMIT and pick.closing_fair_probability is None:
+                    # TERMINAL transition: every recent cycle produced an
+                    # implausible close for this pick — a structural feed
+                    # problem, not a transient quote. Stamp the existing A4
+                    # reason column ('fabricated' — the classification
+                    # close_exclusion_reason() gives this exact condition),
+                    # leave every close column NULL, warn ONCE, stop.
+                    _implausible_skip_streak.pop(pick.id, None)
+                    pick.close_exclusion_reason = "fabricated"
+                    logger.warning(
+                        "pick %d: %d consecutive implausible close-implied edges — "
+                        "terminal no-close state (close_exclusion_reason='fabricated', "
+                        "CLV stays NULL); re-processing stops",
+                        pick.id,
+                        streak,
+                    )
+                    continue
+                _implausible_skip_streak[pick.id] = streak
                 logger.warning(
                     "pick %d: implausible close-implied edge %.3f (fair=%.3f, fill_eff=%.2f) "
-                    "— skipping CLV write",
+                    "— skipping CLV write (%d/%d consecutive)",
                     pick.id,
                     closing_fair - 1.0 / fill_eff,
                     closing_fair,
                     fill_eff,
+                    streak,
+                    CLV_IMPLAUSIBLE_SKIP_LIMIT,
                 )
                 continue
+            # Plausible close: a prior implausible run was transient — reset.
+            _implausible_skip_streak.pop(pick.id, None)
             clv = clv_log(fill_eff, closing_fair)
             pick.closing_fair_probability = Decimal(f"{closing_fair:.6f}")
             pick.clv_log = Decimal(f"{clv:.6f}")

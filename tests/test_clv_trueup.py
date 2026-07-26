@@ -2017,3 +2017,117 @@ async def test_revalidate_matches_legacy_btts_pick_to_exchange_form_close(factor
         assert pick.clv_log is not None
         assert pick.closing_anchor_type == "pinnacle"
         assert pick.selection == "BTTS Yes"  # settlement identity never rewritten
+
+
+# --- implausible-close guard: terminal disposition (finding 2026-07-26) ------
+
+
+def implausible_close_snapshots(event_id: str) -> list[OddsSnapshotIn]:
+    """A close whose implied Home edge vs the 2.50 fill is physically
+    implausible: Pinnacle 1.30 -> fair(Home) ~0.73, 0.73 - 1/2.50 = ~0.33 >
+    CLV_IMPLAUSIBLE_CLOSE_EDGE (0.20) — the CLV-2 skip fires every cycle."""
+    rows = []
+    for book, prices in {
+        "Pinnacle": (1.30, 6.00, 9.00),
+        "SoftBook": (1.35, 5.80, 8.50),
+    }.items():
+        for sel, odds in zip(("Home FC", "Draw", "Away FC"), prices, strict=True):
+            rows.append(
+                OddsSnapshotIn(
+                    event_id=event_id,
+                    bookmaker=book,
+                    market=Market.H2H,
+                    selection=sel,
+                    decimal_odds=odds,
+                    captured_at=NOW,
+                    ingested_at=NOW,
+                )
+            )
+    return rows
+
+
+async def test_implausible_close_reaches_terminal_state_and_warns_once(factory, caplog) -> None:  # type: ignore[no-untyped-def]
+    """434-warnings/6h finding (2026-07-26): after CLV_IMPLAUSIBLE_SKIP_LIMIT
+    consecutive implausible-close skips the pick is stamped with the TERMINAL
+    no-close marker — close_exclusion_reason='fabricated' with the close
+    columns left NULL (the same state shape as the wrong_game re-nulled picks)
+    — the transition warns exactly once, and later cycles never re-process or
+    re-warn."""
+    import logging
+
+    from app.clv_trueup import (
+        CLV_IMPLAUSIBLE_SKIP_LIMIT,
+        _implausible_skip_streak,
+        revalidate_open_picks,
+    )
+    from app.probabilities.devig import DevigMethod
+
+    _implausible_skip_streak.clear()
+    event_id = "evt-clv-implausible-terminal"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+    snaps = implausible_close_snapshots(event_id)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(CLV_IMPLAUSIBLE_SKIP_LIMIT):
+            assert await revalidate_open_picks(factory, snaps, DevigMethod.POWER) == 0
+    async with factory() as session:
+        pick = await session.scalar(select(Pick).where(Pick.reason_summary == "clv true-up test"))
+        assert pick is not None
+        assert pick.close_exclusion_reason == "fabricated"  # terminal no-close marker
+        assert pick.closing_fair_probability is None  # never a fabricated CLV write
+        assert pick.clv_log is None
+    terminal_warnings = [r for r in caplog.records if "terminal" in r.getMessage()]
+    assert len(terminal_warnings) == 1  # warn once, on the transition
+
+    # Later cycles: silent, no re-processing, no repeat warnings.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert await revalidate_open_picks(factory, snaps, DevigMethod.POWER) == 0
+    assert [r for r in caplog.records if "implausible" in r.getMessage()] == []
+    assert _implausible_skip_streak == {}  # terminal pick no longer tracked
+
+
+async def test_implausible_skip_streak_resets_on_plausible_close(factory) -> None:  # type: ignore[no-untyped-def]
+    """The N=5 limit counts CONSECUTIVE skips: a plausible close between
+    implausible cycles writes CLV normally and resets the streak — a transient
+    bad quote can never accumulate into the terminal state."""
+    from app.clv_trueup import (
+        CLV_IMPLAUSIBLE_SKIP_LIMIT,
+        _implausible_skip_streak,
+        revalidate_open_picks,
+    )
+    from app.probabilities.devig import DevigMethod
+
+    _implausible_skip_streak.clear()
+    event_id = "evt-clv-implausible-reset"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    bad = implausible_close_snapshots(event_id)
+    for _ in range(CLV_IMPLAUSIBLE_SKIP_LIMIT - 1):
+        assert await revalidate_open_picks(factory, bad, DevigMethod.POWER) == 0
+    assert list(_implausible_skip_streak.values()) == [CLV_IMPLAUSIBLE_SKIP_LIMIT - 1]
+
+    # A plausible close arrives: normal CLV write + streak reset.
+    assert await revalidate_open_picks(factory, closing_snapshots(event_id), DevigMethod.POWER) == 1
+    assert _implausible_skip_streak == {}
+    async with factory() as session:
+        pick = await session.scalar(select(Pick).where(Pick.reason_summary == "clv true-up test"))
+        assert pick is not None
+        assert pick.closing_fair_probability is not None
+        assert pick.close_exclusion_reason != "fabricated"

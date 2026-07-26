@@ -481,3 +481,33 @@ async def test_self_audit_job_proxy_headroom_none_or_stateless_is_quiet(monkeypa
         _NO_FACTORY, dispatcher=disp, monitor_state=None, proxy_headroom=(0, 12)
     )
     assert disp.sent == []
+
+
+# --- sharp-anchor cliff (gate-reason telemetry follow-up, 2026-07-26) --------- #
+
+
+def test_sharp_anchor_cliff_fires_on_collapse() -> None:
+    # The 13-day regression shape: 468 sharp-anchored evaluations in the prior
+    # 24h, 0 in the last 24h -> WARN through the standard anomaly channel.
+    from app.maintenance.self_audit import evaluate_sharp_anchor_cliff
+
+    warn = evaluate_sharp_anchor_cliff(recent_24h=0, prior_24h=468)
+    assert warn is not None
+    assert (warn.severity, warn.code) == ("WARN", "sharp_anchor_cliff")
+    assert "468" in warn.detail and "0" in warn.detail
+
+
+def test_sharp_anchor_cliff_quiet_on_ordinary_dip_and_thin_prior() -> None:
+    from app.maintenance.self_audit import evaluate_sharp_anchor_cliff
+
+    # 100 -> 90 is a 10% dip — quiet.
+    assert evaluate_sharp_anchor_cliff(recent_24h=90, prior_24h=100) is None
+    # A drop must EXCEED 80%: exactly 80% (100 -> 20) stays quiet...
+    assert evaluate_sharp_anchor_cliff(recent_24h=20, prior_24h=100) is None
+    # ...one fewer trips it.
+    assert evaluate_sharp_anchor_cliff(recent_24h=19, prior_24h=100) is not None
+    # Prior below the significance floor (50): a quiet slate, never a cliff.
+    assert evaluate_sharp_anchor_cliff(recent_24h=0, prior_24h=49) is None
+    assert evaluate_sharp_anchor_cliff(recent_24h=0, prior_24h=0) is None
+    # At the floor exactly, the check is live.
+    assert evaluate_sharp_anchor_cliff(recent_24h=0, prior_24h=50) is not None

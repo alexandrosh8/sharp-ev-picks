@@ -379,6 +379,11 @@ def _unvalidated_sport_scopes(
 #: Trusted counts accrue on settlement cadence (hours), so 15 min is generous.
 STAKE_NEFF_REFRESH_SECONDS = 900.0
 
+#: Proactive Pinnacle slate-linkage cadence: mint event_source_links for the
+#: upcoming soft slate every ~15 min (arcadia capture polls on a similar
+#: cadence; a missed pass just links next cycle — nothing time-critical).
+PINNACLE_SLATE_LINK_INTERVAL_S = 900
+
 
 def _build_stake_neff_source(
     session_factory: "async_sessionmaker",
@@ -1065,6 +1070,39 @@ def build_scheduler(
             coalesce=True,
         )
 
+    if session_factory is not None:
+        # TASK MR (2026-07-26): /resolution/match-rate precompute. The payload
+        # costs 9-11s cold (three >7s repo queries), so this job keeps the
+        # route's per-process TTL cache warm — authenticated dashboard loads
+        # then always serve warm cache; the route computes inline only if this
+        # job has never primed it. Cadence pairs with the route TTL
+        # (_MATCH_RATE_CACHE_TTL_S >= 2x this interval, both in
+        # app/api/routes.py). Read-only diagnostics; a DateTrigger run primes
+        # the cache at startup. Lazy import: routes pulls the FastAPI surface,
+        # which this module never needs at import time.
+        from app.api.routes import MATCH_RATE_REFRESH_INTERVAL_S
+
+        async def refresh_match_rate_job() -> None:
+            from app.api import routes as api_routes
+
+            try:
+                await api_routes.refresh_match_rate_cache(session_factory)
+            except Exception as exc:
+                # DB/driver exception text can embed connection URLs — log the
+                # type name only (security rule: never stringified exceptions).
+                logger.warning("match-rate cache refresh failed: %s", type(exc).__name__)
+
+        scheduler.add_job(
+            refresh_match_rate_job,
+            IntervalTrigger(seconds=int(MATCH_RATE_REFRESH_INTERVAL_S)),
+            id="match_rate_cache_refresh",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            refresh_match_rate_job, DateTrigger(), id="match_rate_cache_refresh_initial"
+        )
+
     # Daily POST-SETTLEMENT calibration-drift watch (P2 ops). Identity-calibration
     # of the devigged fair_prob anchor is load-bearing for EVERY edge; the
     # platform runs no recalibration haircut precisely because the walk-forward
@@ -1205,6 +1243,41 @@ def build_scheduler(
         logger.info(
             "pinnacle arcadia sharp-line archive ENABLED (read-only) for sports=%s",
             settings.arcadia_sports,
+        )
+
+        # PROACTIVE slate linkage (dashboard "Pinnacle 0% (0/20)" fix): the
+        # demand path mints event_source_links rows only at CLV true-up/close
+        # time, so today's slate showed 0 linked Pinnacle events all day even
+        # while arcadia capture was healthy. This pass runs the SAME strict
+        # resolver (resolve_pinnacle_close_snaps — identical matcher + wrong-
+        # game guards + link persistence) over the upcoming soft-priced slate
+        # every ~15 min, so links exist pre-close and the demand path later
+        # finds them pre-linked. Mints NO picks, changes NO odds — link
+        # observability only.
+        from app.resolution.slate_linkage import link_upcoming_slate
+
+        async def link_pinnacle_slate() -> None:
+            try:
+                async with session_factory() as session:
+                    report = await link_upcoming_slate(session)
+                    await session.commit()
+                if report.attempted or report.linked:
+                    logger.info(
+                        "pinnacle slate linkage: linked %d of %d attempted (%d already linked)",
+                        report.linked,
+                        report.attempted,
+                        report.already_linked,
+                    )
+            except Exception as exc:
+                logger.error("pinnacle slate linkage failed: %s", type(exc).__name__)
+
+        scheduler.add_job(
+            link_pinnacle_slate,
+            IntervalTrigger(seconds=PINNACLE_SLATE_LINK_INTERVAL_S),
+            id="link_pinnacle_slate",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=None,  # run on Mac wake, don't skip
         )
 
     # Independent read-only Betfair Exchange BACK-odds ARCHIVE capture

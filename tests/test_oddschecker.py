@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from app.ingestion.oddschecker import _ProxySessionPool
 
 from app.ingestion.base import EventDirectory, ScraperProxy
 from app.ingestion.oddschecker import (
@@ -1824,9 +1830,13 @@ async def test_fetch_html_preserves_http_status_and_bounded_retry_after() -> Non
 
 
 @pytest.mark.asyncio
-async def test_proxy_retry_evicts_challenged_session_and_rotates_proxy() -> None:
+async def test_proxy_retry_evicts_challenged_session_and_rotates_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
     from app.ingestion.oddschecker import _ProxySessionPool
 
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
     proxies = (
         ScraperProxy(url="http://p0", username="", password=""),
         ScraperProxy(url="http://p1", username="", password=""),
@@ -1860,9 +1870,13 @@ async def test_proxy_retry_evicts_challenged_session_and_rotates_proxy() -> None
 
 
 @pytest.mark.asyncio
-async def test_proxy_retry_evicts_the_second_transient_failure_too() -> None:
+async def test_proxy_retry_evicts_the_second_transient_failure_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
     from app.ingestion.oddschecker import _ProxySessionPool
 
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
     proxies = (
         ScraperProxy(url="http://p0", username="", password=""),
         ScraperProxy(url="http://p1", username="", password=""),
@@ -1891,6 +1905,237 @@ async def test_proxy_retry_evicts_the_second_transient_failure_too() -> None:
     assert len(created) == 2
     assert all(session.closed for session in created)
     assert pool._sessions == {}
+
+
+def _challenge_pool(created: list[_PoolFakeSession]) -> _ProxySessionPool:
+    from app.ingestion.oddschecker import _ProxySessionPool
+
+    proxies = (
+        ScraperProxy(url="http://p0", username="", password=""),
+        ScraperProxy(url="http://p1", username="", password=""),
+    )
+
+    def factory(proxy: ScraperProxy | None) -> _PoolFakeSession:
+        del proxy
+        session = _PoolFakeSession([])
+        created.append(session)
+        return session
+
+    return _ProxySessionPool(proxies, session_factory=factory)
+
+
+@pytest.mark.asyncio
+async def test_match_page_challenge_retry_backs_off_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Challenge-then-success: the page gets ONE rotated-session retry with the
+    jittered challenge backoff and is NOT counted as a failed fetch."""
+    from app.ingestion import oddschecker as oc
+
+    backoff_calls = 0
+
+    async def backoff() -> None:
+        nonlocal backoff_calls
+        backoff_calls += 1
+
+    monkeypatch.setattr(oc, "_discovery_challenge_backoff", backoff)
+    created: list[_PoolFakeSession] = []
+    pool = _challenge_pool(created)
+    snapshot = SimpleNamespace(event_id="oc:e1", market=Market.H2H)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, markets
+            if session is created[0]:
+                raise OddsCheckerChallenge("challenge")
+            return [snapshot]
+
+    loader = Loader(EventDirectory())
+    loader._session_pool = pool
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/a/winner"], None, pipeline_key="soccer"
+    )
+
+    assert snapshots == [snapshot]
+    assert backoff_calls == 1
+    assert created[0].closed is True
+    assert loader.last_fetch_complete["soccer"] is True
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 0.0
+    assert loader.last_fetch_challenge_retries["soccer"] == 1
+    assert loader.last_fetch_challenge_failures["soccer"] == 0
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_match_page_double_challenge_still_counted_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Challenge-challenge: exactly two attempts (bounded), then the page stays a
+    failed fetch in the incomplete ratio — fail-closed accounting unchanged."""
+    from app.ingestion import oddschecker as oc
+
+    backoff_calls = 0
+
+    async def backoff() -> None:
+        nonlocal backoff_calls
+        backoff_calls += 1
+
+    monkeypatch.setattr(oc, "_discovery_challenge_backoff", backoff)
+    created: list[_PoolFakeSession] = []
+    pool = _challenge_pool(created)
+    attempts = 0
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, session, markets
+            nonlocal attempts
+            attempts += 1
+            raise OddsCheckerChallenge("challenge")
+
+    loader = Loader(EventDirectory())
+    loader._session_pool = pool
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/a/winner"], None, pipeline_key="soccer"
+    )
+
+    assert snapshots == []
+    assert attempts == 2
+    assert backoff_calls == 1
+    assert loader.last_fetch_complete["soccer"] is False
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
+    assert loader.last_fetch_challenge_retries["soccer"] == 1
+    assert loader.last_fetch_challenge_failures["soccer"] == 1
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_match_page_transient_non_challenge_retry_skips_challenge_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeouts keep the existing single rotated retry, never the challenge
+    backoff, and never increment the challenge counters."""
+    from app.ingestion import oddschecker as oc
+
+    async def backoff() -> None:
+        raise AssertionError("challenge backoff must not run for timeouts")
+
+    monkeypatch.setattr(oc, "_discovery_challenge_backoff", backoff)
+    created: list[_PoolFakeSession] = []
+    pool = _challenge_pool(created)
+    attempts = 0
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, session, markets
+            nonlocal attempts
+            attempts += 1
+            raise TimeoutError("timed out")
+
+    loader = Loader(EventDirectory())
+    loader._session_pool = pool
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/a/winner"], None, pipeline_key="soccer"
+    )
+
+    assert snapshots == []
+    assert attempts == 2
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
+    assert loader.last_fetch_challenge_retries["soccer"] == 0
+    assert loader.last_fetch_challenge_failures["soccer"] == 0
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_match_page_non_transient_error_never_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion import oddschecker as oc
+
+    async def backoff() -> None:
+        raise AssertionError("challenge backoff must not run for parse errors")
+
+    monkeypatch.setattr(oc, "_discovery_challenge_backoff", backoff)
+    created: list[_PoolFakeSession] = []
+    pool = _challenge_pool(created)
+    attempts = 0
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, session, markets
+            nonlocal attempts
+            attempts += 1
+            raise OddsCheckerParseError("bad payload")
+
+    loader = Loader(EventDirectory())
+    loader._session_pool = pool
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/a/winner"], None, pipeline_key="soccer"
+    )
+
+    assert snapshots == []
+    assert attempts == 1
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
+    assert loader.last_fetch_challenge_retries["soccer"] == 0
+    assert loader.last_fetch_challenge_failures["soccer"] == 0
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_match_page_challenge_retries_are_concurrent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two challenged pages must sit in the retry backoff AT THE SAME TIME: a
+    barrier inside the backoff deadlocks (and fails the fetch via timeout) if
+    the retry path serializes the concurrent page tasks."""
+    from app.ingestion import oddschecker as oc
+
+    entered = 0
+    both_entered = asyncio.Event()
+
+    async def backoff() -> None:
+        nonlocal entered
+        entered += 1
+        if entered >= 2:
+            both_entered.set()
+        await asyncio.wait_for(both_entered.wait(), timeout=2.0)
+
+    monkeypatch.setattr(oc, "_discovery_challenge_backoff", backoff)
+    created: list[_PoolFakeSession] = []
+    pool = _challenge_pool(created)
+    calls: dict[str, int] = {}
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del now, session, markets
+            calls[url] = calls.get(url, 0) + 1
+            if calls[url] == 1:
+                raise OddsCheckerChallenge("challenge")
+            return [SimpleNamespace(event_id=url, market=Market.H2H)]
+
+    loader = Loader(EventDirectory())
+    loader._session_pool = pool
+    urls = [
+        "https://www.oddschecker.com/a/winner",
+        "https://www.oddschecker.com/b/winner",
+    ]
+    snapshots = await loader._gather_snapshots(urls, None, pipeline_key="soccer")
+
+    assert entered == 2
+    assert {snapshot.event_id for snapshot in snapshots} == set(urls)
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 0.0
+    assert loader.last_fetch_challenge_retries["soccer"] == 2
+    assert loader.last_fetch_challenge_failures["soccer"] == 0
+    await pool.aclose()
 
 
 def test_malformed_and_nonfinite_market_lines_fail_closed() -> None:

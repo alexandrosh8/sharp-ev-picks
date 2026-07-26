@@ -1605,6 +1605,38 @@ def policy_fingerprint(
     )
 
 
+def _group_and_price_markets(
+    anchor_snapshots: Sequence[OddsSnapshotIn],
+    *,
+    devig_method: DevigMethod,
+    value_policy: ValuePolicy,
+    freshness_basis: CandidateFreshnessBasis,
+    exchange_demoted_events: frozenset[str],
+) -> tuple[
+    "GroupedMarkets",
+    "MarketFreshnessTimes",
+    dict[tuple[str, Market, str | None], str],
+    "EventFairProbs",
+]:
+    """Pure-CPU grouping + devig for one value cycle, bundled so
+    ``run_value_pipeline`` can run the whole block via ``asyncio.to_thread``
+    (TASK EL): multi-pass coalescing sorts plus numpy devig measured ~0.5s per
+    18k snapshots, which blocked the event loop once per poll cycle when run
+    inline. No IO, no env, no shared mutable state — safe in a worker thread."""
+    grouped = group_market_prices(anchor_snapshots)
+    freshness_by_market = group_market_freshness_times(anchor_snapshots, basis=freshness_basis)
+    sharp_miss_by_market: dict[tuple[str, Market, str | None], str] = {}
+    fair = event_fair_probs(
+        grouped,
+        devig_method,
+        value_policy,
+        liquidity_by_market=group_market_liquidity(anchor_snapshots),
+        exchange_demoted_events=exchange_demoted_events,
+        sharp_miss_out=sharp_miss_by_market,
+    )
+    return grouped, freshness_by_market, sharp_miss_by_market, fair
+
+
 async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
     """One polling cycle of the VALIDATED strategy (sharp-vs-soft value,
     docs/backtesting/value-findings.md): group multi-book odds per market,
@@ -1616,6 +1648,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         CONSENSUS_ANCHOR,
         GLOBAL_ODDS_CEILING_REASON,
         SHARP_BOOKS,
+        SHARP_MISS_NO_FULL_MARKET,
         ah_candidate_plausible,
         anchor_type_for,
         dc_candidate_plausible,
@@ -1784,16 +1817,21 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
     kickoff_by_event = await _load_kickoffs(deps, {s.event_id for s in anchor_snapshots})
     anchor_snapshots = drop_post_kickoff_snapshots(anchor_snapshots, kickoff_by_event)
-    grouped = group_market_prices(anchor_snapshots)
-    freshness_by_market = group_market_freshness_times(
+    # EVENT-LOOP GUARD (TASK EL 2026-07-26): the grouping + devig block is pure
+    # CPU (multi-pass coalescing sorts + numpy devig) and measured ~0.5s per 18k
+    # snapshots — run inline it froze the event loop (and every concurrent HTTP
+    # response) once per poll cycle, so it executes in a worker thread.
+    # Gate-reason telemetry (2026-07-26): sharp_miss_by_market records WHICH
+    # guard cost each market its named sharp anchor, keyed like `fair` — emitted
+    # below as 'no_sharp_anchor:<cause>' beside the legacy bare slug so a cliff
+    # (e.g. the PR #164 liquidity-floor regression) is visible in the reason
+    # mix, not hidden inside one label.
+    grouped, freshness_by_market, sharp_miss_by_market, fair = await asyncio.to_thread(
+        _group_and_price_markets,
         anchor_snapshots,
-        basis=deps.candidate_freshness_basis,
-    )
-    fair = event_fair_probs(
-        grouped,
-        deps.devig_method,
-        deps.value_policy,
-        liquidity_by_market=group_market_liquidity(anchor_snapshots),
+        devig_method=deps.devig_method,
+        value_policy=deps.value_policy,
+        freshness_basis=deps.candidate_freshness_basis,
         exchange_demoted_events=enforced_demotions,
     )
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
@@ -2111,6 +2149,11 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # the interventions never stack confusingly (anchor_book == v.sharp_book
             # exactly; see find_value_bets_with_fair).
             sharp_note = ""
+            # Sub-reason telemetry (2026-07-26): WHICH guard cost this market its
+            # named sharp anchor. Missing-key fallback = the generic cause (a
+            # consensus anchor only ever exists after a named miss, so the key is
+            # normally present; the fallback keeps the emission total).
+            sharp_miss_cause = ""
             if (
                 tier == "premium"
                 and deps.value_policy.require_sharp_anchor
@@ -2118,7 +2161,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             ):
                 tier = "volume"
                 n_no_sharp_demoted += 1
-                sharp_note = " | no sharp anchor (consensus): demoted to volume (shadow)"
+                sharp_miss_cause = sharp_miss_by_market.get(
+                    (event_id, market, detail), SHARP_MISS_NO_FULL_MARKET
+                )
+                sharp_note = (
+                    f" | no sharp anchor ({sharp_miss_cause}; consensus): "
+                    "demoted to volume (shadow)"
+                )
             # Experimental (unvalidated) sport: FORCE every pick to the volume
             # (shadow) tier — never alerted, no exposure — regardless of edge.
             # It is still persisted + CLV-tracked + (via ESPN) auto-settled so it
@@ -2432,7 +2481,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             if major_note:
                 audit_reasons.append("non_major_league")
             if sharp_note:
+                # Legacy slug FIRST (dashboards keep exact-matching it), then the
+                # prefixed sub-reason naming the specific guard (2026-07-26).
                 audit_reasons.append("no_sharp_anchor")
+                audit_reasons.append(f"no_sharp_anchor:{sharp_miss_cause}")
             if experimental_note:
                 audit_reasons.append("experimental_sport")
             if ml_note:
@@ -2969,6 +3021,7 @@ def event_fair_probs(
     fell_back_out: dict[tuple[str, Market, str | None], bool] | None = None,
     liquidity_by_market: LiquidityByMarket | None = None,
     exchange_demoted_events: AbstractSet[str] | None = None,
+    sharp_miss_out: dict[tuple[str, Market, str | None], str] | None = None,
 ) -> EventFairProbs:
     """Trustworthy (anchor_book, selection->fair) per (event, market, line).
 
@@ -2996,13 +3049,23 @@ def event_fair_probs(
     markets ONLY (v1 scope — the only market the API capture covers) the
     exchange anchor is skipped inside ``_named_sharp_anchor`` (fail-closed to
     the next sharp book / consensus). None / empty (the default, and always the
-    close/true-up path) leaves anchor selection bit-identical."""
+    close/true-up path) leaves anchor selection bit-identical.
+
+    ``sharp_miss_out`` (gate-reason telemetry, 2026-07-26): when provided it is
+    POPULATED (additively, same keys as the return) with the ``SHARP_MISS_*``
+    sub-reason for every market whose NAMED sharp anchor missed — so the
+    pipeline can emit 'no_sharp_anchor:<cause>' instead of the single opaque
+    label that hid the PR #164 liquidity-floor regression for 13 days. A
+    derived DOUBLE_CHANCE market inherits its 1X2 anchor's miss reason. None
+    (the default) is bit-identical."""
     from app.edge.value import anchor_fair_probs_with_provenance, double_chance_fair
 
     out: EventFairProbs = {}
     h2h_3way: dict[str, tuple[tuple[str, dict[str, float]], list[str], bool]] = {}
+    h2h_miss_by_event: dict[str, str] = {}
     for (event_id, market, detail), (prices, _) in grouped.items():
         if market in _DIRECT_MARKETS:
+            miss_out: list[str] = []
             result = anchor_fair_probs_with_provenance(
                 prices,
                 devig_method=devig_method_for(value_policy, str(market), detail, devig_method),
@@ -3018,7 +3081,13 @@ def event_fair_probs(
                     and exchange_demoted_events is not None
                     and event_id in exchange_demoted_events
                 ),
+                sharp_miss_out=miss_out,
             )
+            if miss_out:
+                if sharp_miss_out is not None:
+                    sharp_miss_out[(event_id, market, detail)] = miss_out[0]
+                if market is Market.H2H:
+                    h2h_miss_by_event[event_id] = miss_out[0]
             if result is not None:
                 book, fair, fell_back = result
                 out[(event_id, market, detail)] = (book, fair)
@@ -3043,6 +3112,9 @@ def event_fair_probs(
                 # DC inherits the 1X2 anchor's fallback (derived from the same devig).
                 if fell_back_out is not None:
                     fell_back_out[(event_id, market, detail)] = fell_back
+                # ...and its sharp-anchor miss sub-reason (same anchor, same miss).
+                if sharp_miss_out is not None and event_id in h2h_miss_by_event:
+                    sharp_miss_out[(event_id, market, detail)] = h2h_miss_by_event[event_id]
     return out
 
 

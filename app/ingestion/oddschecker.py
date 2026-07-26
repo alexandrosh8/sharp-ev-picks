@@ -402,6 +402,8 @@ async def _wait_before_retry(exc: BaseException) -> None:
 # Daily discovery gets extra attempts against Cloudflare-challenge bursts: each
 # attempt rotates to a fresh proxy/session, with a small jittered pause between
 # attempts. Other transient failures keep the historical two-attempt budget.
+# Match-page fetches reuse the same jittered backoff before their single
+# rotated-session retry so a challenged page never instantly re-hits the storm.
 DISCOVERY_CHALLENGE_MAX_ATTEMPTS = 3
 _DISCOVERY_CHALLENGE_BACKOFF_RANGE: tuple[float, float] = (1.0, 3.0)
 
@@ -2131,6 +2133,12 @@ class OddsCheckerLoader:
         # from a provider payload drift that empties the slate.
         self.last_fetch_empty_markets: dict[str, int] = {}
         self._cycle_empty_markets = 0
+        # Challenge-storm telemetry for match pages this cycle: pages whose
+        # first fetch hit a challenge and took the rotated-session retry, and
+        # pages that STILL failed on a challenge afterwards. Failed pages stay
+        # in last_fetch_incomplete_ratio exactly as before (fail-closed).
+        self.last_fetch_challenge_retries: dict[str, int] = {}
+        self.last_fetch_challenge_failures: dict[str, int] = {}
 
     @classmethod
     def football_today_tomorrow(
@@ -2255,16 +2263,28 @@ class OddsCheckerLoader:
         markets: Sequence[Market] | None = None,
     ) -> list[OddsSnapshotIn]:
         eff_markets = markets if markets is not None else self._markets
+        # EVENT-LOOP GUARD (TASK EL 2026-07-26): every html-scanning helper below
+        # (supported_market_ids_from_match_page, parse_match_page) re-parses the
+        # full match page with BeautifulSoup + json.loads — measured 0.4-1.2s of
+        # pure CPU per pass on real page sizes. Run inline they froze the event
+        # loop (and every concurrent HTTP response) for seconds per poll cycle,
+        # so each pass is offloaded to a worker thread via asyncio.to_thread.
         # Fetch mapped, pick-critical markets independently. Optional OTHER
         # capture must never turn a healthy mapped match into an incomplete one.
-        mapped_market_ids = supported_market_ids_from_match_page(
-            page.html, markets=eff_markets, include_other=False
+        mapped_market_ids = await asyncio.to_thread(
+            supported_market_ids_from_match_page,
+            page.html,
+            markets=eff_markets,
+            include_other=False,
         )
         optional_market_ids: list[str] = []
         if self._capture_other and eff_markets is None:
             try:
-                all_market_ids = supported_market_ids_from_match_page(
-                    page.html, markets=None, include_other=True
+                all_market_ids = await asyncio.to_thread(
+                    supported_market_ids_from_match_page,
+                    page.html,
+                    markets=None,
+                    include_other=True,
                 )
             except OddsCheckerSecurityError as exc:
                 logger.warning(
@@ -2304,7 +2324,8 @@ class OddsCheckerLoader:
 
         if not mapped_snapshots:
             try:
-                mapped_snapshots = parse_match_page(
+                mapped_snapshots = await asyncio.to_thread(
+                    parse_match_page,
                     page.html,
                     url=page.url,
                     directory=self._directory,
@@ -2585,6 +2606,10 @@ class OddsCheckerLoader:
                 f"({DISCOVERY_CHALLENGE_MAX_ATTEMPTS} attempts)"
             )
             self.last_fetch_incomplete_ratio[pipeline_key] = 1.0
+            # No match pages were fetched: reset per-page challenge telemetry so
+            # a discovery-blocked cycle never shows the previous cycle's counts.
+            self.last_fetch_challenge_retries[pipeline_key] = 0
+            self.last_fetch_challenge_failures[pipeline_key] = 0
             self.last_fetch_event_ids[pipeline_key] = ()
             return []
         try:
@@ -2620,8 +2645,10 @@ class OddsCheckerLoader:
         pipeline_key: str | None = None,
     ) -> Sequence[OddsSnapshotIn]:
         semaphore = asyncio.Semaphore(self._max_clients)
+        challenge_retries = 0
 
         async def _one(url: str, *, capture_optional: bool) -> list[OddsSnapshotIn]:
+            nonlocal challenge_retries
             async with semaphore:
                 lease: _ProxySessionLease | None = None
                 active_session = session
@@ -2640,6 +2667,13 @@ class OddsCheckerLoader:
                         if not _is_transient_fetch_error(exc):
                             raise
                         await _wait_before_retry(exc)
+                        if _is_challenge_error(exc):
+                            # Challenge storms need a jittered pause before the
+                            # single rotated-session retry, not an instant
+                            # re-hit. Pages run concurrently, so per-page jitter
+                            # adds little wall time to the cycle.
+                            challenge_retries += 1
+                            await _discovery_challenge_backoff()
 
                         if lease is not None and self._session_pool is not None:
                             failed_lease = lease
@@ -2690,6 +2724,7 @@ class OddsCheckerLoader:
         mapped_snapshots: list[OddsSnapshotIn] = []
         optional_snapshots: list[OddsSnapshotIn] = []
         failures = 0
+        challenge_failures = 0
         self._cycle_empty_markets = 0
         snapshot_overflow = False
         optional_truncated = False
@@ -2727,6 +2762,8 @@ class OddsCheckerLoader:
             for result in results:
                 if isinstance(result, BaseException):
                     failures += 1
+                    if _is_challenge_error(result):
+                        challenge_failures += 1
                     logger.warning("oddschecker match page skipped (%s)", type(result).__name__)
                     continue
                 mapped_result = [
@@ -2787,6 +2824,15 @@ class OddsCheckerLoader:
             else:
                 incomplete_ratio = failures / len(deduped)
             self.last_fetch_incomplete_ratio[pipeline_key] = incomplete_ratio
+            self.last_fetch_challenge_retries[pipeline_key] = challenge_retries
+            self.last_fetch_challenge_failures[pipeline_key] = challenge_failures
+            if challenge_retries:
+                logger.info(
+                    "oddschecker %s: %d challenged match page(s) retried, %d still failed",
+                    pipeline_key,
+                    challenge_retries,
+                    challenge_failures,
+                )
             self.last_fetch_empty_markets[pipeline_key] = self._cycle_empty_markets
             if self._cycle_empty_markets:
                 logger.info(

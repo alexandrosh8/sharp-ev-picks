@@ -1217,7 +1217,18 @@ async def bankroll_ledger(
 # without staleness risk (the frontend already tolerates 5-min-old data).
 # Read-only, per-process.
 _MATCH_RATE_CACHE: dict[int | None, tuple[float, dict[str, Any]]] = {}
-_MATCH_RATE_CACHE_TTL_S = 60.0
+# TASK MR (2026-07-26): the cache is kept WARM by a background scheduler job
+# (app/scheduler.py "match_rate_cache_refresh") that recomputes the payload
+# every MATCH_RATE_REFRESH_INTERVAL_S, so authenticated dashboard loads never
+# eat the 9-11s cold compute. The TTL is deliberately >= 2x the cadence: one
+# missed refresh cycle keeps serving warm data; the route recomputes inline
+# ONLY when the cache was never primed (startup fallback) or the background
+# job has been dead for a full TTL.
+MATCH_RATE_REFRESH_INTERVAL_S = 300.0
+_MATCH_RATE_CACHE_TTL_S = 2.2 * MATCH_RATE_REFRESH_INTERVAL_S
+# The days keys the background job keeps warm — the dashboard's only call is
+# /resolution/match-rate?days=180 (app/api/dashboard_src/app.js).
+_MATCH_RATE_WARM_DAYS: tuple[int | None, ...] = (180,)
 _MATCH_RATE_INFLIGHT: dict[int | None, asyncio.Task[dict[str, Any]]] = {}
 
 
@@ -1227,6 +1238,19 @@ class _MatchRateComputeError(RuntimeError):
 
 async def _compute_resolution_match_rate(
     request: Request,
+    session: AsyncSession | None,
+    days: int | None,
+) -> dict[str, Any]:
+    """Request-scoped wrapper: extract the lifespan session factory (absent on
+    router-only test apps) and delegate to the Request-free payload compute so
+    the background scheduler refresh can share the exact same code path."""
+    return await _compute_match_rate_payload(
+        getattr(request.app.state, "session_factory", None), session, days
+    )
+
+
+async def _compute_match_rate_payload(
+    factory: Any,
     session: AsyncSession | None,
     days: int | None,
 ) -> dict[str, Any]:
@@ -1250,10 +1274,9 @@ async def _compute_resolution_match_rate(
     # sum (~12-20s). Without a session factory (router-only test apps, no
     # lifespan) fall back to the original sequential path on the injected
     # session.
-    factory = getattr(request.app.state, "session_factory", None)
 
     async def _own_session(fn: Any, /, **kwargs: Any) -> Any:
-        async with factory() as own:  # type: ignore[misc]
+        async with factory() as own:
             return await fn(own, **kwargs)
 
     if factory is not None:
@@ -1353,6 +1376,21 @@ async def _compute_resolution_match_rate(
         concurrency_floor=_floor,
     )
     return report
+
+
+async def refresh_match_rate_cache(
+    session_factory: Any,
+    days_keys: tuple[int | None, ...] = _MATCH_RATE_WARM_DAYS,
+) -> None:
+    """Background cache warmer (TASK MR): recompute the match-rate payload(s)
+    on scheduler-owned sessions and store them in the SAME per-process cache
+    ``resolution_match_rate`` reads, so the route serves warm data always.
+    Called by the app/scheduler.py "match_rate_cache_refresh" job every
+    MATCH_RATE_REFRESH_INTERVAL_S (TTL >= 2x that cadence). Read-only; payload
+    shape identical to the inline compute — it IS the inline compute."""
+    for days in days_keys:
+        report = await _compute_match_rate_payload(session_factory, None, days)
+        _MATCH_RATE_CACHE[days] = (time.monotonic(), report)
 
 
 @router.get("/resolution/match-rate", dependencies=[Depends(require_dashboard_auth)])

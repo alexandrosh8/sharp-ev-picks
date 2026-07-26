@@ -45,6 +45,20 @@ EXCHANGE_COMMISSION = {
 CONSENSUS_ANCHOR = "consensus(median)"
 MIN_CONSENSUS_BOOKS = 3
 
+# Sharp-anchor MISS sub-reasons (telemetry finding 2026-07-26): the single
+# 'no_sharp_anchor' gate label was 99.8% of reasons and hid a 13-day regression
+# (PR #164 liquidity-floor NULL rejection) because it conflated four distinct
+# causes the named-anchor loop already computes. ``_named_sharp_anchor`` now
+# returns WHICH guard exhausted the sharp candidates; the pipeline emits it as
+# 'no_sharp_anchor:<cause>' ALONGSIDE the legacy bare slug (dashboards keep
+# matching 'no_sharp_anchor' unchanged). A SPECIFIC guard rejection (floor /
+# demotion / overround) always wins over the generic "no book prices the full
+# market" — the specific causes are the regression signals.
+SHARP_MISS_NO_FULL_MARKET = "no_sharp_book_prices_full_market"
+SHARP_MISS_LIQUIDITY_FLOOR = "exchange_liquidity_floor"
+SHARP_MISS_EXCHANGE_DEMOTED = "exchange_demoted"
+SHARP_MISS_OVERROUND = "overround_implausible"
+
 # edge-ev-devig-r2-2: an anchor whose devigged probability ORDERING inverts the
 # cross-book consensus ordering by more than this margin (in probability units) is
 # treated as untrustworthy (a mislabeled/swapped line, e.g. the 1X2 Draw<->Away
@@ -661,9 +675,16 @@ def anchor_fair_probs_with_provenance(
     liquidity: Mapping[str, Mapping[str, float | None]] | None = None,
     exchange_min_liquidity: float = 0.0,
     exchange_demoted: bool = False,
+    sharp_miss_out: list[str] | None = None,
 ) -> tuple[str, dict[str, float], bool] | None:
     """Like :func:`anchor_fair_probs` but also returns whether the anchor devig
     FELL BACK to multiplicative (P2-2): ``(anchor_book, {selection: fair}, fell_back)``.
+
+    ``sharp_miss_out`` (telemetry finding 2026-07-26): when provided and the
+    NAMED sharp-anchor loop misses (the market falls to consensus, or anchors
+    not at all), the ``SHARP_MISS_*`` sub-reason is APPENDED — so the pipeline
+    can emit 'no_sharp_anchor:<cause>' instead of one opaque label. Left
+    untouched on a named sharp anchor; None (the default) is bit-identical.
 
     The flag is recorded per pick (mint) and per close so the trusted sharp-CLV
     subset can drop ASYMMETRIC fallbacks (mint and close devigged by different
@@ -679,7 +700,7 @@ def anchor_fair_probs_with_provenance(
     selections = list(prices.keys())
     if len(selections) < 2 or len(set(selections)) != len(selections):
         return None
-    anchor_book, anchor_odds = _named_sharp_anchor(
+    anchor_book, anchor_odds, sharp_miss = _named_sharp_anchor(
         prices,
         selections,
         sharp_books,
@@ -690,6 +711,8 @@ def anchor_fair_probs_with_provenance(
         exchange_demoted=exchange_demoted,
     )
     if anchor_book is None:
+        if sharp_miss_out is not None and sharp_miss is not None:
+            sharp_miss_out.append(sharp_miss)
         if consensus_logit_pool:
             anchor_book, anchor_odds = _logit_consensus_anchor(
                 prices, selections, commissions, max_overround, devig_method
@@ -954,10 +977,16 @@ def _named_sharp_anchor(
     liquidity: Mapping[str, Mapping[str, float | None]] | None = None,
     exchange_min_liquidity: float = 0.0,
     exchange_demoted: bool = False,
-) -> tuple[str | None, list[float] | None]:
+) -> tuple[str | None, list[float] | None, str | None]:
     """First preferred sharp book that prices the FULL market with a sane
-    overround. Returns the GROSS (displayed) anchor odds for the fair-probability
-    devig.
+    overround. Returns ``(anchor_book, gross_odds, miss_reason)`` — the GROSS
+    (displayed) anchor odds for the fair-probability devig, plus (on a miss)
+    WHICH guard exhausted the sharp candidates (one of the ``SHARP_MISS_*``
+    sub-reasons; ``None`` on success). The FIRST specific guard rejection
+    (liquidity floor / staleness demotion / overround) encountered in
+    preference order wins over the generic ``SHARP_MISS_NO_FULL_MARKET`` —
+    incomplete books are the ambient condition, guard rejections are the
+    regression signal the telemetry exists to surface.
 
     Betfair staleness guard (``exchange_demoted``, default False = bit-identical):
     when True, a fresh Betfair-API verdict found this event's inline exchange
@@ -1004,6 +1033,9 @@ def _named_sharp_anchor(
         for b in prices[s]:
             raw_by_norm.setdefault(_norm(b), b)
 
+    # First SPECIFIC guard rejection seen (preference order); stays None while
+    # every miss is merely an incomplete book.
+    miss_reason: str | None = None
     for pref in sharp_books:
         net_odds: list[float] = []  # commission-netted — overround gate only
         gross_odds: list[float] = []  # displayed odds — devigged for the fair prob
@@ -1031,17 +1063,23 @@ def _named_sharp_anchor(
                     known_thin = True
                     break
             if known_thin:
+                if miss_reason is None:
+                    miss_reason = SHARP_MISS_LIQUIDITY_FLOOR
                 continue
         if exchange_demoted and _norm(pref) in commissions:
             # Exchange anchor under FRESH API disagreement (staleness guard):
             # demote exactly like known-thin — skip to the next sharp book,
             # then consensus (fail-closed; never a silent pass, never a drop).
+            if miss_reason is None:
+                miss_reason = SHARP_MISS_EXCHANGE_DEMOTED
             continue
         # Gate on NET overround (membership unchanged); devig the GROSS odds.
         if 0.0 <= _overround(net_odds) <= max_overround:
-            return raw_by_norm[pref], gross_odds
+            return raw_by_norm[pref], gross_odds, None
         # implausible anchor (stale/arb-looking) -> try next sharp / consensus
-    return None, None
+        if miss_reason is None:
+            miss_reason = SHARP_MISS_OVERROUND
+    return None, None, miss_reason if miss_reason is not None else SHARP_MISS_NO_FULL_MARKET
 
 
 def _consensus_anchor(

@@ -192,9 +192,13 @@ async def test_pipeline_writes_candidate_audit_rows(factory: async_sessionmaker)
     assert kept.best_odds == Decimal("2.9000")
     assert kept.edge is not None and kept.edge > 0
 
-    # demoted-to-shadow: one row, tier=volume, no_sharp_anchor reason slug.
+    # demoted-to-shadow: one row, tier=volume, legacy no_sharp_anchor slug PLUS
+    # the prefixed sub-reason naming the specific guard (telemetry 2026-07-26 —
+    # soft-only slate: no sharp book prices the full market).
     demo = await _rows_for(factory, "evt-demo")
     assert [r.tier for r in demo] == ["volume"]
     dem = demo[0]
-    assert dem.reasons == {"reasons": ["no_sharp_anchor"]}
+    assert dem.reasons == {
+        "reasons": ["no_sharp_anchor", "no_sharp_anchor:no_sharp_book_prices_full_market"]
+    }
     assert dem.anchor_type == "consensus"

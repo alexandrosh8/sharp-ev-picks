@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.notifications.base import Alert
-from app.storage.models import Event, OddsSnapshot, Pick
+from app.storage.models import CandidateEvaluation, Event, OddsSnapshot, Pick
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,15 @@ PROXY_HEADROOM_ALERT_INTERVAL = timedelta(hours=6)
 #: one-shot "recovered" notice. Aligned with DEAD_MANS_DEFAULT_K so both
 #: switches agree on what a real outage (vs a quiet gap) looks like.
 LISTING_DARK_K = 3
+
+#: Sharp-anchor cliff (gate-reason telemetry follow-up, 2026-07-26): a drop in
+#: sharp-anchored candidate evaluations (last 24h vs the prior 24h) EXCEEDING
+#: this fraction is a regression signal — the shape of the PR #164 liquidity-
+#: floor bug, which silently pushed 99.8% of candidates to 'no_sharp_anchor'
+#: for 13 days. Requires a prior-window count of at least
+#: SHARP_ANCHOR_CLIFF_MIN_PRIOR so a quiet slate can never fake a cliff.
+SHARP_ANCHOR_CLIFF_DROP = 0.80
+SHARP_ANCHOR_CLIFF_MIN_PRIOR = 50
 
 
 class _Dispatcher(Protocol):
@@ -202,6 +211,35 @@ def evaluate_listing_recovery(
     return 0, None
 
 
+def evaluate_sharp_anchor_cliff(
+    *,
+    recent_24h: int,
+    prior_24h: int,
+    drop_threshold: float = SHARP_ANCHOR_CLIFF_DROP,
+    min_prior: int = SHARP_ANCHOR_CLIFF_MIN_PRIOR,
+) -> Anomaly | None:
+    """Pure sharp-anchor cliff check (gate-reason telemetry follow-up,
+    2026-07-26): WARN when sharp-anchored candidate evaluations in the last 24h
+    dropped by MORE than ``drop_threshold`` vs the prior 24h — the shape of the
+    PR #164 liquidity-floor regression, where 'no_sharp_anchor' silently became
+    99.8% of gate reasons for 13 days. A prior-window count below ``min_prior``
+    stays quiet (a thin/off-season slate is not a cliff); an ordinary dip
+    (e.g. 100 -> 90) never fires. Counters only — no odds, no identities."""
+    if prior_24h < min_prior:
+        return None
+    if recent_24h >= prior_24h * (1.0 - drop_threshold):
+        return None
+    drop_pct = 100.0 * (1.0 - recent_24h / prior_24h)
+    return Anomaly(
+        "WARN",
+        "sharp_anchor_cliff",
+        f"sharp-anchored evaluations fell {drop_pct:.0f}%: {recent_24h} in the last "
+        f"24h vs {prior_24h} in the prior 24h — sharp-anchor coverage may have "
+        "regressed (liquidity floor / exchange demotion / sharp feed loss); check "
+        "the no_sharp_anchor:<cause> reason mix in candidate_evaluations",
+    )
+
+
 def _listing_matches_from_last_poll() -> int | None:
     """Latest listing count summed across sports from the pipeline's LAST_POLL
     liveness registry — the self-audit's listing-probe input. The poll cycle
@@ -310,12 +348,42 @@ async def run_self_audit(
                     )
                 )
             ) or 0
+        # Sharp-anchor cliff input (2026-07-26): sharp-anchored candidate
+        # evaluations in the last 24h vs the prior 24h. Bounded aggregate on
+        # the idx-covered evaluated_at windows; 'consensus' rows are exactly
+        # the no-sharp-anchor misses, so they are excluded from the count.
+        sharp_recent = (
+            await session.scalar(
+                select(func.count())
+                .select_from(CandidateEvaluation)
+                .where(
+                    CandidateEvaluation.anchor_type.in_(("pinnacle", "sharp")),
+                    CandidateEvaluation.evaluated_at >= now - timedelta(hours=24),
+                )
+            )
+        ) or 0
+        sharp_prior = (
+            await session.scalar(
+                select(func.count())
+                .select_from(CandidateEvaluation)
+                .where(
+                    CandidateEvaluation.anchor_type.in_(("pinnacle", "sharp")),
+                    CandidateEvaluation.evaluated_at >= now - timedelta(hours=48),
+                    CandidateEvaluation.evaluated_at < now - timedelta(hours=24),
+                )
+            )
+        ) or 0
     found = evaluate_anomalies(
         now,
         awaiting_backlog=backlog,
         newest_odds=newest,
         awaiting_grace_hours=int(awaiting_grace.total_seconds() // 3600),
     )
+    # Sharp-anchor cliff (2026-07-26): rides the standard anomaly channel, so
+    # transition dedupe / dispatch / logging come for free from the job wrapper.
+    cliff = evaluate_sharp_anchor_cliff(recent_24h=sharp_recent, prior_24h=sharp_prior)
+    if cliff is not None:
+        found.append(cliff)
     # WRONG-GAME SAFETY NET (go-live, hardened Pinnacle matcher): independently
     # re-verify recently-accepted live Pinnacle anchors are the SAME fixture. A
     # wrong-game close is fake CLV — the cardinal sin — so any mismatch surfaces

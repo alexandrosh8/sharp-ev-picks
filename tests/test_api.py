@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -1189,6 +1190,81 @@ async def test_match_rate_singleflight_retrieves_detached_error_without_secret(
     log_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "RuntimeError" in log_text
     assert secret_url not in log_text
+
+
+async def test_match_rate_warm_cache_served_without_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TASK MR: a warm cache entry is served directly — the expensive compute
+    path (three >7s repo queries) is never invoked. The background scheduler
+    job (app/scheduler.py "match_rate_cache_refresh") keeps this cache warm."""
+    from app.api import routes
+
+    calls: list[int | None] = []
+
+    async def fake_compute(request, session, days):  # type: ignore[no-untyped-def]
+        calls.append(days)
+        return {"total": 0}
+
+    monkeypatch.setattr(routes, "_compute_resolution_match_rate", fake_compute)
+    routes._MATCH_RATE_CACHE.clear()
+    routes._MATCH_RATE_INFLIGHT.clear()
+    warm = {"total": 42, "matched": 7}
+    routes._MATCH_RATE_CACHE[180] = (time.monotonic(), warm)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=object())))
+    body = await routes.resolution_match_rate(request, None, 180)  # type: ignore[arg-type]
+    assert body is warm
+    assert calls == []
+
+
+async def test_refresh_match_rate_cache_updates_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TASK MR: the background-refresh entry point recomputes the warm-days
+    payloads on its own sessions (no Request) and stores them in the SAME cache
+    the route reads; the TTL outlives 2x the refresh cadence so one missed
+    cycle never drops users back onto the cold compute."""
+    from app.api import routes
+
+    seen: list[tuple[object, object, int | None]] = []
+
+    async def fake_payload(factory, session, days):  # type: ignore[no-untyped-def]
+        seen.append((factory, session, days))
+        return {"days": days}
+
+    monkeypatch.setattr(routes, "_compute_match_rate_payload", fake_payload)
+    routes._MATCH_RATE_CACHE.clear()
+    factory = object()
+    await routes.refresh_match_rate_cache(factory)
+    # The dashboard's only call is ?days=180 (dashboard_src/app.js) — that key
+    # is the one kept warm.
+    assert seen == [(factory, None, 180)]
+    assert routes._MATCH_RATE_CACHE[180][1] == {"days": 180}
+    assert routes._MATCH_RATE_CACHE_TTL_S >= 2 * routes.MATCH_RATE_REFRESH_INTERVAL_S
+
+
+async def test_match_rate_cold_start_computes_inline_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TASK MR: never-primed cache (startup fallback) — the route computes
+    inline exactly once, then serves the cached payload without recomputing."""
+    from app.api import routes
+
+    calls: list[int | None] = []
+
+    async def fake_compute(request, session, days):  # type: ignore[no-untyped-def]
+        calls.append(days)
+        return {"total": 3}
+
+    monkeypatch.setattr(routes, "_compute_resolution_match_rate", fake_compute)
+    routes._MATCH_RATE_CACHE.clear()
+    routes._MATCH_RATE_INFLIGHT.clear()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=object())))
+    first = await routes.resolution_match_rate(request, None, 180)  # type: ignore[arg-type]
+    second = await routes.resolution_match_rate(request, None, 180)  # type: ignore[arg-type]
+    assert first == {"total": 3}
+    assert second is first
+    assert calls == [180]
 
 
 def test_resolution_review_queue_endpoint_serializes_rows(monkeypatch) -> None:  # type: ignore[no-untyped-def]

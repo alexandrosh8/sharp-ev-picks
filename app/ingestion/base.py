@@ -1,6 +1,7 @@
 """Ingestion contracts. ALL loaders are READ-ONLY (GET) by design — no code
 in this package may write to any bookmaker, exchange, or odds provider."""
 
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -95,8 +96,18 @@ class EventDirectory:
 
     def __init__(self) -> None:
         self._events: dict[str, EventTeams] = {}
+        # register() is a read-modify-write (prefer_kickoff / country preserve).
+        # Page parses run in asyncio.to_thread workers (TASK EL), so two threads
+        # (e.g. a poll cycle and a CLV re-price of the same match) can register
+        # one event_id concurrently — the lock keeps the precedence rules atomic.
+        # lookup()/snapshot() stay lock-free: single dict reads are GIL-atomic.
+        self._register_lock = threading.Lock()
 
     def register(self, event_id: str, teams: EventTeams) -> None:
+        with self._register_lock:
+            self._register_locked(event_id, teams)
+
+    def _register_locked(self, event_id: str, teams: EventTeams) -> None:
         # Kickoff precedence: every other field is last-write-wins (the freshest
         # scrape carries the latest score/finished flag), but a date-only midnight
         # or a None must NEVER overwrite an already-known REAL kickoff time — only

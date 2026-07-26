@@ -152,25 +152,28 @@ def test_demoted_exchange_falls_to_next_sharp_book() -> None:
     # the next sharp-book member (Pinnacle) anchors — the exact `continue`
     # fall-through the liquidity floor uses (never a hard drop).
     order = ("betfair exchange", "pinnacle")
-    book, odds = _named_sharp_anchor(
+    book, odds, miss = _named_sharp_anchor(
         _PRICES, _SELECTIONS, order, _COMMISSIONS, 0.12, exchange_demoted=False
     )
     assert book == "Betfair Exchange"
-    book, odds = _named_sharp_anchor(
+    assert miss is None
+    book, odds, miss = _named_sharp_anchor(
         _PRICES, _SELECTIONS, order, _COMMISSIONS, 0.12, exchange_demoted=True
     )
     assert book == "Pinnacle"
     assert odds == [2.48, 3.28, 3.08]
+    assert miss is None  # a later sharp book anchored — no miss
 
 
 def test_demoted_exchange_with_no_other_sharp_returns_none_for_consensus() -> None:
     # Design case 3 (pure half): no other sharp book -> the named-anchor loop
     # yields nothing and the caller falls to _consensus_anchor.
-    book, odds = _named_sharp_anchor(
+    book, odds, miss = _named_sharp_anchor(
         _PRICES, _SELECTIONS, ("betfair exchange",), _COMMISSIONS, 0.12, exchange_demoted=True
     )
     assert book is None
     assert odds is None
+    assert miss == "exchange_demoted"  # sub-reason names the demoting guard
 
 
 # --- pipeline harness (fakes only, mirrors tests/test_value_pipeline.py) ----
