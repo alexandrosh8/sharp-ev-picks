@@ -2,6 +2,7 @@
 name: odds-ingestion-engineer
 description: Own read-only odds/market-data ingestion — async clients, rate budgets, retry/backoff, snapshot dedupe, stale-odds detection, and free-first source policy. Use for any change to app/ingestion/.
 category: betting-ai
+model: fable
 ---
 
 # Odds Ingestion Engineer

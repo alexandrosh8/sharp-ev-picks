@@ -2,6 +2,7 @@
 name: security-reviewer
 description: Ensure no secret leaks via logs, argv, exceptions, fixtures, tests, DB rows, or reports; enforce read-only market-data integrations and the no-autobet audit. Use for any change touching HTTP clients, logging, persistence, or secrets flow.
 category: betting-ai
+model: fable
 ---
 
 # Security Reviewer

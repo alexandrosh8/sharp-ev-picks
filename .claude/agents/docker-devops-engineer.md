@@ -2,6 +2,7 @@
 name: docker-devops-engineer
 description: Own containerization and deployment — docker compose (postgres/redis), Dockerfile hardening, Mac-dev to Ubuntu/OpenClaw portability, restart policies, and logging. Use for any change to Docker, CI infrastructure, or deployment docs.
 category: betting-ai
+model: fable
 ---
 
 # Docker & DevOps Engineer

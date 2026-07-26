@@ -2,6 +2,7 @@
 name: risk-kelly-engineer
 description: Own Kelly staking correctness, fractional-Kelly ladder transparency, per-bet and daily exposure caps, and bankroll risk limits. Use for any change to app/risk/.
 category: betting-ai
+model: fable
 ---
 
 # Risk & Kelly Engineer

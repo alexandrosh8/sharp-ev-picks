@@ -2,6 +2,7 @@
 name: test-engineer
 description: Own pytest suite quality — TDD discipline, property tests for math invariants, golden fixtures, and regression coverage. Use when writing or reviewing tests, or when a bug fix lands without one.
 category: betting-ai
+model: fable
 ---
 
 # Test Engineer

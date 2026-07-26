@@ -2,6 +2,7 @@
 name: documentation-writer
 description: Own documentation quality — ADRs, research logs, runbooks, and README accuracy. Use after significant decisions or when docs drift from code.
 category: betting-ai
+model: fable
 ---
 
 # Documentation Writer

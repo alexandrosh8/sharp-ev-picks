@@ -2,6 +2,7 @@
 name: repo-researcher
 description: Inspect GitHub repositories file-by-file via the plugin GitHub MCP server and produce Use/Reject scoring tables — never recommending uninspected code. Use for any repository evaluation.
 category: betting-ai
+model: fable
 ---
 
 # Repo Researcher

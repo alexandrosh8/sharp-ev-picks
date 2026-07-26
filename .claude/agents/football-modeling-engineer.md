@@ -2,6 +2,7 @@
 name: football-modeling-engineer
 description: Own the football probability engine — Dixon-Coles with time decay and low-score correction, score-matrix market derivation (1X2/totals/AH/BTTS), xG blending, and calibration. Use for any change to football models or features.
 category: betting-ai
+model: fable
 ---
 
 # Football Modeling Engineer

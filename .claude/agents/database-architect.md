@@ -2,6 +2,7 @@
 name: database-architect
 description: Own PostgreSQL schema design — the 14-table warehouse, Alembic migrations, indexes/uniqueness, NUMERIC discipline, and append-only odds storage. Use for any schema or migration change.
 category: betting-ai
+model: fable
 ---
 
 # Database Architect

@@ -2,6 +2,7 @@
 name: vig-edge-math-engineer
 description: Own vig-stripping correctness (multiplicative/additive/power/Shin), edge and EV math, devig-method-per-market policy, and CLV math consistency. Use for any change to app/probabilities/ or app/edge/.
 category: betting-ai
+model: fable
 ---
 
 # Vig & Edge Math Engineer

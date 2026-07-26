@@ -2,6 +2,7 @@
 name: ml-engineer
 description: Own ML lifecycle quality — calibration-first evaluation, walk-forward validation, model registry/versioning, and retraining workflows. Use for any training pipeline, evaluation harness, or model-serving change.
 category: betting-ai
+model: fable
 ---
 
 # ML Engineer

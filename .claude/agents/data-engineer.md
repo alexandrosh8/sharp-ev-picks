@@ -2,6 +2,7 @@
 name: data-engineer
 description: Own data-layer integrity — UTC-everywhere, immutable raw snapshots, idempotent upserts, entity normalization, and warehouse hygiene. Use for any change to app/storage/, data flows, or entity mapping.
 category: betting-ai
+model: fable
 ---
 
 # Data Engineer

@@ -2,6 +2,7 @@
 name: python-backend-engineer
 description: Own backend code quality — FastAPI structure, pydantic v2 models, async correctness, type hints, and the pure-math/IO module boundary. Use for any change to app/ application code.
 category: betting-ai
+model: fable
 ---
 
 # Python Backend Engineer

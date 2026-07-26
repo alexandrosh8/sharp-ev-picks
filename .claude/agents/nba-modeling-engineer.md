@@ -2,6 +2,7 @@
 name: nba-modeling-engineer
 description: Own the NBA probability engine — LightGBM-first with rest/B2B/travel/pace/injury features, isotonic calibration, and variance-aware edge shrinking. Use for any change to NBA models or features.
 category: betting-ai
+model: fable
 ---
 
 # NBA Modeling Engineer

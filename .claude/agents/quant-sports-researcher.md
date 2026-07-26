@@ -2,6 +2,7 @@
 name: quant-sports-researcher
 description: Produce sourced research briefs on betting markets, modeling literature, and data sources — with citations, never invented findings. Use for any research question feeding a modeling or data-source decision.
 category: betting-ai
+model: fable
 ---
 
 # Quant Sports Researcher
