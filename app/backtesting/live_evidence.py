@@ -42,10 +42,33 @@ from app.backtesting.calibration import (
     calibration_report,
 )
 from app.backtesting.clv import mean_significance, wilson_interval
+from app.edge.value_policy import normalize_league
 
 #: Below this many CLV observations a stratum is "insufficient" — the
 #: dashboard shows the state instead of point estimates.
 MIN_STRATUM_N = 50
+
+#: TASK TL (2026-07-26) league-tier MEASUREMENT dimension: the commented value
+#: of the (deliberately DISABLED) VALUE_MAJOR_LEAGUES flag (.env.example /
+#: app/config.py `value_major_leagues` — whitelist disabled 2026-06-28, premium
+#: is scoped by DATA, restore ~Aug). Hardcoded HERE because the trusted-CLV
+#: scorecard needs the major/non-major split as telemetry while the env flag
+#: stays off; this constant NEVER gates, demotes, or promotes a pick.
+#: Membership is judged on app/edge/value_policy.normalize_league — the exact
+#: normal form is_major_league would use if the flag were re-enabled.
+MAJOR_LEAGUES: tuple[str, ...] = (
+    "Premier League",
+    "LaLiga",
+    "Serie A",
+    "Bundesliga",
+    "Ligue 1",
+    "UEFA Champions League",
+    "UEFA Europa League",
+    "NBA",
+    "EuroLeague",
+)
+
+_MAJOR_LEAGUES_NORMALIZED = frozenset(normalize_league(name) for name in MAJOR_LEAGUES)
 
 #: Close anchors that make a close TRUSTABLE for honest CLV — a NAMED sharp
 #: book priced it, not a soft-book consensus median. Mirrors the persisted
@@ -164,6 +187,18 @@ class SettledPickRow:
     # cohort split. None = not joined (pure-test construction) — the row is
     # then excluded from BOTH cohorts (it cannot be assigned honestly).
     minted_at: datetime | None = None
+    # TASK TL (2026-07-26): market key (Pick.market, e.g. "spreads") for the
+    # per-(sport, market) trusted-close coverage counter. None = dimension not
+    # joined (pure-test construction) — the (sport, market) cell grouping is
+    # then omitted entirely, the same feature-detected contract as sport.
+    market: str | None = None
+    # Scraped league display name (League.name) for the major/non-major
+    # trusted-CLV split (MAJOR_LEAGUES). None = dimension not joined — the row
+    # enters NEITHER league-tier bucket (cannot be classified honestly, the
+    # same contract as minted_at); '' (source omitted the league) classifies
+    # as non_major, mirroring is_major_league (an unconfirmable league is
+    # never major).
+    league_name: str | None = None
 
     @property
     def devig_fallback_asymmetric(self) -> bool:
@@ -472,6 +507,45 @@ def _clv_yield_ratio(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, An
     }
 
 
+def _league_tier(league_name: str | None) -> str | None:
+    """TASK TL league-tier of one row: 'major' / 'non_major' / None (unknown).
+
+    Membership is exact on the normalize_league normal form of MAJOR_LEAGUES —
+    the identical comparison is_major_league would apply if VALUE_MAJOR_LEAGUES
+    were re-enabled. None (dimension not joined) classifies as NEITHER; a
+    present-but-unlisted (or blank) name is non_major."""
+    if league_name is None:
+        return None
+    return "major" if normalize_league(league_name) in _MAJOR_LEAGUES_NORMALIZED else "non_major"
+
+
+def _trusted_close_gap_cells(
+    by_sport_market: dict[tuple[str, str], list[SettledPickRow]], min_n: int
+) -> list[dict[str, Any]]:
+    """TASK TL per-(sport, market) trusted-close coverage counter cells.
+
+    ``n_missing_trusted_close`` counts settled picks WITHOUT a trusted sharp
+    close (``sharp_close`` is False) — the exact leak that keeps a promotion-
+    critical cell (basketball spreads: needs n_trusted >= 100) from accruing
+    evidence. Counts are denominators and always survive; the honesty flag
+    ``sufficient`` (n_trusted_close >= min_n, the same evidence floor as every
+    stratum) rides EVERY cell so a thin cell can never read as a bare number."""
+    cells: list[dict[str, Any]] = []
+    for (sport, market), cell_rows in sorted(by_sport_market.items()):
+        n_trusted = sum(1 for r in cell_rows if r.sharp_close)
+        cells.append(
+            {
+                "sport": sport,
+                "market": market,
+                "n_settled": len(cell_rows),
+                "n_trusted_close": n_trusted,
+                "n_missing_trusted_close": len(cell_rows) - n_trusted,
+                "sufficient": n_trusted >= min_n,
+            }
+        )
+    return cells
+
+
 def _mint_cohort(minted_at: datetime | None) -> str | None:
     """ADR-0022 crit 3 cohort of one mint time: 'pre_fix' / 'post_fix' / None.
 
@@ -584,6 +658,7 @@ def live_evidence_report(
     by_anchor: dict[str, list[SettledPickRow]] = {}
     by_close_anchor: dict[str, list[SettledPickRow]] = {}
     by_sport: dict[str, list[SettledPickRow]] = {}
+    by_sport_market: dict[tuple[str, str], list[SettledPickRow]] = {}
     for row in rows:
         by_score.setdefault(_score_bucket(row.value_filter_score, ml_threshold), []).append(row)
         by_tier.setdefault(row.tier, []).append(row)
@@ -593,6 +668,10 @@ def live_evidence_report(
             by_close_anchor.setdefault(row.closing_anchor_type, []).append(row)
         if row.sport is not None:
             by_sport.setdefault(row.sport, []).append(row)
+        # TASK TL: the trusted-close coverage counter needs BOTH keys — a row
+        # missing either cannot be placed in a (sport, market) cell honestly.
+        if row.sport is not None and row.market is not None:
+            by_sport_market.setdefault((row.sport, row.market), []).append(row)
     # The TRUSTED subset: closes the platform can stand behind for honest CLV
     # (a genuine sharp snapshot close, not a consensus median or a poll-time
     # revalidation fallback). Always reported — n=0 honestly says "none yet".
@@ -608,6 +687,15 @@ def live_evidence_report(
         cohort = _mint_cohort(r.minted_at)
         if cohort is not None:
             premium_cohorts[cohort].append(r)
+    # TASK TL: major/non-major league-tier split of the SAME trusted subset
+    # (MAJOR_LEAGUES — the commented VALUE_MAJOR_LEAGUES value; measurement
+    # only, never a gate). Both buckets always present, like premium_cohorts;
+    # rows with an unknown (None) league name enter NEITHER.
+    trusted_by_league_tier: dict[str, list[SettledPickRow]] = {"major": [], "non_major": []}
+    for r in sharp_rows:
+        tier_key = _league_tier(r.league_name)
+        if tier_key is not None:
+            trusted_by_league_tier[tier_key].append(r)
 
     cal = meta_model_calibration(rows, min_n=min_n)
     return {
@@ -651,6 +739,14 @@ def live_evidence_report(
         "by_sport": (
             {k: _stratum_stats(v, min_n) for k, v in sorted(by_sport.items())} if by_sport else None
         ),
+        # TASK TL: per-(sport, market) trusted-close coverage counter — how many
+        # settled picks are NOT accruing trusted CLV evidence in each cell (the
+        # SportMarketClvGate denominator leak; basketball spreads is the
+        # promotion-critical cell). Feature-detected like by_sport: None until a
+        # row carries BOTH sport and market keys.
+        "trusted_close_gap_by_sport_market": (
+            _trusted_close_gap_cells(by_sport_market, min_n) if by_sport_market else None
+        ),
         "sharp_close": _stratum_stats(sharp_rows, min_n),
         # Task 4 (2026-07-10) — trusted-CLV-first operator report. All three
         # ride the SAME trusted subset (sharp_rows) and the SAME min_n floor;
@@ -667,6 +763,14 @@ def live_evidence_report(
             "premium_cohorts": {
                 k: _trusted_clv_ci_entry(v, min_n, progress_min_n=KILL_GATE_PROGRESS_MIN_N)
                 for k, v in sorted(premium_cohorts.items())
+            },
+            # TASK TL: the SAME trusted subset split major/non-major on
+            # MAJOR_LEAGUES (the commented VALUE_MAJOR_LEAGUES value —
+            # measurement only, never a gate). Same entry shape and min_n
+            # floor; unknown-league rows enter neither bucket.
+            "by_league_tier": {
+                k: _trusted_clv_ci_entry(v, min_n)
+                for k, v in sorted(trusted_by_league_tier.items())
             },
         },
         "clv_yield_ratio": _clv_yield_ratio(sharp_rows, min_n),
