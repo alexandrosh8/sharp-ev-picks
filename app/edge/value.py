@@ -477,6 +477,31 @@ def dc_candidate_plausible(
     return bet.sharp_fair_prob / bet.implied_prob <= max_sharp_soft_ratio
 
 
+# Named gate reason for the GLOBAL odds ceiling (logged/audited wherever the
+# gate drops a candidate — the pipeline's candidate boundary).
+GLOBAL_ODDS_CEILING_REASON = "global_odds_ceiling"
+
+
+def global_odds_ceiling_violation(bet: ValueBet, *, max_odds: float) -> bool:
+    """GLOBAL odds ceiling on one value candidate — ALL markets (trusted-CLV
+    audit 2026-07-26).
+
+    The RAW-odds >= 4.0 tail measures -0.1479 [-0.2703, -0.0255] trusted CLV
+    ACROSS markets (553 soccer + 72 tennis spreads >= 4.0 minted
+    post-2026-07-08), so this extends the H2H-only ``moneyline_max_odds``
+    ceiling to every market as a HARD DROP at the candidate-building boundary
+    (named reason ``GLOBAL_ODDS_CEILING_REASON``). The H2H demote-to-volume
+    path stays in place for its sub-ceiling band — this predicate never
+    replaces it. The comparison is >= because the evidence bucket includes the
+    ceiling price itself (odds >= 4.0). Gates on the RAW displayed price, the
+    same convention as ``moneyline_max_odds`` and ``ah_candidate_plausible``.
+
+    ``max_odds`` <= 0 disables the gate (inert, bit-identical). Pure function
+    (no IO); informational-only platform — nothing here places a bet.
+    """
+    return max_odds > 0.0 and bet.best_odds >= max_odds
+
+
 def structural_sanity_violation(
     bet: ValueBet,
     *,
@@ -963,13 +988,17 @@ def _named_sharp_anchor(
     Matchbook) with KNOWN matched ``liquidity`` (£ best-back size, the unit the
     dedicated Betfair capture writes into odds_snapshots.liquidity) BELOW the
     floor on ANY selection must NOT serve as the named sharp anchor — a
-    thin / just-firmed exchange line is not trustworthy-sharp (the Welwalo
-    lesson); the market falls through to the next sharp book / consensus.
-    UNKNOWN (None / absent) liquidity is also ineligible while the floor is
-    enabled: a configured minimum cannot be proven from missing evidence.
-    Those rows still participate in the soft consensus and remain visible in
-    the shadow tier, so this tightens premium evidence without dropping data.
-    At floor 0 the gate is inert and behaviour is bit-for-bit unchanged."""
+    known-thin / just-firmed exchange line is not trustworthy-sharp (the
+    Welwalo lesson); the market falls through to the next sharp book /
+    consensus. UNKNOWN (None / absent) liquidity stays anchor-ELIGIBLE: the
+    dominant main-scrape Betfair rows carry liquidity=None (only the dedicated
+    gated capture sets it) and anchor 59/62 Betfair events (.claude memory:
+    do-not-remove-main-scrape-betfair) — and under ODDS_SOURCE=oddschecker
+    100% of Betfair Exchange snapshots carry NULL liquidity, so rejecting NULL
+    halts the premium tier outright (the PR #164 regression, reverted
+    2026-07-26). NULL != thin is a documented project invariant: known-thin is
+    rejected; unknown stays as today. At floor 0 the gate is inert and
+    behaviour is bit-for-bit unchanged."""
     raw_by_norm: dict[str, str] = {}
     for s in selections:
         for b in prices[s]:
@@ -989,17 +1018,19 @@ def _named_sharp_anchor(
         if not complete:
             continue
         if exchange_min_liquidity > 0.0 and _norm(pref) in commissions:
-            # Exchange anchor floor: every selection must carry sufficient
-            # measured liquidity. Missing evidence cannot satisfy a positive
-            # minimum; fail closed to the next sharp book / consensus.
-            insufficient_liquidity = False
+            # Exchange anchor floor: a selection with KNOWN liquidity BELOW the
+            # floor disqualifies the anchor (known-thin is rejected — fail
+            # closed for anchoring). UNKNOWN (None/absent) liquidity stays
+            # eligible: main-scrape Betfair rows carry liquidity=None and are
+            # the dominant Betfair anchor source (see docstring).
+            known_thin = False
             for s in selections:
                 sel_liq = liquidity.get(s) if liquidity is not None else None
                 lq = _lookup(sel_liq, _norm(pref)) if sel_liq is not None else None
-                if lq is None or lq < exchange_min_liquidity:
-                    insufficient_liquidity = True
+                if lq is not None and lq < exchange_min_liquidity:
+                    known_thin = True
                     break
-            if insufficient_liquidity:
+            if known_thin:
                 continue
         if exchange_demoted and _norm(pref) in commissions:
             # Exchange anchor under FRESH API disagreement (staleness guard):

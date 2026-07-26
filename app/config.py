@@ -612,14 +612,27 @@ class Settings(BaseSettings):
     # never the reverse. Scoped to H2H — OU/AH rarely price this high, so they are
     # untouched. Set a large value (e.g. 1000) to effectively disable.
     value_moneyline_max_odds: float = Field(default=4.0, gt=1.0)
+    # GLOBAL ODDS CEILING — ALL markets (trusted-CLV audit 2026-07-26): a value
+    # candidate whose RAW best price is >= this ceiling is HARD-DROPPED at the
+    # candidate boundary with the named reason 'global_odds_ceiling' (see
+    # app/edge/value.global_odds_ceiling_violation). Trusted-CLV evidence puts
+    # the odds>=4.0 tail at -0.1479 [-0.2703, -0.0255] ACROSS markets — 553
+    # soccer spreads + 72 tennis spreads >= 4.0 were minted post-2026-07-08.
+    # Extends the H2H-only VALUE_MONEYLINE_MAX_ODDS above (whose
+    # demote-to-shadow path stays in place for its own band) to every market.
+    # 0 disables the gate.
+    value_max_odds: float = Field(default=4.0, ge=0.0)
     # EXCHANGE ANCHOR LIQUIDITY FLOOR (WP5) — £ matched best-back size, the
     # unit the dedicated Betfair capture writes into odds_snapshots.liquidity
     # (app/ingestion/betfair_api.py "best-back available £"). An exchange row
-    # whose liquidity is missing OR below this floor on any selection must NOT
+    # whose KNOWN liquidity sits below this floor on any selection must NOT
     # serve as the named sharp anchor (the market falls through to the next
-    # sharp book / consensus — fail-closed anchoring). Main-scrape Betfair rows
-    # with NULL liquidity remain consensus/shadow evidence; only a measured
-    # exchange row can satisfy a positive minimum. Distinct from the CAPTURE-time
+    # sharp book / consensus — fail-closed anchoring). UNKNOWN (NULL)
+    # liquidity stays anchor-eligible: the dominant main-scrape Betfair rows
+    # carry liquidity=NULL and provide 59/62 Betfair-anchored events, so the
+    # floor only rejects KNOWN-thin lines (PR #164's NULL-reject variant halted
+    # the premium tier — 100% of oddschecker Betfair Exchange snapshots carry
+    # NULL liquidity; reverted 2026-07-26). Distinct from the CAPTURE-time
     # floor BETFAIR_EXCHANGE_MIN_LIQUIDITY (10.0 — gates £0/dust rows at
     # ingestion): 50.0 here demands a real, firmed market before an exchange
     # price is trusted as the SHARP fair-value anchor. 0 = gate off.
@@ -1766,6 +1779,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         ah_max_sharp_soft_ratio=settings.value_ah_max_sharp_soft_ratio,
         dc_max_sharp_soft_ratio=settings.value_dc_max_sharp_soft_ratio,
         moneyline_max_odds=settings.value_moneyline_max_odds,
+        max_odds=settings.value_max_odds,
         exchange_min_liquidity=settings.value_exchange_min_liquidity,
         betfair_api_promote=settings.value_betfair_api_promote,
         betfair_staleness_guard=settings.value_betfair_staleness_guard,

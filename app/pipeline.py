@@ -92,6 +92,18 @@ def record_poll_started(sport_key: str) -> None:
     LAST_POLL[sport_key] = poll
 
 
+def _prior_consecutive_degraded(sport_key: str) -> int:
+    """Current per-sport consecutive-degraded-cycle count (0 when absent/bad).
+
+    Hysteresis input for /health: one degraded cycle reads "partial", only a
+    RUN of them (threshold in app/api/routes.py) escalates to degraded/503.
+    """
+    try:
+        return max(0, int(LAST_POLL.get(sport_key, {}).get("consecutive_degraded") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def record_poll_finished(sport_key: str) -> None:
     """Complete a successful heartbeat when a pipeline emitted no poll payload."""
     timestamp = datetime.now(tz=UTC).isoformat()
@@ -104,6 +116,7 @@ def record_poll_finished(sport_key: str) -> None:
             "state": "completed",
             "failure_reason": None,
             "degraded": False,
+            "consecutive_degraded": 0,  # clean cycle resets the hysteresis run
         }
     )
     LAST_POLL[sport_key] = poll
@@ -112,6 +125,7 @@ def record_poll_finished(sport_key: str) -> None:
 def record_poll_failure(sport_key: str, reason: str) -> None:
     """Publish a sanitized timeout/error heartbeat that degrades readiness."""
     timestamp = datetime.now(tz=UTC).isoformat()
+    consecutive = _prior_consecutive_degraded(sport_key) + 1
     poll = dict(LAST_POLL.get(sport_key, {}))
     poll.update(
         {
@@ -121,6 +135,7 @@ def record_poll_failure(sport_key: str, reason: str) -> None:
             "state": "failed",
             "failure_reason": reason,
             "degraded": True,
+            "consecutive_degraded": consecutive,
         }
     )
     LAST_POLL[sport_key] = poll
@@ -250,6 +265,12 @@ def _record_poll(
         # and /ready fail closed until a healthy cycle replaces this record.
         "degradation_reasons": degradation_reasons,
         "degraded": bool(degradation_reasons),
+        # Hysteresis for /health: length of the CURRENT run of degraded cycles
+        # for this sport. A clean cycle resets it; routes.py escalates a single
+        # sport from "partial" to hard degraded/503 only at its threshold.
+        "consecutive_degraded": (
+            _prior_consecutive_degraded(sport_key) + 1 if degradation_reasons else 0
+        ),
     }
 
 
@@ -1593,11 +1614,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     """
     from app.edge.value import (
         CONSENSUS_ANCHOR,
+        GLOBAL_ODDS_CEILING_REASON,
         SHARP_BOOKS,
         ah_candidate_plausible,
         anchor_type_for,
         dc_candidate_plausible,
         find_value_bets_with_fair,
+        global_odds_ceiling_violation,
         is_sharp_anchored,
         structural_sanity_violation,
     )
@@ -1839,6 +1862,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_visibility_capped = 0
     n_ah_rejected = 0
     n_sanity_dropped = 0
+    n_global_ceiling_dropped = 0
     n_dc_rejected = 0
     n_moneyline_capped = 0
     n_sanity_demoted = 0
@@ -1986,6 +2010,19 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # alerted picks with impossible EV. Drop above the ceiling, never alert.
             if float(v.best_odds) > _SANITY_MAX_ODDS:
                 n_sanity_dropped += 1
+                continue
+            # GLOBAL ODDS CEILING (trusted-CLV audit 2026-07-26): the RAW-odds
+            # >= 4.0 tail measures -0.1479 [-0.2703, -0.0255] trusted CLV
+            # ACROSS markets (553 soccer + 72 tennis spreads >= 4.0 minted
+            # post-2026-07-08). HARD DROP on EVERY market at the candidate
+            # boundary — named reason 'global_odds_ceiling', counted + logged,
+            # never a silent drop. Unlike the H2H-only moneyline demote-to-
+            # volume gate below (left in place for its sub-ceiling band), this
+            # drops the candidate outright (premium AND shadow). Settings
+            # VALUE_MAX_ODDS=4.0 arms it; 0 disables (ValuePolicy default 0.0
+            # keeps the bare policy inert).
+            if global_odds_ceiling_violation(v, max_odds=deps.value_policy.max_odds):
+                n_global_ceiling_dropped += 1
                 continue
             # Per-market PREMIUM floor override (default: global floor).
             premium_floor = min_edge_for(
@@ -2663,6 +2700,18 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             sport_key,
             n_sanity_dropped,
             _SANITY_MAX_ODDS,
+        )
+    if n_global_ceiling_dropped:
+        # The global odds ceiling is never silent: these candidates sat in the
+        # trusted-CLV-negative raw-odds tail (>= VALUE_MAX_ODDS, all markets)
+        # and were HARD-DROPPED at the candidate boundary (audit 2026-07-26).
+        logger.info(
+            "value pipeline %s: %s dropped %d candidate(s) at raw odds >= %.2f "
+            "(trusted-CLV-negative tail, all markets)",
+            sport_key,
+            GLOBAL_ODDS_CEILING_REASON,
+            n_global_ceiling_dropped,
+            deps.value_policy.max_odds,
         )
     if n_non_settleable:
         logger.info(

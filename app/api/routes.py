@@ -136,6 +136,19 @@ async def service_worker() -> Response:
     )
 
 
+@router.get("/robots.txt", include_in_schema=False)
+async def robots_txt() -> Response:
+    """Public: keep crawlers out of the (auth-gated) dashboard entirely."""
+    return Response("User-agent: *\nDisallow: /", media_type="text/plain")
+
+
+@router.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    """Public 204: browsers request it unconditionally; the real icons are the
+    inline-SVG data URIs in the PWA manifest — no bitmap asset exists."""
+    return Response(status_code=204)
+
+
 class _LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=MAX_USERNAME_BYTES)
     password: str = Field(min_length=1, max_length=MAX_PASSWORD_BYTES)
@@ -508,6 +521,19 @@ def _poll_freshness_ceiling(
     return max(float(HEALTH_MAX_POLL_AGE_MULTIPLIER * poll_interval_seconds), sweep_budget)
 
 
+#: Consecutive degraded cycles for ONE sport at which its degradation stops
+#: reading "partial"/200 and escalates the whole /health to degraded/503.
+HEALTH_CONSECUTIVE_DEGRADED_THRESHOLD = 3
+
+
+def _poll_consecutive_degraded(poll: Mapping[str, Any]) -> int:
+    """Sanitized per-sport consecutive-degraded-cycle counter (0 when absent)."""
+    try:
+        return max(0, int(poll.get("consecutive_degraded") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _poll_health(
     polls: Mapping[str, Mapping[str, Any]],
     now: datetime,
@@ -516,17 +542,27 @@ def _poll_health(
     *,
     expected_sport_count: int = 1,
     cycle_timeout_seconds: int = HEALTH_FALLBACK_CYCLE_BUDGET_SECONDS,
-) -> tuple[str, int, float | None]:
+) -> tuple[str, int, float | None, dict[str, dict[str, Any]]]:
     """Liveness from poll FRESHNESS, not pick count — a quiet slate that still
     completes cycles is healthy; a stale newest-cycle means a starved/dead engine.
 
-    Returns (status, http_status, newest_poll_age_seconds):
+    Returns (status, http_status, newest_poll_age_seconds, per_sport_breakdown):
     - No recorded cycle at all -> ok/200 (cold start / router-only test app).
     - Every recorded cycle has a valid, recent, non-degraded finish -> ok/200.
-    - Any missing/invalid, stale, future-skewed, or degraded cycle -> degraded/503.
+    - SOME (not all) sports degraded/stale, each below the hysteresis threshold
+      -> "partial"/200: capture is still flowing, so a single sport's bad latest
+      cycle (e.g. one OddsChecker storm) must not page as a fleet outage.
+    - TRUE starvation stays a hard degraded/503: newest completed poll older
+      than the ceiling, invalid/missing/future timestamps, no completed poll at
+      all, ALL sports degraded, or ANY sport with
+      >= HEALTH_CONSECUTIVE_DEGRADED_THRESHOLD consecutive degraded cycles.
+
+    ``per_sport_breakdown`` maps sport -> {degraded, consecutive_degraded,
+    reason} and is for the AUTHENTICATED /health payload only — the anonymous
+    body may carry the "partial" status but never per-sport detail.
     """
     if not polls:
-        return "ok", 200, None
+        return "ok", 200, None, {}
     newest = _newest_poll_finish(polls)
     ceiling = max(
         float(max_age_multiplier * poll_interval_seconds),
@@ -537,41 +573,73 @@ def _poll_health(
         ),
     )
     active_budget = _bounded_cycle_budget(poll_interval_seconds, cycle_timeout_seconds)
-    degraded_cycle = False
+    hard_degraded = False  # true-starvation evidence: always 503
     active_cycle = False
-    for poll in polls.values():
+    breakdown: dict[str, dict[str, Any]] = {}
+    for sport, poll in polls.items():
+        sport_degraded = False
+        reason: str | None = None
         if poll.get("in_progress") is True:
             active_cycle = True
             started = _parse_poll_finish(poll.get("started_at"))
             if started is None:
-                degraded_cycle = True
-                continue
-            active_age = (now - started).total_seconds()
-            if (
-                active_age < -60.0
-                or active_age > active_budget
-                or bool(poll.get("degraded"))
-                or poll.get("state") == "failed"
-            ):
-                degraded_cycle = True
+                sport_degraded, hard_degraded = True, True
+                reason = "invalid_started_at"
+            else:
+                active_age = (now - started).total_seconds()
+                if active_age < -60.0:
+                    sport_degraded, hard_degraded = True, True
+                    reason = "future_started_at"
+                elif (
+                    active_age > active_budget
+                    or bool(poll.get("degraded"))
+                    or poll.get("state") == "failed"
+                ):
+                    sport_degraded = True
+                    reason = "active_cycle_degraded"
             # A valid in-progress heartbeat supersedes its previous completed
             # timestamp for this sport; the full-sweep ceiling covers siblings.
-            continue
-        finished = _parse_poll_finish(poll.get("finished_at"))
-        if finished is None:
-            degraded_cycle = True
-            continue
-        age = (now - finished).total_seconds()
-        if age < -60.0 or age > ceiling or bool(poll.get("degraded")):
-            degraded_cycle = True
+        else:
+            finished = _parse_poll_finish(poll.get("finished_at"))
+            if finished is None:
+                sport_degraded, hard_degraded = True, True
+                reason = "invalid_finished_at"
+            else:
+                age = (now - finished).total_seconds()
+                if age < -60.0:
+                    sport_degraded, hard_degraded = True, True
+                    reason = "future_finished_at"
+                elif age > ceiling:
+                    sport_degraded = True
+                    reason = "stale_cycle"
+                elif bool(poll.get("degraded")):
+                    sport_degraded = True
+                    reason = "degraded_cycle"
+        consecutive = _poll_consecutive_degraded(poll)
+        if sport_degraded and consecutive >= HEALTH_CONSECUTIVE_DEGRADED_THRESHOLD:
+            hard_degraded = True  # hysteresis tripped: a RUN, not a blip
+        breakdown[sport] = {
+            "degraded": sport_degraded,
+            "consecutive_degraded": consecutive,
+            "reason": reason,
+        }
+    degraded_sports = sum(1 for entry in breakdown.values() if entry["degraded"])
+    if degraded_sports == len(breakdown):
+        hard_degraded = hard_degraded or degraded_sports > 0  # ALL sports degraded
     if newest is None:
-        if active_cycle and not degraded_cycle:
-            return "ok", 200, None
-        return "degraded", 503, None
+        if active_cycle and not hard_degraded and degraded_sports == 0:
+            return "ok", 200, None, breakdown
+        return "degraded", 503, None, breakdown  # no completed poll
+    # NOTE: a stale NEWEST completed poll needs no dedicated check — when every
+    # completed cycle is past the ceiling each sport reads degraded, so the
+    # all-sports-degraded rule already hard-503s; and a valid in-progress
+    # heartbeat legitimately supersedes its sport's old finish (not starvation).
     age = (now - newest).total_seconds()
-    if degraded_cycle:
-        return "degraded", 503, age
-    return "ok", 200, age
+    if hard_degraded:
+        return "degraded", 503, age, breakdown
+    if degraded_sports:
+        return "partial", 200, age, breakdown
+    return "ok", 200, age, breakdown
 
 
 _READINESS_CACHE_TTL_SECONDS = 5.0
@@ -610,7 +678,10 @@ async def _probe_readiness(request: Request, poll_status: str) -> dict[str, bool
         "scheduler": bool(getattr(getattr(request.app.state, "scheduler", None), "running", False)),
         "database": False,
         "redis": False,
-        "polls": poll_status == "ok",
+        # "partial" (one sport's blip below the hysteresis threshold) must not
+        # flip readiness to 503 — that restarts the process for a non-outage.
+        # Only hard "degraded" fails the polls check.
+        "polls": poll_status in ("ok", "partial"),
     }
     expected = set(getattr(request.app.state, "expected_poll_sports", ()) or ())
     if expected:
@@ -652,7 +723,7 @@ async def ready(request: Request, response: Response) -> dict[str, Any]:
     settings = get_settings()
     expected = tuple(getattr(request.app.state, "expected_poll_sports", ()) or ())
     expected_count = max(len(expected), len(LAST_POLL), 1)
-    status, _, newest_age = _poll_health(
+    status, _, newest_age, _breakdown = _poll_health(
         LAST_POLL,
         datetime.now(tz=UTC),
         settings.poll_interval_seconds,
@@ -677,6 +748,18 @@ async def ready(request: Request, response: Response) -> dict[str, Any]:
 
 @router.get("/health")
 async def health(request: Request, response: Response) -> dict[str, Any]:
+    """Aggregate health. ``status`` is one of:
+
+    - "ok" (200): every recorded poll cycle fresh and clean.
+    - "partial" (200): SOME sports' latest cycle degraded/stale below the
+      hysteresis threshold while capture still flows elsewhere — NOT a fleet
+      outage. Consumers (dashboard ``dataIsStale()``) must NOT treat
+      "partial" as "ok": only ``status == "ok"`` means fully healthy; the
+      affected sports ride in ``poll_health_by_sport`` (authenticated only).
+    - "degraded" (503): true starvation — stale/absent/invalid newest poll,
+      all sports degraded, >=3 consecutive degraded cycles on any sport, or a
+      failed dependency/readiness probe.
+    """
     from app.config import get_settings
     from app.ingestion.proxy_health import get_registry as _get_proxy_registry
     from app.maintenance.upstream_watch import LAST_CHECK
@@ -694,7 +777,7 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
         expected_count,
         settings.poll_cycle_timeout_seconds,
     )
-    status, http_status, newest_age = _poll_health(
+    status, http_status, newest_age, poll_breakdown = _poll_health(
         LAST_POLL,
         datetime.now(tz=UTC),
         settings.poll_interval_seconds,
@@ -737,6 +820,10 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
         "readiness": readiness,
         "upstream": LAST_CHECK,
         "polls": LAST_POLL,
+        # Per-sport health verdicts (degraded / consecutive_degraded / reason)
+        # backing the ok|partial|degraded split — AUTHENTICATED payload only;
+        # the anonymous body above deliberately omits per-sport detail.
+        "poll_health_by_sport": poll_breakdown,
         # Newest cycle's age + the staleness ceiling the dead-engine check uses
         # (N x poll_interval). status flips to "degraded" (503) when the age
         # exceeds it. None age == no cycle recorded yet (still "ok").
@@ -992,7 +1079,10 @@ def _memory_games_cover_request(
             return False
         requested_polls[sport_key] = poll
 
-    status, _, _ = _poll_health(
+    # Strict: "partial" is NOT ok here — any degraded family keeps the
+    # warehouse merge path (the polls above are pre-filtered non-degraded, so
+    # partial should not occur; this guards the contract regardless).
+    status, _, _, _ = _poll_health(
         requested_polls,
         now,
         settings.poll_interval_seconds,

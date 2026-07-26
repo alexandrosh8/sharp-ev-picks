@@ -717,16 +717,32 @@ def test_premium_adjustment_knobs_default_to_current_behavior() -> None:
     # consensus-mint CLV is ~-9% vs sharp-anchored ~break-even; live via .env since
     # 2026-06-26, now the code default too); and the exchange anchor liquidity floor
     # (50.0 £ best-back — WP5: a KNOWN-thin exchange line never anchors; unknown
-    # liquidity stays eligible so main-scrape Betfair coverage is untouched).
+    # liquidity stays eligible so main-scrape Betfair coverage is untouched);
+    # and the GLOBAL odds ceiling (4.0 — HARD-DROPS the CLV-negative odds>=4.0
+    # tail on EVERY market, trusted-CLV audit 2026-07-26; 0 disables).
     assert value_policy(s) == ValuePolicy(
         max_edge=0.20,
         moneyline_max_odds=4.0,
+        max_odds=4.0,
         require_sharp_anchor=True,
         exchange_min_liquidity=50.0,
     )
     stakes = stake_policy(s)
     assert stakes.max_drawdown is None
     assert stakes.max_drawdown_probability is None
+
+
+def test_value_max_odds_defaults_and_threads_into_policy() -> None:
+    # GLOBAL odds ceiling (trusted-CLV audit 2026-07-26): Settings default 4.0,
+    # threaded into ValuePolicy.max_odds at the composition root; 0 disables
+    # (the predicate app/edge/value.global_odds_ceiling_violation is inert at
+    # 0). The pure-policy default stays inert (empty policy == no-op).
+    s = make_settings()
+    assert s.value_max_odds == 4.0
+    assert value_policy(s).max_odds == 4.0
+    off = make_settings(value_max_odds="0")
+    assert value_policy(off).max_odds == 0.0
+    assert ValuePolicy().max_odds == 0.0
 
 
 def test_value_policy_parses_market_maps_and_bands() -> None:

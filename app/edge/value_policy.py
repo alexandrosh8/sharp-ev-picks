@@ -166,6 +166,17 @@ class ValuePolicy:
     # (VALUE_MONEYLINE_MAX_ODDS, default 4.0). Scoped to H2H in the pipeline, so
     # OU/AH/totals are untouched (they rarely price this high anyway).
     moneyline_max_odds: float = math.inf
+    # GLOBAL ODDS CEILING — ALL markets (trusted-CLV audit 2026-07-26). A
+    # candidate whose RAW best price is >= ``max_odds`` is HARD-DROPPED at the
+    # pipeline's candidate boundary with the named reason 'global_odds_ceiling'
+    # (app/edge/value.global_odds_ceiling_violation — the pure predicate). The
+    # odds>=4.0 tail measures -0.1479 [-0.2703, -0.0255] trusted CLV across
+    # markets (553 soccer + 72 tennis spreads >= 4.0 minted post-2026-07-08).
+    # Unlike ``moneyline_max_odds`` above (H2H demote-to-shadow, which stays in
+    # place for its own band), this is a DROP on every market. 0.0 = gate OFF
+    # (the inert empty-policy default); set from Settings.value_max_odds
+    # (default 4.0; 0 disables) at the composition root.
+    max_odds: float = 0.0
     # When True, the CONSENSUS FALLBACK anchor (used only when NO genuine sharp
     # book priced the full market) is a log-odds (logit) POOL across full-market
     # books instead of the median-of-prices consensus — non-extremizing and
@@ -179,12 +190,13 @@ class ValuePolicy:
     consensus_logit_pool: bool = False
     # EXCHANGE ANCHOR LIQUIDITY FLOOR (£ matched best-back size — the unit the
     # dedicated Betfair capture writes into odds_snapshots.liquidity). When
-    # > 0, an exchange row (Betfair/Smarkets/Matchbook) must report liquidity
-    # at or above the floor on every selection before it may serve as the named
-    # sharp anchor. Thin OR unknown liquidity falls through to the next anchor
-    # / consensus: an enabled risk gate is fail-closed. 0.0 = gate OFF (the
-    # inert empty-policy default); set from Settings.value_exchange_min_liquidity
-    # at the composition root.
+    # > 0, an exchange row (Betfair/Smarkets/Matchbook) with KNOWN liquidity
+    # below the floor on any selection must NOT serve as the named sharp
+    # anchor (falls through to the next anchor / consensus — fail-closed
+    # anchoring). UNKNOWN (None) liquidity stays anchor-ELIGIBLE: the dominant
+    # main-scrape Betfair rows carry liquidity=None and provide 59/62
+    # Betfair-anchored events. 0.0 = gate OFF (the inert empty-policy default);
+    # set from Settings.value_exchange_min_liquidity at the composition root.
     exchange_min_liquidity: float = 0.0
     # Mirrors Settings.value_betfair_api_promote (composition root). When the
     # read-only Betfair API is PROMOTED to persist odds rows, exchange rows on

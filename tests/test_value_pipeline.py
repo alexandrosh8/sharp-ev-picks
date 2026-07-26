@@ -239,6 +239,120 @@ async def test_moneyline_ceiling_caps_longshot_to_shadow(caplog) -> None:  # typ
     assert "moneyline odds ceiling capped" in caplog.text  # shadow-cap, not a drop
 
 
+def group_snap(
+    book: str,
+    sel: str,
+    odds: float,
+    market: Market,
+    detail: str | None,
+    age_s: float = 30.0,
+) -> OddsSnapshotIn:
+    """Like ``snap`` but for a non-H2H market group (market + market_detail)."""
+    now = datetime.now(tz=UTC)
+    return OddsSnapshotIn(
+        event_id="evt-1",
+        bookmaker=book,
+        market=market,
+        selection=sel,
+        decimal_odds=odds,
+        captured_at=now - timedelta(seconds=age_s),
+        ingested_at=now,
+        market_detail=detail,
+    )
+
+
+def two_way_snapshots(
+    market: Market,
+    detail: str | None,
+    sels: tuple[str, str],
+    soft_long: float,
+) -> list[OddsSnapshotIn]:
+    # Pinnacle prices a tight 2-way; SoftBook is generous on the first (long)
+    # side at ``soft_long`` — the ONLY +EV candidate (fair ~0.30 vs implied).
+    return [
+        group_snap("Pinnacle", sels[0], 3.20, market, detail),
+        group_snap("Pinnacle", sels[1], 1.36, market, detail),
+        group_snap("SoftBook", sels[0], soft_long, market, detail),
+        group_snap("SoftBook", sels[1], 1.30, market, detail),
+    ]
+
+
+_CEILING_CASES = [
+    (Market.TOTALS, "over_under_3_5", ("Over 3.5", "Under 3.5")),
+    (Market.SPREADS, "asian_handicap_-1_5", ("Home FC -1.5", "Away FC +1.5")),
+    (Market.DNB, None, ("Home FC", "Away FC")),
+]
+
+
+@pytest.mark.parametrize(("market", "detail", "sels"), _CEILING_CASES)
+async def test_global_odds_ceiling_hard_drops_any_market_at_4_2(
+    caplog: pytest.LogCaptureFixture,
+    market: Market,
+    detail: str | None,
+    sels: tuple[str, str],
+) -> None:
+    # Trusted-CLV audit 2026-07-26: the odds>=4.0 tail is -0.1479 CLV ACROSS
+    # markets — a spreads/totals/dnb candidate at raw 4.2 is HARD-DROPPED at
+    # the candidate boundary with the named reason 'global_odds_ceiling'
+    # (never minted premium OR shadow), unlike the H2H demote-to-volume path.
+    import logging
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(two_way_snapshots(market, detail, sels, soft_long=4.2)),
+        league="Premier League",
+        value_policy=ValuePolicy(max_odds=4.0),
+    )
+    with caplog.at_level(logging.INFO):
+        await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # hard drop: never alerted
+    assert LAST_POLL["soccer"]["picks"] == 0  # and never premium
+    assert "global_odds_ceiling" in caplog.text  # the named gate reason
+
+
+@pytest.mark.parametrize(("market", "detail", "sels"), _CEILING_CASES)
+async def test_global_odds_ceiling_passes_below_at_3_9(
+    market: Market,
+    detail: str | None,
+    sels: tuple[str, str],
+) -> None:
+    # The same candidate at raw 3.9 (< 4.0 ceiling) mints and alerts.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(two_way_snapshots(market, detail, sels, soft_long=3.9)),
+        league="Premier League",
+        value_policy=ValuePolicy(max_odds=4.0),
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["soccer"]["picks"] == 1
+
+
+async def test_global_odds_ceiling_h2h_below_ceiling_unchanged() -> None:
+    # H2H below the ceiling is untouched: the standard slate (best raw 2.90)
+    # mints exactly one alerted premium pick with the global ceiling armed —
+    # identical to test_value_pipeline_records_poll_liveness without it. The
+    # moneyline demote-to-volume path stays in place for its own band.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(market_snapshots()),
+        league="Premier League",
+        value_policy=ValuePolicy(max_odds=4.0, moneyline_max_odds=4.0),
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["soccer"]["picks"] == 1
+
+
 async def test_experimental_sport_forces_premium_pick_to_volume() -> None:
     # An experimental (unvalidated) sport mints picks but every one is FORCED to
     # the volume/shadow tier: persisted + CLV-tracked, never alerted, no exposure

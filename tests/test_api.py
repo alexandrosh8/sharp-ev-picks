@@ -5,6 +5,7 @@ import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -195,7 +196,19 @@ def test_poll_health_uses_full_sequential_sweep_budget() -> None:
         expected_sport_count=4,
         cycle_timeout_seconds=900,
     )[:2] == ("ok", 200)
+    # One sport past the sweep ceiling while siblings stay fresh is a PARTIAL
+    # outage (capture still flowing), not a fleet-wide 503 (TASK H split).
     polls["soccer"]["finished_at"] = (now - timedelta(seconds=3700)).isoformat()
+    assert _poll_health(
+        polls,
+        now,
+        300,
+        expected_sport_count=4,
+        cycle_timeout_seconds=900,
+    )[:2] == ("partial", 200)
+    # ALL sports past the ceiling = true starvation: hard 503.
+    for sport in polls:
+        polls[sport]["finished_at"] = (now - timedelta(seconds=3700)).isoformat()
     assert _poll_health(
         polls,
         now,
@@ -270,6 +283,8 @@ def test_health_exposes_full_sweep_poll_ceiling() -> None:
 
 
 def test_one_fresh_poll_cannot_mask_another_stale_poll() -> None:
+    """TASK H: a stale sibling no longer 503s the fleet, but it must never be
+    MASKED as "ok" either — the aggregate reads "partial" (HTTP 200)."""
     from app.pipeline import LAST_POLL
 
     now = datetime.now(tz=UTC)
@@ -278,8 +293,8 @@ def test_one_fresh_poll_cannot_mask_another_stale_poll() -> None:
     LAST_POLL["basketball"] = {"finished_at": (now - timedelta(days=1)).isoformat()}
     try:
         response = TestClient(make_app()).get("/health")
-        assert response.status_code == 503
-        assert response.json()["status"] == "degraded"
+        assert response.status_code == 200
+        assert response.json()["status"] == "partial"
     finally:
         LAST_POLL.clear()
 
@@ -1719,3 +1734,303 @@ def test_login_page_hardened_against_double_submit() -> None:
     assert _LOGIN_HTML.count("submitBtn.disabled = false;") == 1
     # error text still set via textContent (never innerHTML)
     assert "innerHTML" not in _LOGIN_HTML
+
+
+# --- TASK H: health formula split (ok / partial / degraded) + hysteresis -----
+
+
+def _mk_poll(
+    now: datetime,
+    *,
+    age_seconds: float | None = 60.0,
+    degraded: bool = False,
+    consecutive: int | None = None,
+) -> dict[str, Any]:
+    """Completed poll record; age_seconds=None => no finished_at at all."""
+    poll: dict[str, Any] = {
+        "finished_at": (
+            (now - timedelta(seconds=age_seconds)).isoformat() if age_seconds is not None else None
+        ),
+        "in_progress": False,
+        "state": "failed" if degraded else "completed",
+        "degraded": degraded,
+    }
+    if consecutive is not None:
+        poll["consecutive_degraded"] = consecutive
+    return poll
+
+
+_HEALTH_NOW = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
+# poll_interval=300, expected=2, cycle_timeout=900 -> ceiling = 2*900 = 1800s
+_HEALTH_TABLE: list[tuple[str, dict[str, dict[str, Any]], str, int]] = [
+    (
+        "all_fresh_healthy_ok",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW),
+            "basketball": _mk_poll(_HEALTH_NOW),
+        },
+        "ok",
+        200,
+    ),
+    (
+        "one_degraded_first_cycle_partial",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1),
+            "basketball": _mk_poll(_HEALTH_NOW),
+        },
+        "partial",
+        200,
+    ),
+    (
+        "one_degraded_two_consecutive_still_partial",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=2),
+            "basketball": _mk_poll(_HEALTH_NOW),
+        },
+        "partial",
+        200,
+    ),
+    (
+        "one_degraded_three_consecutive_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=3),
+            "basketball": _mk_poll(_HEALTH_NOW),
+        },
+        "degraded",
+        503,
+    ),
+    (
+        "all_sports_degraded_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1),
+            "basketball": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1),
+        },
+        "degraded",
+        503,
+    ),
+    (
+        "single_sport_degraded_is_all_degraded",
+        {"soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1)},
+        "degraded",
+        503,
+    ),
+    (
+        "one_sport_stale_newest_fresh_partial",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, age_seconds=2000.0),
+            "basketball": _mk_poll(_HEALTH_NOW),
+        },
+        "partial",
+        200,
+    ),
+    (
+        "newest_stale_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, age_seconds=2000.0),
+            "basketball": _mk_poll(_HEALTH_NOW, age_seconds=1900.0),
+        },
+        "degraded",
+        503,
+    ),
+    (
+        "missing_finish_timestamp_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, age_seconds=None),
+            "basketball": _mk_poll(_HEALTH_NOW),
+        },
+        "degraded",
+        503,
+    ),
+    (
+        "future_timestamp_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, age_seconds=-3600.0),
+            "basketball": _mk_poll(_HEALTH_NOW),
+        },
+        "degraded",
+        503,
+    ),
+    (
+        "degraded_without_counter_field_partial",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True),
+            "basketball": _mk_poll(_HEALTH_NOW),
+        },
+        "partial",
+        200,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "polls", "expected_status", "expected_http"),
+    _HEALTH_TABLE,
+    ids=[case[0] for case in _HEALTH_TABLE],
+)
+def test_poll_health_state_table(
+    name: str,
+    polls: dict[str, dict[str, Any]],
+    expected_status: str,
+    expected_http: int,
+) -> None:
+    from app.api.routes import _poll_health
+
+    status, http_status, _age, _breakdown = _poll_health(
+        polls,
+        _HEALTH_NOW,
+        300,
+        expected_sport_count=2,
+        cycle_timeout_seconds=900,
+    )
+    assert (status, http_status) == (expected_status, expected_http), name
+
+
+def test_poll_health_no_completed_poll_is_degraded() -> None:
+    """Records exist but no cycle ever completed (and none in progress) -> 503."""
+    from app.api.routes import _poll_health
+
+    polls = {"soccer": {"in_progress": False, "state": "failed", "degraded": True}}
+    status, http_status, age, _ = _poll_health(
+        polls,
+        _HEALTH_NOW,
+        300,
+        expected_sport_count=2,
+        cycle_timeout_seconds=900,
+    )
+    assert (status, http_status, age) == ("degraded", 503, None)
+
+
+def test_health_endpoint_partial_keeps_200_with_breakdown_when_authenticated() -> None:
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = _mk_poll(datetime.now(tz=UTC), degraded=True, consecutive=1)
+    LAST_POLL["basketball"] = _mk_poll(datetime.now(tz=UTC))
+    try:
+        resp = TestClient(make_app()).get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "partial"
+        breakdown = body["poll_health_by_sport"]
+        assert breakdown["soccer"]["degraded"] is True
+        assert breakdown["soccer"]["consecutive_degraded"] == 1
+        assert breakdown["basketball"]["degraded"] is False
+    finally:
+        LAST_POLL.clear()
+
+
+def test_health_endpoint_partial_anonymous_has_status_but_no_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anonymous body may say 'partial' but never carries per-sport detail."""
+    from app.api import routes
+    from app.pipeline import LAST_POLL
+
+    monkeypatch.setattr(routes, "is_authenticated", lambda request: False)
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = _mk_poll(datetime.now(tz=UTC), degraded=True, consecutive=1)
+    LAST_POLL["basketball"] = _mk_poll(datetime.now(tz=UTC))
+    try:
+        resp = TestClient(make_app()).get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "partial"
+        assert "poll_health_by_sport" not in body
+        assert "polls" not in body
+    finally:
+        LAST_POLL.clear()
+
+
+def test_health_endpoint_hysteresis_three_consecutive_is_503() -> None:
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = _mk_poll(datetime.now(tz=UTC), degraded=True, consecutive=3)
+    LAST_POLL["basketball"] = _mk_poll(datetime.now(tz=UTC))
+    try:
+        resp = TestClient(make_app()).get("/health")
+        assert resp.status_code == 503
+        assert resp.json()["status"] == "degraded"
+    finally:
+        LAST_POLL.clear()
+
+
+def test_consecutive_degraded_counter_tracks_and_resets() -> None:
+    """record_poll_failure/_record_poll increment; any clean cycle resets to 0."""
+    from app.pipeline import LAST_POLL, _record_poll, record_poll_failure, record_poll_finished
+
+    LAST_POLL.clear()
+    try:
+        record_poll_failure("soccer", "timeout")
+        assert LAST_POLL["soccer"]["consecutive_degraded"] == 1
+        record_poll_failure("soccer", "timeout")
+        assert LAST_POLL["soccer"]["consecutive_degraded"] == 2
+        # listed matches without odds -> degraded completed cycle -> increments
+        _record_poll("soccer", [], 0, 5)
+        assert LAST_POLL["soccer"]["degraded"] is True
+        assert LAST_POLL["soccer"]["consecutive_degraded"] == 3
+        # clean completed cycle resets
+        _record_poll("soccer", [], 0, None)
+        assert LAST_POLL["soccer"]["degraded"] is False
+        assert LAST_POLL["soccer"]["consecutive_degraded"] == 0
+        record_poll_failure("soccer", "timeout")
+        assert LAST_POLL["soccer"]["consecutive_degraded"] == 1
+        # a no-payload success heartbeat is also a clean cycle
+        record_poll_finished("soccer")
+        assert LAST_POLL["soccer"]["consecutive_degraded"] == 0
+    finally:
+        LAST_POLL.clear()
+
+
+def test_ready_accepts_partial_polls() -> None:
+    """A single-sport partial storm must not flip /ready to 503 (restart loop);
+    only hard degraded poll health fails the polls readiness check."""
+    from app.api import routes
+    from app.pipeline import LAST_POLL
+
+    routes._READINESS_CACHE.clear()
+    routes._READINESS_LOCKS.clear()
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = _mk_poll(datetime.now(tz=UTC), degraded=True, consecutive=1)
+    LAST_POLL["basketball"] = _mk_poll(datetime.now(tz=UTC))
+    app = make_app()
+    app.state.exposure_seeded = True
+    app.state.scheduler = SimpleNamespace(running=True)
+    app.state.expected_poll_sports = ("soccer", "basketball")
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+        async def execute(self, statement):  # type: ignore[no-untyped-def]
+            return None
+
+    app.state.session_factory = _Session
+    app.state.redis = SimpleNamespace(ping=_async_true)
+    try:
+        resp = TestClient(app).get("/ready")
+        assert resp.status_code == 200
+        assert resp.json()["checks"]["polls"] is True
+    finally:
+        LAST_POLL.clear()
+        routes._READINESS_CACHE.clear()
+        routes._READINESS_LOCKS.clear()
+
+
+async def _async_true() -> bool:
+    return True
+
+
+def test_robots_txt_public_disallow_all() -> None:
+    resp = TestClient(make_app()).get("/robots.txt")
+    assert resp.status_code == 200
+    assert resp.text == "User-agent: *\nDisallow: /"
+    assert resp.headers["content-type"].startswith("text/plain")
+
+
+def test_favicon_ico_is_no_content() -> None:
+    resp = TestClient(make_app()).get("/favicon.ico")
+    assert resp.status_code == 204

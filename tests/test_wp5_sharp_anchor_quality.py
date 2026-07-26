@@ -1,8 +1,11 @@
 """WP5 — sharp-anchor quality (audit fixes, no IO / no network).
 
-FIX 1  Exchange liquidity floor at anchor-USE time: a Betfair row with missing
-       or below-floor matched liquidity must never serve as the named sharp
-       anchor (falls through to consensus). Wired end-to-end from Settings
+FIX 1  Exchange liquidity floor at anchor-USE time: a Betfair row with KNOWN
+       matched liquidity below the floor must never serve as the named sharp
+       anchor (falls through to consensus), while UNKNOWN (None) liquidity
+       stays anchor-eligible — the dominant main-scrape Betfair rows carry
+       liquidity=None and anchor 59/62 Betfair events (project memory:
+       do-not-remove-main-scrape-betfair). Wired end-to-end from Settings
        (VALUE_EXCHANGE_MIN_LIQUIDITY) through ValuePolicy into
        event_fair_probs.
 FIX 2  Pinnacle Arcadia positive-AH key mismatch: the OddsPortal JSON feed key
@@ -48,16 +51,48 @@ def test_known_thin_betfair_liquidity_is_not_the_sharp_anchor() -> None:
     assert res[0] == CONSENSUS_ANCHOR
 
 
-def test_unknown_none_liquidity_cannot_satisfy_positive_floor() -> None:
-    # A configured floor is an evidence requirement: unknown does not prove it.
+def test_unknown_none_liquidity_keeps_betfair_anchor_eligible() -> None:
+    # liquidity=None (the main-scrape consensus rows) stays anchor-ELIGIBLE:
+    # rejecting NULL would gut Betfair coverage (59/62 anchored events carry
+    # NULL liquidity — only the dedicated gated capture sets it). PR #164
+    # regression guard: 100% of current Betfair Exchange snapshots carry NULL
+    # liquidity under ODDS_SOURCE=oddschecker, so NULL-rejecting halted the
+    # premium tier. NULL != thin is a documented project invariant.
     res = anchor_fair_probs(_EX_PRICES, liquidity=None, exchange_min_liquidity=50.0)
     assert res is not None
-    assert res[0] == CONSENSUS_ANCHOR
+    assert res[0] == "betfair exchange"
     # A liquidity map that simply has no Betfair entry is the same unknown case.
     other_book = {s: {"SoftA": 900.0} for s in _EX_PRICES}
     res2 = anchor_fair_probs(_EX_PRICES, liquidity=other_book, exchange_min_liquidity=50.0)
     assert res2 is not None
-    assert res2[0] == CONSENSUS_ANCHOR
+    assert res2[0] == "betfair exchange"
+
+
+def test_pr164_revert_null_eligible_known_thin_rejected_liquid_passes() -> None:
+    # The three-way contract at the production floor (50.0), in one place:
+    #   NULL (unknown)     -> Betfair anchors as SHARP (premium-eligible)
+    #   liquidity=10 KNOWN -> rejected: falls to CONSENSUS (the named non-sharp
+    #                         anchor grade — is_sharp_anchored False, the
+    #                         known-thin gate's observable reason)
+    #   liquidity=100      -> above the floor, Betfair anchors as SHARP
+    from app.edge.value import is_sharp_anchored
+
+    null_res = anchor_fair_probs(_EX_PRICES, liquidity=None, exchange_min_liquidity=50.0)
+    assert null_res is not None
+    assert null_res[0] == "betfair exchange"
+    assert is_sharp_anchored(null_res[0])
+
+    thin = {s: {"betfair exchange": 10.0} for s in _EX_PRICES}
+    thin_res = anchor_fair_probs(_EX_PRICES, liquidity=thin, exchange_min_liquidity=50.0)
+    assert thin_res is not None
+    assert thin_res[0] == CONSENSUS_ANCHOR  # named reason: consensus (known-thin)
+    assert not is_sharp_anchored(thin_res[0])
+
+    liquid = {s: {"betfair exchange": 100.0} for s in _EX_PRICES}
+    liquid_res = anchor_fair_probs(_EX_PRICES, liquidity=liquid, exchange_min_liquidity=50.0)
+    assert liquid_res is not None
+    assert liquid_res[0] == "betfair exchange"
+    assert is_sharp_anchored(liquid_res[0])
 
 
 def test_liquid_betfair_passes_the_floor() -> None:
@@ -172,7 +207,7 @@ def test_event_fair_probs_wires_liquidity_floor_from_policy() -> None:
         policy,
         liquidity_by_market=group_market_liquidity(null_snaps),
     )
-    assert fair_null[key][0] == CONSENSUS_ANCHOR  # unknown cannot prove the floor
+    assert fair_null[key][0] == "betfair exchange"  # unknown stays eligible
 
     liquid_snaps = _h2h_snaps(betfair_liquidity=500.0)
     fair_liquid = event_fair_probs(
