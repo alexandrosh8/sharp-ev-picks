@@ -1,6 +1,6 @@
 {
   "_comment": "Cross-source club/team name alias table. Format: {\"teams\": {\"canonical\": [\"alias\", ...]}}. Names are normalized on load (matching.normalize_name strips accents/FC-noise), so list human-readable forms. Do NOT add men's/women's/youth/reserve-conflating aliases — every import is marker-filtered via distinguishing_markers and collision-checked (scripts/research/import_alias_datasets.py + import_reep_soccer_aliases.py).",
-  "_provenance": "LICENSE-CLEAN sources only (CC0/MIT). (1) openfootball/clubs (CC0) — men's-senior top-5 Europe + Portugal/Netherlands club names, dotted bookmaker abbreviations + [en] exonyms. (2) pretrehr/Sports-betting translation.json (MIT) — odds-feed names (mostly already covered / French-localization rejected). (3) withqwerty/reep names.csv reep_t rows (CC0) — Wikidata-derived club aliases bounded to scraped teams. (4) swar/nba_api static teams (MIT) — the 30 NBA full-name<->tricode<->nickname maps. WNBA 'W'-suffix forms are hand-curated and stay gender-distinct. Reserve hand-maps (Real Madrid Castilla, Jong Ajax/PSV/AZ, Sanse, Bilbao Athletic, Barca B) are explicit. EXCLUDED (non-commercial): TheSportsDB, engsoccerdata, Sackmann, tennis-data. (5) Wikidata SPARQL/REST altLabels (CC0) — exotic clubs + national teams + native-script (Arabic/Chinese/Icelandic) forms for the off-season slate (Real de Banjul, Al-Shorta Baghdad, Wydad Casablanca, Vikingur Reykjavik, Shanghai Port, ...), gated on P31 football-club/national-team and exact-normalized to a slate feed name (scripts/research/import_wikidata_aliases.py). (6) Fixture-CONFIRMED exotic hand-map (scripts/research/exotic_slate_aliases.py) — feed<->Pinnacle pairs verified same-day same-opponent against our own warehouse (Lidkoping/Lidkopings, Kinondoni MC/KMC, Hammarby TFF/Talang, ...); marker-filtered, cross-sport collisions rejected on merge (FC Jazz/Utah Jazz, Miami FC/Miami Heat).",
+  "_provenance": "LICENSE-CLEAN sources only (CC0/MIT). (1) openfootball/clubs (CC0) — men's-senior top-5 Europe + Portugal/Netherlands club names, dotted bookmaker abbreviations + [en] exonyms. (2) pretrehr/Sports-betting translation.json (MIT) — odds-feed names (mostly already covered / French-localization rejected). (3) withqwerty/reep names.csv reep_t rows (CC0) — Wikidata-derived club aliases bounded to scraped teams. (4) swar/nba_api static teams (MIT) — the 30 NBA full-name<->tricode<->nickname maps. WNBA 'W'-suffix forms are hand-curated and stay gender-distinct. Reserve hand-maps (Real Madrid Castilla, Jong Ajax/PSV/AZ, Sanse, Bilbao Athletic, Barca B) are explicit. EXCLUDED (non-commercial): TheSportsDB, engsoccerdata, Sackmann, tennis-data. (5) Wikidata SPARQL/REST altLabels (CC0) — exotic clubs + national teams + native-script (Arabic/Chinese/Icelandic) forms for the off-season slate (Real de Banjul, Al-Shorta Baghdad, Wydad Casablanca, Vikingur Reykjavik, Shanghai Port, ...), gated on P31 football-club/national-team and exact-normalized to a slate feed name (scripts/research/import_wikidata_aliases.py). (6) Fixture-CONFIRMED exotic hand-map (scripts/research/exotic_slate_aliases.py) — feed<->Pinnacle pairs verified same-day same-opponent against our own warehouse (Lidkoping/Lidkopings, Kinondoni MC/KMC, Hammarby TFF/Talang, ...); marker-filtered, cross-sport collisions rejected on merge (FC Jazz/Utah Jazz, Miami FC/Miami Heat). (7) NFL 32-team hand-curated block (2026-07-26, season prep) — canonical = Pinnacle long form (city + nickname), aliases = reviewed city/nickname short forms used by OddsChecker/OddsPortal US listings; imported via the collision-checked build_import pattern (import_alias_datasets). Bare city forms owned by NBA canonicals (Atlanta/Chicago/Dallas/... ) and the ambiguous two-team cities (New York, Los Angeles) are EXCLUDED; 'New England' excluded (collides with soccer 'New England FC' after FC-noise stripping); nflverse tricodes are NOT seeded (word-like collision surface, never a scrape surface form) — the tricode bridge lives in scripts/sports/nfl_lines_provenance.py.",
   "_confirmed_all_women_league_teams": {
     "wnba": [
       "Atlanta Dream",
@@ -278,6 +278,9 @@
     "Akademia Ontustik": [
       "Akademiya Ontustik"
     ],
+    "Al Riyadi Abassiya": [
+      "Al Riyadi Abbasiyah"
+    ],
     "Al-Fahaheel FC": [
       "Al Fehayheel"
     ],
@@ -326,6 +329,9 @@
     "Amarante FC": [
       "Amarante Futebol Clube"
     ],
+    "America Mineiro": [
+      "America MG"
+    ],
     "Amiens SC": [
       "Amiens Sporting Club Football"
     ],
@@ -348,6 +354,16 @@
       "AS Angoulême",
       "Angoulême Charente FC"
     ],
+    "Annan Athletic": [
+      "Annan"
+    ],
+    "Arges Pitesti": [
+      "FC Arges"
+    ],
+    "Arizona Cardinals": [
+      "Arizona",
+      "Cardinals"
+    ],
     "Arminia Bielefeld": [
       "Bielefeld",
       "DSC Arminia Bielefeld",
@@ -363,6 +379,9 @@
     ],
     "Arsenal de Sarandi": [
       "Arsenal Sarandi"
+    ],
+    "Asane Fotball": [
+      "Asane"
     ],
     "Ascoli": [
       "Ascoli Calcio 1898 FC",
@@ -394,6 +413,9 @@
     "Atlanta Dream": [
       "Atlanta Dream W"
     ],
+    "Atlanta Falcons": [
+      "Falcons"
+    ],
     "Atlanta Hawks": [
       "ATL",
       "Hawks",
@@ -418,6 +440,12 @@
     "Atlético de Rafaela": [
       "Atl. Rafaela",
       "Atletico Rafaela"
+    ],
+    "Atmosfera Mazeikiai": [
+      "Atmosfera"
+    ],
+    "Audax Italiano": [
+      "A. Italiano"
     ],
     "Avellino": [
       "US Avellino",
@@ -455,11 +483,18 @@
       "Blau-Weiß Lohne",
       "TuS Blau-Weiß Lohne"
     ],
+    "Ballarat Miners": [
+      "Ballarat"
+    ],
     "Ballyclare Comrades F.C.": [
       "Ballyclare Comrades"
     ],
     "Ballymena United F.C.": [
       "Ballymena United"
+    ],
+    "Baltimore Ravens": [
+      "Baltimore",
+      "Ravens"
     ],
     "Bangor F.C.": [
       "Bangor"
@@ -501,6 +536,9 @@
     ],
     "Beijing Institute of Technology FC": [
       "Beijing Technology"
+    ],
+    "Belconnen United": [
+      "Belconnen Utd."
     ],
     "Belmont Swansea Utd": [
       "Belmont Swansea United"
@@ -608,6 +646,9 @@
     "Brindabella Blues": [
       "Brindabella"
     ],
+    "Brinje Grosuplje": [
+      "Grosuplje"
+    ],
     "Bristol City FC": [
       "Bristol City Football Club"
     ],
@@ -618,10 +659,17 @@
     "Broadbeach United": [
       "Broadbeach Utd."
     ],
+    "Broadmeadow Magic": [
+      "Broadmeadow"
+    ],
     "Brooklyn Nets": [
       "BKN",
       "Nets",
       "Brooklyn"
+    ],
+    "Buffalo Bills": [
+      "Buffalo",
+      "Bills"
     ],
     "Bulleen Lions": [
       "Bulleen"
@@ -803,6 +851,9 @@
     "CF Villanovense": [
       "Club de Fútbol Villanovense"
     ],
+    "CODM Meknes": [
+      "COD Meknes"
+    ],
     "CP Mérida": [
       "Mérida"
     ],
@@ -856,6 +907,10 @@
       "Carlisle",
       "Carlisle United Football Club"
     ],
+    "Carolina Panthers": [
+      "Carolina",
+      "Panthers"
+    ],
     "Carpi": [
       "Carpi FC 1909",
       "Carpi Football Club 1909"
@@ -899,6 +954,9 @@
     "Chesterfield FC": [
       "Chesterfield Town FC"
     ],
+    "Chicago Bears": [
+      "Bears"
+    ],
     "Chicago Bulls": [
       "CHI",
       "Bulls",
@@ -906,6 +964,10 @@
     ],
     "Chicago Sky": [
       "Chicago Sky W"
+    ],
+    "Cincinnati Bengals": [
+      "Cincinnati",
+      "Bengals"
     ],
     "Cittadella": [
       "AS Cittadella",
@@ -915,6 +977,9 @@
       "Clermont",
       "Clermont Foot",
       "Clermont Foot Auvergne"
+    ],
+    "Cleveland Browns": [
+      "Browns"
     ],
     "Cleveland Cavaliers": [
       "CLE",
@@ -967,6 +1032,9 @@
       "Crystal P.",
       "Crystal Palace Football Club"
     ],
+    "Csikszereda M. Ciuc": [
+      "Csikszereda"
+    ],
     "Cultural Leonesa": [
       "Leonesa",
       "Cultural y Deportiva Leonesa",
@@ -1005,6 +1073,9 @@
       "Dag and Red",
       "Dagenham and Redbridge"
     ],
+    "Dallas Cowboys": [
+      "Cowboys"
+    ],
     "Dallas Mavericks": [
       "DAL",
       "Mavericks",
@@ -1013,6 +1084,9 @@
     ],
     "Dallas Wings": [
       "Dallas Wings W"
+    ],
+    "Dandenong Rangers": [
+      "Dandenong"
     ],
     "Darwen FC (1870-2009)": [
       "Darwen"
@@ -1026,8 +1100,14 @@
     "Defensa y Justicia": [
       "Club Social y Deportivo Defensa y Justicia"
     ],
+    "Defensores de Cambaceres": [
+      "Def. de Cambaceres"
+    ],
     "Defensores de Puerto Vilelas": [
       "Defensores de Vilelas"
+    ],
+    "Denver Broncos": [
+      "Broncos"
     ],
     "Denver Nuggets": [
       "DEN",
@@ -1040,6 +1120,9 @@
     "Deportes La Serena": [
       "La Serena"
     ],
+    "Deportes Limache": [
+      "Limache"
+    ],
     "Deportes Puerto Montt": [
       "D. Puerto Montt",
       "Puerto Montt"
@@ -1051,6 +1134,9 @@
     "Deportivo Binacional": [
       "Binacional"
     ],
+    "Deportivo Laferrere": [
+      "Laferrere"
+    ],
     "Derby County FC": [
       "Derby",
       "Derby County Football Club"
@@ -1061,10 +1147,19 @@
     "Desportivo de Chaves": [
       "Desp. Chaves"
     ],
+    "Detroit Lions": [
+      "Lions"
+    ],
     "Detroit Pistons": [
       "DET",
       "Pistons",
       "Detroit"
+    ],
+    "Diamond Valley Eagles": [
+      "Diamond Valley"
+    ],
+    "Dianella White Eagles": [
+      "Dianella White Eagle"
     ],
     "Difaa El Jadida": [
       "Difaa El Jadidi"
@@ -1075,9 +1170,18 @@
       "Dijon Football",
       "Dijon Football Côte-d'Or"
     ],
+    "Dinamo Zagreb": [
+      "Din. Zagreb"
+    ],
+    "Dodoma": [
+      "Dodoma Jiji"
+    ],
     "Doncaster Rovers FC": [
       "Doncaster",
       "Doncaster Rovers Football Club"
+    ],
+    "Drogheda United": [
+      "Drogheda"
     ],
     "Drogheda United F.C.": [
       "Drogheda United"
@@ -1106,6 +1210,9 @@
       "Troyes",
       "ESTAC Troyes",
       "Espérance Sportive Troyes Aube Champagne"
+    ],
+    "Eastern Suns": [
+      "Kalamunda Eastern Suns"
     ],
     "Ebbsfleet United FC": [
       "Ebbsfleet",
@@ -1145,6 +1252,9 @@
     ],
     "Elche CF": [
       "Elche Club de Fútbol"
+    ],
+    "Eltham Wildcats": [
+      "Eltham"
     ],
     "Empoli FC": [
       "Empoli Football Club"
@@ -1430,6 +1540,9 @@
     "Flint City Bucks": [
       "Flint City"
     ],
+    "Flora Tallinn": [
+      "Flora"
+    ],
     "Fluminense F.C.": [
       "Fluminense",
       "Fluminense Football Club"
@@ -1451,6 +1564,9 @@
     "Fortuna Sittard": [
       "F. Sittard",
       "For. Sittard"
+    ],
+    "Frankston Blues": [
+      "Frankston"
     ],
     "Fubon Braves": [
       "Taipei Fubon Braves"
@@ -1543,6 +1659,9 @@
     "Granada CF": [
       "Granada Club de Fútbol"
     ],
+    "Grasshopper Club Zurich": [
+      "Grasshoppers"
+    ],
     "Grays Athletic FC": [
       "Grays"
     ],
@@ -1558,8 +1677,15 @@
       "Grazer Athletiksport Klub",
       "Liebherr GAK"
     ],
+    "Green Bay Packers": [
+      "Green Bay",
+      "Packers"
+    ],
     "Greifswalder FC": [
       "Greifswald"
+    ],
+    "Gremio Novorizontino": [
+      "Novorizontino"
     ],
     "Grenoble Foot 38": [
       "Grenoble",
@@ -1578,6 +1704,9 @@
     "HFC Haarlem (1889-2010)": [
       "Haarlemsche Football Club Haarlem",
       "Haarlem FC"
+    ],
+    "HK Kopavogur": [
+      "Kopavogur"
     ],
     "Hallescher FC": [
       "Halle",
@@ -1614,8 +1743,14 @@
     "Hartlepool United FC": [
       "Hartlepool"
     ],
+    "Haukar Hafnarfjordur": [
+      "Haukar"
+    ],
     "Havant & Waterlooville FC": [
       "Havant & Waterlooville Football Club"
+    ],
+    "Hawke's Bay Hawks": [
+      "Bay Hawks"
     ],
     "Hayes & Yeading United FC": [
       "Hayes & Yeading"
@@ -1627,6 +1762,9 @@
       "Verona",
       "Hellas",
       "Hellas Verona Football Club"
+    ],
+    "Helmond Sport": [
+      "Helmond"
     ],
     "Helsingin Jalkapalloklubi": [
       "HJK Helsinki",
@@ -1667,10 +1805,16 @@
       "Kiel",
       "Kieler Sportvereinigung Holstein von 1900"
     ],
+    "Hornsby Spiders": [
+      "Hornsby S."
+    ],
     "Houston Rockets": [
       "HOU",
       "Rockets",
       "Houston"
+    ],
+    "Houston Texans": [
+      "Texans"
     ],
     "Huddersfield Town AFC": [
       "Huddersfield",
@@ -1685,6 +1829,9 @@
     ],
     "Hércules CF": [
       "Hércules de Alicante Club de Fútbol"
+    ],
+    "IA Akranes": [
+      "Akranes"
     ],
     "IF Brommapojkarna": [
       "Idrottsföreningen  Brommapojkarna"
@@ -1709,6 +1856,10 @@
       "Pacers",
       "Indiana"
     ],
+    "Indianapolis Colts": [
+      "Indianapolis",
+      "Colts"
+    ],
     "Internazionale": [
       "Inter",
       "Inter Milan"
@@ -1719,6 +1870,13 @@
     ],
     "Isloch Minsk": [
       "Isloch"
+    ],
+    "Ittihad Tanger": [
+      "IR Tanger"
+    ],
+    "Jacksonville Jaguars": [
+      "Jacksonville",
+      "Jaguars"
     ],
     "Jong AZ": [
       "AZ B"
@@ -1733,6 +1891,9 @@
       "Juventus Football Club",
       "Juventus Torino",
       "Juventus Turin"
+    ],
+    "Jwaya": [
+      "Jwayya"
     ],
     "Jönköpings Södra IF": [
       "Jonkoping"
@@ -1751,6 +1912,10 @@
     "KSV Hessen Kassel": [
       "Hessen Kassel"
     ],
+    "Kansas City Chiefs": [
+      "Kansas City",
+      "Chiefs"
+    ],
     "Karlsruher SC": [
       "KSC",
       "Karlsruhe",
@@ -1764,6 +1929,9 @@
     ],
     "Kidderminster Harriers FC": [
       "Kidderminster"
+    ],
+    "Kilsyth Cobras": [
+      "Kilsyth"
     ],
     "Kimberley Mar del Plata": [
       "Kimberley"
@@ -1785,6 +1953,9 @@
       "Reikjaviko Víkingur",
       "Vikingur",
       "Vikingur Reykjavik"
+    ],
+    "Knox Raiders": [
+      "Knox"
     ],
     "Kolkheti 1913 Poti": [
       "Kolkheti 1913"
@@ -1813,6 +1984,10 @@
     ],
     "Las Vegas Aces": [
       "Las Vegas Aces W"
+    ],
+    "Las Vegas Raiders": [
+      "Las Vegas",
+      "Raiders"
     ],
     "Launceston City": [
       "Launceston"
@@ -1883,6 +2058,10 @@
       "La Hoya Lorca CF",
       "La Hoya Deportiva Club de Fútbol"
     ],
+    "Los Angeles Chargers": [
+      "Chargers",
+      "LA Chargers"
+    ],
     "Los Angeles Clippers": [
       "LAC",
       "Clippers"
@@ -1890,6 +2069,10 @@
     "Los Angeles Lakers": [
       "LAL",
       "Lakers"
+    ],
+    "Los Angeles Rams": [
+      "Rams",
+      "LA Rams"
     ],
     "Los Angeles Sparks": [
       "Los Angeles Sparks W"
@@ -1910,6 +2093,10 @@
       "Duisburg",
       "Meidericher SV"
     ],
+    "MT Gambier Pioneers": [
+      "Mt Gambier",
+      "Mount Gambier Pioneers"
+    ],
     "MTV Eintracht Celle": [
       "Eintracht Celle",
       "MTV Eintr. Celle",
@@ -1925,6 +2112,9 @@
     "Macclesfield Town FC": [
       "Macclesfield"
     ],
+    "Macva Sabac": [
+      "Macva"
+    ],
     "Maghreb Fes": [
       "Maghreb Fez"
     ],
@@ -1933,6 +2123,9 @@
     ],
     "Maidstone United FC": [
       "Maidstone"
+    ],
+    "Maitland Mustangs": [
+      "Maitland M."
     ],
     "Malmö FF": [
       "Malmö Fotbollförening"
@@ -1950,6 +2143,9 @@
       "Manchester U.",
       "Manchester United Football Club",
       "Newton Heath FC"
+    ],
+    "Manly United": [
+      "Manly Utd"
     ],
     "Mansfield Town FC": [
       "Mansfield"
@@ -1973,6 +2169,12 @@
     "Meshakhte Tkibuli": [
       "Meshakhte",
       "Okriba Tkibuli"
+    ],
+    "MetroStars": [
+      "NE Metrostars"
+    ],
+    "Miami Dolphins": [
+      "Dolphins"
     ],
     "Miami Heat": [
       "MIA",
@@ -2006,6 +2208,12 @@
       "MIN",
       "Timberwolves",
       "Minnesota"
+    ],
+    "Minnesota United II": [
+      "Minnesota 2"
+    ],
+    "Minnesota Vikings": [
+      "Vikings"
     ],
     "Modena FC": [
       "Modena Football Club 2018"
@@ -2044,6 +2252,9 @@
       "Nijmegen",
       "Nijmegen Eendracht Combinatie"
     ],
+    "Naftan Novopolotsk": [
+      "Naftan"
+    ],
     "Nasinu F.C.": [
       "Nasinu"
     ],
@@ -2058,6 +2269,9 @@
     "Neman Grodno": [
       "Neman"
     ],
+    "Neuchatel Xamax": [
+      "Xamax"
+    ],
     "New Brighton Tower FC (1898-1901)": [
       "New Brighton",
       "New Brighton Tower"
@@ -2065,10 +2279,24 @@
     "New England FC": [
       "NEFC"
     ],
+    "New England Patriots": [
+      "Patriots"
+    ],
     "New Orleans Pelicans": [
       "NOP",
       "Pelicans",
       "New Orleans"
+    ],
+    "New Orleans Saints": [
+      "Saints"
+    ],
+    "New York Giants": [
+      "Giants",
+      "NY Giants"
+    ],
+    "New York Jets": [
+      "Jets",
+      "NY Jets"
     ],
     "New York Knicks": [
       "NYK",
@@ -2104,8 +2332,14 @@
       "Nott'ham Forest",
       "Nottingham Forest Football Club"
     ],
+    "Nunawading Spectres": [
+      "Nunawading"
+    ],
     "Nuneaton Borough FC": [
       "Nuneaton Town"
+    ],
+    "Nyiregyhaza Spartacus": [
+      "Nyiregyhaza"
     ],
     "Nîmes Olympique": [
       "Nîmes",
@@ -2127,6 +2361,12 @@
     ],
     "Oldham Athletic AFC": [
       "Oldham"
+    ],
+    "Olympic Safi": [
+      "Olympique de Safi"
+    ],
+    "Olympique Dcheira": [
+      "Dcheira"
     ],
     "Olympique Lyonnais": [
       "Lyon",
@@ -2184,6 +2424,9 @@
       "US Città di Palermo",
       "Unione Sportiva Città di Palermo"
     ],
+    "Para Hills Knights": [
+      "Para"
+    ],
     "Paris FC": [
       "Paris FC 98",
       "Paris Football Club"
@@ -2222,11 +2465,17 @@
       "Peterborough Utd.",
       "Peterborough United Football Club"
     ],
+    "Petrolul Ploiesti": [
+      "Petrolul"
+    ],
     "Philadelphia 76ers": [
       "PHI",
       "76ers",
       "Philadelphia",
       "Sixers"
+    ],
+    "Philadelphia Eagles": [
+      "Eagles"
     ],
     "Phoenix Mercury": [
       "Phoenix Mercury W"
@@ -2238,6 +2487,13 @@
     ],
     "Piacenza Calcio": [
       "Piacenza Calcio 1919"
+    ],
+    "Pittsburgh Steelers": [
+      "Pittsburgh",
+      "Steelers"
+    ],
+    "Playford City": [
+      "Playford Patriots"
     ],
     "Plymouth Argyle FC": [
       "Plymouth",
@@ -2256,11 +2512,11 @@
     "Portimonense SC": [
       "Portimonense Sporting Clube"
     ],
-    "Portland Hearts of Pine": [
-      "Hearts of Pine"
-    ],
     "Portland Fire": [
       "Portland Fire W"
+    ],
+    "Portland Hearts of Pine": [
+      "Hearts of Pine"
     ],
     "Portland Trail Blazers": [
       "POR",
@@ -2286,6 +2542,9 @@
     ],
     "Pro Patria": [
       "Aurora Pro Patria 1919"
+    ],
+    "Queens Park": [
+      "Queen's Park"
     ],
     "Queens Park Rangers FC": [
       "QPR",
@@ -2461,6 +2720,9 @@
       "Red Star 93",
       "Red Star Football Club"
     ],
+    "Redlands United": [
+      "Redlands"
+    ],
     "Reggina 1914": [
       "Reggina Calcio"
     ],
@@ -2471,6 +2733,9 @@
       "Rimini",
       "Rimini FC 1912",
       "Rimini FC 1912 SSD"
+    ],
+    "Ringwood Hawks": [
+      "Ringwood"
     ],
     "Rio Ave FC": [
       "Rio Ave Futebol Clube"
@@ -2799,6 +3064,13 @@
       "SAS",
       "San Antonio"
     ],
+    "San Francisco 49ers": [
+      "San Francisco",
+      "49ers"
+    ],
+    "San Martin de Mendoza": [
+      "San Martin Mendoza"
+    ],
     "San Martin de San Juan": [
       "San Martin T.",
       "San Martin S.J.",
@@ -2817,6 +3089,10 @@
       "Scunthorpe",
       "Scunthorpe & Lindsey United FC"
     ],
+    "Seattle Seahawks": [
+      "Seattle",
+      "Seahawks"
+    ],
     "Seattle Storm": [
       "Seattle Storm W"
     ],
@@ -2828,6 +3104,9 @@
     ],
     "Sevilla FC": [
       "Sevilla Fútbol Club"
+    ],
+    "Shabab Al Sahel": [
+      "Al Sahel"
     ],
     "Shanghai Port F.C.": [
       "SIPG F.C.",
@@ -2843,6 +3122,9 @@
       "Shanghai SIPG",
       "Shanghai SIPG F.C.",
       "Shanghai Shanggang Jituan Zuqiu Julebu"
+    ],
+    "Shanghai Segenda": [
+      "Shanghai Second"
     ],
     "Sheffield United": [
       "Sheffield Utd",
@@ -2879,6 +3161,9 @@
     ],
     "Southend United FC": [
       "Southend"
+    ],
+    "Southern Districts Spartans": [
+      "Southern District"
     ],
     "SpVgg Ansbach": [
       "Ansbach",
@@ -2920,6 +3205,9 @@
       "Sporting Liss.",
       "Sporting Lissabon"
     ],
+    "Sporting Club Jacksonville": [
+      "Sporting Jax"
+    ],
     "Sporting Gijón": [
       "Sp Gijón",
       "Real Sporting",
@@ -2932,6 +3220,9 @@
     "Sporting de Espinho": [
       "Espinho",
       "Sporting Clube de Espinho"
+    ],
+    "Springvale White Eagles": [
+      "Springvale"
     ],
     "St Patrick's Athletic F.C.": [
       "St Patrick's Athletic",
@@ -2999,6 +3290,9 @@
     "Sunnersta AIF": [
       "Sunnersta"
     ],
+    "Sutjeska Niksic": [
+      "Sutjeska"
+    ],
     "Sutton United FC": [
       "Sutton"
     ],
@@ -3059,6 +3353,11 @@
     "Talleres de Córdoba": [
       "Club Atlético Talleres"
     ],
+    "Tampa Bay Buccaneers": [
+      "Tampa Bay",
+      "Tampa",
+      "Buccaneers"
+    ],
     "Tampere United": [
       "Tampere Utd",
       "TamU",
@@ -3072,6 +3371,10 @@
     ],
     "Telford United FC (1872-2004)": [
       "Telford United"
+    ],
+    "Tennessee Titans": [
+      "Tennessee",
+      "Titans"
     ],
     "Tennis Borussia Berlin": [
       "TB Berlin",
@@ -3128,6 +3431,9 @@
     ],
     "Turkiye": [
       "Turkey"
+    ],
+    "Turriff United": [
+      "Turriff Utd"
     ],
     "Türkgücü München": [
       "Türkgücü"
@@ -3279,8 +3585,20 @@
       "Albinoleffe",
       "UC Albinoleffe"
     ],
+    "Universidad Catolica": [
+      "U. Catolica"
+    ],
     "Universidad Las Palmas": [
       "U.Las Palmas"
+    ],
+    "Universidad de Chile": [
+      "U. De Chile"
+    ],
+    "Universidad de Concepcion": [
+      "U. De Concepcion"
+    ],
+    "Universitatea Craiova": [
+      "Univ. Craiova"
     ],
     "União da Madeira": [
       "Madeira",
@@ -3321,6 +3639,9 @@
     ],
     "Valenciennes FC": [
       "Valenciennes Football Club"
+    ],
+    "Valeriodoce EC": [
+      "Valeriodoce"
     ],
     "Valmiera FC": [
       "BFK Valmiera",
@@ -3430,6 +3751,12 @@
       "Setúbal",
       "Vitória Setúbal"
     ],
+    "Vllaznia Shkoder": [
+      "Vllaznia"
+    ],
+    "Vysocina Jihlava": [
+      "Jihlava"
+    ],
     "Wacker Burghausen": [
       "Burghausen"
     ],
@@ -3438,6 +3765,9 @@
     ],
     "Walsall FC": [
       "Walsall Town Swifts FC"
+    ],
+    "Washington Commanders": [
+      "Commanders"
     ],
     "Washington Mystics": [
       "Washington Mystics W"
@@ -3452,6 +3782,9 @@
     ],
     "Watford FC": [
       "Watford Football Club"
+    ],
+    "Waverley Falcons": [
+      "Waverley"
     ],
     "Wealdstone FC": [
       "Wealdstone Football Club"
@@ -3476,6 +3809,12 @@
     ],
     "West Torrens Birkalla": [
       "West Torrens"
+    ],
+    "Weston Workers": [
+      "Weston Bears"
+    ],
+    "Whai": [
+      "Tauranga Whai"
     ],
     "Wigan Athletic FC": [
       "Wigan",
@@ -3538,245 +3877,17 @@
     "Zamora CF": [
       "Zamora Club de Fútbol"
     ],
-    "Écija Balompié": [
-      "Écija"
-    ],
-    "Évian TG FC": [
-      "Évian",
-      "Évian Thonon Gaillard",
-      "Évian Thonon Gaillard Football Club"
-    ],
-    "Neuchatel Xamax": [
-      "Xamax"
-    ],
-    "Flora Tallinn": [
-      "Flora"
-    ],
-    "Vysocina Jihlava": [
-      "Jihlava"
-    ],
-    "Helmond Sport": [
-      "Helmond"
-    ],
-    "Macva Sabac": [
-      "Macva"
-    ],
-    "Sutjeska Niksic": [
-      "Sutjeska"
-    ],
-    "Haukar Hafnarfjordur": [
-      "Haukar"
-    ],
-    "Atmosfera Mazeikiai": [
-      "Atmosfera"
-    ],
-    "Asane Fotball": [
-      "Asane"
-    ],
-    "Csikszereda M. Ciuc": [
-      "Csikszereda"
-    ],
-    "Deportes Limache": [
-      "Limache"
-    ],
-    "Hawke's Bay Hawks": [
-      "Bay Hawks"
-    ],
-    "Whai": [
-      "Tauranga Whai"
-    ],
-    "Frankston Blues": [
-      "Frankston"
-    ],
-    "Kilsyth Cobras": [
-      "Kilsyth"
-    ],
-    "Knox Raiders": [
-      "Knox"
-    ],
-    "Ringwood Hawks": [
-      "Ringwood"
-    ],
-    "CODM Meknes": [
-      "COD Meknes"
-    ],
-    "Olympique Dcheira": [
-      "Dcheira"
-    ],
-    "Ittihad Tanger": [
-      "IR Tanger"
-    ],
-    "Olympic Safi": [
-      "Olympique de Safi"
-    ],
     "Zbrojovka Brno": [
       "Brno"
     ],
-    "Arges Pitesti": [
-      "FC Arges"
-    ],
-    "Brinje Grosuplje": [
-      "Grosuplje"
-    ],
-    "Petrolul Ploiesti": [
-      "Petrolul"
-    ],
-    "Vllaznia Shkoder": [
-      "Vllaznia"
-    ],
-    "Audax Italiano": [
-      "A. Italiano"
-    ],
-    "Universidad Catolica": [
-      "U. Catolica"
-    ],
-    "Universidad de Chile": [
-      "U. De Chile"
-    ],
-    "Universidad de Concepcion": [
-      "U. De Concepcion"
-    ],
-    "HK Kopavogur": [
-      "Kopavogur"
-    ],
-    "Shanghai Segenda": [
-      "Shanghai Second"
-    ],
-    "Dodoma": [
-      "Dodoma Jiji"
-    ],
-    "Broadmeadow Magic": [
-      "Broadmeadow"
-    ],
-    "Weston Workers": [
-      "Weston Bears"
-    ],
-    "Para Hills Knights": [
-      "Para"
-    ],
-    "Al Riyadi Abassiya": [
-      "Al Riyadi Abbasiyah"
-    ],
-    "Shabab Al Sahel": [
-      "Al Sahel"
-    ],
-    "Jwaya": [
-      "Jwayya"
-    ],
-    "Annan Athletic": [
-      "Annan"
-    ],
-    "Dinamo Zagreb": [
-      "Din. Zagreb"
-    ],
-    "Grasshopper Club Zurich": [
-      "Grasshoppers"
-    ],
-    "Queens Park": [
-      "Queen's Park"
-    ],
-    "Minnesota United II": [
-      "Minnesota 2"
-    ],
-    "MetroStars": [
-      "NE Metrostars"
-    ],
-    "Playford City": [
-      "Playford Patriots"
-    ],
-    "Redlands United": [
-      "Redlands"
-    ],
-    "Turriff United": [
-      "Turriff Utd"
-    ],
-    "Belconnen United": [
-      "Belconnen Utd."
-    ],
-    "Drogheda United": [
-      "Drogheda"
-    ],
-    "Manly United": [
-      "Manly Utd"
-    ],
-    "Hornsby Spiders": [
-      "Hornsby S."
-    ],
-    "Maitland Mustangs": [
-      "Maitland M."
-    ],
-    "Defensores de Cambaceres": [
-      "Def. de Cambaceres"
-    ],
-    "Southern Districts Spartans": [
-      "Southern District"
-    ],
-    "Ballarat Miners": [
-      "Ballarat"
-    ],
-    "Dandenong Rangers": [
-      "Dandenong"
-    ],
-    "Diamond Valley Eagles": [
-      "Diamond Valley"
-    ],
-    "Eltham Wildcats": [
-      "Eltham"
-    ],
-    "MT Gambier Pioneers": [
-      "Mt Gambier",
-      "Mount Gambier Pioneers"
-    ],
-    "Nunawading Spectres": [
-      "Nunawading"
-    ],
-    "Waverley Falcons": [
-      "Waverley"
-    ],
-    "Eastern Suns": [
-      "Kalamunda Eastern Suns"
-    ],
-    "IA Akranes": [
-      "Akranes"
-    ],
-    "Nyiregyhaza Spartacus": [
-      "Nyiregyhaza"
-    ],
-    "Universitatea Craiova": [
-      "Univ. Craiova"
-    ],
-    "Valeriodoce EC": [
-      "Valeriodoce"
-    ],
-    "Dianella White Eagles": [
-      "Dianella White Eagle"
-    ],
-    "Deportivo Laferrere": [
-      "Laferrere"
-    ],
-    "America Mineiro": [
-      "America MG"
-    ],
-    "Gremio Novorizontino": [
-      "Novorizontino"
-    ],
-    "San Martin de Mendoza": [
-      "San Martin Mendoza"
-    ],
-    "Sporting Club Jacksonville": [
-      "Sporting Jax"
-    ],
-    "Springvale White Eagles": [
-      "Springvale"
-    ],
-    "Naftan Novopolotsk": [
-      "Naftan"
+    "fokina a": [
+      "davidovichfokina a"
     ],
     "kjaer n": [
       "budkovkjaer n"
     ],
-    "fokina a": [
-      "davidovichfokina a"
+    "maneiro j": [
+      "bouzasmaneiro j"
     ],
     "minaur a": [
       "deminaur a"
@@ -3784,14 +3895,19 @@
     "tiffon p": [
       "martintiffon p"
     ],
+    "tormo s": [
+      "sorribestormo s"
+    ],
     "zandschulp b": [
       "vandezandschulp b"
     ],
-    "maneiro j": [
-      "bouzasmaneiro j"
+    "Écija Balompié": [
+      "Écija"
     ],
-    "tormo s": [
-      "sorribestormo s"
+    "Évian TG FC": [
+      "Évian",
+      "Évian Thonon Gaillard",
+      "Évian Thonon Gaillard Football Club"
     ]
   }
 }
