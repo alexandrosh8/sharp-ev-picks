@@ -645,6 +645,18 @@ class Settings(BaseSettings):
     # dropped, so the band keeps accruing forward evidence (see
     # app/edge/value.draw_selection_demotion). False disables the gate.
     value_demote_draw_selections: bool = True
+    # SHOTS-TOTALS VETO (Wheatcroft GAP shots screen, app/models/football_shots).
+    # When True, a PREMIUM soccer TOTALS-2.5 candidate whose shots-screen lean
+    # DISAGREES with the pick side is DEMOTED to the volume (shadow) tier with
+    # the named reason 'shots_totals_veto' — persisted + CLV-tracked, never
+    # alerted, NEVER dropped, never a fair-price source. Default False (inert)
+    # DESPITE the screen beating the goals-only baseline OOS in all 5
+    # walk-forward leagues (2026-07-26, scripts/research/shots_ou25_walkforward
+    # .py): shadow-first mandate keeps new soccer-totals screens tag-only until
+    # forward trusted-CLV evidence — flipping this is an operator decision.
+    # Inert regardless until the composition root wires
+    # PipelineDeps.shots_signal_lookup (the tag annotates either way).
+    value_shots_totals_veto: bool = False
     # SHARP-ANCHOR-ONLY sports, csv of pipeline sport keys (trusted evidence
     # 2026-07-26: the tennis consensus-anchored cell runs -37.9% ROI). For a
     # sport listed here, the require-sharp-anchor branch HARD-DROPS a tripped
@@ -728,6 +740,26 @@ class Settings(BaseSettings):
     # kappa on the spent holdout.
     stake_uncertainty_shrink_enabled: bool = False
     stake_uncertainty_kappa: float = Field(default=50.0, gt=0.0)
+
+    # --- Edge-uncertainty Kelly shrink (B6 Baker-McHale, ships OFF) -----------
+    # When > 0, the Kelly multiplier for a VALUE pick is divided by
+    # (1 + coef * edge_variance) where edge_variance is the per-pick
+    # edge-ESTIMATE variance proxy computed at mint (devig-method spread on the
+    # anchor fair + cross-book implied-prob disagreement — app/pipeline.
+    # _candidate_edge_variance). A noisier edge estimate is staked SMALLER;
+    # the correction can only ever shrink a stake, never raise one
+    # (app/risk/staking.uncertainty_multiplier). 0 = OFF (the default):
+    # StakePolicy.edge_uncertainty_coef stays None and stakes are bit-for-bit
+    # unchanged. SHADOW-FIRST: flip only after a pre-registered review.
+    stake_edge_uncertainty_coef: float = Field(default=0.0, ge=0.0)
+    # --- Same-event correlation haircut (B7 Busseti-Boyd, ships OFF) ----------
+    # Average pairwise correlation assumed between SIMULTANEOUS premium picks
+    # on the SAME event in one cycle. When > 0 each of the N same-event legs'
+    # stakes is multiplied by 1/sqrt(1 + (N-1)*rho) before the ledger reserve
+    # (app/risk/exposure.same_event_stake_multipliers) — can only SHRINK the
+    # simultaneous-event stake sum. 0 = OFF (the default): stakes bit-for-bit
+    # unchanged. Must be < 1.
+    stake_same_event_rho: float = Field(default=0.0, ge=0.0, lt=1.0)
 
     # --- Bankroll ledger (A8, informational only — ships OFF) -----------------
     # Manual HYPOTHETICAL bankroll tracking: a starting balance plus running
@@ -860,7 +892,18 @@ class Settings(BaseSettings):
     # leagues=all; with the scoped default slug it is uncapped but bounded by
     # that league's match volume (~1 browser tab per match per market key).
     oddsportal_nfl_leagues: str = "nfl,ncaa,cfl,ufl"  # csv american-football slugs; empty = OFF
-    oddsportal_nfl_markets: str = "home_away"
+    # Markets mirror the basketball wildcard pattern — the JSON-feed loader is
+    # already sport-agnostic here (loader-ready): over_under_games /
+    # asian_handicap_games are WILDCARD families bound to the event's OWN
+    # defaultBetId/defaultScopeId, so one GET per family captures EVERY priced
+    # half-line of the points-totals / points-spread ladder (integer/quarter
+    # lines are dropped at enumeration — only ±0.5 half-lines devig cleanly).
+    # This widens VISIBILITY/VOLUME capture only: NFL stays visibility-only
+    # (no picks/alerts) via app/scheduler.py visibility_only_sports and the
+    # warehouse _VALIDATED_SPORT_PREFIXES — no pipeline/gating change here.
+    # Leagues are SCOPED slugs (not "all"), so the all-leagues market budget
+    # guard does not engage; cost is ~1 feed GET per family per match.
+    oddsportal_nfl_markets: str = "home_away,over_under_games,asian_handicap_games"
     # Dated scraping: each cycle covers today..today+N (UTC) instead of a
     # league's whole upcoming list — far-future fixtures are skipped and
     # cycle time tracks the actionable slate. Unset = legacy upcoming page.
@@ -1781,6 +1824,13 @@ def stake_policy(settings: Settings) -> StakePolicy:
         # 0.25x/2% path, numerically unchanged) — see Settings comments.
         max_drawdown=settings.stake_max_drawdown,
         max_drawdown_probability=settings.stake_max_drawdown_probability,
+        # B6 edge-uncertainty shrink: 0.0 is the OFF sentinel (Settings floats
+        # stay finite) and maps to the policy's inert None — stakes unchanged.
+        edge_uncertainty_coef=(
+            settings.stake_edge_uncertainty_coef
+            if settings.stake_edge_uncertainty_coef > 0.0
+            else None
+        ),
     )
 
 
@@ -1834,6 +1884,8 @@ def value_policy(settings: Settings) -> ValuePolicy:
         moneyline_max_odds=settings.value_moneyline_max_odds,
         max_odds=settings.value_max_odds,
         demote_draw_selections=settings.value_demote_draw_selections,
+        shots_totals_veto=settings.value_shots_totals_veto,
+        stake_same_event_rho=settings.stake_same_event_rho,
         sharp_anchor_only_sports=parse_sharp_anchor_only_sports(
             settings.value_sharp_anchor_only_sports
         ),
