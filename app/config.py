@@ -1224,6 +1224,17 @@ class Settings(BaseSettings):
     # lives on the pick's OWN event so settlement matches it exactly (no
     # cross-source name risk). Feed/ESPN scores still take precedence. Default ON.
     settle_from_scraped_scores: bool = True
+    # Bounded no-result expiry (backlog policy 2026-07-26): an alerted pick whose
+    # kickoff is older than this many days and for which NO results provider has
+    # ANY candidate score (feed + ESPN + scraped, the union book of the cycle) is
+    # settled as VOID with result_tracking.note='expired_no_result_source' (stake
+    # returned, pnl 0), so provider-gap picks terminally exit the open set instead
+    # of skewing open-exposure views forever. ONLY no-candidate-result picks
+    # expire — a pick with a pending/ambiguous result (score present but not
+    # gradeable, e.g. tennis set-score game lines) is NEVER expired. 0 disables.
+    # Note: void_unsettleable_known_kickoff_picks (hard 15d) usually bounds the
+    # same class first; values below 15 make this the earlier, note-carrying bound.
+    settlement_expire_days: int = Field(default=21, ge=0)
     # Dedicated finished-score scrape job cadence (seconds). The finished-score
     # pass (capture_finished_scores) runs on its OWN light interval job —
     # SEPARATE from the heavy odds-polling pass — so results settle promptly even

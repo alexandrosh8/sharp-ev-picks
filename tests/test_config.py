@@ -986,3 +986,13 @@ def test_value_policy_book_allowlist_default_empty_and_wired() -> None:
     # Configured csv flows to the frozen policy field, normalized.
     policy = value_policy(make_settings(value_book_allowlist="Bet365,WilliamHill"))
     assert policy.book_allowlist == frozenset({"bet365", "williamhill"})
+
+
+def test_settlement_expire_days_default_and_bounds() -> None:
+    # Bounded no-result expiry policy (task SB 2026-07-26): default 21 days,
+    # 0 = disabled, negatives rejected.
+    s = make_settings()
+    assert s.settlement_expire_days == 21
+    assert make_settings(settlement_expire_days=0).settlement_expire_days == 0
+    with pytest.raises(ValidationError):
+        make_settings(settlement_expire_days=-1)

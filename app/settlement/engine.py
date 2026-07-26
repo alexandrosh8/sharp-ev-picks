@@ -39,7 +39,7 @@ from app.settlement.outcomes import (
     tennis_set_score_ungradeable,
 )
 from app.settlement.results import Completion, FinalScore, ScoreBook, load_scores
-from app.storage.models import Event, ManualBetLog, Pick, ResultTracking, Sport, Team
+from app.storage.models import Event, League, ManualBetLog, Pick, ResultTracking, Sport, Team
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -179,6 +179,12 @@ async def void_stale_null_kickoff_picks(
     return voided
 
 
+#: result_tracking.note stamped on every no-result policy void (the bounded
+#: expiry below AND the 15d scrape-window void), so provider-gap voids stay
+#: distinguishable from score-based results in later audits.
+EXPIRED_NO_RESULT_NOTE = "expired_no_result_source"
+
+
 #: A KNOWN-kickoff pick this old with NO captured score can never settle: the
 #: free results feed (SCORE_WINDOW) AND the finished-score scrape
 #: (RESULTS_SCRAPE_WINDOW, 14d) have both stopped covering it. Without a void
@@ -270,6 +276,7 @@ async def void_unsettleable_known_kickoff_picks(
                 roi=pick_roi(pnl, stake),
                 settled_stake_amount=stake,
                 settled_effective_odds=_effective_settlement_odds(odds, payout_bookmaker),
+                note=EXPIRED_NO_RESULT_NOTE,
                 settled_at=now,
             )
             .on_conflict_do_nothing(constraint="uq_result_tracking_pick")
@@ -296,6 +303,164 @@ async def void_unsettleable_known_kickoff_picks(
             superseded,
         )
     return voided
+
+
+async def report_and_expire_no_result_picks(
+    session: AsyncSession,
+    book: ScoreBook,
+    now: datetime,
+    *,
+    delay: timedelta = SETTLE_DELAY,
+    expire_after: timedelta | None,
+) -> int:
+    """Provider-gap visibility + bounded expiry for NO-candidate-result picks.
+
+    ``book`` must be the UNION of every result source the cycle consulted
+    (feed + ESPN + scraped): a pick counts as a provider gap only when that
+    union holds NO candidate score for its fixture. Two actions:
+
+    1. REPORT — one INFO line per cycle aggregating the gap backlog by
+       (sport, league), top-10 by count, so leagues no provider covers are
+       visible instead of silently skewing open-exposure views.
+    2. EXPIRE — with ``expire_after`` set (settlement_expire_days > 0), a gap
+       pick whose kickoff is older than that bound is settled as VOID with
+       ``result_tracking.note=EXPIRED_NO_RESULT_NOTE`` (stake returned,
+       pnl 0), terminally exiting the open set. ``None`` disables expiry;
+       the report still runs.
+
+    Safety gates (mirror of the engine's no-result vs not-settleable split):
+    - A pick with ANY candidate score — even one that grades to a refusal
+      (unparseable selection, tennis set-score game line) — is NEVER touched
+      here: a pending/ambiguous result belongs to manual settlement.
+    - An EMPTY book is a provider outage, not a quiet day (silent-empty
+      guard): nothing is reported or expired.
+    - The cross-source dedup guard applies before any void write, so an
+      expiring twin of an already-settled fixture supersedes instead of
+      minting a second P&L row.
+
+    Returns the number of picks expired. The caller owns the transaction.
+    """
+    if len(book) == 0:
+        return 0
+    home, away = aliased(Team), aliased(Team)
+    rows = (
+        await session.execute(
+            select(
+                Pick,
+                home.name,
+                away.name,
+                Event.starts_at,
+                Event.sport_id,
+                Sport.key,
+                League.name,
+            )
+            .join(Event, Pick.event_id == Event.id)
+            .join(home, Event.home_team_id == home.id)
+            .join(away, Event.away_team_id == away.id)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(League, Event.league_id == League.id)
+            # NULL starts_at is excluded by SQL three-valued logic — the
+            # TBD-kickoff class has its own policy (void_stale_null_kickoff).
+            .where(Pick.status == "alerted", Event.starts_at <= now - delay)
+        )
+    ).all()
+    gap_counts: Counter[tuple[str, str]] = Counter()
+    gap_rows = []
+    for pick, home_name, away_name, starts_at, sport_id, sport_key, league_name in rows:
+        if starts_at > now - settle_delay_for(sport_key, delay):
+            continue  # sport floor not reached — the game may still be in play
+        if book.lookup(home_name, away_name, starts_at) is not None:
+            continue  # candidate result exists -> the grading paths own it
+        gap_counts[(sport_key, league_name)] += 1
+        gap_rows.append((pick, home_name, away_name, starts_at, sport_id, sport_key))
+    if gap_counts:
+        top = ", ".join(
+            f"{sport}/{league} {count}" for (sport, league), count in gap_counts.most_common(10)
+        )
+        logger.info(
+            "settlement cycle: %d picks past kickoff with no result source (top: %s)",
+            sum(gap_counts.values()),
+            top,
+        )
+    if expire_after is None:
+        return 0
+    cutoff = now - expire_after
+    expired = 0
+    superseded = 0
+    for pick, home_name, away_name, starts_at, sport_id, sport_key in gap_rows:
+        if starts_at >= cutoff:
+            continue
+        pair = fixture_pair_key(home_name, away_name)
+        if pair is not None:
+            await _lock_settlement_instrument(
+                session,
+                sport_id=sport_id,
+                market=pick.market,
+                market_detail=pick.market_detail,
+                selection=pick.selection,
+                model_version_id=pick.model_version_id,
+                target_pair=pair,
+            )
+            if await _settled_sibling_exists(
+                session,
+                pick_id=pick.id,
+                event_id=pick.event_id,
+                sport_id=sport_id,
+                starts_at=starts_at,
+                market=pick.market,
+                market_detail=pick.market_detail,
+                selection=pick.selection,
+                model_version_id=pick.model_version_id,
+                target_pair=pair,
+                sport_key=sport_key,
+            ):
+                pick.status = "superseded"
+                superseded += 1
+                logger.info(
+                    "no-result expiry: superseded duplicate pick %d (%s %s)",
+                    pick.id,
+                    pick.market,
+                    pick.selection,
+                )
+                continue
+        stake, odds, payout_bookmaker = await _stake_and_odds(session, pick)
+        pnl = pick_pnl(Outcome.VOID, stake, odds)  # stake returned -> 0.00
+        inserted = await session.execute(
+            pg_insert(ResultTracking)
+            .values(
+                pick_id=pick.id,
+                outcome=str(Outcome.VOID),
+                pnl=pnl,
+                roi=pick_roi(pnl, stake),
+                settled_stake_amount=stake,
+                settled_effective_odds=_effective_settlement_odds(odds, payout_bookmaker),
+                note=EXPIRED_NO_RESULT_NOTE,
+                settled_at=now,
+            )
+            .on_conflict_do_nothing(constraint="uq_result_tracking_pick")
+            .returning(ResultTracking.id)
+        )
+        if inserted.scalar_one_or_none() is None:
+            continue  # already settled by a concurrent/manual path
+        pick.status = "settled"
+        logger.info(
+            "expired pick %d (%s %s): no result source %d days after kickoff — "
+            "voided, stake treated as returned (note=%s)",
+            pick.id,
+            pick.market,
+            pick.selection,
+            expire_after.days,
+            EXPIRED_NO_RESULT_NOTE,
+        )
+        expired += 1
+    if expired or superseded:
+        await session.flush()
+        logger.info(
+            "settlement cycle: %d no-result picks expired (voided), %d duplicates superseded",
+            expired,
+            superseded,
+        )
+    return expired
 
 
 # Per-pick "not settleable" warning dedup (audit S 2026-07-26): the 30s cycle
@@ -1329,6 +1494,19 @@ async def run_settlement_cycle(
                 sharp_close_echo_gate=settings.clv_sharp_close_echo_gate,
                 value_policy=settlement_value_policy,
             )
+        # Provider-gap report + bounded no-result expiry, AFTER both settle
+        # passes so only picks NO source could settle remain alerted. The union
+        # book is judgment-only here (lookup-is-None), so merge order is moot.
+        await report_and_expire_no_result_picks(
+            session,
+            ScoreBook([*feed_scores, *scraped]),
+            now,
+            expire_after=(
+                timedelta(days=settings.settlement_expire_days)
+                if settings.settlement_expire_days > 0
+                else None
+            ),
+        )
         await session.commit()
     return settled
 

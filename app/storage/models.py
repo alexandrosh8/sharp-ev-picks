@@ -513,6 +513,11 @@ class ResultTracking(Base):
     # and rows persisted before this column stay NULL.
     home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Machine-readable settlement-provenance note (e.g. 'expired_no_result_source'
+    # for the bounded no-result expiry policy) — distinguishes policy voids from
+    # score-based results so they can be audited/excluded later. NULL = normal
+    # score-based settlement or a pre-column row.
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
     settled_at: Mapped[datetime]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

@@ -589,6 +589,11 @@ async def test_voids_unsettleable_known_kickoff_pick(session) -> None:  # type: 
     assert recent.status == "alerted"  # still in window
     row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == old_pick.id))
     assert row is not None and row.outcome == "void"
+    # The 15d no-result void carries the same provenance note as the bounded
+    # expiry policy: every provider-gap void stays distinguishable later.
+    from app.settlement.engine import EXPIRED_NO_RESULT_NOTE
+
+    assert row.note == EXPIRED_NO_RESULT_NOTE
     # idempotent
     assert await void_unsettleable_known_kickoff_picks(session, now) == 0
 
@@ -1416,3 +1421,249 @@ async def test_soccer_settlement_regression_unchanged_by_completion_fields(sessi
     assert row.outcome == "won"  # Over 2.5 with 3 goals — same as test_settles_past_pick
     assert row.pnl == Decimal("22.00")
     assert (row.home_score, row.away_score) == (2, 1)
+
+
+# --- bounded no-result expiry + per-league provider-gap report (task SB) -------
+
+
+def _unrelated_book(now: datetime) -> ScoreBook:
+    """A NON-EMPTY book that matches none of the seeded fixtures — providers
+    are alive (so the outage guard passes) but carry no candidate result."""
+    return ScoreBook(
+        [
+            FinalScore(
+                home_team="Unrelated Alpha",
+                away_team="Unrelated Beta",
+                match_date=now.date(),
+                home_score=1,
+                away_score=0,
+            )
+        ]
+    )
+
+
+async def test_expires_old_no_result_pick_as_void_with_note(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # A 22-day-old alerted pick for which NO provider has any candidate result
+    # expires: void, stake returned (pnl 0), note='expired_no_result_source'.
+    from app.settlement.engine import (
+        EXPIRED_NO_RESULT_NOTE,
+        report_and_expire_no_result_picks,
+    )
+
+    now = datetime.now(tz=UTC)
+    assert await persist_pick(
+        session,
+        make_pick("evt-expire-old"),
+        EventTeams(home=HOME, away=AWAY, starts_at=now - timedelta(days=22)),
+        "value",
+        "test-v",
+    )
+    pick = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+    assert pick is not None
+    with caplog.at_level("INFO"):
+        expired = await report_and_expire_no_result_picks(
+            session, _unrelated_book(now), now, expire_after=timedelta(days=21)
+        )
+    assert expired == 1
+    await session.refresh(pick)
+    assert pick.status == "settled"
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "void"
+    assert row.pnl == Decimal("0.00")
+    assert row.note == EXPIRED_NO_RESULT_NOTE
+    per_pick = [r for r in caplog.records if "expired pick" in r.getMessage()]
+    assert len(per_pick) == 1
+    # idempotent: a second run finds nothing alerted
+    assert (
+        await report_and_expire_no_result_picks(
+            session, _unrelated_book(now), now, expire_after=timedelta(days=21)
+        )
+        == 0
+    )
+
+
+async def test_old_pick_with_gradeable_result_is_never_expired(session) -> None:  # type: ignore[no-untyped-def]
+    # A candidate result exists (even if grading later fails/needs manual
+    # settlement) -> the expiry policy must NEVER touch the pick.
+    from app.settlement.engine import report_and_expire_no_result_picks
+
+    now = datetime.now(tz=UTC)
+    kickoff = now - timedelta(days=22)
+    assert await persist_pick(
+        session,
+        make_pick("evt-expire-scored"),
+        EventTeams(home=HOME, away=AWAY, starts_at=kickoff),
+        "value",
+        "test-v",
+    )
+    pick = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+    assert pick is not None
+    book = ScoreBook(
+        [
+            FinalScore(
+                home_team=HOME,
+                away_team=AWAY,
+                match_date=kickoff.date(),
+                home_score=2,
+                away_score=1,
+            )
+        ]
+    )
+    assert (
+        await report_and_expire_no_result_picks(session, book, now, expire_after=timedelta(days=21))
+        == 0
+    )
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+    assert (
+        await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+        is None
+    )
+
+
+async def test_expiry_disabled_still_reports_provider_gaps(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # expire_after=None (settlement_expire_days=0) disables voiding, but the
+    # per-league provider-gap INFO line still fires.
+    from app.settlement.engine import report_and_expire_no_result_picks
+
+    now = datetime.now(tz=UTC)
+    assert await persist_pick(
+        session,
+        make_pick("evt-expire-disabled"),
+        EventTeams(home=HOME, away=AWAY, starts_at=now - timedelta(days=22)),
+        "value",
+        "test-v",
+    )
+    pick = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+    assert pick is not None
+    with caplog.at_level("INFO"):
+        assert (
+            await report_and_expire_no_result_picks(
+                session, _unrelated_book(now), now, expire_after=None
+            )
+            == 0
+        )
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+    reports = [r for r in caplog.records if "no result source" in r.getMessage()]
+    assert len(reports) == 1
+
+
+async def test_no_result_report_aggregates_by_sport_and_league(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # Two no-result picks in one league + one in another -> a SINGLE INFO line
+    # aggregated by (sport, league), largest gap first.
+    from app.settlement.engine import report_and_expire_no_result_picks
+
+    now = datetime.now(tz=UTC)
+    # persist_pick derives the league row from PickOut.league (teams.league is
+    # loader metadata), so override the PickOut for distinct leagues.
+    assert await persist_pick(
+        session,
+        make_pick("evt-gap-a1").model_copy(update={"league": "gap-league-big"}),
+        EventTeams(home=HOME, away=AWAY, starts_at=now - timedelta(days=2)),
+        "value",
+        "test-v",
+    )
+    assert await persist_pick(
+        session,
+        make_pick("evt-gap-a2", selection="Under 2.5").model_copy(
+            update={"league": "gap-league-big"}
+        ),
+        EventTeams(home=HOME, away="Gap Other Away", starts_at=now - timedelta(days=3)),
+        "value",
+        "test-v",
+    )
+    assert await persist_pick(
+        session,
+        make_pick("evt-gap-b1").model_copy(update={"league": "gap-league-small"}),
+        EventTeams(home="Gap Home C", away="Gap Away C", starts_at=now - timedelta(days=2)),
+        "value",
+        "test-v",
+    )
+    with caplog.at_level("INFO"):
+        await report_and_expire_no_result_picks(
+            session, _unrelated_book(now), now, expire_after=None
+        )
+    reports = [r for r in caplog.records if "no result source" in r.getMessage()]
+    assert len(reports) == 1
+    message = reports[0].getMessage()
+    assert "3 picks past kickoff with no result source" in message
+    assert "soccer/gap-league-big 2" in message
+    assert "soccer/gap-league-small 1" in message
+    assert message.index("gap-league-big") < message.index("gap-league-small")
+
+
+async def test_empty_book_never_expires(session) -> None:  # type: ignore[no-untyped-def]
+    # A total provider outage (empty book) must not mass-expire the backlog —
+    # mirror of the silent-empty settle guard.
+    from app.settlement.engine import report_and_expire_no_result_picks
+
+    now = datetime.now(tz=UTC)
+    assert await persist_pick(
+        session,
+        make_pick("evt-expire-outage"),
+        EventTeams(home=HOME, away=AWAY, starts_at=now - timedelta(days=22)),
+        "value",
+        "test-v",
+    )
+    pick = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+    assert pick is not None
+    assert (
+        await report_and_expire_no_result_picks(
+            session, ScoreBook([]), now, expire_after=timedelta(days=21)
+        )
+        == 0
+    )
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+
+
+async def test_run_settlement_cycle_wires_expiry_from_settings(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Composition-root wiring: settlement_expire_days drives the expiry inside
+    # run_settlement_cycle. 5 days (< the 15d hard void) proves THIS path fired.
+    import app.config as app_config
+    from app.settlement.engine import EXPIRED_NO_RESULT_NOTE, clear_feed_cache
+
+    clear_feed_cache()
+    async with factory() as session:
+        assert await persist_pick(
+            session,
+            make_pick("evt-expire-cycle"),
+            EventTeams(
+                home="Cycle Gap Home", away="Cycle Gap Away", starts_at=NOW - timedelta(days=6)
+            ),
+            "value",
+            "test-v",
+        )
+        await session.commit()
+
+    settings = app_config.get_settings().model_copy(update={"settlement_expire_days": 5})
+    monkeypatch.setattr(app_config, "get_settings", lambda: settings)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/new/BRA.csv"):
+            return httpx.Response(200, text=CYCLE_CSV)
+        return httpx.Response(404)
+
+    with caplog.at_level("INFO"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await run_settlement_cycle(
+                client, factory, slugs=["brazil-serie-a"], seasons=[], now=NOW
+            )
+
+    async with factory() as session:
+        row = await session.scalar(
+            select(ResultTracking)
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .join(Event, Pick.event_id == Event.id)
+            .where(Event.external_ref == "evt-expire-cycle")
+        )
+        assert row is not None
+        assert row.outcome == "void"
+        assert row.note == EXPIRED_NO_RESULT_NOTE
+    clear_feed_cache()
