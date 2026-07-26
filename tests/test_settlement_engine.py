@@ -329,6 +329,29 @@ async def test_football_ah_unparseable_selection_skipped(session, caplog) -> Non
     assert any("not settleable" in r.message for r in caplog.records)
 
 
+async def test_unsettleable_warns_once_across_cycles_with_summary(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # Warning dedup (audit S): an unsettleable pick warns on FIRST sighting
+    # only — repeat cycles emit the per-cycle summary line, not 167k per-pick
+    # re-warns. The pick stays open throughout.
+    from app.settlement.engine import reset_unsettleable_warning_state
+
+    reset_unsettleable_warning_state()
+    pick = await seed_pick(
+        session, "evt-warn-dedup", market=Market.SPREADS, selection="Gamma Town -0.75"
+    )
+    with caplog.at_level("WARNING"):
+        assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 0
+        assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 0
+        assert await settle_open_picks(session, book_with_score(2, 1), NOW) == 0
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+    per_pick = [r for r in caplog.records if "not settleable" in r.getMessage()]
+    assert len(per_pick) == 1
+    summaries = [r for r in caplog.records if "picks unsettleable (" in r.getMessage()]
+    assert len(summaries) == 3
+    assert "1 picks unsettleable (1 spreads)" in summaries[0].getMessage()
+
+
 async def test_future_kickoff_stays_open(session) -> None:  # type: ignore[no-untyped-def]
     teams = EventTeams(
         home=HOME, away=AWAY, league="test-league-settlement", starts_at=NOW + timedelta(hours=3)

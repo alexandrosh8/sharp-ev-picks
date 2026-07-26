@@ -12,6 +12,7 @@ Invariants (kestrel-settlement discipline):
 
 import logging
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -295,6 +296,28 @@ async def void_unsettleable_known_kickoff_picks(
             superseded,
         )
     return voided
+
+
+# Per-pick "not settleable" warning dedup (audit S 2026-07-26): the 30s cycle
+# re-warned EVERY unsettleable pick EVERY cycle (~167k warnings/6h). First
+# sighting of a (pick id, reason) warns; repeats stay silent until the REASON
+# changes or the pick grades (its entry is then dropped, so a later regression
+# re-warns). In-memory only — a restart re-warns each pick once, which is
+# acceptable; no schema change.
+_UNSETTLEABLE_WARNED: dict[int, str] = {}
+
+
+def reset_unsettleable_warning_state() -> None:
+    """Forget which unsettleable picks were already warned about (tests +
+    operator tooling)."""
+    _UNSETTLEABLE_WARNED.clear()
+
+
+def _unsettleable_summary(counts: Counter[str]) -> str:
+    """The per-cycle summary line body: 'N picks unsettleable (M btts, ...)'."""
+    total = sum(counts.values())
+    breakdown = ", ".join(f"{n} {market}" for market, n in sorted(counts.items()))
+    return f"{total} picks unsettleable ({breakdown})"
 
 
 # Trailing signed handicap token of a spreads selection ("Alpha FC -1.5").
@@ -752,6 +775,7 @@ async def settle_open_picks(
     settled = 0
     superseded = 0
     tennis_manual_ids: list[int] = []
+    unsettleable_counts: Counter[str] = Counter()
 
     # Phase 1: every row capable of writing a result ALWAYS lock+rechecks,
     # independent of any snapshot. Doing real work first also preserves the old
@@ -775,6 +799,7 @@ async def settle_open_picks(
             completion=score.completion,
             winner_side=score.winner_side,
             sport_key=candidate.sport_key,
+            unsettleable_counts=unsettleable_counts,
         ):
             settled += 1
             # Snapshot close AFTER the status flip, same transaction: the
@@ -826,6 +851,9 @@ async def settle_open_picks(
             len(tennis_manual_ids),
             sorted(tennis_manual_ids)[:3],
         )
+    if unsettleable_counts:
+        # One line per cycle replaces the old per-pick re-warns (dedup above).
+        logger.warning("settlement cycle: %s", _unsettleable_summary(unsettleable_counts))
     if settled or superseded:
         await session.flush()  # status flips visible to the caller's transaction
         logger.info(
@@ -979,6 +1007,7 @@ async def _settle_one(
     completion: Completion = "full",
     winner_side: str | None = None,
     sport_key: str | None = None,
+    unsettleable_counts: Counter[str] | None = None,
 ) -> bool:
     """Atomic single-pick settlement: result row + status flip. False = skipped.
 
@@ -1032,8 +1061,19 @@ async def _settle_one(
                 sport_key=sport_key,
             )
     except ValueError as exc:
-        logger.warning("pick %d not settleable: %s", pick.id, exc)
+        reason = str(exc)
+        if unsettleable_counts is not None:
+            unsettleable_counts[pick.market] += 1
+        if _UNSETTLEABLE_WARNED.get(pick.id) != reason:
+            # First sighting of this (pick, reason) — or the reason changed.
+            # Repeats stay silent; the caller's per-cycle summary carries the
+            # ongoing count instead (warning-dedup, audit S 2026-07-26).
+            _UNSETTLEABLE_WARNED[pick.id] = reason
+            logger.warning("pick %d not settleable: %s", pick.id, exc)
         return False
+    # The pick grades now — clear any stale unsettleable state so a future
+    # regression on this pick warns again.
+    _UNSETTLEABLE_WARNED.pop(pick.id, None)
 
     stake, odds, payout_bookmaker = await _stake_and_odds(session, pick)
     pnl = pick_pnl(outcome, stake, odds, bookmaker=payout_bookmaker)

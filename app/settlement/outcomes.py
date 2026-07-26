@@ -316,10 +316,15 @@ def _totals_component(direction: str, total: int, comp_line: float) -> Outcome:
 
 
 def _settle_btts(selection: str, hs: int, as_: int) -> Outcome:
+    # Two vocabularies for one two-outcome market: OddsPortal emits the
+    # prefixed 'BTTS Yes'/'BTTS No'; OddsChecker's canonical form is the bare
+    # 'Yes'/'No' (app.ingestion.oddschecker._canonical_selection strips the
+    # legacy prefix). Both grade from the same full-time score; no push/void
+    # exists on this market (a 0-0 is a clean 'No' win).
     both = hs > 0 and as_ > 0
-    if selection == "BTTS Yes":
+    if selection in ("BTTS Yes", "Yes"):
         return _won(both)
-    if selection == "BTTS No":
+    if selection in ("BTTS No", "No"):
         return _won(not both)
     raise ValueError(f"btts selection {selection!r} unparseable")
 
@@ -391,6 +396,19 @@ def _settle_spreads(
     if not team or _SIGNED_LINE_RE.fullmatch(raw_line) is None:
         raise ValueError(f"spreads selection {selection!r} unparseable")
     line = float(raw_line)
+    if team == "Draw":
+        # OddsChecker 3-way (European) handicap draw leg, bare-line form
+        # ("Draw -1" via _line_bearing_selection). The line is the HOME
+        # team's handicap — grounded 2026-07-26 against live same-capture
+        # snapshot triples ({home -1, Draw -1, away +1} devig to one book's
+        # market; the mirrored home +1 market carries "Draw +1") — i.e. the
+        # SAME instrument as OddsPortal's parenthesised "Draw (L)" leg above,
+        # graded identically: the draw leg absorbs the adjusted tie exactly.
+        # A draw leg only exists on integer lines; anything else is not a
+        # gradable instrument — fail loud, never guess.
+        if not line.is_integer():
+            raise ValueError(f"spreads draw selection {selection!r} carries a non-integer line")
+        return _won(hs + line == as_)
     if team == home:
         base = float(hs - as_)
     elif team == away:

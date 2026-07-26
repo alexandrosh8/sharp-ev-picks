@@ -128,6 +128,34 @@ def test_btts() -> None:
     assert settle("btts", "BTTS No", 1, 2) is Outcome.LOST
 
 
+@pytest.mark.parametrize(
+    ("selection", "hs", "as_", "expected"),
+    [
+        # OddsChecker canonical bare form (app.ingestion.oddschecker
+        # _canonical_selection strips the legacy 'BTTS ' prefix): 'Yes' wins
+        # iff both teams scored >= 1, 'No' wins otherwise. Same full-time score
+        # basis as every other market here; no push/void exists on this market.
+        ("Yes", 2, 1, Outcome.WON),
+        ("Yes", 1, 1, Outcome.WON),
+        ("Yes", 1, 0, Outcome.LOST),
+        ("Yes", 0, 2, Outcome.LOST),
+        ("Yes", 0, 0, Outcome.LOST),
+        ("No", 1, 0, Outcome.WON),
+        ("No", 0, 0, Outcome.WON),
+        ("No", 0, 3, Outcome.WON),
+        ("No", 2, 1, Outcome.LOST),
+        ("No", 1, 1, Outcome.LOST),
+    ],
+)
+def test_btts_bare_selections(selection: str, hs: int, as_: int, expected: Outcome) -> None:
+    assert settle("btts", selection, hs, as_) is expected
+
+
+def test_btts_unknown_selection_still_raises() -> None:
+    with pytest.raises(ValueError, match="btts selection"):
+        settle("btts", "Maybe", 1, 1)
+
+
 # --- dnb ----------------------------------------------------------------------
 
 
@@ -221,6 +249,50 @@ def test_european_handicap_draw_leg() -> None:
     assert settle("spreads", "Draw (-1)", 2, 1) is Outcome.WON
     assert settle("spreads", "Draw (-1)", 1, 1) is Outcome.LOST
     assert settle("spreads", "Draw (-1)", 3, 1) is Outcome.LOST
+
+
+@pytest.mark.parametrize(
+    ("selection", "hs", "as_", "expected"),
+    [
+        # OddsChecker 3-way (European) handicap draw leg: bare "Draw {line:+g}"
+        # (app.ingestion.oddschecker._line_bearing_selection). The line is the
+        # HOME team's handicap — grounded against live same-capture snapshot
+        # triples ({home -1, Draw -1, away +1} devig to one book's market) —
+        # identical semantics to OddsPortal's parenthesised "Draw (L)" leg:
+        # WON iff hs + line == as_, LOST otherwise (the draw leg absorbs the
+        # adjusted tie, so it never pushes).
+        ("Draw -1", 2, 1, Outcome.WON),  # home by exactly 1
+        ("Draw -1", 1, 1, Outcome.LOST),
+        ("Draw -1", 3, 1, Outcome.LOST),
+        ("Draw -1", 0, 1, Outcome.LOST),
+        ("Draw +1", 1, 2, Outcome.WON),  # away by exactly 1
+        ("Draw +1", 1, 1, Outcome.LOST),
+        ("Draw +1", 2, 1, Outcome.LOST),
+        ("Draw -2", 3, 1, Outcome.WON),
+        ("Draw +3", 0, 3, Outcome.WON),
+        ("Draw +3", 0, 4, Outcome.LOST),
+    ],
+)
+def test_oddschecker_draw_handicap_leg(
+    selection: str, hs: int, as_: int, expected: Outcome
+) -> None:
+    assert settle("spreads", selection, hs, as_) is expected
+
+
+def test_oddschecker_draw_handicap_matches_paren_form() -> None:
+    # The bare-line and parenthesised draw legs are the SAME instrument and
+    # must grade identically on every score.
+    for hs in range(5):
+        for as_ in range(5):
+            assert settle("spreads", "Draw -1", hs, as_) is settle("spreads", "Draw (-1)", hs, as_)
+            assert settle("spreads", "Draw +2", hs, as_) is settle("spreads", "Draw (+2)", hs, as_)
+
+
+def test_oddschecker_draw_handicap_non_integer_line_raises() -> None:
+    # A draw leg only exists on integer lines; a half-line "Draw" selection is
+    # not a gradable instrument — fail loud, never guess.
+    with pytest.raises(ValueError, match="spreads"):
+        settle("spreads", "Draw -1.5", 2, 1)
 
 
 # --- spreads: quarter lines (Asian split stakes) --------------------------------
