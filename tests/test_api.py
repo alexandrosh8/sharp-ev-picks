@@ -1500,6 +1500,32 @@ def test_lab_promotion_distance_endpoint_serializes(monkeypatch) -> None:  # typ
     assert cell["est_days_to_threshold"] == 42.0
 
 
+def test_lab_gate_reasons_endpoint_serializes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """GET /lab/gate-reasons is a thin auth-gated passthrough of the
+    candidate_evaluations reason-slug breakdown (the SQL aggregate is pinned in
+    tests/test_gate_reason_breakdown.py). Confirms the ?hours param threads
+    through and the payload shape the dashboard widget reads."""
+    from app.api import routes
+
+    captured: dict[str, int] = {}
+
+    async def fake_breakdown(session, *, hours):  # type: ignore[no-untyped-def]
+        captured["hours"] = hours
+        return {
+            "window_hours": hours,
+            "n_evaluations": 1200,
+            "n_clean_premium": 14,
+            "reasons": {"no_sharp_anchor": 900, "no_sharp_anchor:exchange_liquidity_floor": 850},
+        }
+
+    monkeypatch.setattr(routes, "gate_reason_breakdown", fake_breakdown)
+    body = TestClient(make_app()).get("/lab/gate-reasons?hours=48").json()
+    assert captured["hours"] == 48
+    assert body["n_evaluations"] == 1200
+    assert body["n_clean_premium"] == 14
+    assert body["reasons"]["no_sharp_anchor:exchange_liquidity_floor"] == 850
+
+
 def test_resolution_match_ceiling_endpoint_serializes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """B3: GET /resolution/match-ceiling serves the LIVE per-sport ceiling
     decomposition (structural vs addressable vs unknown-league) — the DB read

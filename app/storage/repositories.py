@@ -47,6 +47,7 @@ from app.settlement.outcomes import provisional_result
 from app.storage.models import (
     BankrollLedgerEntry,
     BetfairAnchorVerdict,
+    CandidateEvaluation,
     DashboardCredential,
     Event,
     EventSourceLink,
@@ -5695,6 +5696,51 @@ async def sport_market_promotion_distance(session: AsyncSession) -> dict[str, An
             ),
             "cells": promotion_readiness_cells(cells),
         },
+    }
+
+
+async def gate_reason_breakdown(session: AsyncSession, *, hours: int = 24) -> dict[str, Any]:
+    """Aggregate candidate_evaluations reason slugs over a recent window
+    (read-only, informational). Powers the dashboard 'why picks did not mint'
+    widget. Every slug element in each row's ``{"reasons": [...]}`` is counted,
+    so the emitted sub-reasons (``no_sharp_anchor:exchange_liquidity_floor`` ...)
+    surface alongside the legacy bare slug. Pure MEASUREMENT — reads only."""
+    window_start = datetime.now(UTC) - timedelta(hours=hours)
+    totals = (
+        await session.execute(
+            select(
+                func.count().label("n"),
+                func.count()
+                .filter(
+                    and_(
+                        CandidateEvaluation.tier == "premium",
+                        CandidateEvaluation.reasons.is_(None),
+                    )
+                )
+                .label("clean_premium"),
+            ).where(CandidateEvaluation.evaluated_at >= window_start)
+        )
+    ).one()
+    # jsonb_array_elements_text over reasons->'reasons'; NULL/absent yields no
+    # rows, so clean-premium keeps contribute nothing to the breakdown.
+    reason_rows = (
+        await session.execute(
+            text(
+                "SELECT elem AS reason, count(*) AS n "
+                "FROM candidate_evaluations ce, "
+                "jsonb_array_elements_text(ce.reasons -> 'reasons') AS elem "
+                "WHERE ce.evaluated_at >= :window_start "
+                "GROUP BY elem"
+            ),
+            {"window_start": window_start},
+        )
+    ).all()
+    reasons = {str(r.reason): int(r.n) for r in reason_rows}
+    return {
+        "window_hours": hours,
+        "n_evaluations": int(totals.n or 0),
+        "n_clean_premium": int(totals.clean_premium or 0),
+        "reasons": dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))),
     }
 
 

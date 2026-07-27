@@ -55,6 +55,7 @@ from app.storage.repositories import (
     betfair_inline_capture_by_sport,
     betfair_staleness_metrics,
     create_dashboard_credentials,
+    gate_reason_breakdown,
     latest_available_games_with_events,
     latest_picks_with_events,
     live_evidence_rows,
@@ -1531,6 +1532,18 @@ async def lab_promotion_distance(
     estimates are nulled at the source below the floor, so no consumer can
     read a sub-floor CLV number."""
     return await sport_market_promotion_distance(session)
+
+
+@router.get("/lab/gate-reasons", dependencies=[Depends(require_dashboard_auth)])
+async def lab_gate_reasons(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    hours: Annotated[int, Query(ge=1, le=168)] = 24,
+) -> dict[str, Any]:
+    """Why candidate picks did not mint: candidate_evaluations reason-slug
+    counts over the last ``hours`` window (read-only, informational). Surfaces
+    the emitted sub-reasons (no_sharp_anchor:<cause>) so an anchor-supply cliff
+    is legible next to the legacy bare slug. Never gates minting."""
+    return await gate_reason_breakdown(session, hours=hours)
 
 
 @router.get("/resolution/match-ceiling", dependencies=[Depends(require_dashboard_auth)])
