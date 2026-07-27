@@ -47,7 +47,6 @@ from app.settlement.outcomes import provisional_result
 from app.storage.models import (
     BankrollLedgerEntry,
     BetfairAnchorVerdict,
-    CandidateEvaluation,
     DashboardCredential,
     Event,
     EventSourceLink,
@@ -5706,19 +5705,21 @@ async def gate_reason_breakdown(session: AsyncSession, *, hours: int = 24) -> di
     so the emitted sub-reasons (``no_sharp_anchor:exchange_liquidity_floor`` ...)
     surface alongside the legacy bare slug. Pure MEASUREMENT — reads only."""
     window_start = datetime.now(UTC) - timedelta(hours=hours)
+    # NOTE: the writer stores a clean premium's reasons as JSON 'null' (Python
+    # None through a JSONB column, none_as_null off), NOT SQL NULL — so a plain
+    # `reasons IS NULL` MISSES clean premiums. Key on the reasons array being
+    # empty/absent, which covers SQL NULL, JSON null, and an empty list alike.
     totals = (
         await session.execute(
-            select(
-                func.count().label("n"),
-                func.count()
-                .filter(
-                    and_(
-                        CandidateEvaluation.tier == "premium",
-                        CandidateEvaluation.reasons.is_(None),
-                    )
-                )
-                .label("clean_premium"),
-            ).where(CandidateEvaluation.evaluated_at >= window_start)
+            text(
+                "SELECT count(*) AS n, "
+                "count(*) FILTER ("
+                "  WHERE tier = 'premium' "
+                "  AND coalesce(jsonb_array_length(reasons -> 'reasons'), 0) = 0"
+                ") AS clean_premium "
+                "FROM candidate_evaluations WHERE evaluated_at >= :window_start"
+            ),
+            {"window_start": window_start},
         )
     ).one()
     # jsonb_array_elements_text over reasons->'reasons'; NULL/absent yields no
