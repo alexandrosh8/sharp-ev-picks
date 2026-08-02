@@ -1924,36 +1924,56 @@
         }
         function validateHealthPayload(value, httpStatus) {
           const health = expectObjectPayload(value, "Health");
-          if (health.status !== "ok" && health.status !== "degraded") {
+          // Backend contract (routes.py GET /health): "ok" (200), "partial"
+          // (200 — some sports degraded while capture still flows; downstream
+          // dataIsStale() must NOT treat it as "ok") and "degraded" (503).
+          // Audit 2026-07-27: rejecting "partial" here failed the whole
+          // health card closed into a false "Could not verify" banner.
+          if (health.status !== "ok" && health.status !== "partial" && health.status !== "degraded") {
             throw responseError("Health payload has an unknown status.", "SchemaError");
           }
-          if ((httpStatus === 200 && health.status !== "ok") ||
+          if ((httpStatus === 200 && health.status === "degraded") ||
               (httpStatus === 503 && health.status !== "degraded")) {
             throw responseError("Health HTTP status and payload disagree.", "SchemaError");
           }
-          if (health.mode !== "picks-only" || !isRecord(health.polls)) {
-            throw responseError("Health payload is missing authenticated detail.", "SchemaError");
+          if (health.mode !== "picks-only") {
+            throw responseError("Health payload is missing picks-only mode.", "SchemaError");
           }
-          Object.values(health.polls).forEach((poll) => {
-            if (!isRecord(poll) || (poll.per_market != null && !isRecord(poll.per_market))) {
-              throw responseError("Health payload contains an invalid poll record.", "SchemaError");
-            }
-            if (poll.finished_at != null && !Number.isFinite(timestampMs(poll.finished_at))) {
-              throw responseError("Health payload contains an invalid poll timestamp.", "SchemaError");
-            }
-          });
+          // Two legitimate shapes: the AUTHENTICATED body carries `polls` plus
+          // interval/edge-floor detail; the redacted ANONYMOUS body (expired
+          // session / public liveness) omits them and carries the boolean
+          // has_completed_poll instead. Anything else still fails closed.
+          const authenticatedDetail = isRecord(health.polls);
+          if (!authenticatedDetail && typeof health.has_completed_poll !== "boolean") {
+            throw responseError("Health payload is missing poll detail.", "SchemaError");
+          }
+          if (authenticatedDetail) {
+            Object.values(health.polls).forEach((poll) => {
+              if (!isRecord(poll) || (poll.per_market != null && !isRecord(poll.per_market))) {
+                throw responseError("Health payload contains an invalid poll record.", "SchemaError");
+              }
+              if (poll.finished_at != null && !Number.isFinite(timestampMs(poll.finished_at))) {
+                throw responseError("Health payload contains an invalid poll timestamp.", "SchemaError");
+              }
+            });
+          }
           const age = health.newest_poll_age_seconds;
           if (age !== null && (typeof age !== "number" || !Number.isFinite(age) || age < 0)) {
             throw responseError("Health payload has an invalid poll age.", "SchemaError");
           }
-          for (const key of ["poll_interval_seconds", "max_odds_age_seconds", "poll_max_age_seconds"]) {
+          const requiredPositive = authenticatedDetail
+            ? ["poll_interval_seconds", "max_odds_age_seconds", "poll_max_age_seconds"]
+            : ["max_odds_age_seconds", "poll_max_age_seconds"];
+          for (const key of requiredPositive) {
             if (typeof health[key] !== "number" || !Number.isFinite(health[key]) || health[key] <= 0) {
               throw responseError("Health payload has an invalid " + key + ".", "SchemaError");
             }
           }
-          for (const key of ["value_min_edge", "value_volume_min_edge"]) {
-            if (typeof health[key] !== "number" || !Number.isFinite(health[key]) || health[key] < 0) {
-              throw responseError("Health payload has an invalid " + key + ".", "SchemaError");
+          if (authenticatedDetail) {
+            for (const key of ["value_min_edge", "value_volume_min_edge"]) {
+              if (typeof health[key] !== "number" || !Number.isFinite(health[key]) || health[key] < 0) {
+                throw responseError("Health payload has an invalid " + key + ".", "SchemaError");
+              }
             }
           }
           return health;

@@ -667,8 +667,17 @@ def test_response_deadline_covers_streamed_body_and_caps_json_size() -> None:
 def test_health_contract_and_cold_start_fail_closed() -> None:
     text = _text()
     assert "function validateHealthPayload" in text
-    assert 'httpStatus === 200 && health.status !== "ok"' in text
+    # 2026-08-02: backend emits ok|partial on 200 and degraded on 503; the
+    # validator must accept "partial" and the redacted anonymous body while
+    # still failing closed on status/HTTP disagreement (behavioral coverage
+    # in tests/test_dashboard_health_validator.py).
+    assert 'httpStatus === 200 && health.status === "degraded"' in text
     assert 'httpStatus === 503 && health.status !== "degraded"' in text
+    assert (
+        'health.status !== "ok" && health.status !== "partial" && health.status !== "degraded"'
+        in text
+    )
+    assert "typeof health.has_completed_poll" in text
     assert 'health.mode !== "picks-only"' in text
     assert "function healthHasCompletedPoll" in text
     assert "finishedAt <= Date.now()" in text
