@@ -1093,6 +1093,14 @@ def _is_set_handicap_market_type(key: str) -> bool:
 
 
 def _is_team_total_market_type(key: str) -> bool:
+    # Unit guard (live-feed verified 2026-08-02): "Total Away Corners" /
+    # "Total Home Team Cards" substring-match the team-total vocabulary below
+    # but are NOT goal-unit markets — mapping them here would merge a corners
+    # 4.5 line into the goals team_totals_4_5 devig group. Reject the same
+    # non-goal terms the spread/total classifiers reject; the markets then
+    # flow to the sharp-anchored OTHER capture path (or are dropped).
+    if any(term in key for term in _EXCLUDED_PLAYER_PROP_TERMS):
+        return False
     return any(
         term in key
         for term in (

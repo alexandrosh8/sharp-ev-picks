@@ -104,6 +104,75 @@ def test_set_and_game_handicap_same_line_never_share_a_devig_key() -> None:
     assert set_result[1] != game_result[1]
 
 
+# --- corners/cards leak into the goals TEAM_TOTALS namespace (unit collision) --
+# "Total Away Corners" / "Total Home Team Cards" substring-match the
+# "total away"/"total home" team-total vocabulary, so a corners 4.5 line and a
+# goals 4.5 line both slugged to team_totals_4_5 — one devig group mixing two
+# units. Fail-closed fix: the team-total classifier rejects the same
+# _EXCLUDED_PLAYER_PROP_TERMS the spread/total classifiers already reject; the
+# markets flow to the sharp-anchored OTHER capture path instead.
+
+
+@pytest.mark.parametrize(
+    "market_type",
+    [
+        "Total Home Corners",
+        "Total Away Corners",
+        "Total Home Team Cards",
+        "Total Away Team Cards",
+        "Total Home Bookings",
+    ],
+)
+def test_corners_and_cards_never_map_to_goals_team_totals(market_type: str) -> None:
+    from app.ingestion.oddschecker import _market_for_type
+
+    assert _market_for_type(market_type, "4.5") is None
+
+
+def test_goal_team_totals_vocabulary_is_untouched() -> None:
+    # Genuine goal-unit team totals must keep the EXACT historical detail —
+    # renaming them would orphan every already-stamped team_totals_* pick.
+    from app.ingestion.oddschecker import _market_for_type
+
+    assert _market_for_type("Total Home Goals", "4.5") == (Market.TEAM_TOTALS, "team_totals_4_5")
+    assert _market_for_type("Total Away Goals", "1.5") == (Market.TEAM_TOTALS, "team_totals_1_5")
+    assert _market_for_type("Home Team Total", "2.5") == (Market.TEAM_TOTALS, "team_totals_2_5")
+
+
+def test_home_corners_flow_to_sharp_anchored_other_capture() -> None:
+    # Rejected from TEAM_TOTALS, a team-corners market takes the existing
+    # OTHER route: captured with an oc_ detail when Betfair anchors it,
+    # dropped entirely otherwise.
+    directory = EventDirectory()
+    payload = {
+        "subeventId": 7001,
+        "subeventName": "Arsenal vs Chelsea",
+        "eventName": "Premier League Matches",
+        "marketTypeName": "Total Home Corners",
+        "bets": [{"betId": 1, "betName": "Over", "line": "4.5"}],
+        "odds": [
+            {"betId": 1, "bookmakerCode": "BF", "oddsDecimal": 1.9, "status": "ACTIVE"},
+            {"betId": 1, "bookmakerCode": "WH", "oddsDecimal": 1.85, "status": "ACTIVE"},
+        ],
+    }
+
+    dropped = parse_market_api_payloads(
+        [payload], url="https://www.oddschecker.com/football/x/y/winner", directory=directory
+    )
+    assert dropped == []  # no TEAM_TOTALS snapshots, and OTHER is opt-in
+
+    captured = parse_market_api_payloads(
+        [payload],
+        url="https://www.oddschecker.com/football/x/y/winner",
+        directory=directory,
+        capture_other=True,
+    )
+    assert {(s.market, s.selection, s.market_detail, s.bookmaker) for s in captured} == {
+        (Market.OTHER, "Over", "oc_total_home_corners_4_5", "Betfair Exchange"),
+        (Market.OTHER, "Over", "oc_total_home_corners_4_5", "William Hill"),
+    }
+
+
 def test_other_market_detail_preserves_identity_beyond_legacy_64_chars() -> None:
     prefix = "long capture market " + "x" * 80
     first = _other_market_detail(f"{prefix} alpha")
