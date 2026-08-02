@@ -1968,14 +1968,19 @@ def _mk_poll(
     age_seconds: float | None = 60.0,
     degraded: bool = False,
     consecutive: int | None = None,
+    state: str | None = None,
 ) -> dict[str, Any]:
-    """Completed poll record; age_seconds=None => no finished_at at all."""
+    """Completed poll record; age_seconds=None => no finished_at at all.
+
+    ``state`` defaults to "failed" when degraded (starvation-class flavor,
+    matching record_poll_failure) — pass state="completed" to build the SOFT
+    flavor (_record_poll's completed-but-incomplete-coverage cycle)."""
     poll: dict[str, Any] = {
         "finished_at": (
             (now - timedelta(seconds=age_seconds)).isoformat() if age_seconds is not None else None
         ),
         "in_progress": False,
-        "state": "failed" if degraded else "completed",
+        "state": state if state is not None else ("failed" if degraded else "completed"),
         "degraded": degraded,
     }
     if consecutive is not None:
@@ -2082,6 +2087,113 @@ _HEALTH_TABLE: list[tuple[str, dict[str, dict[str, Any]], str, int]] = [
         "partial",
         200,
     ),
+    # --- SOFT-vs-STARVATION split (2026-08-02): all-sports SOFT degradation
+    # (cycles completing, coverage incomplete — provider challenge storm) with
+    # a fresh newest poll reads "partial"/200; any starvation-class reason in
+    # the mix keeps the hard degraded/503 (fail-closed).
+    (
+        "all_sports_soft_degraded_fresh_partial",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed"),
+            "basketball": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed"),
+        },
+        "partial",
+        200,
+    ),
+    (
+        "single_sport_soft_degraded_fresh_partial",
+        {"soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed")},
+        "partial",
+        200,
+    ),
+    (
+        # DECISION pin: soft reasons never hard-escalate on the consecutive-run
+        # counter — a week-long challenge storm with proven-fresh capture stays
+        # "partial" (true starvation would flip the reason to stale_cycle/hard
+        # within one freshness ceiling anyway).
+        "soft_degraded_long_run_stays_partial",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=7, state="completed"),
+            "basketball": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=7, state="completed"),
+        },
+        "partial",
+        200,
+    ),
+    (
+        # Mixed soft + failed-cycle: fail-closed, hard 503.
+        "mixed_soft_plus_failed_cycle_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed"),
+            "basketball": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1),  # state=failed
+        },
+        "degraded",
+        503,
+    ),
+    (
+        # Mixed soft + stale sibling past the ceiling: fail-closed, hard 503.
+        "mixed_soft_plus_stale_cycle_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed"),
+            "basketball": _mk_poll(_HEALTH_NOW, age_seconds=2000.0),
+        },
+        "degraded",
+        503,
+    ),
+    (
+        # Starvation-class hysteresis is PRESERVED: >=3 consecutive degraded
+        # cycles on a failed-state sport hard-escalates even mid-storm.
+        "mixed_soft_plus_failed_hysteresis_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed"),
+            "basketball": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=3),  # state=failed
+        },
+        "degraded",
+        503,
+    ),
+    (
+        # Mid-sweep: one sport's in-progress heartbeat (within budget) carries
+        # the prior soft cycle's degraded flag (_publish_poll_started keeps it)
+        # — the aggregate must NOT flap back to 503 while the sweep runs.
+        "all_soft_with_in_budget_active_sibling_stays_partial",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed"),
+            "basketball": {
+                "started_at": (_HEALTH_NOW - timedelta(seconds=120)).isoformat(),
+                "finished_at": (_HEALTH_NOW - timedelta(seconds=400)).isoformat(),
+                "in_progress": True,
+                "state": "in_progress",
+                "degraded": True,  # carried over from the prior soft cycle
+                "consecutive_degraded": 1,
+            },
+        },
+        "partial",
+        200,
+    ),
+    (
+        # An in-progress cycle OVER its budget is starvation-class even when
+        # flagged degraded — the over-budget verdict wins (hard).
+        "all_soft_with_over_budget_active_sibling_degraded",
+        {
+            "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed"),
+            "basketball": {
+                "started_at": (_HEALTH_NOW - timedelta(seconds=901)).isoformat(),
+                "in_progress": True,
+                "state": "in_progress",
+                "degraded": True,
+                "consecutive_degraded": 1,
+            },
+        },
+        "degraded",
+        503,
+    ),
+    (
+        # Degraded flag WITHOUT a positive state=="completed" verdict is NOT
+        # proven soft: unknown/missing state stays hard (allowlist, fail-closed).
+        "soft_flag_without_completed_state_degraded",
+        {"soccer": {"finished_at": _HEALTH_NOW.isoformat(), "degraded": True}},
+        "degraded",
+        503,
+    ),
 ]
 
 
@@ -2160,6 +2272,131 @@ def test_health_endpoint_partial_anonymous_has_status_but_no_detail(
         assert body["status"] == "partial"
         assert "poll_health_by_sport" not in body
         assert "polls" not in body
+    finally:
+        LAST_POLL.clear()
+
+
+def test_soft_reason_allowlist_is_fail_closed() -> None:
+    """Soft classification is an ALLOWLIST: unknown/unclassified reasons —
+    including any new degradation path added upstream — are NEVER soft."""
+    from app.api.routes import _is_soft_degraded_reason
+
+    assert _is_soft_degraded_reason("degraded_cycle") is True
+    assert _is_soft_degraded_reason("active_cycle_prior_degraded") is True
+    for hard_reason in (
+        "stale_cycle",
+        "failed_cycle",
+        "invalid_finished_at",
+        "future_finished_at",
+        "invalid_started_at",
+        "future_started_at",
+        "active_cycle_degraded",
+        "brand_new_unclassified_reason",
+        "",
+    ):
+        assert _is_soft_degraded_reason(hard_reason) is False, hard_reason
+    assert _is_soft_degraded_reason(None) is False
+
+
+def test_soft_and_failed_cycles_get_distinct_breakdown_reasons() -> None:
+    """The per-sport reason splits completed-but-incomplete ("degraded_cycle",
+    soft) from failed/unknown-state ("failed_cycle", hard) explicitly."""
+    from app.api.routes import _poll_health
+
+    polls = {
+        "soccer": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1, state="completed"),
+        "basketball": _mk_poll(_HEALTH_NOW, degraded=True, consecutive=1),  # state=failed
+    }
+    _status, _http, _age, breakdown = _poll_health(
+        polls,
+        _HEALTH_NOW,
+        300,
+        expected_sport_count=2,
+        cycle_timeout_seconds=900,
+    )
+    assert breakdown["soccer"]["reason"] == "degraded_cycle"
+    assert breakdown["basketball"]["reason"] == "failed_cycle"
+
+
+def test_health_endpoint_all_sports_soft_degraded_serves_200_partial() -> None:
+    """PIN (2026-08-02 challenge storm): all sports soft-degraded with fresh
+    capture serves HTTP 200 "partial" — the dashboard already renders
+    "partial" as untrusted/coverage-degraded (app.js validator, c918d28)."""
+    from app.pipeline import LAST_POLL
+
+    now = datetime.now(tz=UTC)
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = _mk_poll(now, degraded=True, consecutive=2, state="completed")
+    LAST_POLL["basketball"] = _mk_poll(now, degraded=True, consecutive=2, state="completed")
+    try:
+        resp = TestClient(make_app()).get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "partial"
+        assert body["poll_health_by_sport"]["soccer"]["reason"] == "degraded_cycle"
+    finally:
+        LAST_POLL.clear()
+
+
+def _ready_app_with_healthy_dependencies() -> FastAPI:
+    """Router app whose DB/Redis/scheduler/exposure probes all pass, so /ready
+    reflects ONLY the polls check."""
+    from app.api import routes
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+        async def execute(self, statement):  # type: ignore[no-untyped-def]
+            return None
+
+    class _Redis:
+        async def ping(self) -> bool:
+            return True
+
+    routes._READINESS_CACHE.clear()
+    routes._READINESS_LOCKS.clear()
+    app = make_app()
+    app.state.exposure_seeded = True
+    app.state.scheduler = SimpleNamespace(running=True)
+    app.state.expected_poll_sports = ()
+    app.state.session_factory = _Session
+    app.state.redis = _Redis()
+    return app
+
+
+def test_ready_polls_check_passes_under_all_soft_storm() -> None:
+    """Readiness's polls check accepts "partial" — an all-sports SOFT storm
+    (reclassified partial/200) must not 503 /ready and invite restart pressure.
+    The check itself is NOT weakened: hard "degraded" still fails below."""
+    from app.pipeline import LAST_POLL
+
+    now = datetime.now(tz=UTC)
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = _mk_poll(now, degraded=True, consecutive=1, state="completed")
+    LAST_POLL["basketball"] = _mk_poll(now, degraded=True, consecutive=1, state="completed")
+    try:
+        response = TestClient(_ready_app_with_healthy_dependencies()).get("/ready")
+        assert response.status_code == 200
+        assert response.json()["checks"]["polls"] is True
+    finally:
+        LAST_POLL.clear()
+
+
+def test_ready_polls_check_fails_under_starvation() -> None:
+    from app.pipeline import LAST_POLL
+
+    now = datetime.now(tz=UTC)
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = _mk_poll(now, degraded=True, consecutive=1)  # state=failed
+    LAST_POLL["basketball"] = _mk_poll(now, degraded=True, consecutive=1)  # state=failed
+    try:
+        response = TestClient(_ready_app_with_healthy_dependencies()).get("/ready")
+        assert response.status_code == 503
+        assert response.json()["checks"]["polls"] is False
     finally:
         LAST_POLL.clear()
 

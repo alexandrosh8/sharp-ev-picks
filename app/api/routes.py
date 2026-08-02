@@ -550,6 +550,36 @@ def _poll_consecutive_degraded(poll: Mapping[str, Any]) -> int:
         return 0
 
 
+#: SOFT-vs-STARVATION reason split (operator-approved 2026-08-02, re-raised by
+#: the 2026-07-26 audit "over-strict formula x CF storm" and the 2026-08-02
+#: challenge storm that hard-503'd /health for an hour at 4.4k snapshots/30min).
+#: ALLOWLIST of per-sport degradation reasons that are SOFT: the cycle engine
+#: is PROVEN alive (completed cycle / in-budget heartbeat, fresh timestamps)
+#: and only COVERAGE is degraded (provider challenges -> incomplete cycle).
+#: Deliberately an allowlist, never a default-soft catchall: any reason not
+#: listed here — including new/unknown ones added upstream — stays hard/
+#: degraded (fail-closed).
+#: - "degraded_cycle": state=="completed" cycle flagged incomplete by
+#:   _record_poll (listed_matches_without_odds / source_incomplete /
+#:   stale_drop_ratio) with a fresh finished_at.
+#: - "active_cycle_prior_degraded": valid in-budget in-progress heartbeat
+#:   whose record carries the PRIOR cycle's degraded flag
+#:   (_publish_poll_started keeps it) — without this, an all-soft storm would
+#:   flap back to 503 every time the sequential sweep has a cycle in flight.
+_SOFT_DEGRADED_POLL_REASONS: frozenset[str] = frozenset(
+    {"degraded_cycle", "active_cycle_prior_degraded"}
+)
+
+
+def _is_soft_degraded_reason(reason: str | None) -> bool:
+    """True only for allowlisted soft/incomplete-coverage reasons.
+
+    Unknown or unclassified reasons are NEVER soft (fail-closed): a new
+    degradation path reads hard/degraded until deliberately classified above.
+    """
+    return reason in _SOFT_DEGRADED_POLL_REASONS
+
+
 def _poll_health(
     polls: Mapping[str, Mapping[str, Any]],
     now: datetime,
@@ -568,10 +598,20 @@ def _poll_health(
     - SOME (not all) sports degraded/stale, each below the hysteresis threshold
       -> "partial"/200: capture is still flowing, so a single sport's bad latest
       cycle (e.g. one OddsChecker storm) must not page as a fleet outage.
+    - ALL sports degraded but every reason is allowlisted SOFT
+      (_SOFT_DEGRADED_POLL_REASONS: cycle completed yet flagged incomplete /
+      in-budget heartbeat carrying the prior soft flag) AND the newest
+      completed poll is inside the freshness ceiling -> "partial"/200: a
+      fleet-wide provider challenge storm degrades QUALITY, not LIVENESS.
+      PICK-SAFETY INVARIANT: this loosens no gate — picks are independently
+      withheld by the pipeline's incomplete-cycle gating (source_complete /
+      degraded in app/pipeline.py) and the dashboard renders "partial" as
+      untrusted/coverage-degraded; /health only observes.
     - TRUE starvation stays a hard degraded/503: newest completed poll older
-      than the ceiling, invalid/missing/future timestamps, no completed poll at
-      all, ALL sports degraded, or ANY sport with
-      >= HEALTH_CONSECUTIVE_DEGRADED_THRESHOLD consecutive degraded cycles.
+      than the ceiling, invalid/missing/future timestamps, no completed poll
+      at all, ALL sports degraded with ANY starvation-class (non-allowlisted)
+      reason, or ANY sport with >= HEALTH_CONSECUTIVE_DEGRADED_THRESHOLD
+      consecutive degraded cycles on a starvation-class reason.
 
     ``per_sport_breakdown`` maps sport -> {degraded, consecutive_degraded,
     reason} and is for the AUTHENTICATED /health payload only — the anonymous
@@ -606,13 +646,17 @@ def _poll_health(
                 if active_age < -60.0:
                     sport_degraded, hard_degraded = True, True
                     reason = "future_started_at"
-                elif (
-                    active_age > active_budget
-                    or bool(poll.get("degraded"))
-                    or poll.get("state") == "failed"
-                ):
+                elif active_age > active_budget or poll.get("state") == "failed":
                     sport_degraded = True
                     reason = "active_cycle_degraded"
+                elif bool(poll.get("degraded")):
+                    # In-budget heartbeat carrying the PREVIOUS cycle's
+                    # degraded flag (_publish_poll_started keeps it): the
+                    # engine is proven live, so this is the SOFT class — any
+                    # hard evidence resurfaces the moment this cycle completes
+                    # degraded/failed or blows its budget.
+                    sport_degraded = True
+                    reason = "active_cycle_prior_degraded"
             # A valid in-progress heartbeat supersedes its previous completed
             # timestamp for this sport; the full-sweep ceiling covers siblings.
         else:
@@ -630,18 +674,52 @@ def _poll_health(
                     reason = "stale_cycle"
                 elif bool(poll.get("degraded")):
                     sport_degraded = True
-                    reason = "degraded_cycle"
+                    # SOFT only on the loader's POSITIVE completed-cycle
+                    # verdict; a failed or unknown/missing state is not
+                    # proven-completed and stays hard (fail-closed).
+                    reason = (
+                        "degraded_cycle" if poll.get("state") == "completed" else "failed_cycle"
+                    )
         consecutive = _poll_consecutive_degraded(poll)
-        if sport_degraded and consecutive >= HEALTH_CONSECUTIVE_DEGRADED_THRESHOLD:
-            hard_degraded = True  # hysteresis tripped: a RUN, not a blip
+        if (
+            sport_degraded
+            and consecutive >= HEALTH_CONSECUTIVE_DEGRADED_THRESHOLD
+            and not _is_soft_degraded_reason(reason)
+        ):
+            # Hysteresis tripped on a STARVATION-CLASS reason: a RUN, not a
+            # blip. DECISION (2026-08-02): soft reasons never hard-escalate on
+            # run length — while capture is proven fresh, a long challenge
+            # storm stays "partial" (no 503 restart pressure); if capture
+            # actually stops, the reason flips to stale_cycle / no-poll (hard)
+            # within one freshness ceiling, so a soft run cannot mask true
+            # starvation for longer than the ceiling.
+            hard_degraded = True
         breakdown[sport] = {
             "degraded": sport_degraded,
             "consecutive_degraded": consecutive,
             "reason": reason,
         }
     degraded_sports = sum(1 for entry in breakdown.values() if entry["degraded"])
-    if degraded_sports == len(breakdown):
-        hard_degraded = hard_degraded or degraded_sports > 0  # ALL sports degraded
+    if 0 < degraded_sports == len(breakdown):
+        # ALL sports degraded. SOFT-vs-STARVATION split (2026-08-02): when
+        # every degraded sport's reason is allowlisted soft AND the newest
+        # completed poll is inside the freshness ceiling, capture is proven
+        # flowing — a fleet-wide challenge storm reads "partial"/200, not a
+        # hard 503 (which fails /ready's polls check and invites restart
+        # pressure for a non-outage). Any starvation-class reason in the mix,
+        # or a stale/absent newest poll, stays hard degraded/503 (fail-closed).
+        # PICK-SAFETY INVARIANT: no gate is loosened here — picks are
+        # independently withheld by the pipeline's incomplete-cycle gating
+        # (source_complete / degraded in app/pipeline.py), and the dashboard
+        # renders "partial" as untrusted/coverage-degraded. /health observes.
+        all_soft = all(
+            _is_soft_degraded_reason(entry["reason"])
+            for entry in breakdown.values()
+            if entry["degraded"]
+        )
+        newest_is_fresh = newest is not None and (now - newest).total_seconds() <= ceiling
+        if not (all_soft and newest_is_fresh):
+            hard_degraded = True
     if newest is None:
         if active_cycle and not hard_degraded and degraded_sports == 0:
             return "ok", 200, None, breakdown
@@ -767,14 +845,24 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
     """Aggregate health. ``status`` is one of:
 
     - "ok" (200): every recorded poll cycle fresh and clean.
-    - "partial" (200): SOME sports' latest cycle degraded/stale below the
-      hysteresis threshold while capture still flows elsewhere — NOT a fleet
-      outage. Consumers (dashboard ``dataIsStale()``) must NOT treat
-      "partial" as "ok": only ``status == "ok"`` means fully healthy; the
-      affected sports ride in ``poll_health_by_sport`` (authenticated only).
-    - "degraded" (503): true starvation — stale/absent/invalid newest poll,
-      all sports degraded, >=3 consecutive degraded cycles on any sport, or a
-      failed dependency/readiness probe.
+    - "partial" (200): coverage degraded, capture alive. Either (a) SOME (not
+      all) sports' latest cycle degraded/stale below the hysteresis threshold
+      while capture flows elsewhere, or (b) ALL sports degraded but EVERY
+      reason is allowlisted SOFT (``_SOFT_DEGRADED_POLL_REASONS``: cycle
+      completed yet flagged incomplete — e.g. a provider challenge storm — or
+      an in-budget heartbeat carrying the prior soft flag) AND the newest
+      completed poll is inside ``poll_max_age_seconds``. NOT a fleet outage.
+      Consumers (dashboard ``dataIsStale()``) must NOT treat "partial" as
+      "ok": only ``status == "ok"`` means fully healthy; the affected sports
+      ride in ``poll_health_by_sport`` (authenticated only). Soft reasons
+      never hard-escalate on run length while capture stays proven-fresh
+      (2026-08-02 decision — picks are independently withheld by the
+      pipeline's incomplete-cycle gating, so no pick-safety regression).
+    - "degraded" (503): true starvation or invalid state — no completed poll,
+      stale/absent/invalid/future newest poll, all sports degraded with ANY
+      starvation-class (non-allowlisted) reason, >=3 consecutive degraded
+      cycles on any sport for a starvation-class reason, or a failed
+      dependency/readiness probe.
     """
     from app.config import get_settings
     from app.ingestion.proxy_health import get_registry as _get_proxy_registry
