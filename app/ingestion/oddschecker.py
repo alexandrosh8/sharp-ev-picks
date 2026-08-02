@@ -113,11 +113,15 @@ _EXCLUDED_PLAYER_PROP_TERMS = (
 )
 
 # The sharp anchor this project trusts (app/edge/value.py SHARP_BOOKS). On
-# OddsChecker, Betfair Exchange is bookmaker code "OE". A capture-only ("OTHER")
-# market is emitted ONLY when it carries a quote from one of these — so props /
-# period markets are captured as odds history solely when a sharp exchange
-# actually prices them, never soft-book-only noise.
-_SHARP_ANCHOR_BOOK_CODES: frozenset[str] = frozenset({"OE"})
+# OddsChecker, Betfair Exchange is bookmaker code "BF" (live-feed verified
+# 2026-08-02 against the read-only Betfair Exchange API — OddsChecker RECYCLED
+# the codes; "OE" is now the traditional book 10bet). This static set is the
+# FALLBACK only: when live ``bestOdds.bookmakers`` entities are available the
+# anchor codes derive from them (see ``_sharp_anchor_codes``). A capture-only
+# ("OTHER") market is emitted ONLY when it carries a quote from one of these —
+# so props / period markets are captured as odds history solely when a sharp
+# exchange actually prices them, never soft-book-only noise.
+_SHARP_ANCHOR_BOOK_CODES: frozenset[str] = frozenset({"BF"})
 
 # Markets that are DELIBERATELY mispriced (boosted / hand-built) — never capture
 # them, even under OTHER: feeding boosted odds anywhere near devig is poison.
@@ -133,16 +137,23 @@ _EXCLUDED_OTHER_MARKET_TERMS: tuple[str, ...] = (
     "same game",
 )
 
+# Static fallbacks — used ONLY when no live ``bookmakers`` entities are in
+# hand. Corrected 2026-08-02 from the live entities feed (cross-checked against
+# the read-only Betfair Exchange API): OddsChecker RECYCLED the codes — "BF" is
+# the Betfair EXCHANGE (selection ids embed real Betfair market ids) and "OE"
+# is the traditional book 10bet. The previous inverted mapping persisted 10bet
+# prices as "Betfair Exchange" (netting phantom 5% exchange commission) and the
+# real exchange as "Betfair Sportsbook".
 _BOOKMAKER_FALLBACKS: Mapping[str, str] = {
     "B3": "bet365",
-    "BF": "Betfair Sportsbook",
+    "BF": "Betfair Exchange",
     "BY": "BOYLE Sports",
     "CE": "Coral",
     "FR": "Betfred",
     "KN": "BetMGM UK",
     "LD": "Ladbrokes",
     "MA": "Matchbook",
-    "OE": "Betfair Exchange",
+    "OE": "10bet",
     "PP": "Paddy Power",
     "SK": "Skybet",
     "UN": "Unibet",
@@ -981,8 +992,32 @@ def _other_market_detail(market_type: str, line: Any = None) -> str:
     )
 
 
-def _odds_have_sharp_anchor(raw_odds: Sequence[Any]) -> bool:
-    """True when any LIVE odd carries a sharp-anchor book quote (active OE).
+def _sharp_anchor_codes(bookmaker_entities: Mapping[str, Any]) -> frozenset[str]:
+    """Sharp-anchor (Betfair exchange) codes derived from LIVE feed entities.
+
+    OddsChecker recycles bookmaker codes (2026-08-02: "OE" flipped from the
+    exchange to 10bet while "BF" became the exchange), so whenever the page's
+    ``bestOdds.bookmakers`` entities are in hand the anchor set derives from
+    them: ``bookmakerType == "exchange"`` AND a name containing "betfair".
+    Without entities (or none matching), the corrected static fallback set
+    applies."""
+    derived: set[str] = set()
+    for code, raw in bookmaker_entities.items():
+        if not isinstance(raw, Mapping):
+            continue
+        if str(raw.get("bookmakerType") or "").strip().lower() != "exchange":
+            continue
+        name = raw.get("bookmakerName") or raw.get("name")
+        if isinstance(name, str) and "betfair" in name.lower():
+            derived.add(str(code))
+    return frozenset(derived) if derived else _SHARP_ANCHOR_BOOK_CODES
+
+
+def _odds_have_sharp_anchor(
+    raw_odds: Sequence[Any],
+    anchor_codes: frozenset[str] = _SHARP_ANCHOR_BOOK_CODES,
+) -> bool:
+    """True when any LIVE odd carries a sharp-anchor book quote.
 
     A SUSPENDED or expired exchange quote is not a live anchor: the OTHER-capture
     gate must require the sharp book to actually be pricing the market now, not
@@ -990,7 +1025,7 @@ def _odds_have_sharp_anchor(raw_odds: Sequence[Any]) -> bool:
     for odd in raw_odds:
         if not isinstance(odd, Mapping):
             continue
-        if str(odd.get("bookmakerCode") or "") not in _SHARP_ANCHOR_BOOK_CODES:
+        if str(odd.get("bookmakerCode") or "") not in anchor_codes:
             continue
         if str(odd.get("status") or "").upper() != "ACTIVE":
             continue
@@ -1146,23 +1181,72 @@ def _bookmaker_name(code: str, bookmaker_entities: Mapping[str, Any]) -> str | N
         name = raw.get("bookmakerName") or raw.get("name")
         if isinstance(name, str) and name.strip():
             cleaned = name.strip()
-            # M863 (audit 2026-07-10): the feed sometimes labels code BF with the
-            # bare display name "Betfair", persisting the SAME sportsbook under
-            # two bookmaker names — and edge/EV maps bare "betfair" to 5%
-            # EXCHANGE commission, mispricing those rows. The ambiguous bare
-            # name resolves through the code's canonical fallback (BF ->
-            # "Betfair Sportsbook", OE -> "Betfair Exchange"); every other
-            # display name passes through unchanged.
+            # M863 (audit 2026-07-10, revised 2026-08-02): the feed labels the
+            # exchange with the bare display name "Betfair" — and edge/EV maps
+            # bare "betfair" to 5% EXCHANGE commission, mispricing sportsbook
+            # rows. The live entity's ``bookmakerType`` is authoritative
+            # (OddsChecker recycles CODES, so the earlier code-keyed fallback
+            # branch mislabelled the true exchange as Sportsbook): "exchange"
+            # -> "Betfair Exchange", "traditional" -> "Betfair Sportsbook".
+            # Only a bare brand WITHOUT a usable type falls through to the
+            # audited static map; every other display name passes unchanged.
             if cleaned.lower() == "betfair":
-                # The bare brand is ambiguous: BF is the sportsbook while OE
-                # is the exchange and only the latter carries commission. An
-                # unknown code cannot be priced safely as either venue.
+                bookmaker_type = str(raw.get("bookmakerType") or "").strip().lower()
+                if bookmaker_type == "exchange":
+                    return "Betfair Exchange"
+                if bookmaker_type == "traditional":
+                    return "Betfair Sportsbook"
+                # The bare brand with no live type is ambiguous: an unknown
+                # code cannot be priced safely as either venue.
                 return _BOOKMAKER_FALLBACKS.get(code)
             return cleaned
     # Raw provider codes are not stable bookmaker identities. If neither the
     # payload nor our audited mapping can name the code, drop that quote rather
     # than persist a second identity that can carry the wrong commission model.
     return _BOOKMAKER_FALLBACKS.get(code)
+
+
+def bookmaker_entity_fallback_drift(
+    bookmaker_entities: Mapping[str, Any],
+) -> tuple[tuple[str, str, str], ...]:
+    """``(code, live_name, fallback_name)`` per code whose LIVE entity name
+    contradicts the static fallback map — the drift alarm's evidence.
+
+    OddsChecker recycles bookmaker codes (2026-08-02: OE/BF flipped), so a
+    contradiction means the static map is stale and any entity-less path would
+    mislabel books (and misprice exchange commission). Names/codes only —
+    callers must never log URLs or payload bodies with this."""
+    drift: list[tuple[str, str, str]] = []
+    for code, expected in _BOOKMAKER_FALLBACKS.items():
+        if not isinstance(bookmaker_entities.get(code), Mapping):
+            continue
+        resolved = _bookmaker_name(code, bookmaker_entities)
+        if resolved is None or resolved.strip().lower() == expected.strip().lower():
+            continue
+        drift.append((code, resolved, expected))
+    return tuple(sorted(drift))
+
+
+def match_page_bookmaker_entities(
+    html: str, *, payloads: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """The match page's ``bestOdds.bookmakers`` entities map, or ``{}``.
+
+    Threaded into ``parse_market_api_payloads`` because the all-odds API
+    payloads carry NO ``bookmakers`` key (live-verified 2026-08-02) — without
+    the page entities every code resolves via the static fallback map."""
+    page_payloads = payloads if payloads is not None else hypernova_payloads(html)
+    try:
+        header = _find_header_payload(html, payloads=page_payloads)
+        payload = _find_match_payload(
+            html, prefer_subevent_id=_header_subevent_id(header), payloads=page_payloads
+        )
+    except OddsCheckerParseError:
+        return {}
+    best = payload.get("bestOdds")
+    if not isinstance(best, Mapping):
+        return {}
+    return _entity_map(best.get("bookmakers"))
 
 
 def _team_names(best: Mapping[str, Any], header: Mapping[str, Any]) -> tuple[str, str]:
@@ -1490,8 +1574,14 @@ def parse_market_api_payloads(
     capture_only_other: bool = False,
     truncate_on_limit: bool = False,
     max_snapshots: int = MAX_SNAPSHOTS_PER_MATCH,
+    page_bookmaker_entities: Mapping[str, Any] | None = None,
 ) -> list[OddsSnapshotIn]:
     """Parse ``/api/markets/v2/all-odds`` payloads into normalized snapshots.
+
+    ``page_bookmaker_entities`` is the match page's ``bestOdds.bookmakers``
+    entities map (see ``match_page_bookmaker_entities``): the all-odds payloads
+    carry no ``bookmakers`` key, so without it every code resolves via the
+    static fallback map — stale after a provider code recycle (2026-08-02).
 
     With ``capture_other`` (and no ``markets`` filter), unmapped non-boost
     markets that carry a sharp-anchor (Betfair Exchange) quote are captured
@@ -1514,12 +1604,19 @@ def parse_market_api_payloads(
             continue
         if not isinstance(raw_odds, Sequence) or isinstance(raw_odds, (str, bytes)):
             continue
-        # Sharp-anchor gate for capture-only OTHER markets (computed once/market).
+        # Bookmaker entities: prefer the payload's own map, else the match
+        # page's threaded entities, so codes resolve to the LIVE feed's names
+        # (the all-odds payloads carry no bookmakers key); {} = fallback map.
+        bm_entities: Mapping[str, Any] = _entity_map(market_payload.get("bookmakers"))
+        if not bm_entities and page_bookmaker_entities:
+            bm_entities = page_bookmaker_entities
+        # Sharp-anchor gate for capture-only OTHER markets (computed once/market,
+        # anchor codes derived from the live entities when available).
         other_ok = (
             capture_other
             and wanted is None
             and not _is_boost_market(market_type)
-            and _odds_have_sharp_anchor(raw_odds)
+            and _odds_have_sharp_anchor(raw_odds, _sharp_anchor_codes(bm_entities))
         )
         # Best-of-3 exact-sets bijection (computed once/market from the FULL
         # bet-name set — the market-level proof of format).
@@ -1552,9 +1649,6 @@ def parse_market_api_payloads(
             if not bet_id:
                 continue
             odds_by_bet.setdefault(bet_id, []).append(raw_odd)
-        # Thread the payload's bookmaker entities so off-map book codes resolve to
-        # the feed's canonical name (matches the bestOdds path); {} when absent.
-        bm_entities = _entity_map(market_payload.get("bookmakers"))
         for raw_bet in raw_bets:
             if not isinstance(raw_bet, Mapping):
                 continue
@@ -2154,6 +2248,10 @@ class OddsCheckerLoader:
         # from a provider payload drift that empties the slate.
         self.last_fetch_empty_markets: dict[str, int] = {}
         self._cycle_empty_markets = 0
+        # Bookmaker-code drift alarm latch: one warning per poll cycle when a
+        # page's LIVE bookmakers entities contradict the static fallback map
+        # (OddsChecker recycles codes — 2026-08-02 OE/BF flip). Never silent.
+        self._cycle_bookmaker_drift_warned = False
         # Challenge-storm telemetry for match pages this cycle: pages whose
         # first fetch hit a challenge and took the rotated-session retry, and
         # pages that STILL failed on a challenge afterwards. Failed pages stay
@@ -2275,6 +2373,24 @@ class OddsCheckerLoader:
             raise OddsCheckerSecurityError("match exceeded snapshot ceiling")
         return snapshots
 
+    def _warn_on_bookmaker_code_drift(self, bookmaker_entities: Mapping[str, Any]) -> None:
+        """DRIFT ALARM: one warning per poll cycle when the LIVE bookmakers
+        entities contradict the static fallback map (a provider code recycle,
+        e.g. the 2026-08-02 OE/BF flip). Codes + names only — never URLs,
+        payload bodies, or credentials."""
+        if self._cycle_bookmaker_drift_warned:
+            return
+        drift = bookmaker_entity_fallback_drift(bookmaker_entities)
+        if not drift:
+            return
+        self._cycle_bookmaker_drift_warned = True
+        logger.warning(
+            "oddschecker bookmaker-code drift: live entities contradict static fallbacks: %s",
+            "; ".join(
+                f"{code} live={live!r} fallback={expected!r}" for code, live, expected in drift
+            ),
+        )
+
     async def _parse_modern_or_legacy_match_page(
         self,
         page: OddsCheckerFetchResult,
@@ -2296,6 +2412,12 @@ class OddsCheckerLoader:
         # here (still off-loop) and thread the payload list through; the memo
         # lives only for this call, never across fetches/cycles.
         page_payloads = await asyncio.to_thread(hypernova_payloads, page.html)
+        # The page's LIVE bookmakers entities: threaded into the all-odds parse
+        # (those payloads carry no bookmakers key) and checked against the
+        # static fallback map — a contradiction (code recycle) alarms, never
+        # silently mislabels. Cheap: page_payloads is already parsed.
+        page_bm_entities = match_page_bookmaker_entities(page.html, payloads=page_payloads)
+        self._warn_on_bookmaker_code_drift(page_bm_entities)
         # Fetch mapped, pick-critical markets independently. Optional OTHER
         # capture must never turn a healthy mapped match into an incomplete one.
         mapped_market_ids = await asyncio.to_thread(
@@ -2342,6 +2464,7 @@ class OddsCheckerLoader:
                     now=now,
                     markets=eff_markets,
                     capture_other=False,
+                    page_bookmaker_entities=page_bm_entities,
                 )
             except OddsCheckerError:
                 # Any API failure after the page advertised supported market
@@ -2409,6 +2532,7 @@ class OddsCheckerLoader:
                 capture_only_other=True,
                 truncate_on_limit=True,
                 max_snapshots=remaining,
+                page_bookmaker_entities=page_bm_entities,
             )
             optional_snapshots = [
                 snapshot
@@ -2756,6 +2880,7 @@ class OddsCheckerLoader:
         failures = 0
         challenge_failures = 0
         self._cycle_empty_markets = 0
+        self._cycle_bookmaker_drift_warned = False
         snapshot_overflow = False
         optional_truncated = False
         if len(deduped) > MAX_MATCH_URLS_PER_CYCLE:

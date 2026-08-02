@@ -1040,34 +1040,35 @@ class _RouteSession:
 
 
 def test_parse_market_api_capture_other_is_sharp_anchor_gated() -> None:
-    """capture_other persists unmapped markets ONLY when Betfair (OE) prices
-    them, never boosted markets, under Market.OTHER with an oc_<slug> detail."""
+    """capture_other persists unmapped markets ONLY when Betfair (code BF since
+    the 2026-08-02 recycle) prices them, never boosted markets, under
+    Market.OTHER with an oc_<slug> detail."""
     directory = EventDirectory()
     payloads = [
-        {  # unmapped + Betfair Exchange (OE) present -> captured as OTHER
+        {  # unmapped + Betfair Exchange (BF) present -> captured as OTHER
             "subeventId": 7001,
             "subeventName": "Arsenal vs Chelsea",
             "eventName": "Premier League Matches",
             "marketTypeName": "Total Corners",
             "bets": [{"betId": 1, "betName": "Over", "line": "9.5"}],
             "odds": [
-                {"betId": 1, "bookmakerCode": "OE", "oddsDecimal": 1.9, "status": "ACTIVE"},
+                {"betId": 1, "bookmakerCode": "BF", "oddsDecimal": 1.9, "status": "ACTIVE"},
                 {"betId": 1, "bookmakerCode": "WH", "oddsDecimal": 1.85, "status": "ACTIVE"},
             ],
         },
-        {  # unmapped + soft books only (no OE) -> dropped
+        {  # unmapped + soft books only (no BF) -> dropped
             "subeventId": 7001,
             "subeventName": "Arsenal vs Chelsea",
             "marketTypeName": "Anytime Goalscorer",
             "bets": [{"betId": 2, "betName": "Some Player"}],
             "odds": [{"betId": 2, "bookmakerCode": "WH", "oddsDecimal": 3.5, "status": "ACTIVE"}],
         },
-        {  # boosted market, even with OE -> dropped
+        {  # boosted market, even with BF -> dropped
             "subeventId": 7001,
             "subeventName": "Arsenal vs Chelsea",
             "marketTypeName": "Enhanced Win Market",
             "bets": [{"betId": 3, "betName": "Arsenal"}],
-            "odds": [{"betId": 3, "bookmakerCode": "OE", "oddsDecimal": 5.0, "status": "ACTIVE"}],
+            "odds": [{"betId": 3, "bookmakerCode": "BF", "oddsDecimal": 5.0, "status": "ACTIVE"}],
         },
     ]
 
@@ -1103,7 +1104,7 @@ def test_market_api_overflow_is_mapped_fail_closed_but_optional_prefix_bounded()
         "marketTypeName": "Total Corners",
         "bets": [{"betId": 1, "betName": "Over", "line": "9.5"}],
         "odds": [
-            {"betId": 1, "bookmakerCode": "OE", "oddsDecimal": 1.9, "status": "ACTIVE"},
+            {"betId": 1, "bookmakerCode": "BF", "oddsDecimal": 1.9, "status": "ACTIVE"},
             {"betId": 1, "bookmakerCode": "WH", "oddsDecimal": 1.85, "status": "ACTIVE"},
         ],
     }
@@ -1201,7 +1202,7 @@ async def test_optional_market_metadata_cannot_mutate_mapped_event(
         "odds": [
             {
                 "betId": 2,
-                "bookmakerCode": "OE",
+                "bookmakerCode": "BF",
                 "oddsDecimal": 1.9,
                 "status": "ACTIVE",
             }
@@ -1698,26 +1699,28 @@ async def test_gather_snapshots_retries_once_on_timeout(
 
 
 def test_bookmaker_name_disambiguates_bare_betfair_by_code() -> None:
-    """Audit 2026-07-10 (M863): the feed's entity display name for code BF is
-    sometimes the bare 'Betfair', persisting the SAME sportsbook under two
-    names (2,241 live rows) — and effective_odds maps bare 'betfair' to 5%
-    exchange commission, mispricing those rows. The ambiguous display name
-    must resolve through the code's canonical fallback; unambiguous entity
-    names pass through and unnamed unknown codes are rejected."""
+    """Audit 2026-07-10 (M863), REVISED 2026-08-02: the feed labels the
+    exchange with the bare display name 'Betfair' — and effective_odds maps
+    bare 'betfair' to 5% exchange commission. OddsChecker recycles CODES, so
+    the bare brand now disambiguates via the entity's live ``bookmakerType``;
+    only a typeless bare brand falls back to the (corrected) static map.
+    Unambiguous entity names pass through; unknown typeless codes are
+    rejected."""
     from app.ingestion.oddschecker import _bookmaker_name
 
-    assert _bookmaker_name("BF", {"BF": {"bookmakerName": "Betfair"}}) == "Betfair Sportsbook"
-    assert _bookmaker_name("OE", {"OE": {"bookmakerName": "Betfair"}}) == "Betfair Exchange"
+    # typeless bare brand: the corrected fallback map decides (BF = exchange).
+    assert _bookmaker_name("BF", {"BF": {"bookmakerName": "Betfair"}}) == "Betfair Exchange"
+    assert _bookmaker_name("OE", {"OE": {"bookmakerName": "Betfair"}}) == "10bet"
     # unambiguous display names pass through
     assert (
         _bookmaker_name("BF", {"BF": {"bookmakerName": "Betfair Sportsbook"}})
         == "Betfair Sportsbook"
     )
-    # unknown code with the ambiguous brand cannot safely select sportsbook
-    # versus exchange commission semantics.
+    # unknown TYPELESS code with the ambiguous brand cannot safely select
+    # sportsbook versus exchange commission semantics.
     assert _bookmaker_name("ZZ", {"ZZ": {"bookmakerName": "Betfair"}}) is None
-    # fallback path (no entity) unchanged
-    assert _bookmaker_name("BF", {}) == "Betfair Sportsbook"
+    # fallback path (no entity) uses the corrected map
+    assert _bookmaker_name("BF", {}) == "Betfair Exchange"
     # A raw provider code is not a canonical bookmaker identity.
     assert _bookmaker_name("ZZ", {}) is None
 
@@ -2434,3 +2437,240 @@ def test_parse_helpers_reuse_supplied_payloads_without_reparse(
         payloads=payloads,
     )
     assert snapshots
+
+
+# --- 2026-08-02 recycled bookmaker codes (live-feed verified) -----------------
+# Trimmed from the live ``bestOdds.bookmakers.entities`` capture (2026-08-02,
+# cross-checked against the read-only Betfair Exchange API): OddsChecker
+# RECYCLED the codes — "OE" is now the TRADITIONAL book 10bet while "BF" is the
+# Betfair EXCHANGE (its selection ids embed real Betfair market ids).
+_LIVE_BOOKMAKER_ENTITIES: dict[str, object] = {
+    "B3": {"bookmakerType": "traditional", "bookmakerCode": "B3", "bookmakerName": "bet365"},
+    "WH": {
+        "bookmakerType": "traditional",
+        "bookmakerCode": "WH",
+        "bookmakerName": "William Hill",
+    },
+    "OE": {"bookmakerType": "traditional", "bookmakerCode": "OE", "bookmakerName": "10bet"},
+    "BF": {"bookmakerType": "exchange", "bookmakerCode": "BF", "bookmakerName": "Betfair"},
+    "MA": {"bookmakerType": "exchange", "bookmakerCode": "MA", "bookmakerName": "Matchbook"},
+}
+
+
+def test_live_entities_resolve_recycled_codes_and_sharp_anchor_set() -> None:
+    """Entities present: names come from the live feed (OE=10bet, BF=Betfair
+    Exchange via bookmakerType), and the sharp-anchor code set derives {BF}
+    (betfair-named exchange only — Matchbook is exchange but not the anchor)."""
+    from app.ingestion.oddschecker import _bookmaker_name, _sharp_anchor_codes
+
+    assert _bookmaker_name("OE", _LIVE_BOOKMAKER_ENTITIES) == "10bet"
+    assert _bookmaker_name("BF", _LIVE_BOOKMAKER_ENTITIES) == "Betfair Exchange"
+    assert _bookmaker_name("MA", _LIVE_BOOKMAKER_ENTITIES) == "Matchbook"
+    assert _sharp_anchor_codes(_LIVE_BOOKMAKER_ENTITIES) == frozenset({"BF"})
+
+
+def test_bare_betfair_resolves_by_bookmaker_type() -> None:
+    """A bare 'Betfair' display name disambiguates via the entity's live
+    bookmakerType (replaces the 2026-07-10 M863 code-fallback branch, which
+    renamed the true exchange to Sportsbook via the inverted static map)."""
+    from app.ingestion.oddschecker import _bookmaker_name
+
+    exchange = {"BF": {"bookmakerName": "Betfair", "bookmakerType": "exchange"}}
+    assert _bookmaker_name("BF", exchange) == "Betfair Exchange"
+    traditional = {"BF": {"bookmakerName": "Betfair", "bookmakerType": "traditional"}}
+    assert _bookmaker_name("BF", traditional) == "Betfair Sportsbook"
+    # Even an off-map code disambiguates when the live type is present.
+    assert (
+        _bookmaker_name("ZZ", {"ZZ": {"bookmakerName": "Betfair", "bookmakerType": "exchange"}})
+        == "Betfair Exchange"
+    )
+    # Bare brand without a type: only the audited fallback map may resolve it.
+    assert _bookmaker_name("BF", {"BF": {"bookmakerName": "Betfair"}}) == "Betfair Exchange"
+    assert _bookmaker_name("ZZ", {"ZZ": {"bookmakerName": "Betfair"}}) is None
+
+
+def test_corrected_fallbacks_apply_only_without_entities() -> None:
+    from app.ingestion.oddschecker import (
+        _BOOKMAKER_FALLBACKS,
+        _SHARP_ANCHOR_BOOK_CODES,
+        _bookmaker_name,
+        _sharp_anchor_codes,
+    )
+
+    assert _BOOKMAKER_FALLBACKS["BF"] == "Betfair Exchange"
+    assert _BOOKMAKER_FALLBACKS["OE"] == "10bet"
+    assert _bookmaker_name("BF", {}) == "Betfair Exchange"
+    assert _bookmaker_name("OE", {}) == "10bet"
+    assert frozenset({"BF"}) == _SHARP_ANCHOR_BOOK_CODES
+    assert _sharp_anchor_codes({}) == frozenset({"BF"})
+
+
+def test_all_odds_path_resolves_names_from_threaded_page_entities() -> None:
+    """The all-odds API payloads carry NO ``bookmakers`` key (live-verified
+    2026-08-02) — with the match page's entities threaded in, names resolve
+    from the live feed, not the static fallback map."""
+    payloads = [
+        {
+            "subeventId": 7001,
+            "subeventName": "Hibernian vs Motherwell",
+            "eventName": "Scottish Premiership Matches",
+            "marketTypeName": "Win Market",
+            "bets": [{"betId": 1, "betName": "Hibernian"}],
+            "odds": [
+                {"betId": 1, "bookmakerCode": "OE", "oddsDecimal": 2.10, "status": "ACTIVE"},
+                {"betId": 1, "bookmakerCode": "BF", "oddsDecimal": 2.14, "status": "ACTIVE"},
+            ],
+        }
+    ]
+    snapshots = parse_market_api_payloads(
+        payloads,
+        url="https://www.oddschecker.com/football/scottish/hibernian-v-motherwell/winner",
+        directory=EventDirectory(),
+        now=datetime(2026, 8, 2, 10, 0, tzinfo=UTC),
+        page_bookmaker_entities=_LIVE_BOOKMAKER_ENTITIES,
+    )
+    assert {(s.bookmaker, float(s.decimal_odds)) for s in snapshots} == {
+        ("10bet", 2.10),
+        ("Betfair Exchange", 2.14),
+    }
+
+
+def test_other_capture_anchor_gate_derives_from_page_entities() -> None:
+    """With live entities threaded, the OTHER sharp-anchor gate keys on the
+    derived exchange code (BF) — an OE (now 10bet) quote is no anchor."""
+
+    def corners(code: str) -> list[dict[str, object]]:
+        return [
+            {
+                "subeventId": 7001,
+                "subeventName": "Hibernian vs Motherwell",
+                "marketTypeName": "Total Corners",
+                "bets": [{"betId": 1, "betName": "Over", "line": "9.5"}],
+                "odds": [
+                    {"betId": 1, "bookmakerCode": code, "oddsDecimal": 1.9, "status": "ACTIVE"}
+                ],
+            }
+        ]
+
+    url = "https://www.oddschecker.com/football/scottish/hibernian-v-motherwell/winner"
+    anchored = parse_market_api_payloads(
+        corners("BF"),
+        url=url,
+        directory=EventDirectory(),
+        capture_other=True,
+        page_bookmaker_entities=_LIVE_BOOKMAKER_ENTITIES,
+    )
+    assert {(s.market, s.bookmaker) for s in anchored} == {(Market.OTHER, "Betfair Exchange")}
+    soft_only = parse_market_api_payloads(
+        corners("OE"),
+        url=url,
+        directory=EventDirectory(),
+        capture_other=True,
+        page_bookmaker_entities=_LIVE_BOOKMAKER_ENTITIES,
+    )
+    assert soft_only == []
+
+
+def test_bookmaker_entity_fallback_drift_detects_contradictions() -> None:
+    from app.ingestion.oddschecker import bookmaker_entity_fallback_drift
+
+    # The corrected fallback map agrees with the live entities: no drift.
+    assert bookmaker_entity_fallback_drift(_LIVE_BOOKMAKER_ENTITIES) == ()
+    assert bookmaker_entity_fallback_drift({}) == ()
+    # A future re-recycle (OE claiming the exchange again) must be flagged.
+    stale = {"OE": {"bookmakerName": "Betfair", "bookmakerType": "exchange"}}
+    assert bookmaker_entity_fallback_drift(stale) == (("OE", "Betfair Exchange", "10bet"),)
+
+
+def test_drift_alarm_warns_once_per_poll_cycle(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    loader = OddsCheckerLoader(EventDirectory())
+    stale = {"OE": {"bookmakerName": "Betfair", "bookmakerType": "exchange"}}
+    with caplog.at_level(logging.WARNING, logger="app.ingestion.oddschecker"):
+        loader._warn_on_bookmaker_code_drift(stale)
+        loader._warn_on_bookmaker_code_drift(stale)  # same cycle: no second warning
+        loader._warn_on_bookmaker_code_drift({})  # clean entities never warn
+    drift_logs = [r for r in caplog.records if "drift" in r.getMessage()]
+    assert len(drift_logs) == 1
+    message = drift_logs[0].getMessage()
+    assert "OE" in message
+    assert "http" not in message.lower()  # never URLs/secrets — name+code only
+    # A new poll cycle re-arms the alarm (the gather loop resets the flag).
+    loader._cycle_bookmaker_drift_warned = False
+    with caplog.at_level(logging.WARNING, logger="app.ingestion.oddschecker"):
+        loader._warn_on_bookmaker_code_drift(stale)
+    assert len([r for r in caplog.records if "drift" in r.getMessage()]) == 2
+
+
+@pytest.mark.asyncio
+async def test_loader_threads_page_entities_into_all_odds_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end through _parse_modern_or_legacy_match_page: the match page's
+    bookmakers entities drive both name resolution and the OTHER anchor gate
+    for all-odds payloads that carry no bookmakers key."""
+    from app.ingestion import oddschecker as oc
+
+    page_payload: dict[str, object] = {
+        "repub": "OC",
+        "bestOdds": {
+            "bets": {
+                "entities": {"1": {"ocBetId": 1, "betName": "Hibernian", "marketId": 10}},
+                "ids": [1],
+            },
+            "odds": {"1": {"WH": {"oddsDecimal": 2.0}}},
+            "markets": {
+                "entities": {
+                    "10": {"ocMarketId": 10, "marketTypeName": "Win Market"},
+                    "50": {"ocMarketId": 50, "marketTypeName": "Total Corners"},
+                },
+                "ids": [10, 50],
+            },
+            "bookmakers": {
+                "entities": _LIVE_BOOKMAKER_ENTITIES,
+                "ids": list(_LIVE_BOOKMAKER_ENTITIES),
+            },
+        },
+    }
+    mapped_payload: dict[str, object] = {
+        "marketId": 10,
+        "subeventId": 7001,
+        "subeventName": "Hibernian vs Motherwell",
+        "eventName": "Scottish Premiership Matches",
+        "marketTypeName": "Win Market",
+        "bets": [{"betId": 1, "betName": "Hibernian"}],
+        "odds": [
+            {"betId": 1, "bookmakerCode": "OE", "oddsDecimal": 2.10, "status": "ACTIVE"},
+            {"betId": 1, "bookmakerCode": "BF", "oddsDecimal": 2.14, "status": "ACTIVE"},
+        ],
+    }
+    optional_payload: dict[str, object] = {
+        "marketId": 50,
+        "subeventId": 7001,
+        "subeventName": "Hibernian vs Motherwell",
+        "marketTypeName": "Total Corners",
+        "bets": [{"betId": 2, "betName": "Over", "line": "9.5"}],
+        "odds": [{"betId": 2, "bookmakerCode": "BF", "oddsDecimal": 1.9, "status": "ACTIVE"}],
+    }
+
+    async def fetch(market_ids: list[str], **kwargs: object) -> list[dict[str, object]]:
+        del kwargs
+        ids = tuple(str(market_id) for market_id in market_ids)
+        return [mapped_payload] if ids == ("10",) else [optional_payload]
+
+    monkeypatch.setattr(oc, "fetch_market_api_payloads", fetch)
+    loader = OddsCheckerLoader(EventDirectory(), capture_other=True)
+    page = OddsCheckerFetchResult(
+        url="https://www.oddschecker.com/football/scottish/hibernian-v-motherwell/winner",
+        html=_json_script(page_payload),
+        status_code=200,
+    )
+    snapshots = await loader._parse_modern_or_legacy_match_page(
+        page, now=datetime(2026, 8, 2, 10, 0, tzinfo=UTC), session=None
+    )
+    assert {(s.market, s.bookmaker) for s in snapshots} == {
+        (Market.H2H, "10bet"),
+        (Market.H2H, "Betfair Exchange"),
+        (Market.OTHER, "Betfair Exchange"),
+    }

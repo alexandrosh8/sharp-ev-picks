@@ -3,7 +3,12 @@
 Empirical key forms — verified READ-ONLY against the live warehouse
 (odds_snapshots / picks, 2026-07-11):
 
-- BTTS rows key as ``market='btts'``; the Betfair Exchange (code ``OE``) inline
+NOTE 2026-08-02: OddsChecker RECYCLED bookmaker codes — the Betfair Exchange is
+now code ``BF`` (``OE`` became 10bet); fixtures below use ``BF``. The warehouse
+facts referenced were captured under the pre-recycle code vocabulary.
+
+- BTTS rows key as ``market='btts'``; the Betfair Exchange (then code ``OE``,
+  now ``BF``) inline
   rows use bare selections ``'Yes'``/``'No'`` exclusively (3,272 rows since
   2026-07-03), while a legacy soft-book form ``'BTTS Yes'``/``'BTTS No'``
   (~66k rows each, last seen 2026-07-05) coexisted — splitting the two-outcome
@@ -83,8 +88,8 @@ def test_btts_prefixed_selections_normalize_to_exchange_form_api_path() -> None:
             odds=[
                 _active_odd(1, "WH", 1.95),
                 _active_odd(2, "WH", 1.85),
-                _active_odd(1, "OE", 2.00),
-                _active_odd(2, "OE", 1.99),
+                _active_odd(1, "BF", 2.00),
+                _active_odd(2, "BF", 1.99),
             ],
             subevent="Alpha FC vs Beta FC",
             event_name="English Premier League Matches",
@@ -112,7 +117,7 @@ def test_btts_bare_selections_pass_through_unchanged_api_path() -> None:
                 {"betId": 1, "betName": "Yes", "line": None},
                 {"betId": 2, "betName": "No", "line": None},
             ],
-            odds=[_active_odd(1, "OE", 2.02), _active_odd(2, "OE", 1.97)],
+            odds=[_active_odd(1, "BF", 2.02), _active_odd(2, "BF", 1.97)],
             subevent="Alpha FC vs Beta FC",
         )
     ]
@@ -140,8 +145,8 @@ def _bestodds_html(
     }
     odds = {
         str(i + 1): {
-            "OE": {
-                "bookmakerCode": "OE",
+            "BF": {
+                "bookmakerCode": "BF",
                 "oddsDecimal": 1.9 + i * 0.2,
                 "status": "ACTIVE",
                 "expired": False,
@@ -162,8 +167,8 @@ def _bestodds_html(
                 "ids": [10],
             },
             "bookmakers": {
-                "entities": {"OE": {"bookmakerCode": "OE", "bookmakerName": "Betfair Exchange"}},
-                "ids": ["OE"],
+                "entities": {"BF": {"bookmakerCode": "BF", "bookmakerName": "Betfair Exchange"}},
+                "ids": ["BF"],
             },
             "subeventConfig": {
                 "name": f"{home} vs {away}",
@@ -220,8 +225,8 @@ def test_exact_sets_bo3_maps_to_canonical_set_totals_api_path() -> None:
                 {"betId": 2, "betName": "3 Sets", "line": None},
             ],
             odds=[
-                _active_odd(1, "OE", 1.80),
-                _active_odd(2, "OE", 2.26),
+                _active_odd(1, "BF", 1.80),
+                _active_odd(2, "BF", 2.26),
                 _active_odd(1, "WH", 1.73),
                 _active_odd(2, "WH", 2.10),
             ],
@@ -253,9 +258,9 @@ def test_exact_sets_bo5_market_is_never_mapped_to_totals() -> None:
                 {"betId": 3, "betName": "5 Sets", "line": None},
             ],
             odds=[
-                _active_odd(1, "OE", 2.5),
-                _active_odd(2, "OE", 3.0),
-                _active_odd(3, "OE", 3.5),
+                _active_odd(1, "BF", 2.5),
+                _active_odd(2, "BF", 3.0),
+                _active_odd(3, "BF", 3.5),
             ],
         )
     ]
@@ -286,7 +291,7 @@ def test_exact_sets_bo3_respects_markets_filter() -> None:
                 {"betId": 1, "betName": "2 Sets", "line": None},
                 {"betId": 2, "betName": "3 Sets", "line": None},
             ],
-            odds=[_active_odd(1, "OE", 1.80), _active_odd(2, "OE", 2.26)],
+            odds=[_active_odd(1, "BF", 1.80), _active_odd(2, "BF", 2.26)],
         )
     ]
     snapshots = parse_market_api_payloads(
