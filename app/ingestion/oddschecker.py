@@ -2366,6 +2366,7 @@ class OddsCheckerLoader:
         markets: Sequence[Market] | None = None,
         start_date: date | None = None,
         capture_other: bool = False,
+        proxy_health: ProxyHealthRegistry | None = None,
     ) -> OddsCheckerLoader:
         """Scheduler loader: ``fetch_odds(pipeline_key)`` fetches ONLY that sport.
 
@@ -2386,6 +2387,7 @@ class OddsCheckerLoader:
             markets=markets,
             scheduler_sport_keys=wanted,
             capture_other=capture_other,
+            proxy_health=proxy_health,
         )
 
     def _next_proxy(self) -> ScraperProxy | None:
@@ -2754,6 +2756,12 @@ class OddsCheckerLoader:
             )
 
         challenge_exhausted: type[BaseException] | None = None
+        # Per-session cold warm-up budget (reset on every rotation). Warm-up
+        # retries live INSIDE one attempt: the attempt budget below counts
+        # rotations only, so the worst case is
+        # DISCOVERY_CHALLENGE_MAX_ATTEMPTS * (1 + WARMUP_CHALLENGE_MAX_RETRIES)
+        # discovery fetches per cycle.
+        discovery_warmups = 0
         try:
             attempt = 1
             while True:
@@ -2761,13 +2769,36 @@ class OddsCheckerLoader:
                     match_urls = await _discover(discovery_session)
                     if discovery_lease is not None:
                         self._proxy_health.record_success(discovery_lease.index)
+                        if self._session_pool is not None:
+                            self._session_pool.mark_warmed(discovery_lease)
                     break
                 except Exception as exc:
                     if not _is_transient_fetch_error(exc):
                         raise
+                    is_challenge = _is_challenge_error(exc)
+                    # Cold-session warm-up tolerance (same rationale as
+                    # _fetch_match_odds_with_warmup): a CF warm-up challenge on
+                    # a session's first request(s) resolves on the SAME session
+                    # once it holds cf cookies — retry it before recording a
+                    # slot failure or rotating. A warmed session's challenge
+                    # keeps the immediate record_failure + rotate path below.
+                    if (
+                        is_challenge
+                        and discovery_lease is not None
+                        and self._session_pool is not None
+                        and not self._session_pool.is_warmed(discovery_lease)
+                        and discovery_warmups < WARMUP_CHALLENGE_MAX_RETRIES
+                    ):
+                        discovery_warmups += 1
+                        logger.info(
+                            "oddschecker %s discovery cold-session warm-up retry (%s)",
+                            oc_key,
+                            type(exc).__name__,
+                        )
+                        await _discovery_challenge_backoff()
+                        continue
                     if discovery_lease is not None:
                         self._proxy_health.record_failure(discovery_lease.index, type(exc).__name__)
-                    is_challenge = _is_challenge_error(exc)
                     max_attempts = DISCOVERY_CHALLENGE_MAX_ATTEMPTS if is_challenge else 2
                     if attempt >= max_attempts:
                         if not is_challenge:
@@ -2799,6 +2830,9 @@ class OddsCheckerLoader:
                         except OddsCheckerError:
                             discovery_lease = self._session_pool.acquire_lease()
                         discovery_session = discovery_lease.session
+                        # Fresh session on rotation: it gets its own cold
+                        # warm-up budget.
+                        discovery_warmups = 0
         finally:
             if discovery_lease is not None and self._session_pool is not None:
                 await self._session_pool.release(discovery_lease)

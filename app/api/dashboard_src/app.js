@@ -383,6 +383,9 @@
           gateReasonsAt: null,
           lastOkAt: null,
           globalDegraded: true,
+          // False until renderGlobalDegradedBanner computes the real value —
+          // no stale-banner suppression before the global banner exists.
+          globalCoverageNoticeShown: false,
           coreLoaded: false,
         };
         let selectedId = null;
@@ -758,6 +761,10 @@
             messages.unshift("Could not load picks.");
           }
           state.globalDegraded = messages.length > 0;
+          // 2026-08-02: remembered so the stale banner (rendered directly
+          // below this one) can suppress its own copy of the SAME
+          // coverage-incomplete notice instead of stacking it twice.
+          state.globalCoverageNoticeShown = messages.indexOf(COVERAGE_INCOMPLETE_COPY) !== -1;
           banner.classList.toggle("show", state.globalDegraded);
           banner.textContent = messages.join(" ");
         }
@@ -1294,8 +1301,16 @@
 
         function renderStaleBanner() {
           const banner = $("stale-banner");
-          banner.classList.toggle("show", dataIsStale(state.health));
-          // Task F 2026-07-26 #2: copy tracks the diagnosis — visibility gating above is unchanged.
+          // 2026-08-02: when the global degraded banner (directly above this
+          // element) already carries the SAME coverage-incomplete copy, this
+          // banner would stack an identical second notice in the viewport —
+          // suppress only that exact duplicate. Every other stale case keeps
+          // the Task F 2026-07-26 #2 gating unchanged (fail-closed: the
+          // notice is always visible in at least one banner).
+          const duplicateOfGlobal = staleIsCoverageOnly(state.health)
+            && state.globalCoverageNoticeShown === true;
+          banner.classList.toggle("show", dataIsStale(state.health) && !duplicateOfGlobal);
+          // Task F 2026-07-26 #2: copy tracks the diagnosis.
           banner.textContent = staleIsCoverageOnly(state.health)
             ? COVERAGE_INCOMPLETE_COPY
             : "Odds data is stale. Picks should not be treated as current.";

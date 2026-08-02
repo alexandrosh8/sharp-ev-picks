@@ -1104,3 +1104,16 @@ def test_csv_formula_guard_exempts_bare_numbers() -> None:
     text = _text()
     assert "const plainNumber = /" in text
     assert "!plainNumber &&" in text
+
+
+def test_coverage_incomplete_notice_never_stacked_twice() -> None:
+    """2026-08-02: during coverage-only partial status the SAME copy rendered in
+    BOTH the global degraded banner and the stale banner directly below it. The
+    stale banner must suppress itself when the global banner already carries the
+    coverage-incomplete notice; every other stale-banner case keeps the existing
+    fail-closed gating unchanged."""
+    text = _text()
+    # Single shared constant — the copy never forks into duplicated literals.
+    assert text.count("Source coverage incomplete") == 1
+    assert "globalCoverageNoticeShown" in text
+    assert "duplicateOfGlobal" in text

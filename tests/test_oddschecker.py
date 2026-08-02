@@ -2309,11 +2309,15 @@ async def test_scheduler_discovery_evicts_failed_pool_lease_and_rotates(
     pool = oc._ProxySessionPool(proxies, session_factory=factory)
     seen_sessions: list[object] = []
 
+    # 2026-08-02 warm-up follow-up: a COLD-session CHALLENGE now retries the
+    # same session first (see test_discovery_cold_challenge_recovers_on_same_
+    # session), so this eviction/rotation pin uses a NON-challenge transient,
+    # which keeps the immediate evict+rotate path.
     async def discover(*args: object, **kwargs: object) -> list[str]:
         del args
         seen_sessions.append(kwargs["session"])
         if len(seen_sessions) == 1:
-            raise OddsCheckerChallenge("challenge")
+            raise OddsCheckerHTTPError("unavailable", status_code=503)
         return []
 
     monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
@@ -3136,4 +3140,170 @@ async def test_warmup_bounded_at_two_retries_per_session(
     assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
     assert loader.last_fetch_challenge_failures["soccer"] == 1
     assert loader.last_fetch_warmup_retries["soccer"] == 4
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- #
+# Discovery cold-session warm-up tolerance (2026-08-02 follow-up 2: discovery's
+# rotate-on-challenge burned every slot — 73/73 challenge lines were discovery)
+# --------------------------------------------------------------------------- #
+
+
+def _discovery_pool_with_health(
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]],
+    health: object,
+) -> object:
+    return _three_slot_pool_with_health(created, health)
+
+
+@pytest.mark.asyncio
+async def test_discovery_cold_challenge_recovers_on_same_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold discovery session's first challenge retries the SAME session:
+    no slot failure recorded, no rotation, session marked warmed."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=1)  # any recorded failure quarantines
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _discovery_pool_with_health(created, health)
+    seen_sessions: list[object] = []
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        del args
+        seen_sessions.append(kwargs["session"])
+        if len(seen_sessions) == 1:
+            raise OddsCheckerChallenge("challenge")
+        return []
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+
+    assert await loader._fetch_sport("soccer", None) == []
+    assert len(created) == 1  # no rotation
+    assert seen_sessions == [created[0][1], created[0][1]]  # SAME session retried
+    assert created[0][1].closed is False  # never evicted
+    assert health._slots[0].consecutive_failures == 0
+    assert health._slots[0].successes == 1
+    assert pool._warmed  # type: ignore[attr-defined]  # session marked warmed on success
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_discovery_warmup_exhaustion_records_failure_and_rotates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold discovery session challenged through its whole warm-up budget
+    records ONE slot failure, then takes the existing evict+rotate path."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=3)
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _discovery_pool_with_health(created, health)
+    seen_sessions: list[object] = []
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        del args
+        seen_sessions.append(kwargs["session"])
+        if kwargs["session"] is created[0][1]:
+            raise OddsCheckerChallenge("challenge")
+        return []
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+
+    assert await loader._fetch_sport("soccer", None) == []
+    # 1 attempt + 2 warm-ups on the cold first session, then ONE rotation.
+    assert seen_sessions == [created[0][1]] * 3 + [created[1][1]]
+    assert [proxy.url for proxy, _s in created if proxy is not None] == [
+        "http://p0",
+        "http://p1",
+    ]
+    assert created[0][1].closed is True  # evicted on rotation, as before
+    assert health._slots[0].consecutive_failures == 1  # ONE failure recorded
+    assert health._slots[1].successes == 1
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_discovery_warmed_session_challenge_rotates_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WARMED discovery session's challenge keeps the current immediate
+    record_failure + evict + rotate path — no warm-up retry."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=3)
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _discovery_pool_with_health(created, health)
+    # Pre-warm slot 0's session (as if an earlier fetch succeeded through it).
+    warm_lease = pool.acquire_lease()  # type: ignore[attr-defined]
+    pool.mark_warmed(warm_lease)  # type: ignore[attr-defined]
+    await pool.release(warm_lease)  # type: ignore[attr-defined]
+    pool._cursor = 0  # type: ignore[attr-defined]  # rewind so discovery draws slot 0
+    seen_sessions: list[object] = []
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        del args
+        seen_sessions.append(kwargs["session"])
+        if kwargs["session"] is created[0][1]:
+            raise OddsCheckerChallenge("challenge")
+        return []
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+
+    assert await loader._fetch_sport("soccer", None) == []
+    # Warmed session challenged ONCE, then immediate rotation — no warm-up.
+    assert seen_sessions == [created[0][1], created[1][1]]
+    assert created[0][1].closed is True
+    assert health._slots[0].consecutive_failures == 1
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_discovery_attempt_budget_counts_rotations_not_warmups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warm-up retries live INSIDE one attempt: with every slot challenging,
+    discovery makes DISCOVERY_CHALLENGE_MAX_ATTEMPTS rotations x (1 + 2
+    warm-ups) fetches, then degrades to incomplete exactly as before."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.oddschecker import DISCOVERY_CHALLENGE_MAX_ATTEMPTS
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=5)
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _discovery_pool_with_health(created, health)
+    calls = 0
+
+    async def discover(*args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        nonlocal calls
+        calls += 1
+        raise OddsCheckerChallenge("challenge")
+
+    monkeypatch.setattr(oc, "discover_sport_daily_match_urls", discover)
+    loader = OddsCheckerLoader.for_scheduler(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+
+    assert await loader._fetch_sport("soccer", None) == []
+    assert calls == DISCOVERY_CHALLENGE_MAX_ATTEMPTS * 3  # 3 attempts x (1 + 2 warm-ups)
+    assert loader.last_fetch_complete["soccer"] is False
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
+    # One failure per rotated-through slot — never one per warm-up retry.
+    assert all(
+        health._slots[index].consecutive_failures == 1
+        for index in range(DISCOVERY_CHALLENGE_MAX_ATTEMPTS)
+    )
     await pool.aclose()  # type: ignore[attr-defined]
