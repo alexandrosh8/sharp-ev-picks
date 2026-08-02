@@ -1268,7 +1268,9 @@ def test_close_exclusion_reason_vocabulary_is_closed_and_column_safe() -> None:
     from app.edge.value import CLOSE_EXCLUSION_REASONS, CLOSE_REASON_TRUSTED
 
     assert CLOSE_REASON_TRUSTED in CLOSE_EXCLUSION_REASONS
-    assert len(CLOSE_EXCLUSION_REASONS) == len(set(CLOSE_EXCLUSION_REASONS)) == 6
+    # 7 = the 5 writer-stamped guards + 'trusted' + the READ-time-derived
+    # 'legacy_product_mismatch' (2026-08-02 cohort; never stamped by writers).
+    assert len(CLOSE_EXCLUSION_REASONS) == len(set(CLOSE_EXCLUSION_REASONS)) == 7
     assert all(len(r) <= 32 for r in CLOSE_EXCLUSION_REASONS)
 
 

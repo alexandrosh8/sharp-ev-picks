@@ -42,6 +42,7 @@ from app.backtesting.calibration import (
     calibration_report,
 )
 from app.backtesting.clv import mean_significance, wilson_interval
+from app.edge.value import is_legacy_product_mismatch
 from app.edge.value_policy import normalize_league
 
 #: Below this many CLV observations a stratum is "insufficient" — the
@@ -192,6 +193,12 @@ class SettledPickRow:
     # joined (pure-test construction) — the (sport, market) cell grouping is
     # then omitted entirely, the same feature-detected contract as sport.
     market: str | None = None
+    # Canonical mint-time line detail (Pick.market_detail) — the legacy EH/AH
+    # product-mismatch cohort key (2026-08-02, with sport/market/minted_at).
+    # None is BOTH "dimension not joined" and the genuine NULL-detail legacy
+    # rows; the cohort predicate itself resolves the ambiguity via the other
+    # dimensions (None sport/market/minted_at = unprovable, never excluded).
+    market_detail: str | None = None
     # Scraped league display name (League.name) for the major/non-major
     # trusted-CLV split (MAJOR_LEAGUES). None = dimension not joined — the row
     # enters NEITHER league-tier bucket (cannot be classified honestly, the
@@ -252,6 +259,19 @@ class SettledPickRow:
         return abs(self.clv_log) > CLV_IMPLAUSIBLE_LOG
 
     @property
+    def is_legacy_product_mismatch(self) -> bool:
+        """Legacy EH/AH product-mismatch cohort membership (2026-08-02) — the
+        shared pure predicate over this row's own dimensions, so the verdict
+        can never diverge from the headline gate's (see app.edge.value.
+        is_legacy_product_mismatch for the cohort definition + rationale)."""
+        return is_legacy_product_mismatch(
+            sport=self.sport,
+            market=self.market,
+            market_detail=self.market_detail,
+            minted_at=self.minted_at,
+        )
+
+    @property
     def sharp_close(self) -> bool:
         """A TRUSTED close for honest CLV: snapshot-sourced (not a poll-time
         revalidation fallback), anchored by a named sharp book (not a soft-book
@@ -275,6 +295,10 @@ class SettledPickRow:
             and not self.devig_fallback_asymmetric
             # CLV-1: a physically-impossible (fabricated) close is never trusted.
             and not self.is_fabricated
+            # 2026-08-02: the legacy EH/AH product-mismatch cohort's AH-only
+            # close vs a possible EH fill is a vocabulary artifact — never
+            # trusted (mirrors the headline gate in app/storage/repositories).
+            and not self.is_legacy_product_mismatch
         )
 
 

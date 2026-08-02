@@ -1138,3 +1138,25 @@ def test_coverage_incomplete_notice_never_stacked_twice() -> None:
     assert text.count("Source coverage incomplete") == 1
     assert "globalCoverageNoticeShown" in text
     assert "duplicateOfGlobal" in text
+
+
+def test_value_gone_chip_on_open_premium_failing_edge_gate() -> None:
+    """Operator item 2 (2026-08-02): an OPEN premium pick whose live edge fails
+    the qualifying-edge gate (hasQualifyingEdgeNow) must carry an explicit
+    "VALUE GONE" chip adjacent to the tier chip on the card AND the drawer —
+    a bare PREMIUM chip on a −2.3%-edge row (e.g. pick 946692) is misleading.
+    Display only: built from the existing hasQualifyingEdgeNow/edgeFloorOf
+    gates; isActionable/gating byte-identical; settled/superseded unchanged."""
+    text = _text()
+    # ONE shared chip literal (never forked copies) rendered from exactly TWO
+    # call sites: the card row and the drawer ticket head.
+    assert text.count("VALUE GONE — no longer qualifies") == 1
+    # One builder definition + exactly two call sites (card row, drawer head).
+    assert text.count("function valueGoneChipEl") == 1
+    assert text.count("valueGoneChipEl") == 3
+    assert "function valueGone(" in text
+    # The predicate reuses the existing gate, never a re-derived edge rule.
+    assert "hasQualifyingEdgeNow(p, health)" in text
+    # Never on settled/superseded/started rows: the predicate is scoped to
+    # open (alerted, pre-kickoff) premium rows only.
+    assert re.search(r"function valueGone\([^)]*\)\s*\{[^}]*\"alerted\"", text)

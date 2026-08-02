@@ -2311,6 +2311,29 @@
           const floor = edgeFloorOf(p, health);
           return Number.isFinite(edge) && Number.isFinite(floor) && floor >= 0 && edge >= floor;
         }
+        // Operator item 2 (2026-08-02): explicit "value gone" state. An OPEN
+        // premium pick whose LIVE re-priced edge fails the qualifying-edge
+        // gate (pick 946692: PREMIUM chip, edge −2.3%) must not lead with a
+        // bare PREMIUM chip. Scoped to rows where the verdict is PROVABLE:
+        // a finite re-priced current_edge and a finite tier floor — a
+        // never-re-priced row is "awaiting re-price", not "value gone".
+        // Display only: reuses hasQualifyingEdgeNow/edgeFloorOf verbatim;
+        // isActionable and all gating are untouched. Settled / superseded /
+        // started rows never match (status/kickoff guards below).
+        function valueGone(p, health) {
+          if (tierOf(p) !== "premium" || !p || p.status !== "alerted" || hasStarted(p)) return false;
+          const edge = numOf(p.current_edge);
+          const floor = edgeFloorOf(p, health);
+          if (!Number.isFinite(edge) || !Number.isFinite(floor) || floor < 0) return false;
+          return !hasQualifyingEdgeNow(p, health);
+        }
+        function valueGoneChipEl() {
+          const t = document.createElement("span");
+          t.className = "tag tag-warm tag-dashed";
+          t.textContent = "VALUE GONE — no longer qualifies";
+          t.title = "the live re-priced edge is below this pick's tier floor — the mint-time value is no longer available";
+          return t;
+        }
         function isRevalidationFresh(p, health) {
           if (p.status !== "alerted") return true;
           if (!p.revalidated_at) return false;
@@ -3578,7 +3601,11 @@
           effEl.textContent = (closed ? "mint " : "") + fmtSignedPct(eff);
           sel.appendChild(effEl);
           const trust = document.createElement("span"); trust.className = "er-trust"; trust.textContent = trustGlyph(p); trust.title = anchorLabel(p);
-          row.append(ko, ev, tier, sel, trust);
+          // Operator item 2 (2026-08-02): the "value gone" chip sits ADJACENT
+          // to the tier chip so a failing open premium row never leads with a
+          // bare PREMIUM chip. Display only.
+          if (valueGone(p, health)) row.append(ko, ev, tier, valueGoneChipEl(), sel, trust);
+          else row.append(ko, ev, tier, sel, trust);
           // Live review 2026-08-02 (P1): settled P&L gets its OWN
           // non-truncating line — inside .er-sel it ellipsized to "P…" behind
           // a long selection. The selection cell keeps the ellipsis instead.
@@ -4039,6 +4066,9 @@
           tierTag.className = "tag " + (tierOf(p) === "volume" ? "tag-warm" : "tag-cyan");
           tierTag.textContent = tierOf(p) === "volume" ? "Shadow — tracked, informational only" : "Premium";
           head.appendChild(tierTag);
+          // Operator item 2 (2026-08-02): same "value gone" chip beside the
+          // drawer's tier chip — one shared predicate, both render sites.
+          if (valueGone(p, state.health)) head.appendChild(valueGoneChipEl());
           // Audit 2026-07-09: the server flags stored-impossible rows
           // (structural_sane=false) so the dashboard can refuse to present
           // them as bettable — badge the detail pane in danger style.

@@ -27,6 +27,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
 from app.backtesting.clv import mean_significance, wilson_interval
+from app.edge.value import CLOSE_REASON_LEGACY_PRODUCT_MISMATCH, is_legacy_product_mismatch
 from app.identity import (
     BOOKMAKER_MAX_BYTES,
     COUNTRY_MAX_BYTES,
@@ -1837,6 +1838,14 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         # judge the close-implied edge on the EFFECTIVE (commission-netted)
         # fill price — the same price the write side computed clv_log from.
         fill_bookmaker = row[17] if len(row) > 17 else None
+        # Legacy EH/AH product-mismatch cohort verdict (trailing,
+        # feature-detected; app.edge.value.is_legacy_product_mismatch computed
+        # by the row builder): the pick's snapshot close is product-mismatched
+        # by construction (AH close vs a possible EH fill), so it must never
+        # enter the trusted subset. Read-time rule ONLY — the close writers
+        # overwrite the persisted reason at close-stamp time, so a stamped
+        # reason could not survive; the derived label below can.
+        legacy_mismatch = bool(row[18]) if len(row) > 18 else False
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
@@ -1879,7 +1888,17 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             close_ages_minutes.append(age_minutes)
             if age_minutes > STALE_CLOSE_MAX_GAP_MINUTES:
                 q_stale_close += 1
-        if close_reason is not None:
+        if legacy_mismatch:
+            # Derived label surfaced through the SAME provenance counts as the
+            # persisted reasons (dashboard "close-quality by reason" widget):
+            # it overrides whatever the close writer stamped (typically
+            # 'trusted' — no write-time guard can see the vocabulary history),
+            # so the cohort's exclusion is visible and the with/without split
+            # stays queryable. The persisted column itself is never rewritten.
+            reason_counts[CLOSE_REASON_LEGACY_PRODUCT_MISMATCH] = (
+                reason_counts.get(CLOSE_REASON_LEGACY_PRODUCT_MISMATCH, 0) + 1
+            )
+        elif close_reason is not None:
             key = str(close_reason)
             reason_counts[key] = reason_counts.get(key, 0) + 1
         if clv_log is not None and not clv_excluded:
@@ -1912,6 +1931,10 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             # multiplicative, the other did not), the CLV is a devig-method
             # artifact, not a genuine line move. NULL flags are symmetric (kept).
             and not _devig_fallback_asymmetric(mint_devig_fell_back, close_devig_fell_back)
+            # Legacy EH/AH product-mismatch cohort (2026-08-02): an AH-only
+            # snapshot close stamped onto a possible EH fill is a vocabulary
+            # artifact with a structural positive bias — never trusted.
+            and not legacy_mismatch
         ):
             # Genuine, INDEPENDENT sharp snapshot close with a measured CLV — the
             # trusted subset.
@@ -2350,6 +2373,13 @@ async def performance_report(
     # Appended like the other split keys — not passed to _aggregate_settled.
     market_idx = len(select_cols)
     select_cols.append(Pick.market)
+    # Legacy EH/AH product-mismatch cohort dimensions (2026-08-02): the mint
+    # line detail + mint time complete the (sport, market, detail, minted_at)
+    # key app.edge.value.is_legacy_product_mismatch judges.
+    market_detail_idx = len(select_cols)
+    select_cols.append(Pick.market_detail)
+    created_at_idx = len(select_cols)
+    select_cols.append(Pick.created_at)
     close_anchor_idx = indep_idx = snapshot_idx = None
     if close_anchor_attr is not None:
         close_anchor_idx = len(select_cols)
@@ -2432,6 +2462,12 @@ async def performance_report(
         close_fell_back = r[close_fb_idx] if close_fb_idx is not None else None
         close_captured_at = r[close_cap_idx] if close_cap_idx is not None else None
         close_reason = r[reason_idx] if reason_idx is not None else None
+        legacy_mismatch = is_legacy_product_mismatch(
+            sport=r[sport_idx],
+            market=r[market_idx],
+            market_detail=r[market_detail_idx],
+            minted_at=r[created_at_idx],
+        )
         return (
             r[0],
             r[1],
@@ -2451,6 +2487,7 @@ async def performance_report(
             r[starts_at_idx],  # kickoff — the close-age clock (D4)
             close_reason,  # A4 close-exclusion reason (or None pre-column)
             r[bookmaker_idx],  # fill book — effective-odds CLV-1 guard input
+            legacy_mismatch,  # 2026-08-02 legacy EH/AH cohort — never trusted
         )
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
@@ -2475,6 +2512,12 @@ async def performance_report(
             mint_devig_fell_back=r[mint_fb_idx] if mint_fb_idx is not None else None,
             close_devig_fell_back=r[close_fb_idx] if close_fb_idx is not None else None,
             bookmaker=r[bookmaker_idx],
+            legacy_product_mismatch=is_legacy_product_mismatch(
+                sport=r[sport_idx],
+                market=r[market_idx],
+                market_detail=r[market_detail_idx],
+                minted_at=r[created_at_idx],
+            ),
         )
 
     now = datetime.now(tz=UTC)
@@ -2814,6 +2857,10 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
     columns.append(Pick.market)
     league_name_idx = len(columns)
     columns.append(League.name)
+    # 2026-08-02: mint line detail — completes the legacy EH/AH cohort key
+    # (sport, market, market_detail, minted_at) behind sharp_close.
+    market_detail_idx = len(columns)
+    columns.append(Pick.market_detail)
     rows = (
         await session.execute(
             select(*columns)
@@ -2860,6 +2907,8 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             # TASK TL dimensions: (sport, market) coverage cell + league tier.
             market=row[market_idx],
             league_name=row[league_name_idx],
+            # 2026-08-02 legacy EH/AH cohort dimension (see SettledPickRow).
+            market_detail=row[market_detail_idx],
         )
         for row in rows
     ]
@@ -5663,6 +5712,7 @@ def _settled_close_is_trusted(
     mint_devig_fell_back: Any,
     close_devig_fell_back: Any,
     bookmaker: Any = None,
+    legacy_product_mismatch: bool = False,
 ) -> bool:
     """The trusted sharp-close gate as a standalone predicate.
 
@@ -5670,10 +5720,16 @@ def _settled_close_is_trusted(
     (kept adjacent in this module — see that function for the full rationale):
     a measured clv_log, a GENUINE snapshot close, a named sharp close anchor,
     independence exactly True, non-tautological, non-fabricated (judged on the
-    EFFECTIVE fill price when ``bookmaker`` is threaded), and a symmetric
-    devig fallback. Used by per-(sport, market) accrual counts so they can
-    never diverge from the headline's trust definition.
+    EFFECTIVE fill price when ``bookmaker`` is threaded), a symmetric devig
+    fallback, and NOT in the legacy EH/AH product-mismatch cohort
+    (``legacy_product_mismatch`` — the caller derives it via
+    app.edge.value.is_legacy_product_mismatch; default False mirrors callers
+    that lack the cohort dimensions, where membership is unprovable). Used by
+    per-(sport, market) accrual counts so they can never diverge from the
+    headline's trust definition.
     """
+    if legacy_product_mismatch:
+        return False
     if clv_log is None or not bool(has_snapshot_close):
         return False
     if closing_anchor not in _SHARP_CLOSE_ANCHORS or close_independent is not True:
@@ -5730,6 +5786,12 @@ def promotion_distance_cells(
             close_devig_fell_back,
         ) = row[:12]
         bookmaker = row[12] if len(row) > 12 else None
+        # Trailing cohort dimensions (feature-detected like ``bookmaker``):
+        # market_detail + minted_at complete the legacy EH/AH product-mismatch
+        # key. 13-tuple callers lack them — membership is then unprovable and
+        # never excludes (the shared predicate's None convention).
+        market_detail = row[13] if len(row) > 13 else None
+        minted_at = row[14] if len(row) > 14 else None
         key = (str(sport), str(market))
         settled_counts[key] = settled_counts.get(key, 0) + 1
         if _settled_close_is_trusted(
@@ -5743,6 +5805,12 @@ def promotion_distance_cells(
             mint_devig_fell_back=mint_devig_fell_back,
             close_devig_fell_back=close_devig_fell_back,
             bookmaker=bookmaker,
+            legacy_product_mismatch=is_legacy_product_mismatch(
+                sport=sport if isinstance(sport, str) else None,
+                market=market if isinstance(market, str) else None,
+                market_detail=market_detail if isinstance(market_detail, str) else None,
+                minted_at=minted_at if isinstance(minted_at, datetime) else None,
+            ),
         ):
             trusted.setdefault(key, []).append((float(clv_log), settled_at))
     cells: list[dict[str, Any]] = []
@@ -5878,6 +5946,13 @@ async def _settled_trust_rows(session: AsyncSession) -> list[tuple[Any, ...]]:
             )
         else:
             optional_idx[name] = None
+    # 2026-08-02: legacy EH/AH cohort dimensions (trailing, always present on
+    # the ORM model — appended AFTER the feature-detected block so the
+    # optional indexes above stay stable).
+    market_detail_idx = len(select_cols)
+    select_cols.append(Pick.market_detail)
+    minted_at_idx = len(select_cols)
+    select_cols.append(Pick.created_at)
     db_rows = (
         await session.execute(
             select(*select_cols)
@@ -5907,6 +5982,8 @@ async def _settled_trust_rows(session: AsyncSession) -> list[tuple[Any, ...]]:
             _opt(r, "mint_devig_fell_back"),
             _opt(r, "close_devig_fell_back"),
             r[7],  # bookmaker — effective-odds CLV-1 guard input
+            r[market_detail_idx],  # 2026-08-02 legacy EH/AH cohort dimension
+            r[minted_at_idx],  # minted_at (Pick.created_at) — cohort cutoff clock
         )
         for r in db_rows
     ]

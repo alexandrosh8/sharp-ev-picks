@@ -19,10 +19,11 @@ Pure module: no IO. Input is per-bookmaker decimal odds for one market.
 """
 
 import math
+import re
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.probabilities.devig import DevigMethod, devig, devig_with_provenance
 
@@ -291,12 +292,20 @@ def persisted_close_independent(
 # SPECIFIC guard a close trips, or 'trusted' when none does. Observability
 # only: nothing gates on the reason (the boolean above stays the gate input).
 CLOSE_REASON_TRUSTED = "trusted"
+# READ-TIME derived label (2026-08-02, legacy EH/AH cohort — see
+# is_legacy_product_mismatch below): NEVER stamped by the close writers
+# (finalize_closing_from_snapshots overwrites the persisted reason at
+# close-stamp time, which is exactly why this exclusion lives in the read-time
+# trusted gate instead). Listed in the closed vocabulary so provenance
+# consumers know every label they can encounter.
+CLOSE_REASON_LEGACY_PRODUCT_MISMATCH = "legacy_product_mismatch"
 CLOSE_EXCLUSION_REASONS = (
     "fabricated",
     "circular_self_priced",
     "stale_echo",
     "tautological",
     "asymmetric_devig_fallback",
+    CLOSE_REASON_LEGACY_PRODUCT_MISMATCH,
     CLOSE_REASON_TRUSTED,
 )
 
@@ -393,6 +402,61 @@ def close_exclusion_reason(
     ):
         return "asymmetric_devig_fallback"
     return CLOSE_REASON_TRUSTED
+
+
+# LEGACY EH/AH PRODUCT-MISMATCH COHORT (operator item, 2026-08-02). Commit
+# b061309 (2026-08-02T21:19:07Z, DEPLOYED ~21:30 UTC) fail-closed OddsChecker's
+# 3-way European handicap out of the integer ``spreads_*`` soccer vocabulary:
+# before it, soft EH prices (win-by-line = LOSE) and exchange AH prices
+# (win-by-line = PUSH) shared one devig group, a ~15pp structural implied gap
+# that minted fake premium edges. Soccer spreads picks minted BEFORE the deploy
+# on an INTEGER line (only integer lines are product-ambiguous — half/quarter
+# lines cannot be the 3-way EH product) or with a NULL (line-blind legacy)
+# market_detail may therefore carry EH fills; when they reach kickoff,
+# finalize_closing_from_snapshots stamps a close from the now-AH-only group — a
+# PRODUCT-MISMATCHED close (AH close priced vs an EH fill) whose CLV is a
+# vocabulary artifact with a structural positive bias, never close evidence.
+#
+# The cutoff is the DEPLOY time, not the commit time: the running pipeline kept
+# minting from the pre-fix parser until the container was replaced. Picks
+# minted at/after the deploy can only carry AH prices in this key space.
+LEGACY_EH_SPREADS_FIX_DEPLOYED_AT = datetime(2026, 8, 2, 21, 30, tzinfo=UTC)
+
+# Integer-line spreads detail forms ("spreads_minus_1", "spreads_plus_3",
+# "spreads_plus_0"; a defensive unsigned "spreads_0" also matches). Fractional
+# forms carry a second numeric token ("spreads_minus_0_25") and never match;
+# the tennis "spreads_sets_*" namespace never matches.
+_INTEGER_SPREADS_DETAIL_RE = re.compile(r"^spreads_(?:minus_|plus_)?\d+$")
+
+
+def is_legacy_product_mismatch(
+    *,
+    sport: str | None,
+    market: str | None,
+    market_detail: str | None,
+    minted_at: datetime | None,
+) -> bool:
+    """True when a pick belongs to the legacy EH/AH product-mismatch cohort
+    whose snapshot close is product-mismatched by construction (see the
+    constant above) — the trusted-CLV gates must exclude it.
+
+    Pure and deterministic so the verdict is identical at every read site
+    (headline aggregate, standalone trust predicate, live-evidence rows,
+    promotion-distance cells) and re-derivable in SQL::
+
+        s.key = 'soccer' AND p.market = 'spreads'
+        AND (p.market_detail IS NULL
+             OR p.market_detail ~ '^spreads_(minus_|plus_)?[0-9]+$')
+        AND p.created_at < '2026-08-02 21:30+00'
+
+    A missing dimension (None sport/market/minted_at — pure-test rows; real DB
+    rows always carry them) is UNPROVABLE cohort membership and never excludes,
+    mirroring the mint-echo convention (unprovable is not droppable)."""
+    if sport != "soccer" or market != "spreads" or minted_at is None:
+        return False
+    if minted_at >= LEGACY_EH_SPREADS_FIX_DEPLOYED_AT:
+        return False
+    return market_detail is None or _INTEGER_SPREADS_DETAIL_RE.fullmatch(market_detail) is not None
 
 
 @dataclass(frozen=True)
