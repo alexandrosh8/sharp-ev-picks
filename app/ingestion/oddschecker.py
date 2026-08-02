@@ -419,6 +419,16 @@ async def _wait_before_retry(exc: BaseException) -> None:
 DISCOVERY_CHALLENGE_MAX_ATTEMPTS = 3
 _DISCOVERY_CHALLENGE_BACKOFF_RANGE: tuple[float, float] = (1.0, 3.0)
 
+# Cold-session warm-up tolerance (2026-08-02 follow-up): on CF-flagged proxies
+# a fresh session's FIRST 1-2 requests get a warm-up challenge and then pass
+# once the session holds cf cookies. Recording those as slot failures collapsed
+# the quarantine registry to 1-2 healthy slots (every half-open probe IS a cold
+# first request, so probes always failed). A cold session therefore gets up to
+# this many SAME-session retries (jittered pause between) before a challenge is
+# recorded as a slot failure; warmed sessions get none — their challenges are a
+# genuinely flagged proxy or a real storm.
+WARMUP_CHALLENGE_MAX_RETRIES = 2
+
 
 def _is_challenge_error(exc: BaseException) -> bool:
     """True when the failure chain contains a challenge/interstitial response."""
@@ -2088,6 +2098,10 @@ class _ProxySessionPool:
         # degraded and the health-blind rotation retried straight into them).
         # None = no filtering (unit-test pools keep exact rotation semantics).
         self._health = health
+        # Sessions that have completed at least one successful request. Cold
+        # (unwarmed) sessions get bounded same-session challenge retries —
+        # see WARMUP_CHALLENGE_MAX_RETRIES.
+        self._warmed: set[tuple[int, int]] = set()
 
     @staticmethod
     def _lease_key(lease: _ProxySessionLease) -> tuple[int, int]:
@@ -2125,6 +2139,14 @@ class _ProxySessionPool:
         """Compatibility wrapper for callers that do not need lease identity."""
         return self.acquire_lease().session
 
+    def mark_warmed(self, lease: _ProxySessionLease) -> None:
+        """Record that this lease's session completed a successful request."""
+        self._warmed.add(self._lease_key(lease))
+
+    def is_warmed(self, lease: _ProxySessionLease) -> bool:
+        """True once this lease's exact session has served a success."""
+        return self._lease_key(lease) in self._warmed
+
     @staticmethod
     async def _close_session(session: AsyncGetSession) -> None:
         close = getattr(session, "close", None)
@@ -2147,6 +2169,7 @@ class _ProxySessionPool:
             return
         self._sessions.pop(lease.index, None)
         key = self._lease_key(lease)
+        self._warmed.discard(key)
         if self._lease_counts.get(key, 0) > 0:
             self._retired_sessions[key] = lease.session
             return
@@ -2185,6 +2208,7 @@ class _ProxySessionPool:
         self._sessions.clear()
         self._retired_sessions.clear()
         self._lease_counts.clear()
+        self._warmed.clear()
         results = await asyncio.gather(
             *(self._close_session(session) for session in sessions_by_id.values()),
             return_exceptions=True,
@@ -2282,6 +2306,10 @@ class OddsCheckerLoader:
         # in last_fetch_incomplete_ratio exactly as before (fail-closed).
         self.last_fetch_challenge_retries: dict[str, int] = {}
         self.last_fetch_challenge_failures: dict[str, int] = {}
+        # Cold-session warm-up retries absorbed this cycle (same-session retries
+        # that never became slot failures — see WARMUP_CHALLENGE_MAX_RETRIES).
+        self.last_fetch_warmup_retries: dict[str, int] = {}
+        self._cycle_warmup_retries = 0
 
     @classmethod
     def football_today_tomorrow(
@@ -2792,6 +2820,7 @@ class OddsCheckerLoader:
             # a discovery-blocked cycle never shows the previous cycle's counts.
             self.last_fetch_challenge_retries[pipeline_key] = 0
             self.last_fetch_challenge_failures[pipeline_key] = 0
+            self.last_fetch_warmup_retries[pipeline_key] = 0
             self.last_fetch_event_ids[pipeline_key] = ()
             return []
         try:
@@ -2819,6 +2848,44 @@ class OddsCheckerLoader:
                 raise OddsCheckerSecurityError("listed match URL ceiling exceeded")
         return deduped
 
+    async def _fetch_match_odds_with_warmup(
+        self,
+        url: str,
+        *,
+        lease: _ProxySessionLease,
+        markets: Sequence[Market] | None,
+    ) -> list[OddsSnapshotIn]:
+        """``fetch_match_odds`` with cold-session warm-up tolerance.
+
+        A COLD session (no successful request yet) that hits a challenge gets up
+        to ``WARMUP_CHALLENGE_MAX_RETRIES`` retries on the SAME session with the
+        jittered challenge pause between — CF warm-up challenges resolve once
+        the session holds cf cookies, and rotating away discards that progress.
+        A WARMED session's challenge propagates immediately (real slot signal).
+        Every warm-up retry is counted in ``_cycle_warmup_retries`` whether or
+        not the attempt eventually recovers.
+        """
+        pool = self._session_pool
+        warmups = 0
+        while True:
+            try:
+                result = await self.fetch_match_odds(url, session=lease.session, markets=markets)
+            except Exception as exc:
+                if (
+                    pool is not None
+                    and _is_challenge_error(exc)
+                    and not pool.is_warmed(lease)
+                    and warmups < WARMUP_CHALLENGE_MAX_RETRIES
+                ):
+                    warmups += 1
+                    self._cycle_warmup_retries += 1
+                    await _discovery_challenge_backoff()
+                    continue
+                raise
+            if pool is not None:
+                pool.mark_warmed(lease)
+            return result
+
     async def _gather_snapshots(
         self,
         deduped: Sequence[str],
@@ -2828,6 +2895,7 @@ class OddsCheckerLoader:
     ) -> Sequence[OddsSnapshotIn]:
         semaphore = asyncio.Semaphore(self._max_clients)
         challenge_retries = 0
+        self._cycle_warmup_retries = 0
 
         async def _one(url: str, *, capture_optional: bool) -> list[OddsSnapshotIn]:
             nonlocal challenge_retries
@@ -2840,14 +2908,17 @@ class OddsCheckerLoader:
                     active_session = lease.session
                 try:
                     try:
-                        result = await self.fetch_match_odds(
+                        if lease is not None:
+                            result = await self._fetch_match_odds_with_warmup(
+                                url, lease=lease, markets=market_scope
+                            )
+                            self._proxy_health.record_success(lease.index)
+                            return result
+                        return await self.fetch_match_odds(
                             url,
                             session=active_session,
                             markets=market_scope,
                         )
-                        if lease is not None:
-                            self._proxy_health.record_success(lease.index)
-                        return result
                     except Exception as exc:
                         if not _is_transient_fetch_error(exc):
                             raise
@@ -2877,10 +2948,8 @@ class OddsCheckerLoader:
                                 # the challenged/stale connection.
                                 retry_lease = self._session_pool.acquire_lease()
                             try:
-                                result = await self.fetch_match_odds(
-                                    url,
-                                    session=retry_lease.session,
-                                    markets=market_scope,
+                                result = await self._fetch_match_odds_with_warmup(
+                                    url, lease=retry_lease, markets=market_scope
                                 )
                                 self._proxy_health.record_success(retry_lease.index)
                                 return result
@@ -3026,6 +3095,13 @@ class OddsCheckerLoader:
             self.last_fetch_incomplete_ratio[pipeline_key] = incomplete_ratio
             self.last_fetch_challenge_retries[pipeline_key] = challenge_retries
             self.last_fetch_challenge_failures[pipeline_key] = challenge_failures
+            self.last_fetch_warmup_retries[pipeline_key] = self._cycle_warmup_retries
+            if self._cycle_warmup_retries:
+                logger.info(
+                    "oddschecker %s: %d cold-session warm-up retries absorbed",
+                    pipeline_key,
+                    self._cycle_warmup_retries,
+                )
             if challenge_retries:
                 logger.info(
                     "oddschecker %s: %d challenged match page(s) retried, %d still failed",

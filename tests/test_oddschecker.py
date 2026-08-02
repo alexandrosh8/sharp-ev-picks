@@ -2000,8 +2000,9 @@ def _challenge_pool(created: list[_PoolFakeSession]) -> _ProxySessionPool:
 async def test_match_page_challenge_retry_backs_off_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Challenge-then-success: the page gets ONE rotated-session retry with the
-    jittered challenge backoff and is NOT counted as a failed fetch."""
+    """Challenge-then-success: the cold session absorbs its 2 warm-up retries,
+    then the page gets ONE rotated-session retry with the jittered challenge
+    backoff and is NOT counted as a failed fetch."""
     from app.ingestion import oddschecker as oc
 
     backoff_calls = 0
@@ -2031,12 +2032,14 @@ async def test_match_page_challenge_retry_backs_off_then_succeeds(
     )
 
     assert snapshots == [snapshot]
-    assert backoff_calls == 1
+    # 2 warm-up pauses on the cold session + 1 pause before the rotated retry.
+    assert backoff_calls == 3
     assert created[0].closed is True
     assert loader.last_fetch_complete["soccer"] is True
     assert loader.last_fetch_incomplete_ratio["soccer"] == 0.0
     assert loader.last_fetch_challenge_retries["soccer"] == 1
     assert loader.last_fetch_challenge_failures["soccer"] == 0
+    assert loader.last_fetch_warmup_retries["soccer"] == 2
     await pool.aclose()
 
 
@@ -2044,7 +2047,8 @@ async def test_match_page_challenge_retry_backs_off_then_succeeds(
 async def test_match_page_double_challenge_still_counted_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Challenge-challenge: exactly two attempts (bounded), then the page stays a
+    """Challenge on every attempt: two lease attempts, each with its bounded 2
+    cold-session warm-up retries (6 fetches total), then the page stays a
     failed fetch in the incomplete ratio — fail-closed accounting unchanged."""
     from app.ingestion import oddschecker as oc
 
@@ -2075,12 +2079,15 @@ async def test_match_page_double_challenge_still_counted_failed(
     )
 
     assert snapshots == []
-    assert attempts == 2
-    assert backoff_calls == 1
+    # (1 attempt + 2 warm-ups) per lease, two leases — bounded at 6 fetches.
+    assert attempts == 6
+    # 2+2 warm-up pauses + 1 pause before the rotated retry.
+    assert backoff_calls == 5
     assert loader.last_fetch_complete["soccer"] is False
     assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
     assert loader.last_fetch_challenge_retries["soccer"] == 1
     assert loader.last_fetch_challenge_failures["soccer"] == 1
+    assert loader.last_fetch_warmup_retries["soccer"] == 4
     await pool.aclose()
 
 
@@ -2205,8 +2212,12 @@ async def test_match_page_challenge_retries_are_concurrent(
     assert entered == 2
     assert {snapshot.event_id for snapshot in snapshots} == set(urls)
     assert loader.last_fetch_incomplete_ratio["soccer"] == 0.0
-    assert loader.last_fetch_challenge_retries["soccer"] == 2
+    # Both cold-session challenges recover via the SAME-session warm-up retry,
+    # so no rotated retries are needed — the backoff concurrency property now
+    # holds for the warm-up pause.
+    assert loader.last_fetch_challenge_retries["soccer"] == 0
     assert loader.last_fetch_challenge_failures["soccer"] == 0
+    assert loader.last_fetch_warmup_retries["soccer"] == 2
     await pool.aclose()
 
 
@@ -2955,3 +2966,174 @@ async def test_run_with_session_builds_health_aware_pool() -> None:
 
     await loader._run_with_session(runner)  # type: ignore[arg-type]
     assert seen == [health]
+
+
+# --------------------------------------------------------------------------- #
+# Cold-session warm-up tolerance (2026-08-02 follow-up: CF warm-up slots were
+# quarantined off the pool because their first cold-session request challenges)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_cold_session_warmup_retry_recovers_on_same_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(a) A challenge on a session's FIRST request retries the SAME (now
+    warmed) session; recovery records success and never records a slot
+    failure — the slot stays healthy."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=1)  # any recorded failure would quarantine
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+    calls_by_session: dict[int, int] = {}
+    snapshot = SimpleNamespace(event_id="oc:e1", market=Market.H2H)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, markets
+            count = calls_by_session.get(id(session), 0) + 1
+            calls_by_session[id(session)] = count
+            if count == 1:
+                raise OddsCheckerChallenge("challenge")
+            return [snapshot]
+
+    loader = Loader(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/a/winner"], None, pipeline_key="soccer"
+    )
+
+    assert snapshots == [snapshot]
+    assert len(created) == 1  # recovered on the SAME session — no rotation
+    assert health._slots[0].consecutive_failures == 0
+    assert health._slots[0].successes == 1
+    assert loader.last_fetch_complete["soccer"] is True
+    assert loader.last_fetch_challenge_retries["soccer"] == 0  # no rotated retry
+    assert loader.last_fetch_warmup_retries["soccer"] == 1
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_cold_session_warmup_exhaustion_records_one_failure_then_rotates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(b) A cold session challenged on ALL warm-up attempts records exactly ONE
+    slot failure and takes the existing rotated-session retry."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=3)
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+    calls_by_session: dict[int, int] = {}
+    snapshot = SimpleNamespace(event_id="oc:e1", market=Market.H2H)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, markets
+            calls_by_session[id(session)] = calls_by_session.get(id(session), 0) + 1
+            if session is created[0][1]:
+                raise OddsCheckerChallenge("challenge")
+            return [snapshot]
+
+    loader = Loader(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/a/winner"], None, pipeline_key="soccer"
+    )
+
+    assert snapshots == [snapshot]
+    assert [proxy.url for proxy, _session in created if proxy is not None] == [
+        "http://p0",
+        "http://p1",
+    ]
+    assert calls_by_session[id(created[0][1])] == 3  # 1 attempt + 2 warm-ups, bounded
+    assert health._slots[0].consecutive_failures == 1  # ONE failure, after exhaustion
+    assert health._slots[1].successes == 1
+    assert loader.last_fetch_challenge_retries["soccer"] == 1
+    assert loader.last_fetch_challenge_failures["soccer"] == 0
+    assert loader.last_fetch_warmup_retries["soccer"] == 2
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_warmed_session_challenge_gets_no_warmup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(c) A challenge on a WARMED session is a real signal: no same-session
+    retry — the existing immediate record_failure + rotate path applies."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=3)
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+    calls = 0
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, session, markets
+            nonlocal calls
+            calls += 1
+            raise OddsCheckerChallenge("challenge")
+
+    loader = Loader(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+    lease = pool.acquire_lease()  # type: ignore[attr-defined]
+    pool.mark_warmed(lease)  # type: ignore[attr-defined]
+    with pytest.raises(OddsCheckerChallenge):
+        await loader._fetch_match_odds_with_warmup(
+            "https://www.oddschecker.com/a/winner", lease=lease, markets=None
+        )
+    assert calls == 1  # exactly one attempt: warmed sessions get no tolerance
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_warmup_bounded_at_two_retries_per_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(d) Warm-up is bounded: every cold session gets at most 2 same-session
+    retries; the page then fails closed exactly as before."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=5)
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+    calls_by_session: dict[int, int] = {}
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, markets
+            calls_by_session[id(session)] = calls_by_session.get(id(session), 0) + 1
+            raise OddsCheckerChallenge("challenge")
+
+    loader = Loader(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/a/winner"], None, pipeline_key="soccer"
+    )
+
+    assert snapshots == []
+    assert len(created) == 2  # first lease + one rotated retry (cycle budget unchanged)
+    assert all(count == 3 for count in calls_by_session.values())  # 1 + 2 warm-ups each
+    assert loader.last_fetch_complete["soccer"] is False
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
+    assert loader.last_fetch_challenge_failures["soccer"] == 1
+    assert loader.last_fetch_warmup_retries["soccer"] == 4
+    await pool.aclose()  # type: ignore[attr-defined]
