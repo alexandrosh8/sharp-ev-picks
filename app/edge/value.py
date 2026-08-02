@@ -299,6 +299,15 @@ CLOSE_REASON_TRUSTED = "trusted"
 # trusted gate instead). Listed in the closed vocabulary so provenance
 # consumers know every label they can encounter.
 CLOSE_REASON_LEGACY_PRODUCT_MISMATCH = "legacy_product_mismatch"
+# DEFECT 3 (audit 2026-08-02): the re-scrape revalidation writer never writes
+# closing_odds (no snapshot close exists yet — see finalize's provenance
+# contract), yet stamped 'trusted' when no guard tripped, so the dashboard
+# close-quality widget counted 1,184 fallback re-prices as trusted closes. A
+# would-be-'trusted' verdict from a writer WITHOUT a genuine snapshot close
+# persists this label instead; finalize later overwrites it with the real
+# snapshot-close verdict. (The trusted-CLV gate itself was never fooled — it
+# keys on has_snapshot_close — this fixes the STORED label's honesty.)
+CLOSE_REASON_NO_SNAPSHOT_CLOSE = "no_snapshot_close"
 CLOSE_EXCLUSION_REASONS = (
     "fabricated",
     "circular_self_priced",
@@ -306,6 +315,7 @@ CLOSE_EXCLUSION_REASONS = (
     "tautological",
     "asymmetric_devig_fallback",
     CLOSE_REASON_LEGACY_PRODUCT_MISMATCH,
+    CLOSE_REASON_NO_SNAPSHOT_CLOSE,
     CLOSE_REASON_TRUSTED,
 )
 
@@ -330,6 +340,8 @@ def close_exclusion_reason(
     pick_created_at: datetime | None = None,
     mint_anchor_book: str | None = None,
     mint_anchor_type: str | None = None,
+    clv_log_value: float | None = None,
+    has_snapshot_close: bool = True,
 ) -> str:
     """Classify WHY a close is excluded from trusted CLV — or 'trusted'.
 
@@ -401,6 +413,25 @@ def close_exclusion_reason(
         and mint_devig_fell_back != close_devig_fell_back
     ):
         return "asymmetric_devig_fallback"
+    # 6a (DEFECT 3, audit 2026-08-02) — STAMP-TIME |clv_log| fabrication veto:
+    # a would-be 'trusted' row whose |clv_log| exceeds the aggregation's
+    # magnitude fallback cutoff must not be STORED as trusted — 784 stored
+    # 'trusted' labels (12 of one day's 190) carried |clv_log| > 0.5 that the
+    # read-time guards excluded, so the persisted label lied to the
+    # close-quality widget. Only the terminal 'trusted' verdict is demoted
+    # (tripped guards above keep their finer reason); callers that do not
+    # thread clv_log_value (pure classification, pre-2026-08-02 call sites)
+    # are bit-identical. This deliberately overrides the 2026-07-08
+    # "plausible longshot" note FOR THE STORED LABEL ONLY: the read-time
+    # trusted-subset math still judges edge-first — belt kept.
+    if clv_log_value is not None and abs(clv_log_value) > _CLV_IMPLAUSIBLE_LOG:
+        return "fabricated"
+    # 6b (DEFECT 3) — a writer with NO genuine snapshot close (the re-scrape
+    # revalidation path, which never writes closing_odds) must not persist
+    # 'trusted'; the honest label says what it is. Default True keeps the
+    # finalize (snapshot-close) writer and pure callers bit-identical.
+    if not has_snapshot_close:
+        return CLOSE_REASON_NO_SNAPSHOT_CLOSE
     return CLOSE_REASON_TRUSTED
 
 
@@ -1264,10 +1295,27 @@ def _logit_consensus_anchor(
             book_vec[nb][s] = o
     logit_sum = {s: 0.0 for s in selections}
     k = 0
-    for vec in book_vec.values():
+    for nb, vec in book_vec.items():
         if any(s not in vec for s in selections):
             continue
-        fair_b = devig([vec[s] for s in selections], method=devig_method)
+        gross = [vec[s] for s in selections]
+        # Per-vector overround plausibility bound (DEFECT 1, audit 2026-08-02):
+        # the SAME [0, max_overround] gate _named_sharp_anchor and
+        # _consensus_anchor already apply, judged on the NET vector (membership
+        # parity), devigging GROSS. Without it, a structurally UNDERROUND
+        # "market" — e.g. the OddsChecker spreads vocabulary grouping BOTH
+        # teams' same-magnitude handicaps as if complementary (implieds
+        # summing ~0.70) — was devigged per book with power k < 1, INFLATING
+        # the favourite (0.55 implied -> 0.69 "fair") and pooling the
+        # fabrications into a consensus anchor that minted, and re-stamped
+        # every revalidation cycle, a phantom +14% edge (picks 946585/946586).
+        # An implausible (underround / over-margined) book vector contributes
+        # nothing; fewer than MIN_CONSENSUS_BOOKS plausible vectors -> no
+        # anchor at all (fail-closed, same as the sibling paths).
+        net = [effective_odds(nb, o, commissions) for o in gross]
+        if not 0.0 <= _overround(net) <= max_overround:
+            continue
+        fair_b = devig(gross, method=devig_method)
         k += 1
         for s, p in zip(selections, fair_b, strict=True):
             p = min(max(p, 1e-12), 1.0 - 1e-12)

@@ -1,5 +1,6 @@
 """Sharp-vs-soft value finder: anchor selection, commission, gates, outliers."""
 
+import math
 from typing import Any
 
 import pytest
@@ -858,6 +859,90 @@ def test_logit_consensus_anchor_returns_novig_order_preserving_prices() -> None:
     assert synth[0] < synth[1] < synth[2]  # H favourite, A longshot — order preserved
 
 
+def test_logit_pool_rejects_structurally_underround_group() -> None:
+    """DEFECT 1 regression (audit 2026-08-02, picks 946585/946586): the
+    OddsChecker spreads vocabulary groups BOTH teams' same-magnitude
+    handicaps into one detail group ('York City -0.75' + 'Crawley -0.75') —
+    non-complementary selections whose implieds sum to ~0.70. Every per-book
+    devig then runs on an UNDERROUND vector (power k < 1), inflating the
+    favourite from ~0.55 implied to ~0.69 "fair", and the logit pool averaged
+    the fabrications into a consensus(median) anchor that minted (and
+    re-stamped, every revalidation cycle) a +14% phantom edge. The pool must
+    apply the SAME per-vector overround plausibility bound the named-anchor
+    and median-consensus paths already enforce — this group anchors NOWHERE."""
+    from app.edge.value import anchor_fair_probs
+
+    prices = {  # live warehouse quotes, event oddschecker:101628406
+        "York City -0.75": {
+            "Betfair Exchange": 1.82,
+            "Betfair Sportsbook": 1.83,
+            "Unibet": 1.78,
+            "bet365": 1.825,
+        },
+        "Crawley -0.75": {
+            "Betfair Exchange": 7.69,
+            "Betfair Sportsbook": 6.93,
+            "Unibet": 6.0,
+            "bet365": 6.6,
+        },
+    }
+    assert anchor_fair_probs(prices, consensus_logit_pool=True) is None
+    # parity: the median-consensus path already refuses (its [0, max] gate)
+    assert anchor_fair_probs(prices, consensus_logit_pool=False) is None
+
+
+def test_logit_pool_skips_implausible_book_vectors_keeps_plausible() -> None:
+    """A single stale/arb-looking (underround) book must not contribute a
+    k<1-devigged fair to the pool; the remaining plausible books pool as if
+    the implausible one were absent (mirrors _named_sharp_anchor's per-book
+    overround gate)."""
+    from app.edge.value import _logit_consensus_anchor
+    from app.probabilities.devig import DevigMethod
+
+    plausible = {
+        "H": {"B1": 1.50, "B2": 1.48, "B3": 1.52},
+        "A": {"B1": 2.80, "B2": 2.85, "B3": 2.75},
+    }
+    with_bad = {
+        "H": {**plausible["H"], "Bad": 1.70},  # 0.588 + 0.25 = 0.838 underround
+        "A": {**plausible["A"], "Bad": 4.00},
+    }
+    sels = ["H", "A"]
+    clean = _logit_consensus_anchor(plausible, sels, {}, 0.12, DevigMethod.POWER)
+    mixed = _logit_consensus_anchor(with_bad, sels, {}, 0.12, DevigMethod.POWER)
+    assert clean[1] is not None and mixed[1] is not None
+    for got, ref in zip(mixed[1], clean[1], strict=True):
+        assert got == pytest.approx(ref, abs=1e-12)
+
+
+def test_logit_pool_none_when_too_few_plausible_books() -> None:
+    # 3 books price the full market but only 2 carry a plausible overround:
+    # k < MIN_CONSENSUS_BOOKS after the per-vector gate -> no anchor at all.
+    from app.edge.value import _logit_consensus_anchor
+    from app.probabilities.devig import DevigMethod
+
+    prices = {
+        "H": {"B1": 1.50, "B2": 1.48, "Bad": 1.70},
+        "A": {"B1": 2.80, "B2": 2.85, "Bad": 4.00},
+    }
+    anchor, synth = _logit_consensus_anchor(prices, ["H", "A"], {}, 0.12, DevigMethod.POWER)
+    assert anchor is None and synth is None
+
+
+def test_logit_pool_rejects_over_margined_book_vectors() -> None:
+    # The upper bound mirrors max_overround too: every book 17% over-margined
+    # -> no plausible vector -> None (the median path also refuses).
+    from app.edge.value import _logit_consensus_anchor
+    from app.probabilities.devig import DevigMethod
+
+    prices = {
+        "H": {"B1": 1.50, "B2": 1.50, "B3": 1.50},
+        "A": {"B1": 2.00, "B2": 2.00, "B3": 2.00},
+    }
+    anchor, synth = _logit_consensus_anchor(prices, ["H", "A"], {}, 0.12, DevigMethod.POWER)
+    assert anchor is None and synth is None
+
+
 _EX_PRICES = {
     "H": {"betfair exchange": 1.50, "SoftA": 1.55, "SoftB": 1.52},
     "D": {"betfair exchange": 4.00, "SoftA": 4.10, "SoftB": 4.05},
@@ -1124,6 +1209,57 @@ def test_close_exclusion_reason_tautological_fresh_or_unknown_capture() -> None:
     assert _reason(pick_fair=None) == "tautological"
 
 
+def test_close_reason_stamp_time_clv_magnitude_veto_demotes_trusted() -> None:
+    """DEFECT 3 (audit 2026-08-02): 'trusted' was persisted on rows whose
+    |clv_log| > 0.5 — the aggregation's fabrication fallback catches them
+    read-time, but the STORED label lied to the close-quality widget. At the
+    write sites the stamp must apply the same test: a would-be 'trusted'
+    verdict with |clv_log| above the cutoff persists 'fabricated' instead.
+    Guard-specific reasons are untouched (only 'trusted' is demoted)."""
+    # would-be trusted longshot: edge = 0.25 - 1/8 = 0.125 (plausible) but
+    # |ln(8 * 0.25)| = ln 2 ~ 0.69 > 0.5 -> stamped 'fabricated'.
+    assert (
+        _reason(closing_fair=0.25, fill_eff=8.0, clv_log_value=math.log(8.0 * 0.25)) == "fabricated"
+    )
+    # negative magnitude too: |clv_log| is judged in absolute value.
+    assert (
+        _reason(closing_fair=0.30, fill_eff=1.8, clv_log_value=math.log(1.8 * 0.30)) == "fabricated"
+    )
+    # modest CLV keeps 'trusted'.
+    assert _reason(clv_log_value=0.08) == "trusted"
+    # a tripped guard keeps its own (finer) reason — never rewritten.
+    assert _reason(close_anchor_book="SoftBook", clv_log_value=1.2) == "circular_self_priced"
+    # default (kwarg absent) is bit-identical to the pre-fix classifier.
+    assert _reason(closing_fair=0.25, fill_eff=8.0) == "trusted"
+
+
+def test_close_reason_stamp_time_no_snapshot_close_never_trusted() -> None:
+    """DEFECT 3 (audit 2026-08-02): the re-scrape revalidation path never
+    writes closing_odds (no snapshot close exists yet) — persisting 'trusted'
+    there lied to the widget (1184 live rows). A would-be 'trusted' verdict
+    with has_snapshot_close=False persists 'no_snapshot_close'; tripped
+    guards keep their specific reason; the fabrication veto outranks it."""
+    from app.edge.value import CLOSE_EXCLUSION_REASONS, CLOSE_REASON_NO_SNAPSHOT_CLOSE
+
+    assert CLOSE_REASON_NO_SNAPSHOT_CLOSE in CLOSE_EXCLUSION_REASONS
+    assert _reason(has_snapshot_close=False) == CLOSE_REASON_NO_SNAPSHOT_CLOSE
+    assert _reason(close_anchor_book="SoftBook", has_snapshot_close=False) == (
+        "circular_self_priced"
+    )
+    # fabrication (|clv_log| veto) outranks the no-snapshot demotion.
+    assert (
+        _reason(
+            closing_fair=0.25,
+            fill_eff=8.0,
+            clv_log_value=math.log(8.0 * 0.25),
+            has_snapshot_close=False,
+        )
+        == "fabricated"
+    )
+    # default True is bit-identical for the finalize (snapshot-close) writer.
+    assert _reason(has_snapshot_close=True) == "trusted"
+
+
 def test_close_exclusion_reason_asymmetric_devig_fallback() -> None:
     assert (
         _reason(mint_devig_fell_back=True, close_devig_fell_back=False)
@@ -1268,9 +1404,11 @@ def test_close_exclusion_reason_vocabulary_is_closed_and_column_safe() -> None:
     from app.edge.value import CLOSE_EXCLUSION_REASONS, CLOSE_REASON_TRUSTED
 
     assert CLOSE_REASON_TRUSTED in CLOSE_EXCLUSION_REASONS
-    # 7 = the 5 writer-stamped guards + 'trusted' + the READ-time-derived
-    # 'legacy_product_mismatch' (2026-08-02 cohort; never stamped by writers).
-    assert len(CLOSE_EXCLUSION_REASONS) == len(set(CLOSE_EXCLUSION_REASONS)) == 7
+    # 8 = the 5 writer-stamped guards + 'trusted' + the READ-time-derived
+    # 'legacy_product_mismatch' (2026-08-02 cohort; never stamped by writers)
+    # + 'no_snapshot_close' (DEFECT 3, 2026-08-02: the re-scrape writer's
+    # honest would-be-trusted label — it has no snapshot close to trust).
+    assert len(CLOSE_EXCLUSION_REASONS) == len(set(CLOSE_EXCLUSION_REASONS)) == 8
     assert all(len(r) <= 32 for r in CLOSE_EXCLUSION_REASONS)
 
 

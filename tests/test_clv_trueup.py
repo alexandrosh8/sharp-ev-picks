@@ -229,7 +229,11 @@ async def test_true_up_fills_clv_fields(factory) -> None:  # type: ignore[no-unt
         # -> a genuine, independent close.
         assert pick.close_independent_of_fill is True
         # A4: the revalidation writer stamps the reason beside the boolean.
-        assert pick.close_exclusion_reason == "trusted"
+        # DEFECT 3 (2026-08-02): this writer has no snapshot close (it never
+        # writes closing_odds), so its would-be-'trusted' verdict persists the
+        # honest 'no_snapshot_close' — finalize later overwrites it with the
+        # real snapshot-close verdict.
+        assert pick.close_exclusion_reason == "no_snapshot_close"
 
 
 async def test_true_up_stamps_close_provenance(factory) -> None:  # type: ignore[no-untyped-def]
@@ -1599,6 +1603,57 @@ def _grouped_entry(books: dict[str, float], captured_at: datetime) -> _GroupedEn
     prices = {"Over 2.5": books}
     captured = {("Over 2.5", book): captured_at for book in books}
     return prices, captured
+
+
+def test_revalidation_fair_absent_for_structurally_underround_group() -> None:
+    """DEFECT 1 regression (audit 2026-08-02, picks 946585/946586): the
+    revalidation fair map must carry NO entry for a pick's exact devig group
+    when that group is a structurally UNDERROUND non-market (the OddsChecker
+    spreads vocabulary keys BOTH teams' same-magnitude handicaps into one
+    detail group — implieds sum ~0.70). Under the production logit-pool
+    policy this group used to anchor (per-book power devig k < 1 inflated
+    the favourite from ~0.55 to ~0.69 "fair") and re-stamped a phantom +14%
+    current_edge every cycle. No fair => the revalidation loop's existing
+    fail-closed skip (closing_fair is None -> continue): the stale re-price
+    is never refreshed, revalidated_at stops advancing, and the dashboard's
+    freshness gates strip actionability."""
+    from app.clv_trueup import _merge_vocabulary_groups, _settleable_groups
+    from app.edge.value_policy import ValuePolicy
+    from app.pipeline import event_fair_probs, group_market_prices
+    from app.probabilities.devig import DevigMethod
+
+    rows = []
+    for sel, books in {
+        "York City -0.75": {
+            "Betfair Exchange": 1.82,
+            "Betfair Sportsbook": 1.83,
+            "Unibet": 1.78,
+            "bet365": 1.825,
+        },
+        "Crawley -0.75": {
+            "Betfair Exchange": 7.69,
+            "Betfair Sportsbook": 6.93,
+            "Unibet": 6.0,
+            "bet365": 6.6,
+        },
+    }.items():
+        for book, odds in books.items():
+            rows.append(
+                OddsSnapshotIn(
+                    event_id="oddschecker:101628406",
+                    bookmaker=book,
+                    market=Market.SPREADS,
+                    selection=sel,
+                    decimal_odds=odds,
+                    captured_at=NOW,
+                    ingested_at=NOW,
+                    market_detail="spreads_minus_0_75",
+                )
+            )
+    grouped = _merge_vocabulary_groups(_settleable_groups(group_market_prices(rows)))
+    for policy in (ValuePolicy(consensus_logit_pool=True), ValuePolicy()):
+        fair = event_fair_probs(grouped, DevigMethod.POWER, policy)
+        assert fair == {}  # no anchor from a non-complementary underround group
 
 
 def test_merge_vocabulary_groups_folds_equivalent_full_match_details() -> None:

@@ -624,7 +624,12 @@ async def revalidate_open_picks(
                 )
                 # A4: persist the SPECIFIC reason beside the boolean (closed
                 # vocabulary, observability only — the boolean above stays the
-                # trusted-subset gate input, unchanged).
+                # trusted-subset gate input, unchanged). DEFECT 3 (2026-08-02):
+                # this writer never writes closing_odds (a poll-time FALLBACK
+                # re-price, not a snapshot close), so a would-be 'trusted'
+                # verdict persists 'no_snapshot_close' — and the stamp-time
+                # |clv_log| fabrication veto applies (clv_log_value) so the
+                # stored label can never out-trust the read-time guards.
                 pick.close_exclusion_reason = (
                     "circular_self_priced"
                     if mixed_fill_books
@@ -644,6 +649,8 @@ async def revalidate_open_picks(
                         pick_created_at=pick.created_at,
                         mint_anchor_book=pick.anchor_book,
                         mint_anchor_type=pick.anchor_type,
+                        clv_log_value=clv,
+                        has_snapshot_close=False,
                     )
                 )
             # The pick's own book is the actionable price; if it dropped the
@@ -1657,7 +1664,13 @@ async def finalize_closing_from_snapshots(
         )
         # A4: persist the SPECIFIC reason beside the boolean (closed vocabulary,
         # observability only — the boolean above stays the trusted-subset gate
-        # input, unchanged).
+        # input, unchanged). DEFECT 3 (2026-08-02): the stamp-time |clv_log|
+        # fabrication veto (clv_log_value) applies here too, so a snapshot
+        # close whose CLV magnitude the read-time aggregation would refuse is
+        # never STORED as 'trusted'. has_snapshot_close stays True: this IS
+        # the snapshot-close writer (a sharp-only close may honestly carry
+        # 'trusted' with closing_odds NULL — closing_odds is the soft DISPLAY
+        # price, has_snapshot_close the trust marker, per clv-1 above).
         pick.close_exclusion_reason = (
             "circular_self_priced"
             if mixed_fill_books
@@ -1675,6 +1688,7 @@ async def finalize_closing_from_snapshots(
                 pick_created_at=pick.created_at,
                 mint_anchor_book=pick.anchor_book,
                 mint_anchor_type=pick.anchor_type,
+                clv_log_value=clv,
             )
         )
     if close_odds is not None and close_odds > 1.0:
