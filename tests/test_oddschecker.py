@@ -2674,3 +2674,215 @@ async def test_loader_threads_page_entities_into_all_odds_parse(
         (Market.H2H, "Betfair Exchange"),
         (Market.OTHER, "Betfair Exchange"),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Proxy-health-aware pool rotation (2026-08-02 challenge-storm incident)
+# --------------------------------------------------------------------------- #
+
+
+def _three_slot_pool_with_health(
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]],
+    health: object,
+) -> object:
+    from app.ingestion.oddschecker import _ProxySessionPool
+
+    proxies = (
+        ScraperProxy(url="http://p0", username="", password=""),
+        ScraperProxy(url="http://p1", username="", password=""),
+        ScraperProxy(url="http://p2", username="", password=""),
+    )
+
+    def factory(proxy: ScraperProxy | None) -> _PoolFakeSession:
+        session = _PoolFakeSession([])
+        created.append((proxy, session))
+        return session
+
+    return _ProxySessionPool(proxies, session_factory=factory, health=health)  # type: ignore[arg-type]
+
+
+def test_pool_acquire_lease_skips_quarantined_index() -> None:
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    health = ProxyHealthRegistry(threshold=1)
+    health.record_failure(0, "OddsCheckerChallenge")
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+
+    lease = pool.acquire_lease()  # type: ignore[attr-defined]
+    assert lease.index == 1
+
+
+def test_pool_acquire_lease_fails_open_when_all_quarantined() -> None:
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    health = ProxyHealthRegistry(threshold=1)
+    for index in range(3):
+        health.record_failure(index, "OddsCheckerChallenge")
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+
+    lease = pool.acquire_lease()  # type: ignore[attr-defined]
+    assert lease.index == 0  # fail-open: full rotation, never zero availability
+
+
+@pytest.mark.asyncio
+async def test_challenge_retry_rotates_to_healthy_slot_and_records_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rotated-session retry must SKIP a quarantined slot (the 2026-08-02
+    storm: retry landed on the deterministic next slot, which was also bad) and
+    record the failed slot's failure + the succeeding slot's success."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=3)
+    health.record_failure(1, "OddsCheckerChallenge")
+    health.record_failure(1, "OddsCheckerChallenge")
+    health.record_failure(1, "OddsCheckerChallenge")  # index 1 quarantined
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, markets
+            if session is created[0][1]:
+                raise OddsCheckerChallenge("challenge")
+            return ["snapshot"]
+
+    loader = Loader(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+    snapshots = await loader._gather_snapshots(["https://www.oddschecker.com/a/winner"], None)
+
+    assert snapshots == ["snapshot"]
+    # First lease slot 0 (challenged), retry must pick slot 2 — NOT quarantined slot 1.
+    assert [proxy.url for proxy, _session in created if proxy is not None] == [
+        "http://p0",
+        "http://p2",
+    ]
+    assert health._slots[0].consecutive_failures == 1
+    assert health._slots[2].consecutive_failures == 0
+    assert health._slots[2].successes >= 1
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_match_page_success_resets_proxy_failure_streak() -> None:
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    health = ProxyHealthRegistry(threshold=3)
+    health.record_failure(0, "Timeout")
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, session, markets
+            return ["snapshot"]
+
+    loader = Loader(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+    await loader._gather_snapshots(["https://www.oddschecker.com/a/winner"], None)
+
+    assert health._slots[0].consecutive_failures == 0
+    assert health._slots[0].successes == 1
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_all_slots_quarantined_never_crashes_and_degrades_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Property: consecutive challenges on every slot never crash the cycle —
+    it always yields a recorded incomplete verdict (fail-closed)."""
+    from app.ingestion import oddschecker as oc
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    health = ProxyHealthRegistry(threshold=1)
+    for index in range(3):
+        health.record_failure(index, "OddsCheckerChallenge")
+    created: list[tuple[ScraperProxy | None, _PoolFakeSession]] = []
+    pool = _three_slot_pool_with_health(created, health)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, session, markets
+            raise OddsCheckerChallenge("challenge")
+
+    loader = Loader(EventDirectory(), proxy_health=health)
+    loader._session_pool = pool  # type: ignore[assignment]
+    snapshots = await loader._gather_snapshots(
+        ["https://www.oddschecker.com/a/winner"], None, pipeline_key="soccer"
+    )
+
+    assert snapshots == []
+    assert loader.last_fetch_complete["soccer"] is False
+    assert loader.last_fetch_incomplete_ratio["soccer"] == 1.0
+    assert loader.last_fetch_challenge_failures["soccer"] == 1
+    await pool.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_match_page_skip_warning_logs_path_slug_without_query(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Failed pages must be identifiable in logs: path slug only, never query
+    strings (page identity was unloggable during the 2026-08-02 storm)."""
+    from app.ingestion import oddschecker as oc
+
+    monkeypatch.setattr(oc, "_DISCOVERY_CHALLENGE_BACKOFF_RANGE", (0.0, 0.0))
+    created: list[_PoolFakeSession] = []
+    pool = _challenge_pool(created)
+
+    class Loader(OddsCheckerLoader):
+        async def fetch_match_odds(  # type: ignore[no-untyped-def]
+            self, url, *, now=None, session=None, markets=None
+        ):
+            del url, now, session, markets
+            raise OddsCheckerChallenge("challenge")
+
+    loader = Loader(EventDirectory())
+    loader._session_pool = pool
+    with caplog.at_level("WARNING", logger="app.ingestion.oddschecker"):
+        await loader._gather_snapshots(
+            ["https://www.oddschecker.com/football/a-v-b/winner?tracker=secret"],
+            None,
+            pipeline_key="soccer",
+        )
+
+    skip_messages = [
+        r.getMessage() for r in caplog.records if "match page skipped" in r.getMessage()
+    ]
+    assert skip_messages, "expected a skip warning"
+    assert any("/football/a-v-b/winner" in message for message in skip_messages)
+    assert all("?" not in message and "secret" not in message for message in skip_messages)
+
+
+@pytest.mark.asyncio
+async def test_run_with_session_builds_health_aware_pool() -> None:
+    """The per-cycle production pool must carry the loader's health registry —
+    otherwise rotation is quarantine-blind exactly like the 2026-08-02 outage."""
+    from app.ingestion.proxy_health import ProxyHealthRegistry
+
+    health = ProxyHealthRegistry(threshold=3)
+    proxies = (ScraperProxy(url="http://p0", username="", password=""),)
+    loader = OddsCheckerLoader(EventDirectory(), proxy_pool=proxies, proxy_health=health)
+    seen: list[object] = []
+
+    async def runner(session: object) -> list[object]:
+        del session
+        assert loader._session_pool is not None
+        seen.append(loader._session_pool._health)
+        return []
+
+    await loader._run_with_session(runner)  # type: ignore[arg-type]
+    assert seen == [health]

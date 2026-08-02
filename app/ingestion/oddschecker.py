@@ -36,6 +36,7 @@ from app.ingestion.http_safety import (
     get_bounded,
     validate_https_url,
 )
+from app.ingestion.proxy_health import ProxyHealthRegistry, get_registry
 from app.schemas.base import Market
 from app.schemas.odds import MAX_DECIMAL_ODDS, OddsSnapshotIn
 
@@ -2065,6 +2066,7 @@ class _ProxySessionPool:
         proxies: Sequence[ScraperProxy],
         *,
         session_factory: Callable[[ScraperProxy | None], AsyncGetSession] | None = None,
+        health: ProxyHealthRegistry | None = None,
     ) -> None:
         self._proxies = tuple(proxies)
         # Resolved at call time (not bound as a default) so tests can monkeypatch
@@ -2074,6 +2076,10 @@ class _ProxySessionPool:
         self._lease_counts: dict[tuple[int, int], int] = {}
         self._retired_sessions: dict[tuple[int, int], AsyncGetSession] = {}
         self._cursor = 0
+        # Shared per-index quarantine registry (2026-08-02 storm: 9/12 slots
+        # degraded and the health-blind rotation retried straight into them).
+        # None = no filtering (unit-test pools keep exact rotation semantics).
+        self._health = health
 
     @staticmethod
     def _lease_key(lease: _ProxySessionLease) -> tuple[int, int]:
@@ -2086,15 +2092,18 @@ class _ProxySessionPool:
     ) -> _ProxySessionLease:
         if not self._proxies:
             raise OddsCheckerError("proxy session pool is empty")
-        index: int | None = None
-        for _ in range(len(self._proxies)):
-            candidate = self._cursor % len(self._proxies)
-            self._cursor += 1
-            if candidate not in exclude_indices:
-                index = candidate
-                break
-        if index is None:
+        n = len(self._proxies)
+        start = self._cursor % n
+        self._cursor += 1
+        order = [(start + k) % n for k in range(n) if (start + k) % n not in exclude_indices]
+        if not order:
             raise OddsCheckerError("no proxy session remains after exclusions")
+        if self._health is not None:
+            # Healthy slots first (rotation order), unclaimed half-open probes at
+            # the tail; FAIL-OPEN to the full rotation when all are quarantined —
+            # the registry must never reduce availability below the raw pool.
+            order = self._health.filter_rotation(order)
+        index = order[0]
         session = self._sessions.get(index)
         if session is None:
             session = self._factory(self._proxies[index])
@@ -2202,6 +2211,7 @@ class OddsCheckerLoader:
         markets: Sequence[Market] | None = None,
         scheduler_sport_keys: Sequence[str] = (),
         capture_other: bool = False,
+        proxy_health: ProxyHealthRegistry | None = None,
     ) -> None:
         self._directory = directory
         self._match_urls = tuple(match_urls)
@@ -2213,6 +2223,12 @@ class OddsCheckerLoader:
         self._football_daily_days = football_daily_days
         self._proxy_pool = tuple(proxy_pool)
         self._proxy_cursor = 0
+        # Process-shared per-index quarantine registry (same index space as
+        # OddsPortal: both pools come from settings.scraper_proxies() in the
+        # same order). Records challenge/timeout failures per slot so rotation
+        # and the challenge retry skip quarantined slots; half-open probes
+        # re-admit recovered proxies without a restart.
+        self._proxy_health = proxy_health if proxy_health is not None else get_registry()
         # Per-proxy persistent-session pool, live only for the duration of one
         # fetch_odds cycle (created/closed in _run_with_session). None outside a
         # cycle and whenever a session is injected (tests) or no proxy pool.
@@ -2657,7 +2673,7 @@ class OddsCheckerLoader:
         if session is not None:
             return await runner(session)
         if self._proxy_pool:
-            pool = _ProxySessionPool(self._proxy_pool)
+            pool = _ProxySessionPool(self._proxy_pool, health=self._proxy_health)
             self._session_pool = pool
             try:
                 return await runner(None)
@@ -2707,10 +2723,14 @@ class OddsCheckerLoader:
             while True:
                 try:
                     match_urls = await _discover(discovery_session)
+                    if discovery_lease is not None:
+                        self._proxy_health.record_success(discovery_lease.index)
                     break
                 except Exception as exc:
                     if not _is_transient_fetch_error(exc):
                         raise
+                    if discovery_lease is not None:
+                        self._proxy_health.record_failure(discovery_lease.index, type(exc).__name__)
                     is_challenge = _is_challenge_error(exc)
                     max_attempts = DISCOVERY_CHALLENGE_MAX_ATTEMPTS if is_challenge else 2
                     if attempt >= max_attempts:
@@ -2812,14 +2832,19 @@ class OddsCheckerLoader:
                     active_session = lease.session
                 try:
                     try:
-                        return await self.fetch_match_odds(
+                        result = await self.fetch_match_odds(
                             url,
                             session=active_session,
                             markets=market_scope,
                         )
+                        if lease is not None:
+                            self._proxy_health.record_success(lease.index)
+                        return result
                     except Exception as exc:
                         if not _is_transient_fetch_error(exc):
                             raise
+                        if lease is not None:
+                            self._proxy_health.record_failure(lease.index, type(exc).__name__)
                         await _wait_before_retry(exc)
                         if _is_challenge_error(exc):
                             # Challenge storms need a jittered pause before the
@@ -2844,13 +2869,18 @@ class OddsCheckerLoader:
                                 # the challenged/stale connection.
                                 retry_lease = self._session_pool.acquire_lease()
                             try:
-                                return await self.fetch_match_odds(
+                                result = await self.fetch_match_odds(
                                     url,
                                     session=retry_lease.session,
                                     markets=market_scope,
                                 )
+                                self._proxy_health.record_success(retry_lease.index)
+                                return result
                             except Exception as retry_exc:
                                 if _is_transient_fetch_error(retry_exc):
+                                    self._proxy_health.record_failure(
+                                        retry_lease.index, type(retry_exc).__name__
+                                    )
                                     await self._session_pool.evict(retry_lease)
                                 raise
                             finally:
@@ -2914,12 +2944,19 @@ class OddsCheckerLoader:
                 ),
                 return_exceptions=True,
             )
-            for result in results:
+            for url, result in zip(deduped[start : start + batch_size], results, strict=True):
                 if isinstance(result, BaseException):
                     failures += 1
                     if _is_challenge_error(result):
                         challenge_failures += 1
-                    logger.warning("oddschecker match page skipped (%s)", type(result).__name__)
+                    # Page identity (path slug ONLY — never query strings) so a
+                    # sticky challenged page is identifiable across cycles
+                    # (during the 2026-08-02 storm it was unloggable).
+                    logger.warning(
+                        "oddschecker match page skipped (%s): %s",
+                        type(result).__name__,
+                        urlparse(url).path,
+                    )
                     continue
                 mapped_result = [
                     snapshot
