@@ -485,7 +485,7 @@ def make_value_pick() -> PickOut:
             "edge": 0.201,
             "ev": 0.368,
             "anchor_type": "sharp",
-            "reason_summary": "value: Betfair Exchange fair 1.34 vs 10bet 1.83",
+            "reason_summary": "value: Betfair Exchange fair_odds 1.34 vs 10bet 1.83",
         }
     )
 
@@ -507,8 +507,9 @@ def test_value_pick_reason_line_shows_fair_odds_apples_to_apples() -> None:
     # The reason line must compare like with like: fair ODDS vs offered ODDS,
     # not the fair PROBABILITY (0.748) next to the offered ODDS (1.83).
     alert = build_pick_alert(make_value_pick(), value_min_edge=0.03)
-    assert "value: Betfair Exchange fair 1.34 vs 10bet 1.83" in alert.body
+    assert "value: Betfair Exchange fair_odds 1.34 vs 10bet 1.83" in alert.body
     assert "fair 0.748" not in alert.body
+    assert "fair_odds 0.748" not in alert.body
 
 
 def test_model_pick_fair_line_unchanged() -> None:

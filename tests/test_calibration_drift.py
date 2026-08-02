@@ -212,3 +212,76 @@ async def test_job_no_dispatcher_is_safe(monkeypatch) -> None:  # type: ignore[n
     # drift present but no channel wired: still runs, returns the report, no raise
     report = await cd.calibration_drift_job(_NO_FACTORY, dispatcher=None, now=_NOW)
     assert report is not None and report.warrants_recalibration is True
+
+
+# --- /performance detector-status payload (live review 2026-08-02 item 3) --- #
+
+
+def _insufficient_report(n_total: int) -> RecalibrationGainReport:
+    return RecalibrationGainReport(
+        n_folds=0,
+        n_total=n_total,
+        insufficient=True,
+        pooled_identity_log_loss=None,
+        pooled_recal_log_loss=None,
+        pooled_oos_gain=None,
+        pooled_rel_gain_pct=None,
+        warrants_recalibration=False,
+        folds=(),
+    )
+
+
+def test_drift_status_payload_insufficient_carries_folds_and_eta() -> None:
+    # 0 folds must be STATED, with the sample requirement and an honest ETA
+    # extrapolated from the trailing settle cadence (300/30d = 10/day; the
+    # remaining 2200-400=1800 rows land in 180 days).
+    out = cd.drift_status_payload(_insufficient_report(400), settled_binary_30d=300, now=_NOW)
+    assert out["status"] == "insufficient"
+    assert out["insufficient"] is True
+    assert out["n_folds"] == 0
+    assert out["n_settled_binary"] == 400
+    assert out["needed_n"] == cd.DEFAULT_MIN_TRAIN + cd.DEFAULT_MIN_TEST
+    assert out["warrants_recalibration"] is False
+    assert out["projected_testable_date"] == "2026-12-27"  # _NOW + 180d
+
+
+def test_drift_status_payload_no_eta_without_cadence_and_none_report() -> None:
+    # Zero/unknown cadence -> no fabricated date; a None report (no settled
+    # rows at all) is the honest empty insufficient state.
+    out = cd.drift_status_payload(_insufficient_report(400), settled_binary_30d=0, now=_NOW)
+    assert out["projected_testable_date"] is None
+    empty = cd.drift_status_payload(None, settled_binary_30d=None, now=_NOW)
+    assert empty["status"] == "insufficient"
+    assert empty["n_folds"] == 0
+    assert empty["n_settled_binary"] == 0
+    assert empty["projected_testable_date"] is None
+
+
+def test_drift_status_payload_ok_and_drift_verdicts() -> None:
+    drift = cd.drift_status_payload(_drift_report(), now=_NOW)
+    assert drift["status"] == "drift"
+    assert drift["warrants_recalibration"] is True
+    assert drift["projected_testable_date"] is None  # already testable
+    ok_report = RecalibrationGainReport(
+        n_folds=3,
+        n_total=12000,
+        insufficient=False,
+        pooled_identity_log_loss=0.60,
+        pooled_recal_log_loss=0.60,
+        pooled_oos_gain=0.0,
+        pooled_rel_gain_pct=0.0,
+        warrants_recalibration=False,
+        folds=(),
+    )
+    ok = cd.drift_status_payload(ok_report, now=_NOW)
+    assert ok["status"] == "ok"
+    assert ok["insufficient"] is False
+
+
+async def test_calibration_drift_status_never_raises_on_broken_session() -> None:
+    # /performance must not degrade because the monitor read failed: a fake /
+    # absent session degrades to the explicit "unavailable" shape.
+    out = await cd.calibration_drift_status(cast("AsyncSession", object()))
+    assert out["status"] == "unavailable"
+    assert out["insufficient"] is True
+    assert out["warrants_recalibration"] is False

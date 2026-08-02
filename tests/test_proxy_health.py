@@ -129,24 +129,71 @@ def test_filter_rotation_orders_half_open_last() -> None:
 def test_diagnostics_half_open_is_probing_not_healthy() -> None:
     # Review 2026-07-03 (minor): a half-open slot was folded into "healthy",
     # flapping /health to "Proxy pool healthy" every cooldown for a dead proxy.
-    # Unproven slots count as `probing`, the verdict stays degraded, and the
+    # Live review 2026-08-02 (P3): categories are now DISJOINT — a never-ok
+    # quarantined/half-open slot counts ONLY as dead (no double count), and the
     # dead annotation persists through the half-open window.
     registry, clock = make_registry(threshold=3, cooldown_seconds=900.0)
     for _ in range(3):
-        registry.record_failure(4, "TimeoutError")
+        registry.record_failure(1, "TimeoutError")
     diag = registry.diagnostics(configured=2, concurrency_floor=1)
-    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (1, 0, 1)
-    clock.advance(901)  # half-open — still unproven
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 0, 1)
+    clock.advance(901)  # half-open — still unproven, still dead-classified
     diag = registry.diagnostics(configured=2, concurrency_floor=1)
-    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 1, 1)
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 0, 1)
     assert diag["healthy"] == 1
     assert diag["verdict"] == "Proxy pool degraded"
     assert diag["action"] == "Replace or expand proxy pool"
-    registry.record_success(4)  # probe passed — NOW it is healthy
+    registry.record_success(1)  # probe passed — NOW it is healthy
     diag = registry.diagnostics(configured=2, concurrency_floor=1)
     assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 0, 0)
     assert diag["healthy"] == 2
     assert diag["verdict"] == "Proxy pool healthy"
+
+
+def test_diagnostics_recent_success_slot_stays_in_quarantined_then_probing() -> None:
+    # A slot with a RECENT success that then trips quarantine is not dead —
+    # it counts quarantined, then probing after the cooldown (never both, and
+    # never dead while its last success is inside DEAD_AFTER_SECONDS).
+    registry, clock = make_registry(threshold=3, cooldown_seconds=900.0)
+    registry.record_success(1)
+    for _ in range(3):
+        registry.record_failure(1, "TimeoutError")
+    diag = registry.diagnostics(configured=2, concurrency_floor=1)
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (1, 0, 0)
+    clock.advance(901)  # half-open, success still < DEAD_AFTER_SECONDS old
+    diag = registry.diagnostics(configured=2, concurrency_floor=1)
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 1, 0)
+    assert diag["healthy"] == 1
+
+
+def test_diagnostics_categories_partition_pool_and_slots_list_all_configured() -> None:
+    # Live review 2026-08-02 (P3): healthy+quarantined+probing+dead must equal
+    # configured (a never-ok slot summed 13 > 12 before), and slots[] must list
+    # EVERY configured slot (12/12, never 7/12) — never-attempted slots appear
+    # healthy with zero counters.
+    registry, clock = make_registry(threshold=3, cooldown_seconds=900.0)
+    registry.record_success(0)
+    for _ in range(3):
+        registry.record_failure(1, "TimeoutError")  # never-ok -> dead only
+    registry.record_success(2)
+    for _ in range(3):
+        registry.record_failure(2, "TimeoutError")  # recent success -> quarantined
+    diag = registry.diagnostics(configured=12, concurrency_floor=3)
+    assert (
+        diag["healthy"] + diag["quarantined"] + diag["probing"] + diag["dead"]
+        == diag["configured"]
+        == 12
+    )
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (1, 0, 1)
+    assert [s["index"] for s in diag["slots"]] == list(range(12))
+    untouched = next(s for s in diag["slots"] if s["index"] == 7)
+    assert untouched["state"] == "healthy"
+    assert untouched["successes"] == 0
+    assert untouched["last_success_at"] is None
+    clock.advance(901)  # both bad slots half-open: dead stays dead, other probes
+    diag = registry.diagnostics(configured=12, concurrency_floor=3)
+    assert (diag["quarantined"], diag["probing"], diag["dead"]) == (0, 1, 1)
+    assert diag["healthy"] + diag["quarantined"] + diag["probing"] + diag["dead"] == 12
 
 
 def test_all_quarantined_fails_open_to_full_rotation() -> None:
@@ -198,11 +245,12 @@ def test_diagnostics_shape_and_operator_wording() -> None:
     assert diag["action"] is None
     assert diag["configured"] == 12
     assert diag["healthy"] == 12
-    # degrade one slot (never succeeded -> also "dead")
+    # degrade one slot (never succeeded -> counted ONLY "dead", 2026-08-02
+    # disjoint-category contract; its raw per-slot state stays "quarantined")
     for _ in range(3):
         registry.record_failure(4, "TimeoutError")
     diag = registry.diagnostics(configured=12, concurrency_floor=3)
-    assert diag["quarantined"] == 1
+    assert diag["quarantined"] == 0
     assert diag["dead"] == 1
     assert diag["healthy"] == 11
     # operator-spec freshness-risk wording, EXACT strings
@@ -210,8 +258,10 @@ def test_diagnostics_shape_and_operator_wording() -> None:
     assert diag["freshness"] == "Freshness protected: stale candidates are being discarded"
     assert diag["picks"] == "No stale picks minted"
     assert diag["action"] == "Replace or expand proxy pool"
-    (slot,) = diag["slots"]
-    assert slot["index"] == 4
+    # slots[] lists all 12 configured indices; the degraded one keeps its
+    # raw state + counters.
+    assert len(diag["slots"]) == 12
+    slot = next(s for s in diag["slots"] if s["index"] == 4)
     assert slot["state"] == "quarantined"
     assert slot["consecutive_failures"] == 3
     assert slot["last_error_class"] == "TimeoutError"

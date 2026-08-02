@@ -26,12 +26,14 @@ Read-only: it reads settled picks; it writes nothing and places no bets.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+import math
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import groupby
-from typing import Protocol
+from typing import Any, Protocol
 
-from sqlalchemy import Row, select
+from sqlalchemy import Row, Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.backtesting.calibration import (
@@ -107,23 +109,33 @@ async def load_calibration_periods(
     out — the math stays in the pure module."""
     del now  # accepted for a uniform signature / future windowing; unused today
     async with session_factory() as session:
-        rows = (
-            await session.execute(
-                select(
-                    Event.starts_at,
-                    Pick.model_probability,
-                    ResultTracking.outcome,
-                )
-                .join(Pick, ResultTracking.pick_id == Pick.id)
-                .join(Event, Pick.event_id == Event.id)
-                .where(
-                    ResultTracking.outcome.in_(("won", "lost")),
-                    Pick.tier == "premium",
-                    Event.starts_at.is_not(None),
-                )
-                .order_by(Event.starts_at)
-            )
-        ).all()
+        rows = (await session.execute(_calibration_rows_stmt())).all()
+    return _bucket_periods(rows)
+
+
+def _calibration_rows_stmt() -> Select[tuple[datetime | None, Decimal, str]]:
+    """The one settled-binary-premium calibration query (kickoff-ordered)."""
+    return (
+        select(
+            Event.starts_at,
+            Pick.model_probability,
+            ResultTracking.outcome,
+        )
+        .join(Pick, ResultTracking.pick_id == Pick.id)
+        .join(Event, Pick.event_id == Event.id)
+        .where(
+            ResultTracking.outcome.in_(("won", "lost")),
+            Pick.tier == "premium",
+            Event.starts_at.is_not(None),
+        )
+        .order_by(Event.starts_at)
+    )
+
+
+def _bucket_periods(
+    rows: Sequence[Row[tuple[datetime | None, Decimal, str]]],
+) -> list[tuple[str, list[CalibrationObservation]]]:
+    """Chronological year-month walk-forward buckets from calibration rows."""
 
     def _bucket(row: Row[tuple[datetime | None, Decimal, str]]) -> str:
         starts_at = row[0]
@@ -139,6 +151,123 @@ async def load_calibration_periods(
         ]
         periods.append((label, obs))
     return periods
+
+
+def drift_status_payload(
+    report: RecalibrationGainReport | None,
+    *,
+    settled_binary_30d: int | None = None,
+    now: datetime | None = None,
+    min_train: int = DEFAULT_MIN_TRAIN,
+    min_test: int = DEFAULT_MIN_TEST,
+) -> dict[str, Any]:
+    """JSON-ready detector status for the Lab calibration cell (pure — no DB).
+
+    The Lab must STATE the detector's state instead of rendering a silent
+    green: with 0 eligible walk-forward folds there is NO drift verdict —
+    "insufficient" is a fact, not an implicit OK. ``projected_testable_date``
+    is a linear extrapolation of the trailing-30-day settled-binary cadence
+    toward the first eligible fold's sample requirement (min_train +
+    min_test); None when the cadence is unknown/zero or the sample is already
+    there (the dashboard then omits the ETA — never a fabricated date).
+    """
+    now = now or datetime.now(tz=UTC)
+    needed_n = min_train + min_test
+    n_total = report.n_total if report is not None else 0
+    insufficient = report is None or report.insufficient
+    projected: str | None = None
+    remaining = needed_n - n_total
+    if insufficient and remaining > 0 and settled_binary_30d and settled_binary_30d > 0:
+        days = math.ceil(remaining / (settled_binary_30d / 30.0))
+        projected = (now + timedelta(days=days)).date().isoformat()
+    if insufficient:
+        status = "insufficient"
+    elif report is not None and report.warrants_recalibration:
+        status = "drift"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "insufficient": insufficient,
+        "n_folds": report.n_folds if report is not None else 0,
+        "n_settled_binary": n_total,
+        "min_train": min_train,
+        "min_test": min_test,
+        "needed_n": needed_n,
+        "warrants_recalibration": bool(report is not None and report.warrants_recalibration),
+        "pooled_rel_gain_pct": (report.pooled_rel_gain_pct if report is not None else None),
+        "projected_testable_date": projected,
+    }
+
+
+#: Honest degraded shape when the status computation itself fails (fake/absent
+#: session in router-only tests, transient DB error): the Lab renders an
+#: explicit "unavailable" — never a crash, never a silent green.
+_DRIFT_STATUS_UNAVAILABLE: dict[str, Any] = {
+    "status": "unavailable",
+    "insufficient": True,
+    "n_folds": 0,
+    "n_settled_binary": None,
+    "min_train": DEFAULT_MIN_TRAIN,
+    "min_test": DEFAULT_MIN_TEST,
+    "needed_n": DEFAULT_MIN_TRAIN + DEFAULT_MIN_TEST,
+    "warrants_recalibration": False,
+    "pooled_rel_gain_pct": None,
+    "projected_testable_date": None,
+}
+
+
+async def calibration_drift_status(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    min_train: int = DEFAULT_MIN_TRAIN,
+    min_test: int = DEFAULT_MIN_TEST,
+    min_warrant_rel_pct: float = DEFAULT_MIN_WARRANT_REL_PCT,
+) -> dict[str, Any]:
+    """READ-ONLY detector status for GET /performance (Lab calibration cell).
+
+    Runs the SAME pure walk-forward detector as the daily monitor job on the
+    provided session and reduces it to the JSON status shape above. NEVER
+    raises — /performance must not degrade because a monitor read failed; every
+    failure path returns the explicit "unavailable" shape.
+    """
+    now = now or datetime.now(tz=UTC)
+    try:
+        rows = (await session.execute(_calibration_rows_stmt())).all()
+        periods = _bucket_periods(rows)
+        report = (
+            walk_forward_beta_gain(
+                periods,
+                min_train=min_train,
+                min_test=min_test,
+                min_warrant_rel_pct=min_warrant_rel_pct,
+            )
+            if periods
+            else None
+        )
+        recent = (
+            await session.execute(
+                select(func.count())
+                .select_from(ResultTracking)
+                .join(Pick, ResultTracking.pick_id == Pick.id)
+                .where(
+                    ResultTracking.outcome.in_(("won", "lost")),
+                    Pick.tier == "premium",
+                    ResultTracking.settled_at >= now - timedelta(days=30),
+                )
+            )
+        ).scalar_one()
+        return drift_status_payload(
+            report,
+            settled_binary_30d=int(recent),
+            now=now,
+            min_train=min_train,
+            min_test=min_test,
+        )
+    except Exception as exc:  # monitor read must never break /performance
+        logger.error("calibration_drift status failed: %s", type(exc).__name__)
+        return dict(_DRIFT_STATUS_UNAVAILABLE)
 
 
 async def calibration_drift_job(

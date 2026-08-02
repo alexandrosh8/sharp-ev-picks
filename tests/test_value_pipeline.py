@@ -1004,7 +1004,11 @@ async def test_value_pipeline_produces_pick_and_alert() -> None:
     assert len(sink.sent) == 1
     assert "you place any bet" in sink.sent[0].body
     assert "No profit guaranteed" in sink.sent[0].body
-    assert "value: Pinnacle fair" in pick.reason_summary
+    # Unit-explicit reason (2026-08-02): the value-strategy fair is shown as
+    # ODDS (1/sharp_fair_prob) — labeled fair_odds, never a bare "fair" that
+    # is indistinguishable from the model-strategy's fair PROBABILITY.
+    assert "value: Pinnacle fair_odds " in pick.reason_summary
+    assert " fair " not in pick.reason_summary
 
 
 def totals_snap(book: str, sel: str, odds: float, detail: str | None = None) -> OddsSnapshotIn:

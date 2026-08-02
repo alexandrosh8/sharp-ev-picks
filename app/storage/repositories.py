@@ -17,11 +17,11 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ValidationError
-from sqlalchemy import Text, and_, case, func, or_, select, text, true, union_all
+from sqlalchemy import Text, and_, bindparam, case, func, or_, select, text, true, union_all
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
@@ -895,6 +895,9 @@ def _provisional_result_fields(
         odds,
         sport_key=sport_key,
         bookmaker=bookmaker,
+        # Tennis set-score AXIS guard (audit 2026-08-02): the display grade
+        # applies the same sets-axis refusal as the settler — fail-closed.
+        market_detail=pick.market_detail,
     )
     return {"provisional_outcome": outcome, "provisional_pnl": pnl}
 
@@ -915,6 +918,37 @@ def banner_fair_odds(
     if fair is None or not 0.0 < fair < 1.0:
         return None
     return f"{1.0 / fair:.2f}"
+
+
+#: Restated-cohort audit lookup (live review 2026-08-02, item 4). The
+#: ``bookmaker_label_restatements`` table is created by the OPS script
+#: scripts/restate_oddschecker_betfair_labels.py (not by Alembic), so its
+#: absence is a normal state (fresh/test DBs) — the lookup degrades to an
+#: empty set inside a SAVEPOINT so the caller's transaction stays usable.
+_ANCHOR_RESTATED_STMT = text(
+    "SELECT row_id FROM bookmaker_label_restatements "
+    "WHERE table_name = 'picks' AND column_name = 'anchor_book' AND row_id IN :ids"
+).bindparams(bindparam("ids", expanding=True))
+
+
+async def _anchor_restated_pick_ids(session: AsyncSession, pick_ids: Sequence[int]) -> set[int]:
+    """The subset of ``pick_ids`` whose mint-time ``anchor_book`` was RESTATED
+    by the 2026-08-02 bookmaker-label audit (old sharp-looking label -> '10bet').
+
+    One bounded IN-list SELECT per request (/picks serves <= 200 rows) against
+    the small append-only audit table — cheap by construction. Missing table
+    (pre-ops-script DB) -> empty set, never an error.
+    """
+    if not pick_ids:
+        return set()
+    try:
+        async with session.begin_nested():
+            rows = (await session.execute(_ANCHOR_RESTATED_STMT, {"ids": list(pick_ids)})).scalars()
+            return {int(r) for r in rows}
+    except (ProgrammingError, DBAPIError):
+        # UndefinedTable (audit table not created on this DB) — an honest
+        # "no restatement evidence", never a fabricated flag.
+        return set()
 
 
 async def latest_picks_with_events(
@@ -1016,6 +1050,11 @@ async def latest_picks_with_events(
     if tier is not None:
         stmt = stmt.where(Pick.tier == tier)
     rows = await session.execute(stmt.order_by(Pick.created_at.desc()).limit(limit))
+    fetched = rows.all()
+    # Restated-cohort badge (live review 2026-08-02 item 4): which of THESE
+    # picks had their mint anchor_book restated by the label audit — derived at
+    # serve time from the audit table, one bounded IN-list query per request.
+    restated_ids = await _anchor_restated_pick_ids(session, [r[0].id for r in fetched])
     return [
         {
             "id": p.id,
@@ -1059,6 +1098,11 @@ async def latest_picks_with_events(
                 str(p.anchor_match_confidence) if p.anchor_match_confidence is not None else None
             ),
             "anchor_match_method": p.anchor_match_method,
+            # RESTATED-COHORT badge (2026-08-02 label audit): True when this
+            # pick's mint-time anchor_book was restated (was mislabeled as a
+            # sharp/exchange book; now '10bet') — the drawer chips it so the
+            # cohort's sharp-anchor provenance is never silently trusted.
+            "anchor_restated": p.id in restated_ids,
             # Betfair staleness-guard mint stamp (observability only): effective
             # verdict at mint (pass/demote/no_api_match/no_api_price/stale_api);
             # null = guard off / no verdict / non-H2H / pre-column row.
@@ -1151,7 +1195,7 @@ async def latest_picks_with_events(
             shs,
             saws,
             sport_key,
-        ) in rows.all()
+        ) in fetched
     ]
 
 
@@ -1448,6 +1492,16 @@ async def load_event_kickoffs(
 # anchor_type_for (pinnacle / sharp); kept local to avoid a heavy import here.
 _SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
 
+# Odds-band split of the TRUSTED sharp subset (live review 2026-08-02): the
+# odds >= 4.0 tail has carried the significantly negative trusted CLV while
+# the ex-tail band reads ~flat — the DECISION-RELEVANT split the Lab must
+# show beside the pooled trusted figure. Mirrors VALUE_MONEYLINE_MAX_ODDS=4.0
+# as a plain local constant (this module stays Settings-import-free). Band
+# membership judges the same fill odds the CLV guards judge (the
+# commission-net settlement fill; equals the mint offered price on
+# commission-free books).
+SHARP_ODDS_BAND_THRESHOLD = 4.0
+
 # P2-1 HEADLINE min-n: below this many settled picks the headline roi /
 # beat_close_rate / stake-weighted CLV are NOISE (a 10-pick -8.7% reads as
 # signal), so they are SUPPRESSED at the source and flagged. Mirrors the
@@ -1635,6 +1689,32 @@ def _significance_fields(
     }
 
 
+def _sharp_odds_band_cell(
+    series: Sequence[float],
+    weighted: Decimal,
+    stake: Decimal,
+) -> dict[str, Any]:
+    """One odds-band cell of the trusted-subset split (live review 2026-08-02).
+
+    Same honesty floor as every headline figure: below MIN_HEADLINE_N the
+    point estimates (stake-weighted CLV, mean, CI) are NULLED at the source and
+    the cell reads status="insufficient" — only n survives, exactly like the
+    existing trusted-CLV cells the dashboard renders via ciEntryText.
+    """
+    n = len(series)
+    ok = n >= MIN_HEADLINE_N
+    sig = mean_significance(series) if ok else None
+    return {
+        "n": n,
+        "status": "ok" if ok else "insufficient",
+        "stake_weighted_clv_log": _ratio(weighted, stake) if ok else None,
+        "mean_clv_log": sig.mean if sig is not None else None,
+        "ci_low": sig.ci_low if sig is not None else None,
+        "ci_high": sig.ci_high if sig is not None else None,
+        "significant": bool(sig is not None and sig.significant),
+    }
+
+
 def _devig_fallback_asymmetric(mint_fell_back: bool | None, close_fell_back: bool | None) -> bool:
     """P2-2: True when the MINT and CLOSE fairs were devigged by DIFFERENT
     effective methods — exactly one of them fell back to multiplicative. Such a
@@ -1697,6 +1777,17 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     sharp_clv_stake = Decimal("0")
     sharp_beat_known = sharp_beat_true = n_sharp = 0
     sharp_all_independent = True  # invariant: no circular close in the sharp subset
+    # Odds-band split of the TRUSTED subset (live review 2026-08-02): the
+    # decision-relevant < / >= SHARP_ODDS_BAND_THRESHOLD partition of exactly
+    # the rows admitted to the trusted subset above. Rows whose fill odds are
+    # unusable enter neither band (counted honestly as unknown, never guessed).
+    sharp_band_below_series: list[float] = []
+    sharp_band_tail_series: list[float] = []
+    sharp_band_below_weighted = Decimal("0")
+    sharp_band_below_stake = Decimal("0")
+    sharp_band_tail_weighted = Decimal("0")
+    sharp_band_tail_stake = Decimal("0")
+    sharp_band_unknown_odds = 0
     # P2 SIGNIFICANCE: the per-pick CLEAN clv_log series for each stratum (the rows
     # that actually feed the blended / trusted point estimates — fabricated and
     # tautological rows already excluded). These drive the t-test + CI; collecting
@@ -1832,6 +1923,22 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             if beat_close is not None:
                 sharp_beat_known += 1
                 sharp_beat_true += int(beat_close)
+            # Odds-band membership for the trusted-subset split — judged on the
+            # SAME fill odds the CLV guards judge (tuple slot "decimal_odds").
+            try:
+                band_odds = float(decimal_odds) if decimal_odds is not None else None
+            except (TypeError, ValueError):
+                band_odds = None
+            if band_odds is None:
+                sharp_band_unknown_odds += 1
+            elif band_odds >= SHARP_ODDS_BAND_THRESHOLD:
+                sharp_band_tail_series.append(float(clv_log))
+                sharp_band_tail_weighted += stake * clv_log
+                sharp_band_tail_stake += stake
+            else:
+                sharp_band_below_series.append(float(clv_log))
+                sharp_band_below_weighted += stake * clv_log
+                sharp_band_below_stake += stake
     # Defense-in-depth: the gate above already excludes circular closes, so by
     # construction every row in the sharp subset is independent of its fill book
     # (closing_anchor != fill_book). Enforce it with an explicit raise (NOT assert,
@@ -1885,6 +1992,21 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         "sharp_beat_close_rate": (
             _ratio(Decimal(sharp_beat_true), Decimal(sharp_beat_known)) if sharp_ok else None
         ),
+        # Odds-band split of the SAME trusted subset (live review 2026-08-02):
+        # the decision-relevant partition at SHARP_ODDS_BAND_THRESHOLD — the
+        # >= 4.0 tail is where the negative trusted CLV concentrates. Each band
+        # is min-n gated on its OWN n (MIN_HEADLINE_N), estimates nulled at the
+        # source below the floor exactly like every other cell.
+        "sharp_clv_odds_split": {
+            "threshold_odds": SHARP_ODDS_BAND_THRESHOLD,
+            "below": _sharp_odds_band_cell(
+                sharp_band_below_series, sharp_band_below_weighted, sharp_band_below_stake
+            ),
+            "at_or_above": _sharp_odds_band_cell(
+                sharp_band_tail_series, sharp_band_tail_weighted, sharp_band_tail_stake
+            ),
+            "n_unknown_odds": sharp_band_unknown_odds,
+        },
         # P2 SIGNIFICANCE (NOT min-n suppressed: this IS the honesty gate). One-sample
         # t-test of mean clv_log vs 0 + t-CI, and a Wilson CI on beat_close_rate, for
         # BOTH strata on the CLEAN subset. At tiny live n the flags read False — honest.

@@ -36,13 +36,21 @@ _TOTALS_RE = re.compile(r"(Over|Under) (\d+(?:\.\d+)?)")
 _EH_DRAW_RE = re.compile(r"Draw \(([+-]?\d+(?:\.\d+)?)\)")
 _SIGNED_LINE_RE = re.compile(r"[+-]\d+(?:\.\d+)?")
 
-# Tennis SET-SCORE guard (settlement bug 2026-07-10, 106 mis-graded picks):
+# Tennis SET-SCORE guard (settlement bug 2026-07-10, 106 mis-graded picks;
+# AXIS-AWARE since audit 2026-08-02, 356 mis-graded game handicaps):
 # the scraped tennis result is a SET score (best-of-5 -> home+away <= 5), but
-# some captured totals/spreads lines are GAME lines ("Over 22.5",
+# captured totals/spreads lines may be GAME lines ("Over 22.5",
 # "Karolina Muchova -4.5"). Grading a game line against a set score reads
-# 2-1 as "3 total, margin 1" — provably wrong. A line beyond the set range
-# (totals > 4.5, |spread| > 2.5) is game-based by construction; set-plausible
-# lines (total sets over/under 2.5, set spread -1.5) stay gradeable.
+# 2-1 as "3 total, margin 1" — provably wrong. For TOTALS a line beyond the
+# set range (> 4.5) is game-based by construction and set-totals lines cannot
+# exceed it, so magnitude decides. For SPREADS magnitude CANNOT decide: game
+# handicaps are quoted at -0.5/-1.5/-2.5 too (the 0W/102L spreads_minus_2_5
+# family), so a set score may grade a spread ONLY when the pick's
+# market_detail proves the SETS axis (post-2026-07-11 mint vocabulary:
+# OddsChecker set handicaps are namespaced "spreads_sets_<line>"; OddsPortal
+# tennis set-AH keys carry a "_sets" suffix). Plain ("spreads_minus_*"/
+# "spreads_plus_*"/bare) and NULL details are game-axis or unprovable ->
+# REFUSE, regardless of |line|.
 TENNIS_MAX_SET_SUM = 5
 _TENNIS_MAX_SET_TOTAL_LINE = 4.5
 _TENNIS_MAX_SET_SPREAD_LINE = 2.5
@@ -64,16 +72,61 @@ def is_tennis_game_line(market: str, selection: str) -> bool:
     return False
 
 
+def is_tennis_sets_spread_detail(market_detail: str | None) -> bool:
+    """True when a tennis spreads ``market_detail`` affirmatively names the
+    SETS axis: OddsChecker's namespaced ``spreads_sets_<line>`` (hardening
+    2026-07-11) or OddsPortal's ``asian_handicap_<line>_sets`` key form. Only
+    these are gradeable from a SET score; anything else (plain
+    ``spreads_minus_*``, ``asian_handicap_*_games``, NULL) is game-axis or
+    unprovable and must defer (audit 2026-08-02)."""
+    if market_detail is None:
+        return False
+    detail = market_detail.lower()
+    return detail.startswith("spreads_sets") or (
+        detail.startswith("asian_handicap") and detail.endswith("_sets")
+    )
+
+
+def is_tennis_games_total_detail(market_detail: str | None) -> bool:
+    """True when a tennis totals ``market_detail`` EXPLICITLY names the GAMES
+    axis (``over_under_games_*``, ``totals_games_*``) — such a pick must never
+    grade from a set score even on a set-plausible line. Ambiguous vocabularies
+    (``totals_<line>``, NULL) fall back to the magnitude guard: set-totals
+    lines cannot exceed 4.5 and full-match games totals are always far above
+    it, so magnitude is decisive for totals (unlike spreads)."""
+    if market_detail is None:
+        return False
+    detail = market_detail.lower()
+    return detail.startswith("over_under_games") or detail.startswith("totals_games")
+
+
 def tennis_set_score_ungradeable(
-    market: str, selection: str, home_score: int, away_score: int
+    market: str,
+    selection: str,
+    home_score: int,
+    away_score: int,
+    market_detail: str | None = None,
 ) -> bool:
-    """True when a tennis pick must NOT be graded from this score: the
-    selection carries a GAME-sized line while the final is SET-sized
-    (home+away <= TENNIS_MAX_SET_SUM). Doctrine: leave the pick unsettled for
-    manual result entry — never void, never guess."""
+    """True when a tennis pick must NOT be graded from this score. A final that
+    is SET-sized (home+away <= TENNIS_MAX_SET_SUM) may grade:
+    - totals only on a set-plausible line (<= 4.5) whose detail is not
+      explicitly games-axis;
+    - spreads only when ``market_detail`` proves the SETS axis
+      (is_tennis_sets_spread_detail) AND the line is set-plausible (<= 2.5);
+      plain/NULL-detail spreads REFUSE regardless of magnitude (audit
+      2026-08-02: game handicaps at -0.5/-1.5/-2.5 were graded on set scores,
+      0W/102L). Callers without a detail in hand stay fail-closed by default.
+    Doctrine: leave the pick unsettled for manual result entry — never void,
+    never guess."""
     if home_score + away_score > TENNIS_MAX_SET_SUM:
         return False
-    return is_tennis_game_line(market, selection)
+    if market == "spreads":
+        return not is_tennis_sets_spread_detail(market_detail) or is_tennis_game_line(
+            market, selection
+        )
+    if market == "totals":
+        return is_tennis_games_total_detail(market_detail) or is_tennis_game_line(market, selection)
+    return False
 
 
 # Sports (Sport.key) whose h2h market is TWO-WAY — no Draw leg is offered or
@@ -102,12 +155,16 @@ def settle_selection(
     away_score: int,
     *,
     sport_key: str | None = None,
+    market_detail: str | None = None,
 ) -> Outcome:
     """Outcome of one selection given the full-time score.
 
     `sport_key` (optional) enables sport-convention grading: a tied final on a
     TWO-WAY h2h market (see _TWO_WAY_H2H_SPORTS) pushes instead of losing.
     Callers without a sport in hand keep the 3-way default unchanged.
+    `market_detail` (optional) feeds the tennis set-score AXIS guard: a tennis
+    spreads selection grades from a set score only when the detail proves the
+    SETS axis — omitting it is fail-closed (defer), never a wrong grade.
 
     Raises ValueError for selections that cannot be mapped — callers must
     skip (and log) rather than guess.
@@ -116,12 +173,13 @@ def settle_selection(
         raise ValueError(f"negative score: {home_score}-{away_score}")
 
     if sport_key == "tennis" and tennis_set_score_ungradeable(
-        market, selection, home_score, away_score
+        market, selection, home_score, away_score, market_detail
     ):
         raise ValueError(
-            f"tennis {market} selection {selection!r} carries a game-sized line but "
-            f"the final {home_score}-{away_score} is a set score — left for manual "
-            "settlement, never graded from set counts"
+            f"tennis {market} selection {selection!r} (detail {market_detail!r}) cannot "
+            f"be graded from the set score {home_score}-{away_score} — game-sized line "
+            "or unproven sets axis; left for manual settlement, never graded from set "
+            "counts"
         )
 
     if market == "h2h":
@@ -227,6 +285,7 @@ def provisional_result(
     *,
     sport_key: str | None = None,
     bookmaker: str | None = None,
+    market_detail: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Best-effort (market, selection, scraped final score) -> (outcome, pnl)
     for a kicked-off-but-unsettled pick, so the CLOSED tab can show how the
@@ -238,7 +297,10 @@ def provisional_result(
     odds is absent. ``sport_key`` threads the same sport-aware refusals the
     settler applies (tennis game-line-vs-set-score, 2-way tie push) into the
     display grade — a tennis "Over 22.5" against a 2-1 SET score must show no
-    provisional outcome, not a wrong one (operator report 2026-07-10)."""
+    provisional outcome, not a wrong one (operator report 2026-07-10).
+    ``market_detail`` threads the tennis set-score AXIS guard (audit
+    2026-08-02): a tennis spreads pick without a proven sets-axis detail shows
+    NO provisional outcome from a set score — omitting it is fail-closed."""
     if home_score is None or away_score is None:
         return None, None
     try:
@@ -250,6 +312,7 @@ def provisional_result(
             int(home_score),
             int(away_score),
             sport_key=sport_key,
+            market_detail=market_detail,
         )
     except (ValueError, TypeError):
         return None, None  # unmappable / sport-ungradeable selection -> no guess

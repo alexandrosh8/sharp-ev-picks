@@ -879,7 +879,7 @@ def test_picks_payload_carries_reason_summary(monkeypatch) -> None:  # type: ign
                 tier="volume",
                 market="spreads",
                 reason_summary=(
-                    "value: Pinnacle fair 1.95 vs BookA 2.10 | "
+                    "value: Pinnacle fair_odds 1.95 vs BookA 2.10 | "
                     "visibility-only market: capped at volume (shadow) | "
                     "steam(shadow) (soft_converging): would demote"
                 ),
@@ -2494,3 +2494,92 @@ def test_robots_txt_public_disallow_all() -> None:
 def test_favicon_ico_is_no_content() -> None:
     resp = TestClient(make_app()).get("/favicon.ico")
     assert resp.status_code == 204
+
+
+def test_performance_payload_includes_calibration_drift_status(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Live review 2026-08-02 (item 3): GET /performance carries the
+    walk-forward drift detector's STATUS block (calibration_drift) so the Lab
+    calibration cell can state "insufficient (0 folds)" instead of a silent
+    green. Stubbed at the route's own import like the sibling monitors."""
+    from app.api import routes
+
+    async def fake_perf(session, *, close_coverage_sla=0.85):  # type: ignore[no-untyped-def]
+        return {"n_settled": 0, "tier_scope": "premium"}
+
+    async def fake_rows(session):  # type: ignore[no-untyped-def]
+        return []
+
+    async def fake_band(session):  # type: ignore[no-untyped-def]
+        return []
+
+    async def fake_drift(session):  # type: ignore[no-untyped-def]
+        return {
+            "status": "insufficient",
+            "insufficient": True,
+            "n_folds": 0,
+            "n_settled_binary": 412,
+            "min_train": 2000,
+            "min_test": 200,
+            "needed_n": 2200,
+            "warrants_recalibration": False,
+            "pooled_rel_gain_pct": None,
+            "projected_testable_date": "2026-08-15",
+        }
+
+    monkeypatch.setattr(routes, "performance_report", fake_perf)
+    monkeypatch.setattr(routes, "live_evidence_rows", fake_rows)
+    monkeypatch.setattr(routes, "bet_band_observations", fake_band)
+    monkeypatch.setattr(routes, "calibration_drift_status", fake_drift)
+    monkeypatch.setattr(routes, "_ml_operating_point", lambda: None)
+
+    body = TestClient(make_app()).get("/performance").json()
+    drift = body["calibration_drift"]
+    assert drift["status"] == "insufficient"
+    assert drift["n_folds"] == 0
+    assert drift["projected_testable_date"] == "2026-08-15"
+
+
+def test_performance_calibration_drift_degrades_to_unavailable_without_db(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Unstubbed detector on the router-only no-DB app: /performance still
+    answers and the block reads the explicit "unavailable" shape (never a 500,
+    never a silent omission)."""
+    from app.api import routes
+
+    async def fake_perf(session, *, close_coverage_sla=0.85):  # type: ignore[no-untyped-def]
+        return {"n_settled": 0, "tier_scope": "premium"}
+
+    async def fake_rows(session):  # type: ignore[no-untyped-def]
+        return []
+
+    async def fake_band(session):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr(routes, "performance_report", fake_perf)
+    monkeypatch.setattr(routes, "live_evidence_rows", fake_rows)
+    monkeypatch.setattr(routes, "bet_band_observations", fake_band)
+    monkeypatch.setattr(routes, "_ml_operating_point", lambda: None)
+
+    body = TestClient(make_app()).get("/performance").json()
+    assert body["calibration_drift"]["status"] == "unavailable"
+    assert body["calibration_drift"]["insufficient"] is True
+
+
+def test_picks_payload_serializes_anchor_restated_from_label_audit() -> None:
+    """Live review 2026-08-02 (item 4): the /picks serializer derives
+    `anchor_restated` at serve time from the bookmaker_label_restatements
+    audit table (table_name='picks' AND column_name='anchor_book'), via one
+    bounded IN-list lookup that degrades to False when the ops-script table
+    does not exist. Source pins (behavioral DB coverage in
+    tests/test_persistence.py)."""
+    import inspect
+
+    from app.storage import repositories
+
+    src = inspect.getsource(repositories.latest_picks_with_events)
+    assert '"anchor_restated"' in src
+    assert "restated_ids" in src
+    helper = inspect.getsource(repositories._anchor_restated_pick_ids)
+    assert "begin_nested" in helper  # missing-table savepoint guard
+    module_src = inspect.getsource(repositories)
+    assert "bookmaker_label_restatements" in module_src
+    assert "table_name = 'picks' AND column_name = 'anchor_book'" in module_src

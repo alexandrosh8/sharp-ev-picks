@@ -1097,10 +1097,12 @@ async def test_run_settlement_cycle_refuses_when_providers_empty(factory, caplog
 TENNIS_KICKOFF = NOW - timedelta(hours=7)
 
 
-async def seed_tennis_pick(session, event_id: str, home: str, away: str, market, selection):  # type: ignore[no-untyped-def]
+async def seed_tennis_pick(  # type: ignore[no-untyped-def]
+    session, event_id: str, home: str, away: str, market, selection, market_detail=None
+):
     teams = EventTeams(home=home, away=away, league="atp-test", starts_at=TENNIS_KICKOFF)
     pick_out = make_pick(event_id, market=market, selection=selection).model_copy(
-        update={"sport": "tennis", "event": f"{home} vs {away}"}
+        update={"sport": "tennis", "event": f"{home} vs {away}", "market_detail": market_detail}
     )
     assert await persist_pick(session, pick_out, teams, "value", "test-v")
     pick = await session.scalar(
@@ -1239,6 +1241,121 @@ async def test_tennis_game_line_pick_left_unsettled_from_set_score(session, capl
     assert "reason=tennis_game_line_set_score count=2" in summaries[0]
     assert f"sample_pick_ids={[p_games.id, p_spread.id]}" in summaries[0]
     assert not any("not settled: tennis" in record.message for record in caplog.records)
+
+
+async def test_tennis_spread_axis_guard_defers_non_sets_details(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # AXIS GUARD (audit 2026-08-02): a set-plausible |line| <= 2.5 is NOT
+    # enough — game handicaps are quoted at -0.5/-1.5/-2.5 too and were graded
+    # against 2-0/2-1 SET scores (spreads_minus_2_5: 0W/102L). Only a pick
+    # whose market_detail proves the SETS axis may settle from a set score;
+    # plain and NULL-detail spreads stay OPEN for manual entry.
+    home, away = "Axis India", "Axis Juliett"
+    p_plain = await seed_tennis_pick(
+        session,
+        "evt-ten-axis",
+        home,
+        away,
+        Market.SPREADS,
+        f"{home} -1.5",
+        market_detail="spreads_minus_1_5",
+    )
+    # Distinct player pairs per event: same-pair-same-kickoff events are
+    # cross-source-merged by the dedup resolver, which would fold these picks
+    # onto one event and confound the per-pick assertions.
+    null_home, null_away = "Axis Kebab", "Axis Lambda"
+    p_null = await seed_tennis_pick(
+        session, "evt-ten-axis-null", null_home, null_away, Market.SPREADS, f"{null_home} -2.5"
+    )
+    sets_home, sets_away = "Axis Mango", "Axis Nectar"
+    p_sets = await seed_tennis_pick(
+        session,
+        "evt-ten-axis-sets",
+        sets_home,
+        sets_away,
+        Market.SPREADS,
+        f"{sets_home} -1.5",
+        market_detail="spreads_sets_1_5",
+    )
+    book = ScoreBook(
+        [
+            FinalScore(home, away, TENNIS_KICKOFF.date(), 2, 0),
+            FinalScore(null_home, null_away, TENNIS_KICKOFF.date(), 2, 0),
+            FinalScore(sets_home, sets_away, TENNIS_KICKOFF.date(), 2, 0),
+        ]
+    )
+    with caplog.at_level("INFO", logger="app.settlement.engine"):
+        assert await settle_open_picks(session, book, NOW) == 1  # only the sets detail
+    await session.refresh(p_plain)
+    await session.refresh(p_null)
+    await session.refresh(p_sets)
+    assert p_plain.status == "alerted"  # deferred — game handicap on a set score
+    assert p_null.status == "alerted"  # deferred — axis unprovable
+    assert p_sets.status == "settled"
+    for deferred in (p_plain, p_null):
+        assert (
+            await session.scalar(
+                select(ResultTracking).where(ResultTracking.pick_id == deferred.id)
+            )
+            is None
+        )
+    sets_row = await session.scalar(
+        select(ResultTracking).where(ResultTracking.pick_id == p_sets.id)
+    )
+    assert sets_row is not None
+    assert sets_row.outcome == "won"  # -1.5 sets covered by the 2-0 sweep
+    summaries = [
+        record.message
+        for record in caplog.records
+        if "settlement refusal summary" in record.message
+    ]
+    assert len(summaries) == 1
+    assert "reason=tennis_game_line_set_score count=2" in summaries[0]
+
+
+async def test_manual_tennis_spread_axis_guard_defers_plain_detail(session, caplog) -> None:  # type: ignore[no-untyped-def]
+    # The manual/direct settle path (settle_event_picks -> _settle_one) applies
+    # the SAME axis refusal — a plain-detail set-plausible spread never grades
+    # from a set score entered by hand either.
+    home, away = "Axis Kilo", "Axis Lima"
+    pick = await seed_tennis_pick(
+        session,
+        "evt-ten-axis-manual",
+        home,
+        away,
+        Market.SPREADS,
+        f"{home} -2.5",
+        market_detail="spreads_minus_2_5",
+    )
+    with caplog.at_level("INFO", logger="app.settlement.engine"):
+        assert await settle_event_picks(session, pick.event_id, 2, 0, NOW) == (0, 1)
+    await session.refresh(pick)
+    assert pick.status == "alerted"
+    assert any("left open for manual settlement" in record.message for record in caplog.records)
+
+
+async def test_scraped_finals_exclude_tennis_fail_closed(session) -> None:  # type: ignore[no-untyped-def]
+    # _load_scraped_finals (audit 2026-08-02): a scraped tennis score carries
+    # no completion info — it must NOT enter the ScoreBook as completion="full"
+    # (a missed "ret." marker could grade markets that must VOID under
+    # pinnacle_one_set). Non-tennis scraped finals keep flowing unchanged.
+    from app.settlement.engine import _load_scraped_finals
+
+    home, away = "Scrape Mike", "Scrape November"
+    tennis_pick = await seed_tennis_pick(session, "evt-ten-scraped", home, away, Market.H2H, home)
+    ev = await session.scalar(select(Event).where(Event.id == tennis_pick.event_id))
+    ev.scraped_home_score = 2
+    ev.scraped_away_score = 0
+    soccer_pick = await seed_pick(
+        session, "evt-soccer-scraped", home="Scrape Oscar FC", away="Scrape Papa FC"
+    )
+    sev = await session.scalar(select(Event).where(Event.id == soccer_pick.event_id))
+    sev.scraped_home_score = 2
+    sev.scraped_away_score = 1
+    await session.flush()
+    finals = await _load_scraped_finals(session, NOW)
+    names = {(f.home_team, f.away_team) for f in finals}
+    assert ("Scrape Oscar FC", "Scrape Papa FC") in names  # non-tennis unchanged
+    assert (home, away) not in names  # tennis fail-closed: defer to ESPN/manual
 
 
 async def test_manual_tennis_set_score_guard_remains_request_local(

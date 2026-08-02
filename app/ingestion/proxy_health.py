@@ -216,44 +216,62 @@ class ProxyHealthRegistry:
         (Settings.oddsportal_concurrency / ODDSPORTAL_CONCURRENCY), passed in by
         the caller — env is read ONLY in app/config.py. ``headroom`` =
         ``healthy - concurrency_floor`` and CAN be negative: at/below zero the
-        scrape has no spare proxies over its own parallelism (task B5)."""
+        scrape has no spare proxies over its own parallelism (task B5).
+
+        COUNTER PARTITION (live review 2026-08-02, P3): ``healthy`` +
+        ``quarantined`` + ``probing`` + ``dead`` == ``configured`` — the
+        categories are DISJOINT. A never-successful (idle > DEAD_AFTER_SECONDS)
+        quarantined/half-open slot counts ONLY as ``dead`` (previously it was
+        double-counted dead AND quarantined, so healthy+quarantined+dead could
+        sum past the pool size). ``slots`` lists EVERY configured index — a
+        never-attempted slot appears as ``healthy`` with zero counters (it was
+        previously omitted, so 12 configured slots could list only 7). The
+        per-slot ``state`` string is unchanged (a dead slot still reads its
+        raw quarantined/half_open state; deadness is the top-level category).
+        Recorded indices >= ``configured`` (possible only after a pool shrink
+        without restart) are listed but excluded from the category counts so
+        the partition invariant holds."""
         now = self.clock()
         slots: list[dict[str, Any]] = []
         quarantined = 0
         probing = 0
         dead = 0
-        for index in sorted(self._slots):
-            slot = self._slots[index]
-            state = slot.state(now)
+        for index in sorted(set(range(configured)) | set(self._slots)):
+            slot = self._slots.get(index)
+            state = "healthy" if slot is None else slot.state(now)
             # Review 2026-07-03: a half-open slot is UNPROVEN, not healthy —
             # folding it into "healthy" flapped the verdict to "Proxy pool
             # healthy" every cooldown for a permanently dead proxy. It counts
             # as `probing` (and stays dead-annotated) until a probe SUCCEEDS.
-            if state in ("quarantined", "half_open"):
-                if state == "quarantined":
-                    quarantined += 1
-                else:
-                    probing += 1
+            if slot is not None and state in ("quarantined", "half_open") and index < configured:
                 idle = (
                     slot.last_success_at is None
                     or (now - slot.last_success_at).total_seconds() > DEAD_AFTER_SECONDS
                 )
                 if idle:
                     dead += 1
+                elif state == "quarantined":
+                    quarantined += 1
+                else:
+                    probing += 1
             slots.append(
                 {
                     "index": index,
                     "state": state,
-                    "successes": slot.successes,
-                    "failures": slot.failures,
-                    "consecutive_failures": slot.consecutive_failures,
+                    "successes": slot.successes if slot is not None else 0,
+                    "failures": slot.failures if slot is not None else 0,
+                    "consecutive_failures": (slot.consecutive_failures if slot is not None else 0),
                     "last_success_at": (
-                        slot.last_success_at.isoformat() if slot.last_success_at else None
+                        slot.last_success_at.isoformat()
+                        if slot is not None and slot.last_success_at
+                        else None
                     ),
                     "last_failure_at": (
-                        slot.last_failure_at.isoformat() if slot.last_failure_at else None
+                        slot.last_failure_at.isoformat()
+                        if slot is not None and slot.last_failure_at
+                        else None
                     ),
-                    "last_error_class": slot.last_error_class,
+                    "last_error_class": slot.last_error_class if slot is not None else None,
                 }
             )
         cut_15m = now - timedelta(seconds=900)
@@ -262,8 +280,10 @@ class ProxyHealthRegistry:
         failovers_15m = sum(1 for ts, _cls in recent_1h if ts >= cut_15m)
         class_counts = Counter(cls for _ts, cls in recent_1h)
         dominant = class_counts.most_common(1)[0][0] if class_counts else None
-        degraded = (quarantined + probing) > 0
-        healthy = max(configured - quarantined - probing, 0)
+        # Disjoint categories (see docstring): dead is its own bucket now, so
+        # it joins the degraded test and the healthy remainder subtraction.
+        degraded = (quarantined + probing + dead) > 0
+        healthy = max(configured - quarantined - probing - dead, 0)
         return {
             "configured": configured,
             "healthy": healthy,

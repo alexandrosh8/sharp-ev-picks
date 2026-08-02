@@ -377,6 +377,55 @@ def test_extract_bootstrap_refuses_penalties_decided_score() -> None:
     assert tok.finished is True
 
 
+@pytest.mark.parametrize(
+    "stage_name",
+    ["Retired", "ret.", "Ret", "retirement", "rtd", "Walkover", "w/o", "Abandoned"],
+)
+def test_extract_bootstrap_refuses_retired_or_walkover_score(stage_name: str) -> None:
+    """Retirement/walkover veto (audit 2026-08-02): the earlier marker set
+    missed "ret"/"retired", so a retired tennis match's set score was captured
+    with an implied completion="full" and could grade spreads/totals that must
+    VOID under TENNIS_SETTLEMENT_CONVENTION ("pinnacle_one_set"). Any
+    retirement variant on the stage/partial-result strings -> NO score
+    (defers to the ESPN classifier / manual entry — never corrupts)."""
+    html = _header_html(
+        {
+            "id": f"RET-{stage_name}",
+            "sportId": 2,
+            "home": "A",
+            "away": "B",
+            "homeResult": "1",
+            "awayResult": "0",
+            "isFinished": True,
+        },
+        {"eventStageName": stage_name, "partialresult": "6:2, 3:1"},
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.home_score is None
+    assert tok.away_score is None
+    assert tok.finished is True
+
+
+def test_extract_bootstrap_retirement_marker_is_word_bounded() -> None:
+    """The new ret/rtd markers must never fire inside ordinary words or team
+    names ("Retegui", "Bretton") — word-bounded like the ET/OT markers."""
+    html = _header_html(
+        {
+            "id": "RETX",
+            "sportId": 1,
+            "home": "Retegui FC",
+            "away": "Bretton United",
+            "homeResult": "2",
+            "awayResult": "1",
+            "isFinished": True,
+        },
+        {"eventStageName": "Finished", "partialresult": "1:0, 1:1"},
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.home_score == 2
+    assert tok.away_score == 1
+
+
 def test_extract_bootstrap_keeps_regulation_final_score() -> None:
     """No ET/OT/pen marker anywhere -> the regulation final IS captured (the
     veto must never eat a normal FT score; 'Finished' carries no marker)."""

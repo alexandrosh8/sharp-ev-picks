@@ -629,7 +629,9 @@ def test_tennis_game_line_spread_not_graded_from_set_score() -> None:
 
 
 def test_tennis_set_plausible_lines_still_grade_from_set_score() -> None:
-    # Sets-total and set-spread lines remain gradeable from set scores.
+    # Sets-total lines remain gradeable from set scores; a set spread is
+    # gradeable ONLY when its detail proves the SETS axis (audit 2026-08-02:
+    # game handicaps live at -0.5/-1.5/-2.5 too, so magnitude alone cannot).
     assert (
         settle_selection("totals", "Over 2.5", HOME, AWAY, 2, 1, sport_key="tennis") is Outcome.WON
     )
@@ -637,11 +639,188 @@ def test_tennis_set_plausible_lines_still_grade_from_set_score() -> None:
         settle_selection("totals", "Under 2.5", HOME, AWAY, 2, 0, sport_key="tennis") is Outcome.WON
     )
     assert (
-        settle_selection("spreads", f"{HOME} -1.5", HOME, AWAY, 2, 0, sport_key="tennis")
+        settle_selection(
+            "spreads",
+            f"{HOME} -1.5",
+            HOME,
+            AWAY,
+            2,
+            0,
+            sport_key="tennis",
+            market_detail="spreads_sets_1_5",
+        )
         is Outcome.WON
     )
     # h2h is untouched by the guard.
     assert settle_selection("h2h", HOME, HOME, AWAY, 2, 1, sport_key="tennis") is Outcome.WON
+
+
+# --- tennis set-score AXIS guard (audit 2026-08-02) ---------------------------
+# Post-2026-07-11 mint vocabulary: SET handicaps are namespaced
+# ("spreads_sets_*" / OddsPortal "asian_handicap_*_sets"); GAME handicaps keep
+# the plain vocabulary ("spreads_minus_*"/"spreads_plus_*") or predate the
+# namespace (NULL detail). Magnitude cannot distinguish them at -0.5/-1.5/-2.5
+# — spreads_minus_2_5 graded on set scores ran 0W/102L (impossible: the max
+# best-of-3 set margin is 2). A set score may grade a tennis spread ONLY when
+# the detail proves the SETS axis.
+
+_NON_SETS_SPREAD_DETAILS = (
+    None,
+    "spreads_minus_2_5",
+    "spreads_minus_1_5",
+    "spreads_minus_0_5",
+    "spreads_plus_1_5",
+    "spreads_2_5",
+    "asian_handicap_-1_5",
+    "asian_handicap_-1_5_games",
+)
+_SET_SCORES = ((2, 0), (2, 1), (0, 2), (1, 2), (3, 1), (3, 2))
+_SET_PLAUSIBLE_SPREAD_LINES = ("-0.5", "-1.5", "-2.5", "+1.5", "+2.5")
+
+
+@pytest.mark.parametrize("detail", _NON_SETS_SPREAD_DETAILS)
+def test_tennis_non_sets_spread_detail_never_settles_from_set_score(
+    detail: str | None,
+) -> None:
+    # PROPERTY: for every non-sets (or NULL) detail, every set-plausible line
+    # magnitude and every valid set score, the settle path REFUSES — the
+    # 2026-08-02 defect (game handicaps graded on set scores) can never recur.
+    for raw_line in _SET_PLAUSIBLE_SPREAD_LINES:
+        for hs, as_ in _SET_SCORES:
+            with pytest.raises(ValueError, match="set score"):
+                settle_selection(
+                    "spreads",
+                    f"{HOME} {raw_line}",
+                    HOME,
+                    AWAY,
+                    hs,
+                    as_,
+                    sport_key="tennis",
+                    market_detail=detail,
+                )
+            outcome, pnl = provisional_result(
+                "spreads",
+                f"{HOME} {raw_line}",
+                HOME,
+                AWAY,
+                hs,
+                as_,
+                Decimal("10"),
+                Decimal("2.0"),
+                sport_key="tennis",
+                market_detail=detail,
+            )
+            assert outcome is None and pnl is None
+
+
+@pytest.mark.parametrize("detail", ("spreads_sets_1_5", "asian_handicap_-1_5_sets"))
+def test_tennis_sets_detail_spread_still_settles_from_set_score(detail: str) -> None:
+    # A PROVEN sets-axis detail grades normally: -1.5 with a 2-0 sweep wins,
+    # 2-1 loses; the provisional display path agrees.
+    assert (
+        settle_selection(
+            "spreads", f"{HOME} -1.5", HOME, AWAY, 2, 0, sport_key="tennis", market_detail=detail
+        )
+        is Outcome.WON
+    )
+    assert (
+        settle_selection(
+            "spreads", f"{HOME} -1.5", HOME, AWAY, 2, 1, sport_key="tennis", market_detail=detail
+        )
+        is Outcome.LOST
+    )
+    outcome, _ = provisional_result(
+        "spreads", f"{HOME} -1.5", HOME, AWAY, 2, 0, sport_key="tennis", market_detail=detail
+    )
+    assert outcome == "won"
+
+
+def test_tennis_sets_detail_with_game_sized_line_still_deferred() -> None:
+    # Magnitude belt unchanged: even a sets-claiming detail cannot grade a
+    # |line| > 2.5 spread (or > 4.5 total) from a set score — contradictory
+    # labeling defers, exactly the prior |line|>2.5 behavior.
+    with pytest.raises(ValueError, match="set score"):
+        settle_selection(
+            "spreads",
+            f"{HOME} -4.5",
+            HOME,
+            AWAY,
+            2,
+            1,
+            sport_key="tennis",
+            market_detail="spreads_sets_4_5",
+        )
+    with pytest.raises(ValueError, match="set score"):
+        settle_selection(
+            "totals",
+            "Over 22.5",
+            HOME,
+            AWAY,
+            2,
+            1,
+            sport_key="tennis",
+            market_detail="over_under_sets_22_5",
+        )
+
+
+def test_tennis_totals_axis_detail_rules() -> None:
+    # Sets-denominated and ambiguous totals details keep grading on set-
+    # plausible lines (totals was never a defect family — set and game totals
+    # lines cannot overlap); an EXPLICIT games-axis detail refuses even on a
+    # set-plausible line.
+    for detail in ("over_under_sets_2_5", "totals_2_5", None):
+        assert (
+            settle_selection(
+                "totals", "Over 2.5", HOME, AWAY, 2, 1, sport_key="tennis", market_detail=detail
+            )
+            is Outcome.WON
+        )
+    for detail in ("over_under_games_2_5", "totals_games_2_5"):
+        with pytest.raises(ValueError, match="set score"):
+            settle_selection(
+                "totals", "Over 2.5", HOME, AWAY, 2, 1, sport_key="tennis", market_detail=detail
+            )
+
+
+def test_tennis_axis_guard_stands_aside_for_game_sized_scores() -> None:
+    # A games-sized final (sum > 5) is NOT a set score — even a plain-detail
+    # spread grades from it (the guard only polices SET scores).
+    assert (
+        settle_selection(
+            "spreads",
+            f"{HOME} -1.5",
+            HOME,
+            AWAY,
+            13,
+            10,
+            sport_key="tennis",
+            market_detail="spreads_minus_1_5",
+        )
+        is Outcome.WON
+    )
+
+
+def test_non_tennis_spreads_unaffected_by_axis_guard() -> None:
+    # Non-tennis behavior is byte-identical: detail (or its absence) never
+    # changes a soccer/basketball spread grade on a small score.
+    for detail in (None, "spreads_minus_1_5", "spreads_sets_1_5"):
+        assert (
+            settle_selection(
+                "spreads",
+                f"{HOME} -1.5",
+                HOME,
+                AWAY,
+                2,
+                0,
+                sport_key="soccer",
+                market_detail=detail,
+            )
+            is Outcome.WON
+        )
+        assert (
+            settle_selection("spreads", f"{HOME} -1.5", HOME, AWAY, 2, 0, market_detail=detail)
+            is Outcome.WON
+        )
 
 
 def test_non_tennis_sports_unaffected_by_set_score_guard() -> None:

@@ -15,15 +15,23 @@ and NEVER raises (a monitoring job must not crash the scheduler).
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.notifications.base import Alert
-from app.storage.models import CandidateEvaluation, Event, OddsSnapshot, Pick
+from app.storage.models import (
+    CandidateEvaluation,
+    Event,
+    OddsSnapshot,
+    Pick,
+    ResultTracking,
+    Sport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +61,14 @@ LISTING_DARK_K = 3
 #: SHARP_ANCHOR_CLIFF_MIN_PRIOR so a quiet slate can never fake a cliff.
 SHARP_ANCHOR_CLIFF_DROP = 0.80
 SHARP_ANCHOR_CLIFF_MIN_PRIOR = 50
+
+#: Impossible-market alarm (settlement audit 2026-08-02): a (sport,
+#: market_detail-family) with at least this many GRADED results (won/lost/
+#: half_*) and ZERO wins is a grading defect, not variance — tennis
+#: spreads_minus_2_5 ran 0W/102L (p ~ 1e-24 at its fair ~0.42) for weeks
+#: because game handicaps were graded against set scores. At fair odds ~0.4+,
+#: 30 graded picks with 0 wins has p < 1e-6.
+IMPOSSIBLE_MARKET_MIN_GRADED = 30
 
 
 class _Dispatcher(Protocol):
@@ -240,6 +256,38 @@ def evaluate_sharp_anchor_cliff(
     )
 
 
+def evaluate_impossible_market_families(
+    families: Sequence[tuple[str, str, int, int]],
+    *,
+    min_graded: int = IMPOSSIBLE_MARKET_MIN_GRADED,
+) -> Anomaly | None:
+    """Pure impossible-market check (settlement audit 2026-08-02): ONE warning
+    per run naming every (sport, market_detail-family) with >= ``min_graded``
+    graded results (won/lost/half_won/half_lost — push/void excluded) and ZERO
+    wins. Such a family is statistically impossible under honest grading and
+    signals a settlement-axis defect (the alarm that would have caught tennis
+    spreads_minus_2_5 at 0W/102L). Input rows are
+    ``(sport_key, family, graded_count, win_count)`` — counts only, no odds,
+    no identities. Returns None when every family has at least one win."""
+    offenders = [
+        (sport, family, graded)
+        for sport, family, graded, wins in families
+        if graded >= min_graded and wins == 0
+    ]
+    if not offenders:
+        return None
+    named = "; ".join(
+        f"{sport}/{family}: 0 wins in {graded} graded" for sport, family, graded in offenders
+    )
+    return Anomaly(
+        "WARN",
+        "impossible_market_family",
+        f"impossible market family(ies) — {named} — a family that NEVER wins is a "
+        "grading defect (e.g. game handicaps graded on set scores, audit "
+        "2026-08-02): audit the settlement axis before trusting these results",
+    )
+
+
 def _listing_matches_from_last_poll() -> int | None:
     """Latest listing count summed across sports from the pipeline's LAST_POLL
     liveness registry — the self-audit's listing-probe input. The poll cycle
@@ -373,6 +421,29 @@ async def run_self_audit(
                 )
             )
         ) or 0
+        # Impossible-market alarm input (settlement audit 2026-08-02): graded
+        # (won/lost/half_*) result counts + win counts per (sport,
+        # market_detail-family). NULL details fall back to the market string so
+        # pre-vocabulary picks still form a family. Bounded aggregate; the
+        # HAVING floor keeps the row set tiny. Counts only — no odds/stakes.
+        family_col = func.coalesce(Pick.market_detail, Pick.market)
+        graded_col = func.count()
+        wins_col = func.sum(case((ResultTracking.outcome.in_(("won", "half_won")), 1), else_=0))
+        family_rows = [
+            (str(sport), str(family), int(graded), int(wins))
+            for sport, family, graded, wins in (
+                await session.execute(
+                    select(Sport.key, family_col, graded_col, wins_col)
+                    .select_from(ResultTracking)
+                    .join(Pick, ResultTracking.pick_id == Pick.id)
+                    .join(Event, Pick.event_id == Event.id)
+                    .join(Sport, Event.sport_id == Sport.id)
+                    .where(ResultTracking.outcome.in_(("won", "lost", "half_won", "half_lost")))
+                    .group_by(Sport.key, family_col)
+                    .having(graded_col >= IMPOSSIBLE_MARKET_MIN_GRADED)
+                )
+            ).all()
+        ]
     found = evaluate_anomalies(
         now,
         awaiting_backlog=backlog,
@@ -384,6 +455,9 @@ async def run_self_audit(
     cliff = evaluate_sharp_anchor_cliff(recent_24h=sharp_recent, prior_24h=sharp_prior)
     if cliff is not None:
         found.append(cliff)
+    impossible = evaluate_impossible_market_families(family_rows)
+    if impossible is not None:
+        found.append(impossible)
     # WRONG-GAME SAFETY NET (go-live, hardened Pinnacle matcher): independently
     # re-verify recently-accepted live Pinnacle anchors are the SAME fixture. A
     # wrong-game close is fake CLV — the cardinal sin — so any mismatch surfaces

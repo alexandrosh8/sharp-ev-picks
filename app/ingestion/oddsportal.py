@@ -2298,13 +2298,17 @@ def _parse_score(raw: Any) -> int | None:
 
 # Markers meaning the score was reached AFTER regulation time (extra time /
 # overtime / penalties) on OddsPortal status ("After ET", "After Penalties"),
-# partial-result or score strings. Word-bounded so plain digits/team words
+# partial-result or score strings — OR that the match did NOT finish normally
+# (tennis retirement "ret."/"retired", walkover): capturing such a score as a
+# "full" final would grade markets that must VOID under
+# TENNIS_SETTLEMENT_CONVENTION ("pinnacle_one_set" — audit 2026-08-02; the
+# earlier marker set missed "ret"). Word-bounded so plain digits/team words
 # never fire ("(1:0, 1:1)" has no marker). OT is included: even where totals
 # conventionally include OT (NBA), the primary basketball settle path is the
 # ESPN feed — refusing the scraped score here only defers, never corrupts.
 _ET_PEN_MARKER_RE = re.compile(
     r"(?i)(?<![a-z0-9])(a\.?e\.?t|et|ot|pen(?:s|alt(?:y|ies))?|w\.?/?o|walkover|"
-    r"extra\s+time|overtime|shootout)\.?(?![a-z0-9])"
+    r"ret(?:ired|irement)?|rtd|abandoned|extra\s+time|overtime|shootout)\.?(?![a-z0-9])"
 )
 
 

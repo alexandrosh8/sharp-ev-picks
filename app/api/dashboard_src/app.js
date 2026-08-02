@@ -24,6 +24,13 @@
           );
         }
         const isTimeoutErr = (e) => !!e && (e.name === "AbortError" || e.name === "TimeoutError");
+        // Live review 2026-08-02 (P4): the FIRST load occasionally hit the
+        // 15s deadline on /performance + /picks (net::ERR_ABORTED) and stayed
+        // blank until the 60s refresh. ONE bounded retry on a timeout-class
+        // failure only — never on HTTP/schema errors, never more than once.
+        function retryOnTimeout(makeReq) {
+          return makeReq().catch((e) => (isTimeoutErr(e) ? makeReq() : Promise.reject(e)));
+        }
 
         function releaseResponseGuard(res) {
           const guard = responseGuards.get(res);
@@ -285,6 +292,15 @@
           const d = new Date(iso);
           if (isNaN(d.getTime())) return "—";
           return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+        }
+        // Live review 2026-08-02 (P3): ops-table UTC timestamp — the review
+        // queue's Queued/Status cells rendered raw microsecond ISO strings.
+        // Minute precision, explicit UTC (the queue table's ops convention).
+        function fmtUtcTs(iso) {
+          if (!iso) return "—";
+          const d = new Date(iso);
+          if (isNaN(d.getTime())) return String(iso);
+          return d.toISOString().slice(0, 16).replace("T", " ") + " UTC";
         }
         function fmtRelAge(iso) {
           if (!iso) return "—";
@@ -753,21 +769,21 @@
           // headers arrive. Fixtures are operational context, not a dependency
           // of picks/health/performance: a slow /games query must not hold the
           // entire first dashboard paint hostage.
-          const premiumBodyP = fetchGuarded("/picks?limit=200&tier=premium")
-            .then((res) => readJson(res, (body) => validatePicksPayload(body, "premium")));
-          const volumeBodyP = fetchGuarded("/picks?limit=200&tier=volume")
-            .then((res) => readJson(res, (body) => validatePicksPayload(body, "volume")));
-          const gamesBodyP = fetchGuarded("/games?limit=1000")
-            .then((res) => readJson(res, (body) => expectArrayPayload(body, "Games")));
+          const premiumBodyP = retryOnTimeout(() => fetchGuarded("/picks?limit=200&tier=premium")
+            .then((res) => readJson(res, (body) => validatePicksPayload(body, "premium"))));
+          const volumeBodyP = retryOnTimeout(() => fetchGuarded("/picks?limit=200&tier=volume")
+            .then((res) => readJson(res, (body) => validatePicksPayload(body, "volume"))));
+          const gamesBodyP = retryOnTimeout(() => fetchGuarded("/games?limit=1000")
+            .then((res) => readJson(res, (body) => expectArrayPayload(body, "Games"))));
           // Attach both handlers immediately so a fast fixture failure cannot
           // become an unhandled rejection while the critical responses settle.
           const gamesResultP = gamesBodyP.then(
             (value) => ({ status: "fulfilled", value }),
             (reason) => ({ status: "rejected", reason })
           );
-          const perfBodyP = fetchGuarded("/performance")
-            .then((res) => readJson(res, (body) => expectObjectPayload(body, "Performance")));
-          const healthBodyP = fetchGuarded("/health").then((res) => readHealthJson(res));
+          const perfBodyP = retryOnTimeout(() => fetchGuarded("/performance")
+            .then((res) => readJson(res, (body) => expectObjectPayload(body, "Performance"))));
+          const healthBodyP = retryOnTimeout(() => fetchGuarded("/health").then((res) => readHealthJson(res)));
           const [premiumBodyR, volumeBodyR, perfBodyR, healthBodyR] = await Promise.allSettled([
             premiumBodyP,
             volumeBodyP,
@@ -901,8 +917,8 @@
             const tr = document.createElement("tr");
             const conf = r.confidence != null ? fmtNum(r.confidence, 4) : null;
             const st = r.review_status === "pending" && r.reviewed_at == null ? r.review_status
-              : fmt(r.review_status) + (r.reviewed_at != null ? " @ " + r.reviewed_at : "");
-            [eventLabel(r.event), eventLabel(r.candidate), r.kickoff_utc, r.source, conf, r.reason, st, r.created_at].forEach((v) => {
+              : fmt(r.review_status) + (r.reviewed_at != null ? " @ " + fmtUtcTs(r.reviewed_at) : "");
+            [eventLabel(r.event), eventLabel(r.candidate), r.kickoff_utc, r.source, conf, r.reason, st, fmtUtcTs(r.created_at)].forEach((v) => {
               const td = document.createElement("td");
               td.textContent = String(fmt(v));
               tr.appendChild(td);
@@ -1131,6 +1147,15 @@
             });
           }
           box.appendChild(ml);
+          // Live review 2026-08-02 (item 6): the bare no_sharp_anchor slug and
+          // its :sub_reason rows COUNT THE SAME EVALUATIONS — summing them
+          // double-counts the anchor-miss mass.
+          if (subs.length > 0 && parents.indexOf("no_sharp_anchor") !== -1) {
+            const ov = document.createElement("p"); ov.className = "muted";
+            ov.textContent = "Counting note: the bare no_sharp_anchor row and its "
+              + "no_sharp_anchor:<sub_reason> rows overlap (the same evaluation is counted in both) — do not sum them.";
+            box.appendChild(ov);
+          }
         }
         function loadGateReasons() {
           const fresh = state.gateReasonsAt != null && Date.now() - state.gateReasonsAt < GATE_REASONS_TTL_MS;
@@ -1150,7 +1175,18 @@
         function renderMatchCeiling() {
           const status = $("ceiling-status");
           const tb = $("ceiling-rows"); tb.replaceChildren();
-          if (state.ceilingLoading && !state.ceiling) { status.textContent = "Loading match ceiling…"; return; }
+          if (state.ceilingLoading && !state.ceiling) {
+            status.textContent = "Loading match ceiling…";
+            // Live review 2026-08-02 (P3): skeleton rows while loading — a
+            // bare header table over an empty body read as broken.
+            for (let i = 0; i < 3; i++) {
+              const tr = document.createElement("tr");
+              const td = document.createElement("td"); td.colSpan = 7;
+              const sk = document.createElement("span"); sk.className = "skeleton-line" + (i === 2 ? " short" : "");
+              td.appendChild(sk); tr.appendChild(td); tb.appendChild(tr);
+            }
+            return;
+          }
           if (state.ceilingErr && !state.ceiling) { status.textContent = "Could not load match ceiling."; return; }
           if (!state.ceiling) { status.textContent = "Not loaded yet."; return; }
           const sports = isRecord(state.ceiling.sports) ? state.ceiling.sports : {};
@@ -1192,8 +1228,18 @@
         });
 
         // ===== header: system pill + popover ==================================
-        function setPillText(text, mode) {
-          $("pill-text").textContent = text;
+        function setPillText(text, mode, ageText) {
+          // Live review 2026-08-02 (P3): the data-age suffix rides a separate
+          // span so narrow (~390px) viewports hide it via CSS instead of
+          // truncating the CONDITION label mid-word.
+          const el = $("pill-text");
+          el.textContent = text;
+          if (ageText) {
+            const age = document.createElement("span");
+            age.className = "pill-age";
+            age.textContent = " · " + ageText;
+            el.appendChild(age);
+          }
           const pill = $("system-pill");
           pill.classList.remove("degraded", "stale");
           if (mode) pill.classList.add(mode);
@@ -1202,7 +1248,7 @@
           const health = state.health;
           const condition = systemCondition(health);
           const age = health && health.newest_poll_age_seconds != null ? fmtRelAge(new Date(Date.now() - Number(health.newest_poll_age_seconds) * 1000).toISOString()) : "—";
-          setPillText(condition.label + " · data age " + age, condition.pillMode);
+          setPillText(condition.label, condition.pillMode, "data age " + age);
 
           const body = $("popover-body");
           body.replaceChildren();
@@ -1563,14 +1609,44 @@
         // segments (stake_zero, ml-filter, steam, non-major league, the
         // per-market premium floor …). Client-side DISPLAY parse only — no
         // schema or staking change; defensive against unknown segment shapes.
+        // Live review 2026-08-02 (item 5): canonical demotion-CAUSE chips —
+        // the operator must see WHY a card is volume, not a raw slug. Ordered
+        // prefix map over the lowercased segment (longest/most-specific
+        // first); null = telemetry-only segment, not a demotion cause (shadow
+        // would-demote notes, structural badge already rendered separately).
+        // Unknown segments keep the legacy raw-slug fallback — never dropped.
+        const DEMOTION_CHIP_MAP = [
+          ["no sharp anchor", "NO SHARP ANCHOR"],
+          ["unvalidated sport", "EXPERIMENTAL SPORT (shadow mandate)"],
+          ["visibility-only market", "MARKET CAP (visibility-only)"],
+          ["market floor", "MARKET FLOOR"],
+          ["1x2 longshot > odds ceiling", "ODDS CEILING"],
+          ["steam(shadow)", null],
+          ["steam", "STEAM"],
+          ["shots(shadow)", null],
+          ["shots veto", "SHOTS VETO"],
+          ["draw selection", "DRAW DEMOTION"],
+          ["stake_zero", "STAKE CAP (0 granted)"],
+          ["ml-filter", "ML FILTER"],
+          ["minted ", "MINT TIMING"],
+          ["structural sanity", null],
+        ];
         function demotionChips(p) {
           if (tierOf(p) !== "volume" || !p.reason_summary) return [];
           const segs = String(p.reason_summary).split(" | ").slice(1);
           const out = [];
           segs.forEach((seg) => {
-            const cut = seg.search(/[:(]/);
-            let slug = (cut > 0 ? seg.slice(0, cut) : seg).trim();
-            if (slug.length > 28) slug = slug.slice(0, 27) + "…";
+            const low = seg.trim().toLowerCase();
+            const hit = DEMOTION_CHIP_MAP.find((m) => low.indexOf(m[0]) === 0);
+            let slug;
+            if (hit) {
+              if (hit[1] === null) return; // telemetry note, not a demotion cause
+              slug = hit[1];
+            } else {
+              const cut = seg.search(/[:(]/);
+              slug = (cut > 0 ? seg.slice(0, cut) : seg).trim();
+              if (slug.length > 28) slug = slug.slice(0, 27) + "…";
+            }
             if (slug && out.indexOf(slug) === -1) out.push(slug);
           });
           return out.slice(0, 4);
@@ -1645,14 +1721,21 @@
           effEl.className = "er-edge" + (isFinite(eff) && eff < 0 ? " neg" : "");
           effEl.textContent = (closed ? "mint " : "") + fmtSignedPct(eff);
           sel.appendChild(effEl);
+          const trust = document.createElement("span"); trust.className = "er-trust"; trust.textContent = trustGlyph(p); trust.title = anchorLabel(p);
+          row.append(ko, ev, tier, sel, trust);
+          // Live review 2026-08-02 (P1): settled P&L gets its OWN
+          // non-truncating line — inside .er-sel it ellipsized to "P…" behind
+          // a long selection. The selection cell keeps the ellipsis instead.
           if (closed) {
             const pnl = p.pnl != null ? p.pnl : p.provisional_pnl;
             if (pnl != null && isFinite(Number(pnl))) {
-              sel.appendChild(document.createTextNode(" · P&L " + (Number(pnl) >= 0 ? "+" : "") + Number(pnl).toFixed(2)));
+              const pnlEl = document.createElement("span");
+              pnlEl.className = "er-pnl mono" + (Number(pnl) < 0 ? " neg" : "");
+              pnlEl.textContent = "P&L " + (Number(pnl) >= 0 ? "+" : "") + Number(pnl).toFixed(2)
+                + (p.pnl == null ? " (provisional)" : "");
+              row.appendChild(pnlEl);
             }
           }
-          const trust = document.createElement("span"); trust.className = "er-trust"; trust.textContent = trustGlyph(p); trust.title = anchorLabel(p);
-          row.append(ko, ev, tier, sel, trust);
           // Task 5: same-game correlation chip (premium); Task 4: demotion-note
           // chips (volume). Both display only.
           const corr = correlationChipEl(p);
@@ -1789,7 +1872,12 @@
           // Spreadsheet programs may evaluate cells beginning with these
           // characters as formulas. Prefix after any leading control/space
           // characters, then apply normal RFC 4180 quoting.
-          if (/^[\s\u0000-\u001f]*[=+\-@]/.test(cell)) cell = "'" + cell;
+          // Live review 2026-08-02 (P4, OWASP): a BARE number ("-0.045",
+          // "+1.2") is parsed by spreadsheets as a number, never a formula —
+          // apostrophe-prefixing it corrupted every negative edge in the
+          // export. The formula guard applies only to formula-leading STRINGS.
+          const plainNumber = /^\s*[+\-]?\d+(\.\d+)?([eE][+\-]?\d+)?\s*$/.test(cell);
+          if (!plainNumber && /^[\s\u0000-\u001f]*[=+\-@]/.test(cell)) cell = "'" + cell;
           return /[",\r\n]/.test(cell) ? '"' + cell.replace(/"/g, '""') + '"' : cell;
         }
         function exportEdgesCsv() {
@@ -1809,7 +1897,8 @@
             sortMode === "kickoff" ? new Date(a.starts_at || 8e15) - new Date(b.starts_at || 8e15)
             : sortMode === "odds" ? (numOf(b.decimal_odds) || 0) - (numOf(a.decimal_odds) || 0)
             : (edgeVal(b) || -1e9) - (edgeVal(a) || -1e9));
-          const cols = ["group", "tier", "status", "event", "league", "market", "selection", "decimal_odds", "edge", "current_edge", "confidence", "anchor_type", "starts_at", "revalidated_at"];
+          // Live review 2026-08-02 (P2): the fill bookmaker rides the export.
+          const cols = ["group", "tier", "status", "event", "league", "market", "selection", "bookmaker", "decimal_odds", "edge", "current_edge", "confidence", "anchor_type", "starts_at", "revalidated_at"];
           const lines = [cols.map(csvSafeCell).join(",")];
           rows.forEach((p) => lines.push(cols.map((c) => csvSafeCell(c === "group" ? edgeGroupOf(p) : p[c])).join(",")));
           const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
@@ -2121,7 +2210,12 @@
           const untrustedClose = hasStarted(p) && p.clv_log != null && !isTrustedClv(p);
           const untrusted = staleNow || invalidLiveKickoff || lacksSharpAnchor || matchMissing || untrustedClose ||
             p.structural_sane !== true || dataIsStale(state.health);
-          if (untrusted) {
+          // Live review 2026-08-02 (P2): post-settlement there is no live
+          // pricing to distrust — the "not a recommended bet" banner and the
+          // live EDGE (NOW) tile are meaningless on a settled/superseded pick.
+          // The drawer leads with MINT-TIME truth + the result instead.
+          const postSettlement = p.status === "settled" || p.status === "superseded";
+          if (untrusted && !postSettlement) {
             const warn = document.createElement("div"); warn.className = "trust-banner";
             warn.setAttribute("role", "note");
             warn.textContent = "Untrusted / stale pricing — indicative only, not a recommended bet.";
@@ -2133,7 +2227,9 @@
           const evNum = numOf(p.ev);
           // #22: extreme EV (>+100%) or an untrusted/inconsistent pick mutes
           // the figures and flags them — values are NEVER recomputed/clamped.
-          const figsIndicative = untrusted || (isFinite(evNum) && evNum > 1);
+          // Mint-time figures on a settled pick are archived truth, not a live
+          // claim — they are never muted as "indicative".
+          const figsIndicative = !postSettlement && (untrusted || (isFinite(evNum) && evNum > 1));
           const kpis = document.createElement("div");
           kpis.className = "ticket-kpis" + (figsIndicative ? " indicative" : "");
           const mkKpi = (label, valText, subText) => {
@@ -2147,25 +2243,41 @@
             }
             return c;
           };
-          // Task 3 (2026-07-11): provenance labels — EV is FIXED at mint;
-          // Edge (and Fair odds below) are live re-priced values.
-          kpis.appendChild(mkKpi("Edge (now)", fmtSignedPct(eff), figsIndicative ? "indicative, unverified" : null));
-          kpis.appendChild(mkKpi("EV (at mint)", fmtSignedPct(p.ev), figsIndicative ? "indicative, unverified" : null));
-          const sf = numOf(p.recommended_stake_fraction);
-          // Show the actual fractional-Kelly stake (as a % of bankroll) — the
-          // label promises a stake figure, not a confidence rating. A missing or
-          // zero fraction (e.g. a cap-denied pick) reads "—".
-          const stakeTxt = isFinite(sf) && sf > 0 ? (sf * 100).toFixed(2) + "% of bankroll" : "—";
-          // #23: never an actionable-looking stake on an untrusted/stale/
-          // shadow pick — de-emphasized and explicitly not applicable.
-          const stakeGated = !isActionable(p, state.health);
-          const stakeCell = mkKpi("Suggested stake (informational)", stakeTxt,
-            stakeGated
-              ? (untrusted ? "informational only — not applicable while untrusted"
-                : "informational only — not applicable unless currently qualified")
-              : null);
-          if (stakeGated) stakeCell.classList.add("gated");
-          kpis.appendChild(stakeCell);
+          if (postSettlement) {
+            // Live review 2026-08-02 (P2): settled/superseded drawers LEAD
+            // with mint-time truth + the result — never a live re-priced
+            // "EDGE (NOW)" on a finished market, never a stake tile.
+            kpis.appendChild(mkKpi("Edge (at mint)", fmtSignedPct(p.edge), null));
+            kpis.appendChild(mkKpi("EV (at mint)", fmtSignedPct(p.ev), null));
+            const rOc = outcomeLabel(p.outcome || p.provisional_outcome);
+            const rPnl = p.pnl != null ? p.pnl : p.provisional_pnl;
+            kpis.appendChild(mkKpi("Result",
+              rOc ? rOc + (p.outcome == null ? " (provisional)" : "")
+                : (p.status === "superseded" ? "Superseded" : "Pending"),
+              rPnl != null && isFinite(Number(rPnl))
+                ? "P&L " + (Number(rPnl) >= 0 ? "+" : "") + Number(rPnl).toFixed(2)
+                : null));
+          } else {
+            // Task 3 (2026-07-11): provenance labels — EV is FIXED at mint;
+            // Edge (and Fair odds below) are live re-priced values.
+            kpis.appendChild(mkKpi("Edge (now)", fmtSignedPct(eff), figsIndicative ? "indicative, unverified" : null));
+            kpis.appendChild(mkKpi("EV (at mint)", fmtSignedPct(p.ev), figsIndicative ? "indicative, unverified" : null));
+            const sf = numOf(p.recommended_stake_fraction);
+            // Show the actual fractional-Kelly stake (as a % of bankroll) — the
+            // label promises a stake figure, not a confidence rating. A missing or
+            // zero fraction (e.g. a cap-denied pick) reads "—".
+            const stakeTxt = isFinite(sf) && sf > 0 ? (sf * 100).toFixed(2) + "% of bankroll" : "—";
+            // #23: never an actionable-looking stake on an untrusted/stale/
+            // shadow pick — de-emphasized and explicitly not applicable.
+            const stakeGated = !isActionable(p, state.health);
+            const stakeCell = mkKpi("Suggested stake (informational)", stakeTxt,
+              stakeGated
+                ? (untrusted ? "informational only — not applicable while untrusted"
+                  : "informational only — not applicable unless currently qualified")
+                : null);
+            if (stakeGated) stakeCell.classList.add("gated");
+            kpis.appendChild(stakeCell);
+          }
           body.appendChild(kpis);
           // Task 5 correlation chip (premium) + Task 4 demotion chips (volume)
           // on the ticket too — same builders as the list rows, display only.
@@ -2188,6 +2300,13 @@
             const fair = isFinite(cf) && cf > 0 ? cf : mf;
             fairOdds = isFinite(fair) && fair > 0 && fair < 1 ? (1 / fair).toFixed(2) : "—";
           }
+          // Live review 2026-08-02 (P2): the fill bookmaker belongs on the
+          // ticket — the operator places the bet at a named book, not "odds".
+          ml.appendChild(metricEl("Bookmaker", p.bookmaker
+            ? fmt(p.bookmaker)
+              + (p.current_bookmaker && p.current_bookmaker !== p.bookmaker
+                ? " (re-priced via " + p.current_bookmaker + ")" : "")
+            : naEl("no bookmaker recorded on this row")));
           ml.appendChild(metricEl("Offered odds", fmtOdds(p.decimal_odds)));
           ml.appendChild(metricEl("Fair odds (now)",
             fairOdds === "—" ? naEl("no reconciled fair price on this row") : fairOdds));
@@ -2248,6 +2367,18 @@
             wm.textContent = "Weak Match"; ev.appendChild(wm);
           }
 
+          // Live review 2026-08-02 (item 4): restated-cohort badge — the
+          // 2026-08-02 label audit restated this pick's mint anchor_book
+          // (it was mislabeled as a sharp/exchange book; the true book is
+          // 10bet), so its sharp-anchor provenance is NOT trustworthy.
+          if (p.anchor_restated === true) {
+            const rs = document.createElement("span");
+            rs.className = "tag tag-warm tag-dashed"; rs.style.marginLeft = "6px";
+            rs.textContent = "ANCHOR RESTATED (was mislabeled sharp)";
+            rs.title = "the mint-time anchor book label was corrected by the 2026-08-02 label audit — treat this pick's sharp-anchor provenance as unreliable";
+            ev.appendChild(rs);
+          }
+
           const evml = document.createElement("div"); evml.className = "metric-list"; evml.style.marginTop = "10px";
           const amc = numOf(p.anchor_match_confidence);
           evml.appendChild(metricEl("Match confidence",
@@ -2295,6 +2426,8 @@
           const lines = [
             eventLabel(p.event),
             selLabel(p) + " @ " + fmtOdds(p.decimal_odds),
+            // Live review 2026-08-02 (P2): the fill book rides the copy text.
+            "Book: " + fmt(p.bookmaker),
             "Edge: " + fmtSignedPct(eff),
             "Tier: " + (tierOf(p) === "volume" ? "Shadow" : "Premium"),
             "Anchor: " + anchorLabel(p),
@@ -2411,9 +2544,11 @@
             const k = String(p.event) + "|" + new Date(p.starts_at).getTime();
             if (!pickByEvent.has(k)) pickByEvent.set(k, p);
           });
+          // Live review 2026-08-02 (P3): the middle band is a rolling 2-24h
+          // window, not a calendar day — "Today" mislabeled it.
           const bands = [
             ["Next 2h", (ms) => ms >= 0 && ms <= 2 * 3.6e6],
-            ["Today", (ms) => ms > 2 * 3.6e6 && ms <= 24 * 3.6e6],
+            ["Next 24h", (ms) => ms > 2 * 3.6e6 && ms <= 24 * 3.6e6],
             ["Tomorrow+", (ms) => ms > 24 * 3.6e6],
           ];
           bands.forEach(([label, pred]) => {
@@ -2723,9 +2858,32 @@
               hero.appendChild(etaP);
             }
           }
-          if (perf && perf.stake_weighted_clv_log != null) {
+          // Live review 2026-08-02 (item 1): the DECISION-RELEVANT odds-band
+          // split of the SAME trusted subset — the odds >= threshold tail is
+          // where the negative trusted CLV concentrates. Rendered through the
+          // ONE shared CI formatter; estimates arrive nulled at the source
+          // below the min-n floor ("n=X — insufficient", never a number).
+          const oddsSplit = perf && perf.sharp_clv_odds_split;
+          if (oddsSplit) {
+            const thr = fmtNum(oddsSplit.threshold_odds, 1);
+            const sm = document.createElement("div"); sm.className = "metric-list"; sm.style.marginTop = "10px";
+            sm.appendChild(metricEl("Trusted CLV — odds < " + thr, ciEntryText(oddsSplit.below || {})));
+            sm.appendChild(metricEl("Trusted CLV — odds ≥ " + thr, ciEntryText(oddsSplit.at_or_above || {})));
+            hero.appendChild(sm);
+            const note = document.createElement("p"); note.className = "muted";
+            note.textContent = "Odds-band split of the same trusted subset — the ≥ " + thr
+              + " tail is where negative trusted CLV has concentrated; each band is min-n gated on its own n.";
+            hero.appendChild(note);
+          }
+          // Live review 2026-08-02 (item 2): the blended (consensus-close)
+          // CLV is NON-EVIDENTIAL — tautology-dominated consensus closes.
+          // The label is unmissable and the figure stays muted context only.
+          if (perf && perf.stake_weighted_clv_log != null && perf.blended_clv_evidential !== true) {
             const ctx = document.createElement("p"); ctx.className = "muted"; ctx.style.marginTop = "10px";
-            ctx.textContent = "All-closes CLV (context — not evidence): " + (clvPctFromLog(perf.stake_weighted_clv_log) >= 0 ? "+" : "") + clvPctFromLog(perf.stake_weighted_clv_log).toFixed(2) + "%.";
+            ctx.textContent = "All-closes (blended) CLV "
+              + (clvPctFromLog(perf.stake_weighted_clv_log) >= 0 ? "+" : "")
+              + clvPctFromLog(perf.stake_weighted_clv_log).toFixed(2)
+              + "% — NON-EVIDENTIAL (consensus closes; tautology-dominated). Context only — never compare it to the trusted figure above.";
             hero.appendChild(ctx);
           }
 
@@ -2782,6 +2940,31 @@
             ml.appendChild(metricEl("ECE", fmtNum(cal.ece, 3)));
             ml.appendChild(metricEl("Brier", fmtNum(cal.brier, 3)));
             cs.appendChild(ml);
+          }
+          // Live review 2026-08-02 (item 3): the walk-forward drift detector's
+          // state is stated EXPLICITLY — 0 eligible folds means "no drift
+          // verdict exists yet", never a silent green. Feature-detected: an
+          // older cached payload without the block renders nothing.
+          const cd = perf && perf.calibration_drift;
+          if (cd) {
+            const dp = document.createElement("p"); dp.className = "muted"; dp.style.marginTop = "8px";
+            if (cd.status === "unavailable") {
+              dp.textContent = "Walk-forward drift detector: unavailable (monitor read failed).";
+            } else if (cd.insufficient) {
+              dp.textContent = "Walk-forward drift detector: insufficient data ("
+                + (Number(cd.n_folds) || 0) + " folds; n=" + fmt(cd.n_settled_binary)
+                + " of ~" + fmt(cd.needed_n) + " settled needed"
+                + (cd.projected_testable_date ? "; testable ~" + cd.projected_testable_date : "")
+                + ") — no drift verdict yet.";
+            } else if (cd.status === "drift") {
+              dp.textContent = "Walk-forward drift detector: DRIFT — recalibration warranted OOS ("
+                + fmt(cd.n_folds) + " folds, n=" + fmt(cd.n_settled_binary)
+                + "). Operator review required; nothing retrains automatically.";
+            } else {
+              dp.textContent = "Walk-forward drift detector: OK — identity calibration holds OOS ("
+                + fmt(cd.n_folds) + " folds, n=" + fmt(cd.n_settled_binary) + ").";
+            }
+            cs.appendChild(dp);
           }
 
           const sr = $("sport-readiness"); sr.replaceChildren();

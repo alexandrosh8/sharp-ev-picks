@@ -255,6 +255,11 @@
       }
       .system-pill.stale .pill-dot { background: var(--warm); box-shadow: 0 0 8px var(--warm); }
       .system-pill.degraded .pill-dot { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+      /* Live review 2026-08-02 (P3): on narrow phones the data-age suffix is
+         dropped entirely so the CONDITION label never truncates (~390px). */
+      @media (max-width: 480px) {
+        .pill-age { display: none; }
+      }
       @keyframes breathe {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.35; }
@@ -525,6 +530,24 @@
       /* rr — recent results reuse kickoff grid via JS classes */
       .rr-ev { font-weight: 500; }
       .rr-n, .rr-t, .rr-lg { font-family: var(--font-mono); color: var(--text2); }
+      /* Live review 2026-08-02 (P3): Recent-results status cells wrap at
+         token boundaries (no mid-word breaks, no ellipsis) and the row aligns
+         from the top so a two-line status never reads ragged. */
+      #recent-results .kickoff-row { align-items: start; }
+      #recent-results .kr-s {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+        overflow-wrap: break-word;
+      }
+      /* Live review 2026-08-02 (P3): Lab evidence rows (promo distance, SLA,
+         coverage cells) wrap instead of mid-word-ellipsizing on desktop too. */
+      .lab-board .kickoff-row .kr-s {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+        overflow-wrap: break-word;
+      }
 
       /* ============ EDGE DEPTH CHART ============ */
       /* Fix 2026-07-10 #25: edge-magnitude bar chart removed (operator). */
@@ -671,6 +694,17 @@
          Structurally-inconsistent rows grey out hard; negative-edge Closed
          rows get a distinct muted treatment; a negative edge value always
          renders in danger colour, never like a positive edge. */
+      /* Live review 2026-08-02 (P1): settled P&L on closed cards gets its own
+         full-width, NON-truncating line — it was ellipsizing to "P…" inside
+         .er-sel; the selection cell keeps the ellipsis instead. */
+      .er-pnl {
+        grid-column: 1 / -1;
+        font-size: 11px;
+        color: var(--text2);
+        white-space: nowrap;
+        margin-top: 2px;
+      }
+      .er-pnl.neg { color: var(--danger); }
       .edge-row.is-quarantined { opacity: 0.5; }
       .edge-row.is-quarantined .er-event, .edge-row.is-quarantined .er-sel { color: var(--text3); }
       .edge-row.is-neg-closed { opacity: 0.62; }

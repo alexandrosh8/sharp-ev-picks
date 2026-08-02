@@ -43,6 +43,7 @@ from app.api.deps import get_session
 from app.backtesting.calibration import bet_band_reliability
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
+from app.maintenance.calibration_drift import calibration_drift_status
 from app.resolution.shadow import summarize_anchor_coverage, summarize_match_rate
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
@@ -1300,6 +1301,11 @@ async def performance(
     # calibration drift is visible; its own insufficient-n honesty gate applies.
     band_obs = await bet_band_observations(session)
     report["calibration"] = bet_band_reliability(band_obs)
+    # Walk-forward drift-detector STATUS (live review 2026-08-02 item 3): the
+    # Lab calibration cell must state the detector state explicitly —
+    # "insufficient (0 folds)" is a fact the operator needs, not a silent
+    # green. Read-only; never raises (degrades to an explicit "unavailable").
+    report["calibration_drift"] = await calibration_drift_status(session)
     return report
 
 

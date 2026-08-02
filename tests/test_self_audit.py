@@ -43,6 +43,43 @@ def test_self_audit_evaluate_anomalies() -> None:
     assert {x.code for x in d} == {"awaiting_backlog", "stale_odds"}
 
 
+# --- impossible-market alarm (pure, settlement audit 2026-08-02) ------------- #
+
+
+def test_impossible_market_family_fires_once_naming_families() -> None:
+    """n>=30 graded with 0 wins -> exactly ONE warning per run naming every
+    offending (sport, family) with counts — the alarm that would have caught
+    tennis spreads_minus_2_5 at 0W/102L."""
+    from app.maintenance.self_audit import evaluate_impossible_market_families
+
+    rows = [
+        ("tennis", "spreads_minus_2_5", 102, 0),
+        ("tennis", "spreads_minus_1_5", 143, 41),  # has wins -> quiet
+        ("soccer", "totals_2_5", 500, 260),  # healthy -> quiet
+        ("tennis", "spreads_plus_0_5", 33, 0),
+    ]
+    anomaly = evaluate_impossible_market_families(rows)
+    assert anomaly is not None
+    assert anomaly.severity == "WARN"
+    assert anomaly.code == "impossible_market_family"
+    assert "tennis/spreads_minus_2_5: 0 wins in 102 graded" in anomaly.detail
+    assert "tennis/spreads_plus_0_5: 0 wins in 33 graded" in anomaly.detail
+    assert "spreads_minus_1_5" not in anomaly.detail
+    # ONE anomaly object per run (both families in one warning), and the
+    # detail carries counts only — no odds, stakes or identities.
+    assert "totals_2_5" not in anomaly.detail
+
+
+def test_impossible_market_family_quiet_below_threshold_or_with_wins() -> None:
+    from app.maintenance.self_audit import evaluate_impossible_market_families
+
+    # 0 wins but under the n>=30 floor: small-sample variance, stays quiet.
+    assert evaluate_impossible_market_families([("tennis", "spreads_minus_2_5", 29, 0)]) is None
+    # A single win disarms the alarm regardless of size.
+    assert evaluate_impossible_market_families([("tennis", "spreads_minus_2_5", 500, 1)]) is None
+    assert evaluate_impossible_market_families([]) is None
+
+
 # --- P0-4 dead-man's-switch (pure) ------------------------------------------ #
 
 

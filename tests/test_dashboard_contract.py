@@ -929,3 +929,178 @@ def test_needs_attention_folds_unsettleable_league_gaps() -> None:
     assert '"Results gap — "' in text
     assert "picks past kickoff with no result source." in text
     assert "more leagues with results gaps." in text
+
+
+def test_trusted_clv_odds_band_split_cells() -> None:
+    """Live review 2026-08-02 (item 1): the Lab renders the trusted subset's
+    odds-band split (< / >= threshold) beside the trusted-CLV hero via the ONE
+    shared CI formatter — estimates arrive nulled at the source below the
+    min-n floor, so a sub-floor band reads "n=X — insufficient"."""
+    text = _text()
+    assert "sharp_clv_odds_split" in text
+    assert "threshold_odds" in text
+    assert '"Trusted CLV — odds < " + thr' in text
+    assert '"Trusted CLV — odds ≥ " + thr' in text
+    assert "ciEntryText(oddsSplit.below || {})" in text
+    assert "ciEntryText(oddsSplit.at_or_above || {})" in text
+    assert "Odds-band split of the same trusted subset" in text
+
+
+def test_blended_clv_labelled_non_evidential() -> None:
+    """Live review 2026-08-02 (item 2): the blended (consensus-close) CLV is
+    labelled NON-EVIDENTIAL unmissably and stays muted context — the old
+    soft "context — not evidence" phrasing alone is retired."""
+    text = _text()
+    assert "NON-EVIDENTIAL (consensus closes; tautology-dominated)" in text
+    assert "never compare it to the trusted figure above" in text
+    assert "perf.blended_clv_evidential !== true" in text
+    assert "All-closes CLV (context — not evidence):" not in text
+
+
+def test_calibration_cell_states_drift_detector_status() -> None:
+    """Live review 2026-08-02 (item 3): the Lab calibration cell states the
+    walk-forward drift detector's state explicitly — fold count, sample
+    requirement and the honest testable-by ETA when one exists; 0 folds is
+    never a silent green."""
+    text = _text()
+    assert "calibration_drift" in text
+    assert "Walk-forward drift detector: insufficient data (" in text
+    assert "no drift verdict yet" in text
+    assert "projected_testable_date" in text
+    assert '"; testable ~" + cd.projected_testable_date' in text
+    assert "Walk-forward drift detector: unavailable" in text
+    assert "DRIFT — recalibration warranted OOS (" in text
+    assert "identity calibration holds OOS (" in text
+
+
+def test_anchor_restated_cohort_chip() -> None:
+    """Live review 2026-08-02 (item 4): picks flagged anchor_restated=true by
+    the /picks payload chip the drawer's evidence pane — the mint anchor_book
+    was mislabeled sharp and restated to 10bet by the 2026-08-02 label audit."""
+    text = _text()
+    assert "p.anchor_restated === true" in text
+    assert "ANCHOR RESTATED (was mislabeled sharp)" in text
+    assert "2026-08-02 label audit" in text
+
+
+def test_volume_demotion_cause_chips_canonical_vocabulary() -> None:
+    """Live review 2026-08-02 (item 5): volume cards/drawers distinguish WHY
+    they are volume with canonical demotion-cause chips mapped from the
+    reason_summary segments already in the payload; shadow telemetry notes
+    (steam(shadow)/shots(shadow)) are never presented as demotion causes."""
+    text = _text()
+    assert "DEMOTION_CHIP_MAP" in text
+    for chip in (
+        '"NO SHARP ANCHOR"',
+        '"EXPERIMENTAL SPORT (shadow mandate)"',
+        '"MARKET CAP (visibility-only)"',
+        '"MARKET FLOOR"',
+        '"ODDS CEILING"',
+        '"STEAM"',
+    ):
+        assert chip in text, chip
+    assert '["steam(shadow)", null]' in text
+    assert '["shots(shadow)", null]' in text
+
+
+def test_gate_reasons_overlap_counting_note() -> None:
+    """Live review 2026-08-02 (item 6): the gate-reasons widget warns that the
+    bare no_sharp_anchor slug and its :sub_reason slugs overlap (the same
+    evaluation counts in both) so the operator never sums them."""
+    text = _text()
+    assert "Counting note: the bare no_sharp_anchor row and its " in text
+    assert "do not sum them" in text
+
+
+def test_closed_card_settled_pnl_has_own_non_truncating_line() -> None:
+    """Live review 2026-08-02 (P1): settled P&L on closed Edges cards renders
+    on its OWN full-width line (.er-pnl, nowrap, never ellipsized) — it was
+    truncating to "P…" inside the selection cell; the selection keeps the
+    ellipsis instead."""
+    text = _text()
+    assert 'pnlEl.className = "er-pnl mono"' in text
+    assert "row.appendChild(pnlEl)" in text
+    css = text[text.index(".er-pnl {") : text.index(".er-pnl {") + 300]
+    assert "grid-column: 1 / -1" in css
+    assert "white-space: nowrap" in css
+    # the P&L text no longer rides the truncating .er-sel cell
+    assert 'sel.appendChild(document.createTextNode(" · P&L' not in text
+
+
+def test_settled_drawer_leads_with_mint_truth_not_live_tile() -> None:
+    """Live review 2026-08-02 (P2): settled/superseded drawers lead with the
+    mint edge/EV + result KPIs; the live "Edge (now)" tile and the stake tile
+    are for open picks only, and the "not a recommended bet" stale-pricing
+    banner is suppressed once settled/superseded."""
+    text = _text()
+    assert 'const postSettlement = p.status === "settled" || p.status === "superseded"' in text
+    assert "if (untrusted && !postSettlement) {" in text
+    assert '"Edge (at mint)"' in text
+    assert 'mkKpi("Result"' in text
+    # mint figures on a settled pick are archived truth — never muted
+    assert "!postSettlement && (untrusted ||" in text
+
+
+def test_drawer_copy_and_csv_carry_bookmaker() -> None:
+    """Live review 2026-08-02 (P2): the fill bookmaker renders in the drawer
+    Pricing block, the Copy summary, and as a CSV export column."""
+    text = _text()
+    assert 'metricEl("Bookmaker"' in text
+    assert '"Book: " + fmt(p.bookmaker)' in text
+    assert '"selection", "bookmaker", "decimal_odds"' in text
+
+
+def test_radar_band_named_next_24h() -> None:
+    """Live review 2026-08-02 (P3): the 2-24h radar band is a rolling window,
+    not a calendar day — named "Next 24h", never "Today"."""
+    text = _text()
+    assert '["Next 24h", (ms) => ms > 2 * 3.6e6' in text
+    assert '["Today"' not in text
+
+
+def test_mobile_pill_age_and_ops_timestamp_and_ceiling_skeleton() -> None:
+    """Live review 2026-08-02 (P3 cosmetics): the status pill's data-age rides
+    a .pill-age span hidden on narrow phones (the condition label never
+    truncates); review-queue Queued/Status timestamps format via the UTC ops
+    helper (no raw microsecond ISO); the match-ceiling table shows skeleton
+    rows while loading instead of a bare header."""
+    text = _text()
+    assert 'age.className = "pill-age"' in text
+    assert ".pill-age { display: none; }" in text
+    assert "function fmtUtcTs" in text
+    assert "fmtUtcTs(r.created_at)" in text
+    assert "fmtUtcTs(r.reviewed_at)" in text
+    ceiling = text[
+        text.index("function renderMatchCeiling") : text.index("function loadMatchCeiling")
+    ]
+    assert "skeleton-line" in ceiling
+    # Lab evidence rows + recent results wrap at word boundaries, no mid-word
+    # ellipsis / ragged wraps
+    assert ".lab-board .kickoff-row .kr-s" in text
+    assert "#recent-results .kr-s" in text
+
+
+def test_first_load_retries_once_on_timeout_only() -> None:
+    """Live review 2026-08-02 (P4): the boot-time core fetches retry exactly
+    once on a timeout-class failure (first-load /performance //picks aborts),
+    never on HTTP/schema errors — bounded by construction."""
+    text = _text()
+    assert "function retryOnTimeout" in text
+    assert "isTimeoutErr(e) ? makeReq() : Promise.reject(e)" in text
+    for url in (
+        '"/picks?limit=200&tier=premium"',
+        '"/picks?limit=200&tier=volume"',
+        '"/performance"',
+        '"/health"',
+        '"/games?limit=1000"',
+    ):
+        assert "retryOnTimeout(() => fetchGuarded(" + url in text, url
+
+
+def test_csv_formula_guard_exempts_bare_numbers() -> None:
+    """Live review 2026-08-02 (P4, OWASP): the CSV formula-injection guard
+    applies only to formula-leading STRINGS — a bare number like -0.045 is a
+    number to spreadsheets and must not be apostrophe-prefixed."""
+    text = _text()
+    assert "const plainNumber = /" in text
+    assert "!plainNumber &&" in text

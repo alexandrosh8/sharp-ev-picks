@@ -909,6 +909,7 @@ async def settle_open_picks(
                 pick.selection,
                 score.home_score,
                 score.away_score,
+                pick.market_detail,
             )
         )
         candidates.append(
@@ -1189,21 +1190,29 @@ async def _settle_one(
     if (
         completion == "full"
         and sport_key == "tennis"
-        and tennis_set_score_ungradeable(pick.market, pick.selection, home_score, away_score)
+        and tennis_set_score_ungradeable(
+            pick.market, pick.selection, home_score, away_score, pick.market_detail
+        )
     ):
-        # SET-SCORE GUARD (2026-07-10, 106 mis-graded picks): scraped tennis
+        # SET-SCORE GUARD (2026-07-10, 106 mis-graded picks; AXIS-AWARE since
+        # audit 2026-08-02, 356 mis-graded game handicaps): scraped tennis
         # results are SET scores, so a GAME-line totals/spreads pick ("Over
         # 22.5", "-4.5") must never be graded from one (2-1 would read as
-        # "3 total, margin 1"). Mirror the unclassifiable-selection skip:
-        # leave the pick OPEN for manual result entry — never void, never
-        # guess. (The retirement/walkover paths above are untouched: those
-        # VOID by book convention regardless of line.)
+        # "3 total, margin 1") — and a SPREADS pick may grade from a set score
+        # ONLY when its market_detail proves the SETS axis ("spreads_sets_*"):
+        # game handicaps are quoted at -0.5/-1.5/-2.5 too, so magnitude alone
+        # graded the 0W/102L spreads_minus_2_5 family. Mirror the
+        # unclassifiable-selection skip: leave the pick OPEN for manual result
+        # entry — never void, never guess. (The retirement/walkover paths
+        # above are untouched: those VOID by book convention regardless of
+        # line.)
         logger.info(
-            "pick %d not settled: tennis %s %r is a game line but %d-%d is a set "
-            "score — left open for manual settlement",
+            "pick %d not settled: tennis %s %r (detail %r) is not gradeable from the "
+            "set score %d-%d — left open for manual settlement",
             pick.id,
             pick.market,
             pick.selection,
+            pick.market_detail,
             home_score,
             away_score,
         )
@@ -1224,6 +1233,7 @@ async def _settle_one(
                 home_score,
                 away_score,
                 sport_key=sport_key,
+                market_detail=pick.market_detail,
             )
     except ValueError as exc:
         reason = str(exc)
@@ -1304,7 +1314,17 @@ async def _load_scraped_finals(session: AsyncSession, now: datetime) -> list[Fin
     for still-open picks whose match has kicked off. Lets leagues with no free
     results feed AUTO-settle (no manual entry) from the score already fetched at
     scrape time. The score is on the pick's OWN event, so the ScoreBook matches
-    it exactly by the same team names — no cross-source name risk."""
+    it exactly by the same team names — no cross-source name risk.
+
+    TENNIS IS EXCLUDED (audit 2026-08-02, fail-closed): a scraped tennis score
+    carries NO completion information — every emitted row would default to
+    completion="full", but the OddsPortal capture cannot prove a normal finish
+    (its abnormal-finish markers can miss e.g. "ret."), and under
+    TENNIS_SETTLEMENT_CONVENTION ("pinnacle_one_set") a retired match must
+    VOID spreads/totals, never grade them. The ESPN tennis path
+    (parse_tennis_scoreboard) is the only source that affirmatively classifies
+    completion ("full"/"retired"/"void"); scraped tennis finals defer to it or
+    to manual entry. Unknown/abnormal completion == not-full == not emitted."""
     home_t, away_t = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
@@ -1318,8 +1338,10 @@ async def _load_scraped_finals(session: AsyncSession, now: datetime) -> list[Fin
             .join(Pick, Pick.event_id == Event.id)
             .join(home_t, Event.home_team_id == home_t.id)
             .join(away_t, Event.away_team_id == away_t.id)
+            .join(Sport, Event.sport_id == Sport.id)
             .where(
                 Pick.status == "alerted",
+                Sport.key != "tennis",  # fail-closed: see docstring
                 Event.scraped_home_score.is_not(None),
                 Event.scraped_away_score.is_not(None),
                 Event.starts_at.is_not(None),

@@ -62,7 +62,11 @@ from app.risk.staking import (
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
-from app.settlement.outcomes import is_tennis_game_line
+from app.settlement.outcomes import (
+    is_tennis_game_line,
+    is_tennis_games_total_detail,
+    is_tennis_sets_spread_detail,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -995,7 +999,11 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 # — never fabricated; the pick then predates the column's gate).
                 hours_to_kickoff=_hours_to_kickoff(kickoff_by_event.get(event_id), now),
                 reason_summary=(
-                    f"model {prediction.probability:.3f} vs fair {fair_p:.3f} "
+                    # Unit-explicit labels (2026-08-02): both figures here are
+                    # PROBABILITIES (_p), while the value-strategy reason shows
+                    # the sharp fair as ODDS (fair_odds) — a bare "fair" was
+                    # ambiguous across rows. Display only; math unchanged.
+                    f"model_p {prediction.probability:.3f} vs fair_p {fair_p:.3f} "
                     f"({deps.devig_method}) at {snap.bookmaker}"
                 ),
                 # The model strategy has NO volume tier: the volume-tier
@@ -1152,18 +1160,30 @@ def _is_settleable_market_detail(detail: str | None) -> bool:
 def _is_tennis_game_line_group(
     sport_key: str,
     market: Market,
+    detail: str | None,
     prices: Mapping[str, Mapping[str, float]],
 ) -> bool:
-    """True for a tennis totals/spreads candidate group priced on a GAME line
-    (totals line > 4.5 or |spread| > 2.5, parsed from the selection tails via
-    the settler's own line parser). Our tennis results feed carries SET scores
-    only, so a game-line pick can never be auto-settled honestly — the
-    settlement set-score guard would hold it for manual entry forever. Dropped
-    at the candidate boundary, same mechanism as the period/corner/card
-    sub-market drop above. Set-plausible tennis lines (sets total 2.5, set
-    spread 1.5) and every other sport pass through untouched."""
+    """True for a tennis totals/spreads candidate group that can never be
+    auto-settled from our SET-score results feed — the settlement set-score
+    guard would hold such a pick for manual entry forever, so it is dropped at
+    the candidate boundary (same mechanism as the period/corner/card drop).
+
+    AXIS-AWARE (audit 2026-08-02, mirrors outcomes.tennis_set_score_ungradeable):
+    - SPREADS: unsettleable unless ``detail`` proves the SETS axis
+      ("spreads_sets_*" / "asian_handicap_*_sets") — game handicaps live at
+      -0.5/-1.5/-2.5 too, so magnitude alone let the 0W/102L
+      spreads_minus_2_5 family mint; plain/NULL details are game-axis or
+      unprovable. A sets group still drops on a game-sized |line| > 2.5.
+    - TOTALS: unsettleable on an explicit games-axis detail or a game-sized
+      line (> 4.5, parsed from the selection tails via the settler's own
+      parser). Set-plausible sets/ambiguous totals lines pass.
+    Every other sport passes through untouched."""
     if sport_key != "tennis" or market not in (Market.TOTALS, Market.SPREADS):
         return False
+    if market is Market.SPREADS and not is_tennis_sets_spread_detail(detail):
+        return True
+    if market is Market.TOTALS and is_tennis_games_total_detail(detail):
+        return True
     return any(is_tennis_game_line(str(market), sel) for sel in prices)
 
 
@@ -2207,10 +2227,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             continue
         # TENNIS GAME-LINE drop: our tennis results feed carries SET scores
         # only, so a totals/spreads candidate on a GAME-sized line ("Over
-        # 22.5", "Muchova -4.5") can never be auto-settled honestly — the
-        # settlement set-score guard would hold such a pick for manual entry
-        # forever. Same mechanism as the non-settleable sub-market drop above.
-        if _is_tennis_game_line_group(sport_key, market, prices):
+        # 22.5", "Muchova -4.5") — or a SPREADS group whose detail does not
+        # prove the SETS axis (audit 2026-08-02) — can never be auto-settled
+        # honestly: the settlement set-score guard would hold such a pick for
+        # manual entry forever. Same mechanism as the non-settleable sub-market
+        # drop above.
+        if _is_tennis_game_line_group(sport_key, market, detail, prices):
             n_tennis_game_line += 1
             continue
         # INTEGER-LINE totals drop: the push outcome at exactly the line breaks
@@ -2781,9 +2803,11 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 reason_summary=(
                     # Show the sharp fair as ODDS (1/sharp_fair_prob), apples-to-
                     # apples with the offered odds — NOT the fair probability,
-                    # which mixed units against best_odds (display only; the edge/
-                    # EV math above is unchanged).
-                    f"value: {v.sharp_book} fair {1.0 / v.sharp_fair_prob:.2f} vs "
+                    # which mixed units against best_odds. Labeled fair_odds
+                    # (unit-explicit, 2026-08-02) so it can never be misread as
+                    # the model-strategy's fair_p PROBABILITY (display only; the
+                    # edge/EV math above is unchanged).
+                    f"value: {v.sharp_book} fair_odds {1.0 / v.sharp_fair_prob:.2f} vs "
                     f"{v.best_book} {v.best_odds:.2f}"
                     + (
                         f" (eff {v.best_odds_effective:.2f} after commission)"

@@ -287,6 +287,63 @@ def test_by_sport_split_empty_when_no_rows() -> None:
     assert _aggregate_settled_by_sport([]) == {}
 
 
+def test_sharp_clv_odds_split_partitions_trusted_subset() -> None:
+    # Live review 2026-08-02 (item 1): the trusted subset splits at the 4.0
+    # odds threshold — the decision-relevant partition (the >= 4.0 tail is
+    # where negative trusted CLV concentrated). Bands partition n_sharp_close.
+    rows = [_row(clv_log=0.02, decimal_odds=2.0) for _ in range(MIN_HEADLINE_N)] + [
+        _row(clv_log=-0.10, decimal_odds=4.5) for _ in range(MIN_HEADLINE_N)
+    ]
+    agg = _aggregate_settled(rows)
+    split = agg["sharp_clv_odds_split"]
+    assert split["threshold_odds"] == 4.0
+    assert split["below"]["n"] == MIN_HEADLINE_N
+    assert split["at_or_above"]["n"] == MIN_HEADLINE_N
+    assert split["n_unknown_odds"] == 0
+    assert split["below"]["n"] + split["at_or_above"]["n"] == agg["n_sharp_close"]
+    assert split["below"]["status"] == "ok"
+    assert split["below"]["stake_weighted_clv_log"] == "0.02"
+    assert split["at_or_above"]["stake_weighted_clv_log"] == "-0.1"
+    # at/above the floor the CI fields are populated for the dashboard's
+    # shared ciEntryText renderer
+    assert split["below"]["mean_clv_log"] is not None
+    assert split["below"]["ci_low"] is not None
+    assert split["below"]["ci_high"] is not None
+
+
+def test_sharp_clv_odds_split_boundary_min_n_nulling_and_unknown_odds() -> None:
+    # Exactly-threshold odds land in the tail band; a sub-floor band carries
+    # ONLY its n (estimates nulled at the source, status "insufficient"); a
+    # trusted row with unusable odds enters neither band (counted unknown).
+    rows = [_row(clv_log=0.03, decimal_odds=4.0) for _ in range(10)] + [
+        _row(clv_log=0.01, decimal_odds=None) for _ in range(5)
+    ]
+    split = _aggregate_settled(rows)["sharp_clv_odds_split"]
+    assert split["at_or_above"]["n"] == 10  # boundary 4.0 -> tail
+    assert split["below"]["n"] == 0
+    assert split["n_unknown_odds"] == 5
+    assert split["at_or_above"]["status"] == "insufficient"
+    assert split["at_or_above"]["stake_weighted_clv_log"] is None
+    assert split["at_or_above"]["mean_clv_log"] is None
+    assert split["at_or_above"]["ci_low"] is None
+    assert split["at_or_above"]["significant"] is False
+
+
+def test_sharp_clv_odds_split_excludes_untrusted_rows() -> None:
+    # Consensus-anchored (untrusted) rows never enter either band — the split
+    # is of the TRUSTED subset only, so it can never diverge from n_sharp_close.
+    rows = [
+        _row(clv_log=0.02, decimal_odds=5.0, closing_anchor="consensus")
+        for _ in range(MIN_HEADLINE_N + 10)
+    ]
+    agg = _aggregate_settled(rows)
+    split = agg["sharp_clv_odds_split"]
+    assert agg["n_sharp_close"] == 0
+    assert split["below"]["n"] == 0
+    assert split["at_or_above"]["n"] == 0
+    assert split["n_unknown_odds"] == 0
+
+
 def test_sharp_subset_gated_on_its_own_n_not_n_settled() -> None:
     # A big settled population (headline OK) but only a FEW genuine sharp closes:
     # the sharp metrics stay suppressed on their own n_sharp_close floor — a

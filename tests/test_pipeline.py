@@ -119,9 +119,11 @@ def test_non_settleable_market_details_are_filtered() -> None:
 
 def test_tennis_game_line_groups_are_filtered() -> None:
     """Our tennis results feed carries SET scores only, so a totals/spreads
-    candidate on a GAME-sized line (totals > 4.5, |spread| > 2.5) can never be
-    auto-settled honestly — the candidate gate must drop it while keeping
-    set-plausible tennis lines and every non-tennis sport untouched."""
+    candidate on a GAME-sized line (totals > 4.5, |spread| > 2.5) — or a
+    SPREADS group whose detail does not prove the SETS axis (audit
+    2026-08-02) — can never be auto-settled honestly. The candidate gate must
+    drop it while keeping provably-sets tennis lines and every non-tennis
+    sport untouched."""
     from app.pipeline import _is_tennis_game_line_group
     from app.schemas.base import Market
 
@@ -129,15 +131,50 @@ def test_tennis_game_line_groups_are_filtered() -> None:
     sets_total = {"Over 2.5": {"b": 1.9}, "Under 2.5": {"b": 1.9}}
     games_spread = {"Karolina Muchova -4.5": {"b": 1.9}}
     sets_spread = {"Karolina Muchova -1.5": {"b": 1.9}}
-    assert _is_tennis_game_line_group("tennis", Market.TOTALS, games_total) is True
-    assert _is_tennis_game_line_group("tennis", Market.TOTALS, sets_total) is False
-    assert _is_tennis_game_line_group("tennis", Market.SPREADS, games_spread) is True
-    assert _is_tennis_game_line_group("tennis", Market.SPREADS, sets_spread) is False
+    assert _is_tennis_game_line_group("tennis", Market.TOTALS, "totals_22_5", games_total) is True
+    assert _is_tennis_game_line_group("tennis", Market.TOTALS, "totals_2_5", sets_total) is False
+    assert (
+        _is_tennis_game_line_group("tennis", Market.TOTALS, "over_under_sets_2_5", sets_total)
+        is False
+    )
+    # Explicit games-axis totals detail drops even on a set-plausible line.
+    assert (
+        _is_tennis_game_line_group("tennis", Market.TOTALS, "over_under_games_2_5", sets_total)
+        is True
+    )
+    assert _is_tennis_game_line_group("tennis", Market.TOTALS, None, sets_total) is False
+    # SPREADS are axis-gated: only a proven sets-axis detail passes; a plain
+    # ("spreads_minus_*") or NULL detail is a GAME handicap (or unprovable)
+    # regardless of magnitude — spreads_minus_2_5 graded on set scores ran
+    # 0W/102L (audit 2026-08-02).
+    assert (
+        _is_tennis_game_line_group("tennis", Market.SPREADS, "spreads_sets_4_5", games_spread)
+        is True  # magnitude belt still applies inside the sets namespace
+    )
+    assert (
+        _is_tennis_game_line_group("tennis", Market.SPREADS, "spreads_sets_1_5", sets_spread)
+        is False
+    )
+    assert (
+        _is_tennis_game_line_group(
+            "tennis", Market.SPREADS, "asian_handicap_-1_5_sets", sets_spread
+        )
+        is False
+    )
+    assert (
+        _is_tennis_game_line_group("tennis", Market.SPREADS, "spreads_minus_1_5", sets_spread)
+        is True
+    )
+    assert _is_tennis_game_line_group("tennis", Market.SPREADS, None, sets_spread) is True
     # Non-tennis sports and non-line markets are never dropped by this gate
     # (soccer corner totals are already handled by the detail gate above).
-    assert _is_tennis_game_line_group("soccer", Market.TOTALS, games_total) is False
-    assert _is_tennis_game_line_group("basketball", Market.TOTALS, games_total) is False
-    assert _is_tennis_game_line_group("tennis", Market.H2H, {"A": {"b": 2.0}}) is False
+    assert _is_tennis_game_line_group("soccer", Market.TOTALS, "totals_22_5", games_total) is False
+    assert _is_tennis_game_line_group("basketball", Market.TOTALS, None, games_total) is False
+    assert (
+        _is_tennis_game_line_group("soccer", Market.SPREADS, "spreads_minus_1_5", sets_spread)
+        is False
+    )
+    assert _is_tennis_game_line_group("tennis", Market.H2H, None, {"A": {"b": 2.0}}) is False
 
 
 def test_hours_to_kickoff_helper() -> None:
@@ -167,6 +204,23 @@ async def test_pipeline_produces_pick_and_alert() -> None:
     assert pick.recommended_stake_fraction <= 0.02
     assert len(sink.sent) == 1
     assert "you place any bet" in sink.sent[0].body  # mandatory decision-support footer
+
+
+async def test_pipeline_reason_summary_units_are_explicit() -> None:
+    """Reason-string unit consistency (2026-08-02): the model-strategy reason
+    shows PROBABILITIES, so both figures carry an explicit ``_p`` unit suffix
+    ("model_p 0.580 vs fair_p 0.500") — never a bare "fair 0.500" that is
+    indistinguishable from the value-strategy's fair-as-ODDS figure. Display
+    only; edge/EV math untouched."""
+    sink = RecordingSink()
+    picks = await run_pick_pipeline(make_deps(sink), "soccer_epl")
+    assert len(picks) == 1
+    reason = picks[0].reason_summary
+    # fair prob = 0.5 each (2.0/2.0 devig), model 0.58 — explicit units:
+    assert "model_p 0.580 vs fair_p 0.500" in reason
+    # the ambiguous bare-unit forms must be gone
+    assert " vs fair 0" not in reason
+    assert "model 0" not in reason
 
 
 async def test_model_pipeline_nets_exchange_commission_for_ev_and_stake() -> None:
