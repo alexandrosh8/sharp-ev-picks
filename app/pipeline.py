@@ -1241,7 +1241,11 @@ def _is_integer_line_totals_group(
 # docs/research/2026-07-10-ah-spreads-vocabulary-audit.md. That class stays
 # fail-closed; stamped picks bypass it via the exact-detail match instead.
 _LINELESS_DETAILS = frozenset({"h2h", "1x2", "btts"})
-_OU_DETAIL_RE = re.compile(r"^over_under_(\d+(?:_\d+)?)$")
+# ``over_under_games_<line>`` is the basketball/soft "_games" namespace of the
+# SAME side-independent Over/Under key (arcadia + OddsPortal JSON feed); the
+# line token is identical to the bare form, so folding to ``totals_<line>``
+# can never collapse two distinct lines (audit 2026-08-02, defect 2a).
+_OU_DETAIL_RE = re.compile(r"^over_under_(?:games_)?(\d+(?:_\d+)?)$")
 # INTEGER-line full-match totals tokens diverge by provider (observation 3232,
 # audit 2026-07-10 L-arcadia-300): Pinnacle/OddsPortal emit the `_0` form
 # ("totals_3_0"), OddsChecker the bare form ("totals_3") — the same line never
@@ -1271,6 +1275,85 @@ def canonical_market_detail(detail: str | None) -> str | None:
     if im:
         return f"totals_{im.group(1)}"
     return detail
+
+
+# MINT-GROUPING VOCABULARY UNIFICATION (audit 2026-08-02, defect 2a). Injected
+# Pinnacle ARCADIA anchor rows keep the archive market_detail vocabulary
+# ("over_under_2_75", "asian_handicap_-0_25", detail-less h2h), so under
+# ODDS_SOURCE=oddschecker they formed their OWN devig groups beside the scraped
+# ("totals_2_75", "spreads_minus_0_25", "h2h") groups and never anchored a pick
+# (0 Pinnacle-anchored picks since the 2026-07-05 cutover). Group-key-time
+# normalization, mirroring the CLV close path's vocabulary merge:
+#   1. ``canonical_market_detail`` folds the PROVEN line-identical classes
+#      (lineless h2h/1x2/btts -> None, over_under[_games]_<line> ->
+#      totals_<line>, integer-totals `_0`).
+#   2. Fractional (quarter/half-line, 2-way) Asian-handicap details are adopted
+#      into the event's UNIQUE native full-match spreads group ONLY when that
+#      group already quotes the EXACT "{team} {signed-line}" selection string
+#      AND the |line| magnitudes agree. Selection-keyed on purpose: the DETAIL
+#      sign is producer-dependent (AH-vs-spreads string merge audited UNSAFE
+#      2026-07-10 — docs/research/2026-07-10-ah-spreads-vocabulary-audit.md),
+#      but an exact team+signed-line selection identifies one line-pair, so
+#      two different lines can never fold together. Integer AH lines stay
+#      fail-closed (the scraped integer spreads_* space mixes 3-way EH
+#      products); ambiguity (the selection in >1 native group) blocks adoption.
+_ARCADIA_AH_DETAIL_RE = re.compile(r"^asian_handicap_(?:games_)?(-?\d+(?:_\d+)?)(?:_games)?$")
+_NATIVE_SPREAD_DETAIL_RE = re.compile(r"^spreads_(?:minus_|plus_)?(\d+(?:_\d+)?)$")
+
+
+def _fractional_line(token: str) -> float | None:
+    """Signed numeric line for a detail line token ('-0_25' -> -0.25), or None
+    when the token is integer-valued or unparseable (never folded)."""
+    try:
+        line = float(token.replace("_", "."))
+    except ValueError:
+        return None
+    return line if line != int(line) else None
+
+
+def fold_injected_group_details(snapshots: Sequence[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
+    """Snapshots with ``market_detail`` rewritten to the mint-grouping canonical
+    vocabulary (see the note above), so equivalent lines from different provider
+    vocabularies land in the SAME (event, market, detail) devig group.
+
+    Pure (no IO); unchanged snapshots pass through by identity (``model_copy``
+    only on change). Distinct lines never merge: the canonical folds are
+    line-token-preserving and AH adoption requires an exact selection-string +
+    |line| match against exactly ONE native fractional spreads group."""
+    canoned: list[OddsSnapshotIn] = []
+    native_by_selection: dict[tuple[str, str], set[str]] = {}
+    for snap in snapshots:
+        canon = canonical_market_detail(snap.market_detail)
+        if canon != snap.market_detail:
+            snap = snap.model_copy(update={"market_detail": canon})
+        canoned.append(snap)
+        if snap.market is Market.SPREADS and snap.market_detail is not None:
+            native = _NATIVE_SPREAD_DETAIL_RE.match(snap.market_detail)
+            if native is not None and _fractional_line(native.group(1)) is not None:
+                native_by_selection.setdefault((snap.event_id, snap.selection), set()).add(
+                    snap.market_detail
+                )
+    out: list[OddsSnapshotIn] = []
+    for snap in canoned:
+        detail = snap.market_detail
+        if snap.market is Market.SPREADS and detail is not None:
+            injected = _ARCADIA_AH_DETAIL_RE.match(detail)
+            if injected is not None:
+                line = _fractional_line(injected.group(1))
+                natives = native_by_selection.get((snap.event_id, snap.selection), set())
+                if line is not None and len(natives) == 1:
+                    native_detail = next(iter(natives))
+                    native_match = _NATIVE_SPREAD_DETAIL_RE.match(native_detail)
+                    native_line = (
+                        _fractional_line(native_match.group(1))
+                        if native_match is not None
+                        else None
+                    )
+                    if native_line is not None and abs(native_line) == abs(line):
+                        out.append(snap.model_copy(update={"market_detail": native_detail}))
+                        continue
+        out.append(snap)
+    return out
 
 
 SHOTS_TOTALS_VETO_REASON = "shots_totals_veto"
@@ -1771,6 +1854,13 @@ def _group_and_price_markets(
     (TASK EL): multi-pass coalescing sorts plus numpy devig measured ~0.5s per
     18k snapshots, which blocked the event loop once per poll cycle when run
     inline. No IO, no env, no shared mutable state — safe in a worker thread."""
+    # Defect 2a (audit 2026-08-02): normalize BOTH the scraped and the injected
+    # sharp-anchor vocabularies to ONE canonical detail per line BEFORE grouping
+    # — otherwise the injected arcadia rows ("over_under_2_75",
+    # "asian_handicap_-0_25", detail-less h2h) devig in their own groups and
+    # never anchor a pick. Applied at the snapshot level so grouping, freshness
+    # and liquidity all key identically.
+    anchor_snapshots = fold_injected_group_details(anchor_snapshots)
     grouped = group_market_prices(anchor_snapshots)
     freshness_by_market = group_market_freshness_times(anchor_snapshots, basis=freshness_basis)
     sharp_miss_by_market: dict[tuple[str, Market, str | None], str] = {}

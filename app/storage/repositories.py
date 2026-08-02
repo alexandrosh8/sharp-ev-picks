@@ -3752,12 +3752,28 @@ async def resolve_pinnacle_close_snaps(
     kickoff: datetime,
     max_day_drift: int = 1,
     provenance_out: dict[str, tuple[float, str]] | None = None,
+    outcome_out: dict[str, str] | None = None,
 ) -> list[OddsSnapshotIn]:
     """Strict-match a pick's fixture to its `pinnacle_<sport>` ARCHIVE event and
     return that event's CLOSE snapshots, re-keyed to the pick's event_id and
     selection vocabulary (bookmaker stays "Pinnacle"). Each row carries
     captured_at, so a pick-time caller can gate freshness on the event's most-
     recent row. [] when there is no unambiguous match.
+
+    LINK FAST-PATH (audit 2026-08-02, defect 2b): when a persisted ACTIVE
+    ``event_source_links`` row (source='pinnacle_arcadia' — minted by THIS
+    resolver's own strict accept path / the hourly slate-linkage pass) already
+    binds the pick's canonical event to exactly ONE arcadia event, the close
+    resolves through that link and the display-name matcher is NOT consulted:
+    OddsChecker's abbreviated display names ("Minnesota Utd", "Edm Elks") fail
+    the hardened matcher against arcadia full names at cycle time, while the
+    persisted linkage was accepted on safe evidence. No threshold is loosened —
+    the fallback below is byte-identical to the previous behavior and runs only
+    when no (or an ambiguous >1) active link exists.
+
+    ``outcome_out`` (telemetry only, never a gate): records per pick ref HOW
+    resolution ended — 'link' (fast-path), 'name_match' (fallback accepted) or
+    'no_match' (no link and the fallback refused/failed).
 
     Returns [] when there is no UNAMBIGUOUS match or no Pinnacle coverage — a
     wrong close corrupts CLV, so this never guesses. Matching is the pure
@@ -3811,6 +3827,155 @@ async def resolve_pinnacle_close_snaps(
         return set(normalize_name(name).split())
 
     home_t, away_t = aliased(Team), aliased(Team)
+
+    async def _rekeyed_close(
+        pin_id: int,
+        pin_ref: str,
+        pin_home: str,
+        pin_away: str,
+        pin_kickoff: datetime,
+    ) -> list[OddsSnapshotIn]:
+        """The resolved arcadia event's close snapshots re-keyed to the pick's
+        vocabulary — shared by the link fast-path and the name-match fallback so
+        cutoff capping, the degenerate-pair guard and selection re-keying are
+        byte-identical on both paths."""
+        # Cap the close cutoff at the matched ARCADIA event's OWN kickoff: the
+        # match window allows +/- a day of drift, so the arcadia event may start
+        # earlier than the pick. Using the pick's kickoff would admit
+        # post-arcadia-kickoff (in-play) Pinnacle rows as "the close" ->
+        # corrupted CLV (the cardinal sin).
+        cutoff = pin_kickoff if pin_kickoff < kickoff else kickoff
+        snaps, _last = await closing_odds_from_snapshots(session, pin_id, pin_ref, cutoff)
+        # Cannot tell the two outcomes apart by name -> never risk mis-attributing
+        # a price to the wrong side; drop the whole close. (The matcher guards this
+        # for ordered events, but defend the re-key directly for the unordered path
+        # too.)
+        if normalize_name(pin_home) == normalize_name(pin_away):
+            return []
+        # Re-key arcadia selections to the pick's selection vocabulary PER MARKET,
+        # so the close groups with the pick's market/line. The selection vocabulary
+        # is team-named only for H2H (1X2/moneyline); for the source-keyed markets
+        # (totals, Asian handicap) the selection is ALREADY in the pick's
+        # vocabulary, so re-keying those through the team-name map would silently
+        # DROP every Over/Under and handicap close (a cardinal coverage bug —
+        # totals/spreads picks could never get a Pinnacle anchor). market +
+        # market_detail (the line) are preserved by model_copy; only event_id and
+        # the team-named part of selection are re-keyed.
+        if is_tennis:
+            # UNORDERED tennis matches can accept a SWAPPED player order (the
+            # matcher runs ordered=False for tennis), so arcadia's positional
+            # pin_home/pin_away no longer correspond to the pick's home/away.
+            # Re-key by canonical NAME, never by position — else a swap attaches
+            # the WRONG player's close (wrong-side CLV, the cardinal sin).
+            # Degenerate/unmappable names drop (safe).
+            ch, ca = canonical_tennis_name(home), canonical_tennis_name(away)
+            selection_map = {}
+            if ch and ca and ch != ca:
+                for raw in (pin_home, pin_away):
+                    c = canonical_tennis_name(raw)
+                    if c == ch:
+                        selection_map[normalize_name(raw)] = home
+                    elif c == ca:
+                        selection_map[normalize_name(raw)] = away
+        else:
+            selection_map = {normalize_name(pin_home): home, normalize_name(pin_away): away}
+        out: list[OddsSnapshotIn] = []
+        for snap in snaps:
+            mapped_selection: str | None
+            if snap.market == Market.H2H:
+                # Team-named 1X2/moneyline outcomes — UNCHANGED re-key. "Draw" is
+                # source-independent; an unmappable team name is dropped, never
+                # guessed.
+                if snap.selection == "Draw":
+                    mapped_selection = "Draw"
+                else:
+                    mapped_selection = selection_map.get(normalize_name(snap.selection))
+            elif snap.market == Market.TOTALS:
+                # Over/Under vocabulary is SOURCE-INDEPENDENT (the line rides both
+                # the selection text "Over 2.5" and market_detail "over_under_2_5"),
+                # so it is already in the pick's vocabulary -> identity (preserve
+                # selection + line).
+                mapped_selection = snap.selection
+            elif snap.market == Market.SPREADS:
+                # Asian handicap selection is "{team} {signed}". Re-key ONLY the
+                # team-name prefix via the SAME outcome map (home->home,
+                # away->away; NEVER swapped), preserving the signed handicap suffix
+                # and the line (market_detail). A prefix matching neither side is
+                # dropped (safe) — never mis-attached.
+                team_part, sep, suffix = snap.selection.rpartition(" ")
+                mapped_team = selection_map.get(normalize_name(team_part)) if sep else None
+                mapped_selection = f"{mapped_team} {suffix}" if mapped_team is not None else None
+            else:
+                # Any other market's selection vocabulary is not provably source-
+                # independent here -> drop (the safe default; never guess a
+                # mapping).
+                mapped_selection = None
+            if mapped_selection is None:
+                continue  # a selection we cannot confidently map -> drop (safe)
+            out.append(
+                snap.model_copy(
+                    update={"event_id": pick_external_ref, "selection": mapped_selection}
+                )
+            )
+        if snaps and not out:
+            # MATCHED the fixture but EVERY close dropped in the re-key — the
+            # anomalous case the silent per-selection drop hides (a re-key
+            # regression would be invisible). Counts + ref only (no odds/names/
+            # URLs). Legit-empty is rare.
+            logger.info(
+                "pinnacle close: matched %s (%s) but re-key emitted 0 of %d snaps",
+                pick_external_ref,
+                pinnacle_sport_key,
+                len(snaps),
+            )
+        return out
+
+    # LINK FAST-PATH (defect 2b): a persisted ACTIVE pinnacle_arcadia link —
+    # minted by this resolver's own strict accept path (directly or via the
+    # hourly slate-linkage pass) — already names the arcadia event for this
+    # canonical fixture. Reuse it instead of re-matching abbreviated display
+    # names every cycle; exactly-one active link required (>1 is ambiguous ->
+    # fall through to the guarded name path, fail-closed).
+    canon_ev, arc_ev = aliased(Event), aliased(Event)
+    link_rows = (
+        await session.execute(
+            select(
+                EventSourceLink.confidence_score,
+                EventSourceLink.match_method,
+                arc_ev.id,
+                arc_ev.external_ref,
+                home_t.name,
+                away_t.name,
+                arc_ev.starts_at,
+            )
+            .select_from(EventSourceLink)
+            .join(canon_ev, canon_ev.id == EventSourceLink.canonical_event_id)
+            .join(arc_ev, arc_ev.external_ref == EventSourceLink.source_event_id)
+            .join(Sport, arc_ev.sport_id == Sport.id)
+            .join(home_t, arc_ev.home_team_id == home_t.id)
+            .join(away_t, arc_ev.away_team_id == away_t.id)
+            .where(
+                canon_ev.external_ref == pick_external_ref,
+                EventSourceLink.source == "pinnacle_arcadia",
+                EventSourceLink.active.is_(True),
+                Sport.key == pinnacle_sport_key,
+                arc_ev.starts_at.is_not(None),
+            )
+        )
+    ).all()
+    if len(link_rows) == 1:
+        link_confidence, link_method, pin_id, pin_ref, pin_home, pin_away, pin_kickoff = link_rows[
+            0
+        ]
+        if provenance_out is not None:
+            provenance_out[pick_external_ref] = (float(link_confidence), f"link_{link_method}")
+        if outcome_out is not None:
+            outcome_out[pick_external_ref] = "link"
+        return await _rekeyed_close(pin_id, pin_ref, pin_home, pin_away, pin_kickoff)
+    if outcome_out is not None:
+        # Provisional: overwritten with 'name_match' iff the fallback accepts.
+        outcome_out[pick_external_ref] = "no_match"
+
     window = timedelta(days=max_day_drift + 1)
     rows = (
         await session.execute(
@@ -4026,86 +4191,9 @@ async def resolve_pinnacle_close_snaps(
         ),
         reviews=(),
     )
-    # Cap the close cutoff at the matched ARCADIA event's OWN kickoff: the match
-    # window allows +/- a day of drift, so the arcadia event may start earlier
-    # than the pick. Using the pick's kickoff would admit post-arcadia-kickoff
-    # (in-play) Pinnacle rows as "the close" -> corrupted CLV (the cardinal sin).
-    cutoff = pin_kickoff if pin_kickoff < kickoff else kickoff
-    snaps, _last = await closing_odds_from_snapshots(session, pin_id, pin_ref, cutoff)
-    # Cannot tell the two outcomes apart by name -> never risk mis-attributing a
-    # price to the wrong side; drop the whole close. (The matcher guards this for
-    # ordered events, but defend the re-key directly for the unordered path too.)
-    if normalize_name(pin_home) == normalize_name(pin_away):
-        return []
-    # Re-key arcadia selections to the pick's selection vocabulary PER MARKET, so
-    # the close groups with the pick's market/line. The selection vocabulary is
-    # team-named only for H2H (1X2/moneyline); for the source-keyed markets
-    # (totals, Asian handicap) the selection is ALREADY in the pick's vocabulary,
-    # so re-keying those through the team-name map would silently DROP every
-    # Over/Under and handicap close (a cardinal coverage bug — totals/spreads picks
-    # could never get a Pinnacle anchor). market + market_detail (the line) are
-    # preserved by model_copy; only event_id and the team-named part of selection
-    # are re-keyed.
-    if is_tennis:
-        # UNORDERED tennis matches can accept a SWAPPED player order (the matcher
-        # runs ordered=False for tennis), so arcadia's positional pin_home/pin_away
-        # no longer correspond to the pick's home/away. Re-key by canonical NAME,
-        # never by position — else a swap attaches the WRONG player's close
-        # (wrong-side CLV, the cardinal sin). Degenerate/unmappable names drop (safe).
-        ch, ca = canonical_tennis_name(home), canonical_tennis_name(away)
-        selection_map = {}
-        if ch and ca and ch != ca:
-            for raw in (pin_home, pin_away):
-                c = canonical_tennis_name(raw)
-                if c == ch:
-                    selection_map[normalize_name(raw)] = home
-                elif c == ca:
-                    selection_map[normalize_name(raw)] = away
-    else:
-        selection_map = {normalize_name(pin_home): home, normalize_name(pin_away): away}
-    out: list[OddsSnapshotIn] = []
-    for snap in snaps:
-        mapped_selection: str | None
-        if snap.market == Market.H2H:
-            # Team-named 1X2/moneyline outcomes — UNCHANGED re-key. "Draw" is
-            # source-independent; an unmappable team name is dropped, never guessed.
-            if snap.selection == "Draw":
-                mapped_selection = "Draw"
-            else:
-                mapped_selection = selection_map.get(normalize_name(snap.selection))
-        elif snap.market == Market.TOTALS:
-            # Over/Under vocabulary is SOURCE-INDEPENDENT (the line rides both the
-            # selection text "Over 2.5" and market_detail "over_under_2_5"), so it is
-            # already in the pick's vocabulary -> identity (preserve selection + line).
-            mapped_selection = snap.selection
-        elif snap.market == Market.SPREADS:
-            # Asian handicap selection is "{team} {signed}". Re-key ONLY the team-name
-            # prefix via the SAME outcome map (home->home, away->away; NEVER swapped),
-            # preserving the signed handicap suffix and the line (market_detail). A
-            # prefix matching neither side is dropped (safe) — never mis-attached.
-            team_part, sep, suffix = snap.selection.rpartition(" ")
-            mapped_team = selection_map.get(normalize_name(team_part)) if sep else None
-            mapped_selection = f"{mapped_team} {suffix}" if mapped_team is not None else None
-        else:
-            # Any other market's selection vocabulary is not provably source-
-            # independent here -> drop (the safe default; never guess a mapping).
-            mapped_selection = None
-        if mapped_selection is None:
-            continue  # a selection we cannot confidently map -> drop (safe)
-        out.append(
-            snap.model_copy(update={"event_id": pick_external_ref, "selection": mapped_selection})
-        )
-    if snaps and not out:
-        # MATCHED the fixture but EVERY close dropped in the re-key — the anomalous
-        # case the silent per-selection drop hides (a re-key regression would be
-        # invisible). Counts + ref only (no odds/names/URLs). Legit-empty is rare.
-        logger.info(
-            "pinnacle close: matched %s (%s) but re-key emitted 0 of %d snaps",
-            pick_external_ref,
-            pinnacle_sport_key,
-            len(snaps),
-        )
-    return out
+    if outcome_out is not None:
+        outcome_out[pick_external_ref] = "name_match"
+    return await _rekeyed_close(pin_id, pin_ref, pin_home, pin_away, pin_kickoff)
 
 
 async def shadow_match_rate_outcomes(

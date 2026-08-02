@@ -46,6 +46,7 @@ from app.pipeline import (
     canonical_market_detail,
     drop_post_kickoff_snapshots,
     event_fair_probs,
+    fold_injected_group_details,
     group_market_prices,
 )
 from app.probabilities.devig import DevigMethod
@@ -1462,7 +1463,15 @@ async def finalize_closing_from_snapshots(
     # Same period-group exclusion as revalidation: a sharp-priced half
     # submarket must not anchor beside the main line and mark the pick's
     # line-blind key ambiguous (which refused the snapshot close).
-    grouped = _merge_vocabulary_groups(_settleable_groups(group_market_prices(snaps)))
+    # fold_injected_group_details (audit 2026-08-02, defect 2a): the injected
+    # arcadia sharp rows keep the archive vocabulary ("asian_handicap_-0_25",
+    # "over_under_2_75") — the SAME snapshot-level normalization the mint
+    # grouping applies runs here so a mint-stamped pick's exact-detail close
+    # lookup finds the Pinnacle close in ITS OWN canonical group (fill and
+    # close resolved under one vocabulary, same devig method both sides).
+    grouped = _merge_vocabulary_groups(
+        _settleable_groups(group_market_prices(fold_injected_group_details(snaps)))
+    )
     fair_by_key: dict[tuple[str, str], float] = {}
     anchor_by_key: dict[tuple[str, str], str] = {}
     # P2-2: per-market close devig-fallback flag, carried to the pick's
@@ -1827,6 +1836,19 @@ def build_sharp_anchor_loader(
 
         anchored = 0
         eligible = 0
+        # Audit 2026-08-02 (defect 2b instrumentation): per-cycle Pinnacle
+        # resolution funnel. Result buckets are mutually exclusive per event
+        # (resolved / freshness_drop / match_fail / directory_miss); link_miss
+        # counts, ADDITIONALLY, the events resolved WITHOUT a persisted
+        # event_source_links row (the cycle-time name matcher had to run) —
+        # overlap with resolved/match_fail is intentional and diagnosable.
+        pin_counts = {
+            "resolved": 0,
+            "link_miss": 0,
+            "match_fail": 0,
+            "freshness_drop": 0,
+            "directory_miss": 0,
+        }
         async with session_factory() as session:
             for snap in snapshots:
                 ref = snap.event_id
@@ -1835,6 +1857,8 @@ def build_sharp_anchor_loader(
                 seen.add(ref)
                 teams = directory.lookup(ref)
                 if teams is None or teams.starts_at is None:
+                    if use_pinnacle:
+                        pin_counts["directory_miss"] += 1
                     continue  # need a kickoff for the cutoff + the pinnacle match
                 eligible += 1  # directory-resolvable event: a sharp anchor is possible
                 event_snaps: list[OddsSnapshotIn] = []
@@ -1848,21 +1872,29 @@ def build_sharp_anchor_loader(
                         provenance[(ref, "sharp")] = (1.0, "inline_betfair_canonical")
                 if use_pinnacle:
                     pin_provenance: dict[str, tuple[float, str]] = {}
-                    pinnacle_rows = _fresh_source(
-                        await resolve_pinnacle_close_snaps(
-                            session,
-                            pinnacle_sport_key=f"pinnacle_{base}",
-                            pick_external_ref=ref,
-                            home=teams.home,
-                            away=teams.away,
-                            kickoff=teams.starts_at,
-                            provenance_out=pin_provenance,
-                        )
+                    pin_outcome: dict[str, str] = {}
+                    raw_pinnacle = await resolve_pinnacle_close_snaps(
+                        session,
+                        pinnacle_sport_key=f"pinnacle_{base}",
+                        pick_external_ref=ref,
+                        home=teams.home,
+                        away=teams.away,
+                        kickoff=teams.starts_at,
+                        provenance_out=pin_provenance,
+                        outcome_out=pin_outcome,
                     )
+                    pinnacle_rows = _fresh_source(raw_pinnacle)
+                    if pin_outcome.get(ref) in ("name_match", "no_match"):
+                        pin_counts["link_miss"] += 1  # no persisted link this cycle
                     if pinnacle_rows:
+                        pin_counts["resolved"] += 1
                         event_snaps.extend(pinnacle_rows)
                         if ref in pin_provenance:
                             provenance[(ref, "pinnacle")] = pin_provenance[ref]
+                    elif raw_pinnacle:
+                        pin_counts["freshness_drop"] += 1
+                    else:
+                        pin_counts["match_fail"] += 1
                 if not event_snaps:
                     continue
                 anchored += 1
@@ -1880,6 +1912,22 @@ def build_sharp_anchor_loader(
                 # observability cleanup discard the cycle's sharp anchors.
                 with contextlib.suppress(Exception):
                     await session.rollback()
+        if use_pinnacle:
+            # One INFO line per cycle (audit 2026-08-02): the live-vs-replay
+            # anchoring discrepancy was undiagnosable from logs — this names
+            # WHERE each event's Pinnacle anchor resolution ended. Counts +
+            # sport key only; no names, odds, URLs, or secrets.
+            logger.info(
+                "pinnacle anchor resolution %s: resolved=%d link_miss=%d match_fail=%d "
+                "freshness_drop=%d directory_miss=%d (events=%d)",
+                sport_key,
+                pin_counts["resolved"],
+                pin_counts["link_miss"],
+                pin_counts["match_fail"],
+                pin_counts["freshness_drop"],
+                pin_counts["directory_miss"],
+                len(seen),
+            )
         # Observability only (no acceptance change): a FULL miss across resolvable
         # events signals a systemic sharp-capture/freshness outage; a partial miss
         # is the normal capture ceiling and stays at debug to avoid per-cycle noise.
