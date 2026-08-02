@@ -20,6 +20,7 @@ from app.edge.value import SHARP_BOOKS
 from app.ingestion import betfair_api
 from app.ingestion.base import EventTeams
 from app.ingestion.betfair_api import (
+    EXTENDED_MARKET_TYPES,
     IDENTITY_KEEPALIVE_URL,
     IDENTITY_LOGIN_URL,
     IDENTITY_LOGOUT_URL,
@@ -30,18 +31,22 @@ from app.ingestion.betfair_api import (
     BetfairApiError,
     BetfairApiShadowCapture,
     BetfairAuthError,
+    BetfairLineQuote,
     BetfairMatchOdds,
     ComparisonAggregate,
     ReferenceOdds,
     betfair_tick_size,
     build_shadow_capture,
     compare_event,
+    join_extended_lines,
     join_match_odds,
     parse_market_book_backs,
+    parse_market_book_backs_by_handicap,
     parse_market_catalogue,
     within_one_tick,
 )
 from app.resolution.matching import EventCandidate, default_aliases
+from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 
 APP_KEY = "appkey-test-123"
@@ -854,3 +859,334 @@ async def test_shadow_matches_oddschecker_era_canonical_refs() -> None:
     assert report.matched == 1
     assert report.match_rate > 0
     assert {s.event_id for s in report.snapshots} == {"oddschecker:101610031"}
+
+
+# --- EXTENDED markets (Asian Handicap + Over/Under goal lines) ---------------- #
+# Fixture: one AH ladder (quarter -0.25 two-sided, half -0.5 one-sided, integer
+# -1.0 two-sided but fail-closed), one OVER_UNDER_25 market, one ALT_TOTAL_GOALS
+# ladder (quarter 2.25 two-sided, integer 3.0 fail-closed).
+EXTENDED_CATALOGUE_RESULT: list[dict[str, Any]] = [
+    {
+        "marketId": "1.888001",
+        "marketStartTime": "2026-06-30T18:00:00.000Z",
+        "event": {"id": "30001", "name": "Alpha FC v Beta United"},
+        "competition": {"name": "English Premier League"},
+        "description": {"marketType": "ASIAN_HANDICAP"},
+        "runners": [
+            {"selectionId": 501, "runnerName": "Alpha FC", "sortPriority": 1, "handicap": -0.25},
+            {"selectionId": 502, "runnerName": "Beta United", "sortPriority": 2, "handicap": 0.25},
+            {"selectionId": 501, "runnerName": "Alpha FC", "sortPriority": 3, "handicap": -0.5},
+            {"selectionId": 502, "runnerName": "Beta United", "sortPriority": 4, "handicap": 0.5},
+            {"selectionId": 501, "runnerName": "Alpha FC", "sortPriority": 5, "handicap": -1.0},
+            {"selectionId": 502, "runnerName": "Beta United", "sortPriority": 6, "handicap": 1.0},
+        ],
+    },
+    {
+        "marketId": "1.888002",
+        "marketStartTime": "2026-06-30T18:00:00.000Z",
+        "event": {"id": "30001", "name": "Alpha FC v Beta United"},
+        "competition": {"name": "English Premier League"},
+        "description": {"marketType": "OVER_UNDER_25"},
+        "runners": [
+            {"selectionId": 601, "runnerName": "Under 2.5 Goals", "sortPriority": 1},
+            {"selectionId": 602, "runnerName": "Over 2.5 Goals", "sortPriority": 2},
+        ],
+    },
+    {
+        "marketId": "1.888003",
+        "marketStartTime": "2026-06-30T18:00:00.000Z",
+        "event": {"id": "30001", "name": "Alpha FC v Beta United"},
+        "competition": {"name": "English Premier League"},
+        "description": {"marketType": "ALT_TOTAL_GOALS"},
+        "runners": [
+            {"selectionId": 701, "runnerName": "Under", "sortPriority": 1, "handicap": 2.25},
+            {"selectionId": 702, "runnerName": "Over", "sortPriority": 2, "handicap": 2.25},
+            {"selectionId": 701, "runnerName": "Under", "sortPriority": 3, "handicap": 3.0},
+            {"selectionId": 702, "runnerName": "Over", "sortPriority": 4, "handicap": 3.0},
+        ],
+    },
+]
+
+EXTENDED_BOOK_RESULT: list[dict[str, Any]] = [
+    {
+        "marketId": "1.888001",
+        "status": "OPEN",
+        "inplay": False,
+        "runners": [
+            {
+                "selectionId": 501,
+                "handicap": -0.25,
+                "ex": {"availableToBack": [{"price": 1.98, "size": 500}]},
+            },
+            {
+                "selectionId": 502,
+                "handicap": 0.25,
+                "ex": {"availableToBack": [{"price": 1.96, "size": 400}]},
+            },
+            # -0.5 line: HOME side only (one-sided book -> must be skipped).
+            {
+                "selectionId": 501,
+                "handicap": -0.5,
+                "ex": {"availableToBack": [{"price": 2.2, "size": 300}]},
+            },
+            # -1.0 line: two-sided but INTEGER (fail-closed, EH-collision risk).
+            {
+                "selectionId": 501,
+                "handicap": -1.0,
+                "ex": {"availableToBack": [{"price": 3.0, "size": 200}]},
+            },
+            {
+                "selectionId": 502,
+                "handicap": 1.0,
+                "ex": {"availableToBack": [{"price": 1.4, "size": 200}]},
+            },
+        ],
+    },
+    {
+        "marketId": "1.888002",
+        "status": "OPEN",
+        "inplay": False,
+        "runners": [
+            {"selectionId": 601, "ex": {"availableToBack": [{"price": 1.92, "size": 250}]}},
+            {"selectionId": 602, "ex": {"availableToBack": [{"price": 2.02, "size": 300}]}},
+        ],
+    },
+    {
+        "marketId": "1.888003",
+        "status": "OPEN",
+        "inplay": False,
+        "runners": [
+            {
+                "selectionId": 701,
+                "handicap": 2.25,
+                "ex": {"availableToBack": [{"price": 1.8, "size": 150}]},
+            },
+            {
+                "selectionId": 702,
+                "handicap": 2.25,
+                "ex": {"availableToBack": [{"price": 2.16, "size": 120}]},
+            },
+            {
+                "selectionId": 701,
+                "handicap": 3.0,
+                "ex": {"availableToBack": [{"price": 1.6, "size": 100}]},
+            },
+            {
+                "selectionId": 702,
+                "handicap": 3.0,
+                "ex": {"availableToBack": [{"price": 2.5, "size": 100}]},
+            },
+        ],
+    },
+]
+
+
+def _extended_mock() -> MockBetfair:
+    # Queue order matches the capture: h2h catalogue, h2h book, extended
+    # catalogue, extended book (MockBetfair consumes queued envelopes in order).
+    return MockBetfair(
+        rpc_results={
+            "listMarketCatalogue": [
+                {"result": CATALOGUE_RESULT},
+                {"result": EXTENDED_CATALOGUE_RESULT},
+            ],
+            "listMarketBook": [{"result": BOOK_RESULT}, {"result": EXTENDED_BOOK_RESULT}],
+        }
+    )
+
+
+def _extended_capture(
+    mock: MockBetfair, candidates: list[EventCandidate]
+) -> BetfairApiShadowCapture:
+    return BetfairApiShadowCapture(
+        make_client(mock),
+        candidates_fn=lambda: candidates,
+        window=timedelta(hours=72),
+        aliases=default_aliases(),
+        now_fn=lambda: KICKOFF - timedelta(hours=6),
+        extended_markets=True,
+    )
+
+
+def test_parse_extended_catalogue_carries_market_type_and_runner_handicap() -> None:
+    parsed = {m.market_id: m for m in parse_market_catalogue(EXTENDED_CATALOGUE_RESULT)}
+    ah = parsed["1.888001"]
+    assert ah.market_type == "ASIAN_HANDICAP"
+    assert {(r.selection_id, r.handicap) for r in ah.runners} == {
+        (501, -0.25),
+        (502, 0.25),
+        (501, -0.5),
+        (502, 0.5),
+        (501, -1.0),
+        (502, 1.0),
+    }
+    ou = parsed["1.888002"]
+    assert ou.market_type == "OVER_UNDER_25"
+    assert all(r.handicap is None for r in ou.runners)  # absent -> None, never invented
+    # The legacy Match-Odds fixture (no description projection) parses unchanged.
+    legacy = parse_market_catalogue(CATALOGUE_RESULT)[0]
+    assert legacy.market_type == ""
+    assert all(r.handicap is None for r in legacy.runners)
+
+
+def test_parse_market_book_backs_by_handicap_keys_ladder_runners() -> None:
+    books = parse_market_book_backs_by_handicap(EXTENDED_BOOK_RESULT)
+    ah = books["1.888001"]
+    # The SAME selectionId at two handicaps stays two distinct entries — the
+    # selectionId-only parser would silently collapse the ladder.
+    assert ah[(501, -0.25)] == (1.98, 500.0)
+    assert ah[(501, -0.5)] == (2.2, 300.0)
+    assert ah[(502, 0.25)] == (1.96, 400.0)
+    # Absent handicap keys as 0.0 (non-ladder markets).
+    assert books["1.888002"][(602, 0.0)] == (2.02, 300.0)
+
+
+def _joined_quotes() -> list[BetfairLineQuote]:
+    catalogue = parse_market_catalogue(EXTENDED_CATALOGUE_RESULT)
+    books = parse_market_book_backs_by_handicap(EXTENDED_BOOK_RESULT)
+    return join_extended_lines(catalogue, books, {"30001": ("Alpha FC", "Beta United")})
+
+
+def test_join_extended_lines_maps_quarter_half_lines_both_sides() -> None:
+    quotes = _joined_quotes()
+    by_detail: dict[str, set[str]] = {}
+    for quote in quotes:
+        by_detail.setdefault(quote.market_detail, set()).add(quote.side)
+    assert by_detail == {
+        "spreads_minus_0_25": {"home", "away"},  # quarter AH, two-sided
+        "totals_2_5": {"over", "under"},  # OVER_UNDER_25
+        "totals_2_25": {"over", "under"},  # ALT_TOTAL_GOALS quarter line
+    }
+    # One-sided (-0.5) and integer (-1.0 AH, 3.0 totals) lines never emit.
+    ah = {q.market_detail: q for q in quotes if q.market is Market.SPREADS}
+    assert set(ah) == {"spreads_minus_0_25"}
+    assert all(q.market in (Market.SPREADS, Market.TOTALS) for q in quotes)
+
+
+def test_extended_vocabulary_equals_scraped_keys() -> None:
+    # The captured AH -0.25 must group with the SCRAPED spreads_minus_0_25 key
+    # and totals with totals_2_5 — byte-equal to the OddsChecker producer and a
+    # fixed point of the pipeline's canonical fold (never a new vocabulary).
+    from app.ingestion.oddschecker import _market_for_type
+    from app.pipeline import canonical_market_detail
+    from app.schemas.base import Market as MarketEnum
+
+    quotes = _joined_quotes()
+    details = {q.market_detail for q in quotes}
+    assert _market_for_type("Asian Handicap", "-0.25") == (
+        MarketEnum.SPREADS,
+        "spreads_minus_0_25",
+    )
+    assert _market_for_type("Total Goals", "2.5") == (MarketEnum.TOTALS, "totals_2_5")
+    assert "spreads_minus_0_25" in details
+    assert "totals_2_5" in details
+    for detail in details:
+        assert canonical_market_detail(detail) == detail  # canonical fixed point
+
+
+def test_two_sided_probabilities_form_plausible_book() -> None:
+    # The whole point: per line, sum(1/back) over BOTH sides must land in a
+    # plausible band (the scraped one-sided AH books ran 0.08-0.94).
+    quotes = _joined_quotes()
+    sums: dict[str, float] = {}
+    for quote in quotes:
+        sums[quote.market_detail] = sums.get(quote.market_detail, 0.0) + 1.0 / quote.back
+    assert sums  # never a silent empty
+    for detail, total in sums.items():
+        assert 0.9 < total < 1.12, (detail, total)
+
+
+async def test_extended_capture_emits_canonical_spreads_and_totals_rows() -> None:
+    # Canonical home name differs from the Betfair runner name — the emitted
+    # selection strings must speak the CANONICAL vocabulary (like the h2h path).
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha", away="Beta United", kickoff=KICKOFF)
+    ]
+    report = await _extended_capture(_extended_mock(), candidates).capture_once()
+    assert report.matched == 1
+    rows = [s for s in report.snapshots if s.market_detail is not None]
+    by_detail: dict[str, set[str]] = {}
+    for snap in rows:
+        assert snap.market_detail is not None  # filtered above; narrows for mypy
+        by_detail.setdefault(snap.market_detail, set()).add(snap.selection)
+    assert by_detail == {
+        "spreads_minus_0_25": {"Alpha -0.25", "Beta United +0.25"},
+        "totals_2_5": {"Over 2.5", "Under 2.5"},
+        "totals_2_25": {"Over 2.25", "Under 2.25"},
+    }
+    assert all(s.event_id == "evt-canonical-1" for s in rows)
+    assert all(s.captured_at.tzinfo is not None for s in rows)
+    # Liquidity carries the best-back size, exactly like the h2h path.
+    sizes = {s.selection: s.liquidity for s in rows}
+    assert sizes["Alpha -0.25"] == pytest.approx(500.0)
+    # Telemetry: counts only.
+    assert report.extended_lines == 3
+    assert report.extended_events == 1
+    assert report.extended_failed is False
+
+
+async def test_extended_rows_share_the_shadow_or_promoted_bookmaker_tag() -> None:
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    report = await _extended_capture(_extended_mock(), candidates).capture_once()
+    # Promotion OFF -> every extended row stays the NON-SHARP shadow tag, so it
+    # can never feed the live anchor until VALUE_BETFAIR_API_PROMOTE is armed.
+    assert all(s.bookmaker == SHADOW_BOOKMAKER for s in report.snapshots)
+
+
+async def test_extended_flag_off_makes_no_extra_rpc_calls() -> None:
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    mock_off = _full_odds_mock()
+    await _shadow_capture(mock_off, candidates).capture_once()
+    rpc_off = [url for url, _, _ in mock_off.requests if url == JSON_RPC_URL]
+    assert len(rpc_off) == 2  # h2h catalogue + h2h book: budget UNCHANGED
+
+    mock_on = _extended_mock()
+    await _extended_capture(mock_on, candidates).capture_once()
+    rpc_on = [url for url, _, _ in mock_on.requests if url == JSON_RPC_URL]
+    # Exactly ONE extra catalogue + ONE (batched) book pass.
+    assert len(rpc_on) == 4
+
+
+async def test_extended_fetch_failure_is_flagged_and_never_kills_h2h() -> None:
+    # The extended catalogue errors -> the cycle FLAGS the failure (never a
+    # silent pretend-success) but the h2h anchor capture still completes.
+    mock = MockBetfair(
+        rpc_results={
+            "listMarketCatalogue": [
+                {"result": CATALOGUE_RESULT},
+                {"error": {"code": -32099, "message": "boom"}},
+            ],
+            "listMarketBook": [{"result": BOOK_RESULT}],
+        }
+    )
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    report = await _extended_capture(mock, candidates).capture_once()
+    assert report.extended_failed is True
+    assert report.extended_lines == 0
+    assert report.matched == 1  # h2h path unharmed
+    assert {s.selection for s in report.snapshots} == {"Alpha FC", "Beta United", "Draw"}
+
+
+def test_extended_market_types_are_price_read_codes_only() -> None:
+    # The extended catalogue filter asks ONLY for AH + goal-line market types —
+    # never an order/account surface (read-only scope is structural).
+    assert "ASIAN_HANDICAP" in EXTENDED_MARKET_TYPES
+    assert "ALT_TOTAL_GOALS" in EXTENDED_MARKET_TYPES
+    assert "OVER_UNDER_25" in EXTENDED_MARKET_TYPES
+    assert all(
+        t.isupper() and ("HANDICAP" in t or "GOAL" in t or "OVER_UNDER" in t)
+        for t in EXTENDED_MARKET_TYPES
+    )
+
+
+def test_no_unsafe_http_method_strings_in_module() -> None:
+    # GET + (read-only JSON-RPC) POST only — no mutating HTTP verbs anywhere.
+    source = Path(betfair_api.__file__).read_text(encoding="utf-8")
+    for verb in ('"PUT"', "'PUT'", '"DELETE"', "'DELETE'", '"PATCH"', "'PATCH'"):
+        assert verb not in source

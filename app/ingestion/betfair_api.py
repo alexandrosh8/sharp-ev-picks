@@ -36,6 +36,7 @@ from __future__ import annotations
 import inspect
 import logging
 import math
+import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -57,6 +58,7 @@ from app.edge.betfair_ticks import (
 )
 from app.ingestion.base import EventTeams
 from app.ingestion.http_safety import UpstreamBodyTooLarge, request_httpx_bounded
+from app.pipeline import canonical_market_detail
 from app.resolution.matching import (
     AliasTable,
     EventCandidate,
@@ -92,6 +94,19 @@ _MARKET_BOOK_BATCH = 25
 # Soccer event type (the only one this read-only shadow capture fetches).
 EVENT_TYPE_SOCCER = "1"
 MARKET_TYPE_MATCH_ODDS = "MATCH_ODDS"
+# EXTENDED price-read market types (default-OFF, VALUE_BETFAIR_API_EXTENDED_
+# MARKETS): the soccer Asian-Handicap ladder, the "Goal Lines" asian-total
+# ladder, and the fixed half-goal Over/Under markets. Betfair's official
+# marketTypeCodes vocabulary — price reads only, exactly like MATCH_ODDS.
+MARKET_TYPE_ASIAN_HANDICAP = "ASIAN_HANDICAP"
+MARKET_TYPE_ALT_TOTAL_GOALS = "ALT_TOTAL_GOALS"
+OVER_UNDER_MARKET_TYPES: tuple[str, ...] = tuple(f"OVER_UNDER_{n}5" for n in range(9))
+EXTENDED_MARKET_TYPES: tuple[str, ...] = (
+    MARKET_TYPE_ASIAN_HANDICAP,
+    MARKET_TYPE_ALT_TOTAL_GOALS,
+    *OVER_UNDER_MARKET_TYPES,
+)
+_OVER_UNDER_TYPE_RE = re.compile(r"^OVER_UNDER_(\d{2})$")
 # Betfair's constant selectionId for "The Draw" on a soccer Match-Odds market.
 DRAW_SELECTION_ID = 58805
 
@@ -351,17 +366,22 @@ def _best_back(available_to_back: Any) -> float | None:
 
 @dataclass(frozen=True)
 class BetfairRunner:
-    """One Match-Odds runner from the catalogue (no price)."""
+    """One catalogue runner (no price). ``handicap`` is populated only on
+    ladder markets (Asian Handicap / Goal Lines), where the SAME selectionId
+    repeats once per line — None on non-ladder markets, never invented."""
 
     selection_id: int
     name: str
     sort_priority: int
+    handicap: float | None = None
 
 
 @dataclass(frozen=True)
 class BetfairMarketCatalogue:
     """One ``listMarketCatalogue`` market with EVENT / COMPETITION /
-    MARKET_START_TIME / RUNNER_DESCRIPTION projections."""
+    MARKET_START_TIME / RUNNER_DESCRIPTION projections. ``market_type`` is the
+    Betfair marketType code and is populated only when the call also asked for
+    the MARKET_DESCRIPTION projection (the extended-markets path)."""
 
     market_id: str
     event_id: str
@@ -369,6 +389,7 @@ class BetfairMarketCatalogue:
     competition: str
     market_start_time: datetime | None
     runners: tuple[BetfairRunner, ...]
+    market_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -408,6 +429,10 @@ def parse_market_catalogue(payload: Sequence[Mapping[str, Any]]) -> list[Betfair
         competition: Mapping[str, Any] = (
             competition_raw if isinstance(competition_raw, Mapping) else {}
         )
+        description_raw = market.get("description")
+        description: Mapping[str, Any] = (
+            description_raw if isinstance(description_raw, Mapping) else {}
+        )
         runners: list[BetfairRunner] = []
         for runner in market.get("runners") or []:
             if not isinstance(runner, Mapping):
@@ -420,6 +445,7 @@ def parse_market_catalogue(payload: Sequence[Mapping[str, Any]]) -> list[Betfair
                     selection_id=sel,
                     name=str(runner.get("runnerName", "")).strip(),
                     sort_priority=int(runner.get("sortPriority", 0) or 0),
+                    handicap=_finite_handicap(runner.get("handicap")),
                 )
             )
         out.append(
@@ -430,9 +456,59 @@ def parse_market_catalogue(payload: Sequence[Mapping[str, Any]]) -> list[Betfair
                 competition=str(competition.get("name", "")).strip(),
                 market_start_time=_parse_market_start(str(market.get("marketStartTime", ""))),
                 runners=tuple(runners),
+                market_type=str(description.get("marketType", "")).strip(),
             )
         )
     return out
+
+
+def _finite_handicap(raw: Any) -> float | None:
+    """A runner's ``handicap`` as a finite float, or None when absent/garbled
+    (never invented — a ladder runner without a parseable line is unusable)."""
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    value = float(raw)
+    return value if math.isfinite(value) else None
+
+
+def parse_market_book_backs_by_handicap(
+    payload: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[tuple[int, float], tuple[float, float]]]:
+    """Pure parser for a ``listMarketBook`` result array (EX_BEST_OFFERS) on
+    LADDER markets (Asian Handicap / Goal Lines) ->
+    ``{market_id: {(selection_id, handicap): (best_back_price, size@best)}}``.
+
+    Keyed by (selectionId, handicap) because ladder markets repeat the SAME
+    selectionId once per line — the selectionId-only parser above would silently
+    collapse the ladder to one arbitrary line. An absent handicap keys as 0.0
+    (non-ladder markets such as the fixed OVER_UNDER_x5 books). The same
+    OPEN/non-in-play fail-closed guards as ``parse_market_book_backs``."""
+    books: dict[str, dict[tuple[int, float], tuple[float, float]]] = {}
+    for market in payload:
+        if not isinstance(market, Mapping):
+            continue
+        market_id = str(market.get("marketId", "")).strip()
+        if not market_id:
+            continue
+        if str(market.get("status", "")).upper() != "OPEN":
+            continue
+        if market.get("inplay") is not False:
+            continue
+        per_runner: dict[tuple[int, float], tuple[float, float]] = {}
+        for runner in market.get("runners") or []:
+            if not isinstance(runner, Mapping):
+                continue
+            sel = runner.get("selectionId")
+            if not isinstance(sel, int):
+                continue
+            handicap = _finite_handicap(runner.get("handicap"))
+            ex_raw = runner.get("ex")
+            ex: Mapping[str, Any] = ex_raw if isinstance(ex_raw, Mapping) else {}
+            level = _best_back_level(ex.get("availableToBack"))
+            if level is not None:
+                per_runner[(sel, _line_key(handicap or 0.0))] = level
+        books[market_id] = per_runner
+    return books
 
 
 def parse_market_book_backs(
@@ -529,6 +605,235 @@ def join_match_odds(
             )
         )
     return out
+
+
+# --- EXTENDED markets: Asian Handicap + Over/Under goal lines ---------------- #
+# Vocabulary NOTE: the emitted market_detail keys are the SCRAPED OddsChecker
+# vocabulary (spreads_minus_0_25 / totals_2_5 — byte-equal to
+# app.ingestion.oddschecker._market_for_type output for the same line) run
+# through the pipeline's canonical fold, so a captured API line lands in the
+# SAME (event, market, detail) devig group as the scraped rows. Never a new
+# vocabulary (pipeline mint-grouping unification, audit 2026-08-02).
+
+
+def _line_key(value: float) -> float:
+    """Stable float key for a Betfair handicap (quarter-goal grid) so catalogue
+    and book runner entries join exactly (2 decimals is exact on the grid)."""
+    return round(value, 2)
+
+
+def _is_fractional_line(value: float) -> bool:
+    """True for a half/quarter line (non-integer). Integer lines are
+    fail-closed: an integer AH detail would collide with the scraped 3-way
+    European-handicap spreads_* key space (vocabulary audit 2026-07-10), and an
+    integer totals line has a push third outcome (the candidate boundary
+    rejects such groups anyway)."""
+    return abs(value - round(value)) > 1e-9
+
+
+def _signed_line_token(line: float) -> str:
+    """'-0.25' -> 'minus_0_25', '+0.25' -> 'plus_0_25' — byte-equal to the
+    scrape's slug of the signed line string (oddschecker._slug_line)."""
+    text = format(line, "+g").replace("+", "plus_").replace("-", "minus_")
+    return re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_").lower()
+
+
+def _unsigned_line_token(line: float) -> str:
+    """'2.5' -> '2_5', '2.25' -> '2_25' (totals lines are unsigned)."""
+    return re.sub(r"[^0-9A-Za-z]+", "_", format(abs(line), "g")).strip("_").lower()
+
+
+@dataclass(frozen=True)
+class BetfairLineQuote:
+    """One side of one captured AH / Over-Under line: the canonical devig-group
+    key (market + market_detail, scraped vocabulary) plus the best BACK price
+    and size. ``line`` is the signed HOME line for SPREADS and the goals line
+    for TOTALS; the canonical selection STRING is built later from the matched
+    candidate's team names (never the Betfair runner names)."""
+
+    market_id: str
+    event_id: str
+    market: Market
+    market_detail: str
+    side: str  # 'home' | 'away' (SPREADS) / 'over' | 'under' (TOTALS)
+    line: float
+    back: float
+    back_size: float
+
+
+def _spread_detail(home_line: float) -> str | None:
+    """Canonical scraped-vocabulary detail for a fractional AH home line, via
+    the pipeline fold (a fixed point for spreads_*)."""
+    return canonical_market_detail(f"spreads_{_signed_line_token(home_line)}")
+
+
+def _totals_detail(line: float) -> str | None:
+    """Canonical scraped-vocabulary detail for a fractional totals line."""
+    return canonical_market_detail(f"totals_{_unsigned_line_token(line)}")
+
+
+def _asian_handicap_quotes(
+    market: BetfairMarketCatalogue,
+    per_runner: Mapping[tuple[int, float], tuple[float, float]],
+    teams: tuple[str, str],
+) -> list[BetfairLineQuote]:
+    """Two-sided quotes for each FRACTIONAL AH line of one ladder market.
+
+    Sides are resolved by comparing runner names against the Match-Odds
+    home/away runner names for the SAME Betfair event (fail-closed: an
+    unrecognized runner name is skipped, never guessed). A line is emitted only
+    when BOTH sides carry a backable price — a one-sided API line cannot form
+    the plausible two-way book this capture exists to provide."""
+    home_name, away_name = (t.strip().casefold() for t in teams)
+    if not home_name or not away_name or home_name == away_name:
+        return []
+    home_prices: dict[float, tuple[float, float]] = {}
+    away_prices: dict[float, tuple[float, float]] = {}
+    for runner in market.runners:
+        if runner.handicap is None:
+            continue
+        line = _line_key(runner.handicap)
+        level = per_runner.get((runner.selection_id, line))
+        if level is None:
+            continue
+        name = runner.name.strip().casefold()
+        if name == home_name:
+            home_prices[line] = level
+        elif name == away_name:
+            away_prices[line] = level
+    out: list[BetfairLineQuote] = []
+    for home_line in sorted(home_prices):
+        if not _is_fractional_line(home_line):
+            continue  # integer AH: fail-closed (EH-collision, see note above)
+        away_level = away_prices.get(_line_key(-home_line))
+        if away_level is None:
+            continue  # one-sided line: adds nothing beyond the thin scrape
+        detail = _spread_detail(home_line)
+        if detail is None:  # unreachable for spreads_*; fail closed
+            continue
+        home_level = home_prices[home_line]
+        out.append(
+            BetfairLineQuote(
+                market_id=market.market_id,
+                event_id=market.event_id,
+                market=Market.SPREADS,
+                market_detail=detail,
+                side="home",
+                line=home_line,
+                back=home_level[0],
+                back_size=home_level[1],
+            )
+        )
+        out.append(
+            BetfairLineQuote(
+                market_id=market.market_id,
+                event_id=market.event_id,
+                market=Market.SPREADS,
+                market_detail=detail,
+                side="away",
+                line=home_line,
+                back=away_level[0],
+                back_size=away_level[1],
+            )
+        )
+    return out
+
+
+def _totals_quotes_for_lines(
+    market: BetfairMarketCatalogue,
+    over_prices: Mapping[float, tuple[float, float]],
+    under_prices: Mapping[float, tuple[float, float]],
+) -> list[BetfairLineQuote]:
+    """Two-sided TOTALS quotes for every fractional line priced on BOTH sides."""
+    out: list[BetfairLineQuote] = []
+    for line in sorted(over_prices):
+        if line <= 0 or not _is_fractional_line(line):
+            continue  # integer totals: push third outcome — never emitted
+        under_level = under_prices.get(line)
+        if under_level is None:
+            continue
+        detail = _totals_detail(line)
+        if detail is None:  # unreachable for fractional totals_*; fail closed
+            continue
+        over_level = over_prices[line]
+        for side, level in (("over", over_level), ("under", under_level)):
+            out.append(
+                BetfairLineQuote(
+                    market_id=market.market_id,
+                    event_id=market.event_id,
+                    market=Market.TOTALS,
+                    market_detail=detail,
+                    side=side,
+                    line=line,
+                    back=level[0],
+                    back_size=level[1],
+                )
+            )
+    return out
+
+
+def _over_under_sides(
+    market: BetfairMarketCatalogue,
+    per_runner: Mapping[tuple[int, float], tuple[float, float]],
+    *,
+    line_from_handicap: bool,
+    fixed_line: float = 0.0,
+) -> tuple[dict[float, tuple[float, float]], dict[float, tuple[float, float]]]:
+    """(over, under) price maps keyed by line. ALT_TOTAL_GOALS carries the line
+    in the runner handicap (``line_from_handicap=True``); the fixed
+    OVER_UNDER_x5 markets carry it in the marketType (``fixed_line``)."""
+    over: dict[float, tuple[float, float]] = {}
+    under: dict[float, tuple[float, float]] = {}
+    for runner in market.runners:
+        handicap = _line_key(runner.handicap or 0.0)
+        level = per_runner.get((runner.selection_id, handicap))
+        if level is None:
+            continue
+        line = handicap if line_from_handicap else _line_key(fixed_line)
+        name = runner.name.strip().casefold()
+        if name.startswith("over"):
+            over[line] = level
+        elif name.startswith("under"):
+            under[line] = level
+    return over, under
+
+
+def join_extended_lines(
+    catalogue: Sequence[BetfairMarketCatalogue],
+    books: Mapping[str, Mapping[tuple[int, float], tuple[float, float]]],
+    home_away_by_event: Mapping[str, tuple[str, str]],
+) -> list[BetfairLineQuote]:
+    """Join the EXTENDED catalogue (AH + goal lines) with its handicap-keyed
+    best-back books into canonical-vocabulary two-sided line quotes.
+
+    ``home_away_by_event`` maps a Betfair event id to the Match-Odds home/away
+    RUNNER NAMES from the same cycle's h2h fetch — the extended capture covers
+    only events the h2h path already resolves (side identity comes from the
+    proven Match-Odds sortPriority convention, never re-derived). Pure."""
+    quotes: list[BetfairLineQuote] = []
+    for market in catalogue:
+        per_runner = books.get(market.market_id)
+        if not per_runner:
+            continue  # book rejected (in-play / non-open) or priceless
+        market_type = market.market_type.strip().upper()
+        if market_type == MARKET_TYPE_ASIAN_HANDICAP:
+            teams = home_away_by_event.get(market.event_id)
+            if teams is None:
+                continue  # not an event the h2h path resolved this cycle
+            quotes.extend(_asian_handicap_quotes(market, per_runner, teams))
+        elif market_type == MARKET_TYPE_ALT_TOTAL_GOALS:
+            over, under = _over_under_sides(market, per_runner, line_from_handicap=True)
+            quotes.extend(_totals_quotes_for_lines(market, over, under))
+        else:
+            match = _OVER_UNDER_TYPE_RE.match(market_type)
+            if match is None:
+                continue  # unknown type: skipped, never guessed
+            fixed = int(match.group(1)) / 10.0
+            over, under = _over_under_sides(
+                market, per_runner, line_from_handicap=False, fixed_line=fixed
+            )
+            quotes.extend(_totals_quotes_for_lines(market, over, under))
+    return quotes
 
 
 class BetfairApiClient:
@@ -729,21 +1034,23 @@ class BetfairApiClient:
         market_start_to: datetime,
         market_type_codes: Sequence[str] = (MARKET_TYPE_MATCH_ODDS,),
         max_results: int = 200,
+        include_market_description: bool = False,
     ) -> list[BetfairMarketCatalogue]:
         if isinstance(max_results, bool) or not 1 <= max_results <= MAX_MARKETS_PER_FETCH:
             raise BetfairApiError(f"betfair max_results must be within 1..{MAX_MARKETS_PER_FETCH}")
+        # MARKET_DESCRIPTION (extended path only) adds description.marketType so
+        # the ladder joiner can dispatch AH vs goal-line handling — still a pure
+        # metadata read on the same read-only op.
+        projection = ["EVENT", "COMPETITION", "MARKET_START_TIME", "RUNNER_DESCRIPTION"]
+        if include_market_description:
+            projection.append("MARKET_DESCRIPTION")
         result = await self._rpc(
             _OP_LIST_MARKET_CATALOGUE,
             {
                 "filter": _build_filter(
                     event_type_ids, market_type_codes, market_start_from, market_start_to
                 ),
-                "marketProjection": [
-                    "EVENT",
-                    "COMPETITION",
-                    "MARKET_START_TIME",
-                    "RUNNER_DESCRIPTION",
-                ],
+                "marketProjection": projection,
                 "maxResults": max_results,
                 "sort": "FIRST_TO_START",
             },
@@ -805,6 +1112,63 @@ class BetfairApiClient:
         market_ids = [m.market_id for m in catalogue]
         backs = await self.list_market_book_backs(market_ids)
         return join_match_odds(catalogue, backs)
+
+    async def list_market_book_backs_by_handicap(
+        self, market_ids: Sequence[str]
+    ) -> dict[str, dict[tuple[int, float], tuple[float, float]]]:
+        """Ladder-aware sibling of ``list_market_book_backs``: the SAME read-only
+        listMarketBook op and <=25-market batching, parsed keyed by
+        (selectionId, handicap) so AH / goal-line ladders never collapse."""
+        if not market_ids:
+            return {}
+        ids = list(market_ids)
+        if len(ids) > MAX_MARKETS_PER_FETCH:
+            raise BetfairApiError("betfair listMarketBook exceeded market-id ceiling")
+        out: dict[str, dict[tuple[int, float], tuple[float, float]]] = {}
+        for start in range(0, len(ids), _MARKET_BOOK_BATCH):
+            batch = ids[start : start + _MARKET_BOOK_BATCH]
+            result = await self._rpc(
+                _OP_LIST_MARKET_BOOK,
+                {
+                    "marketIds": batch,
+                    "priceProjection": {"priceData": ["EX_BEST_OFFERS"]},
+                },
+            )
+            if not isinstance(result, list):
+                raise BetfairApiError("betfair listMarketBook returned invalid result container")
+            if len(result) > len(batch):
+                raise BetfairApiError("betfair listMarketBook exceeded batch result ceiling")
+            out.update(parse_market_book_backs_by_handicap(result))
+        return out
+
+    async def fetch_extended_line_books(
+        self,
+        *,
+        market_start_from: datetime,
+        market_start_to: datetime,
+        event_type_ids: Sequence[str] = (EVENT_TYPE_SOCCER,),
+        max_results: int = 200,
+    ) -> tuple[
+        list[BetfairMarketCatalogue],
+        dict[str, dict[tuple[int, float], tuple[float, float]]],
+    ]:
+        """High-level EXTENDED read: ONE catalogue call over the AH + goal-line
+        market types plus ONE batched book pass — the exact request shape of the
+        h2h path, so arming the flag adds exactly one catalogue+book batch per
+        cycle. Empty catalogue -> ([], {}) (a benign quiet slate; RPC errors
+        raise, never a silent success)."""
+        catalogue = await self.list_market_catalogue(
+            event_type_ids=event_type_ids,
+            market_start_from=market_start_from,
+            market_start_to=market_start_to,
+            market_type_codes=EXTENDED_MARKET_TYPES,
+            max_results=max_results,
+            include_market_description=True,
+        )
+        if not catalogue:
+            return [], {}
+        books = await self.list_market_book_backs_by_handicap([m.market_id for m in catalogue])
+        return catalogue, books
 
 
 def _build_filter(
@@ -949,6 +1313,12 @@ class BetfairApiShadowReport:
     snapshots: tuple[OddsSnapshotIn, ...]
     comparison: ComparisonAggregate | None = None
     promoted: bool = False
+    # EXTENDED-markets telemetry (counts only): distinct (event, market, detail)
+    # line groups emitted / distinct events they cover, and whether the extended
+    # fetch FAILED this cycle (flagged loudly, never a silent pretend-success).
+    extended_lines: int = 0
+    extended_events: int = 0
+    extended_failed: bool = False
 
     @property
     def match_rate(self) -> float:
@@ -975,10 +1345,15 @@ class BetfairApiShadowCapture:
         link_sink: LinkSink | None = None,
         verdict_sink: VerdictSink | None = None,
         verdict_ticks: float = 1.0,
+        extended_markets: bool = False,
     ) -> None:
         self._client = client
         self._candidates_fn = candidates_fn
         self._window = window
+        # EXTENDED markets (VALUE_BETFAIR_API_EXTENDED_MARKETS, default OFF):
+        # when False, zero extra RPC calls — the rate budget is byte-identical
+        # to the h2h-only capture.
+        self._extended_markets = extended_markets
         self._aliases = aliases or default_aliases()
         self._event_type_ids = tuple(event_type_ids)
         self._now_fn = now_fn or _utc_now
@@ -1053,6 +1428,72 @@ class BetfairApiShadowCapture:
             )
         return rows
 
+    def _extended_snapshots_for(
+        self,
+        quotes: Sequence[BetfairLineQuote],
+        home: str,
+        away: str,
+        event_ref: str,
+        now: datetime,
+    ) -> list[OddsSnapshotIn]:
+        """Snapshot rows for one matched event's extended line quotes.
+
+        Selection strings speak the CANONICAL matched candidate's vocabulary
+        (exactly like the h2h path — the Betfair runner names never leak):
+        SPREADS emit the scraped "{team} {signed-line}" form ("Alpha -0.25" /
+        "Beta +0.25"), TOTALS the scraped "Over/Under {line:g}" form."""
+        rows: list[OddsSnapshotIn] = []
+        for quote in quotes:
+            if quote.market is Market.SPREADS:
+                if not home or not away:
+                    continue
+                if quote.side == "home":
+                    selection = f"{home} {quote.line:+g}"
+                else:
+                    selection = f"{away} {-quote.line:+g}"
+            else:
+                word = "Over" if quote.side == "over" else "Under"
+                selection = f"{word} {quote.line:g}"
+            rows.append(
+                OddsSnapshotIn(
+                    event_id=event_ref,
+                    bookmaker=self._bookmaker,
+                    market=quote.market,
+                    market_detail=quote.market_detail,
+                    selection=selection,
+                    decimal_odds=quote.back,
+                    liquidity=quote.back_size,  # best-back available £, as h2h
+                    captured_at=now,
+                    ingested_at=now,
+                )
+            )
+        return rows
+
+    async def _fetch_extended_quotes(
+        self, query_now: datetime, odds: Sequence[BetfairMatchOdds]
+    ) -> tuple[dict[str, list[BetfairLineQuote]], bool]:
+        """({betfair_event_id: line quotes}, failed) for the extended markets.
+
+        A fetch/RPC failure is FLAGGED (WARNING, type-only — never a URL or
+        token) and returns failed=True, but never kills the h2h anchor capture:
+        the extended feed is an add-on, the h2h anchor is live-promoted."""
+        if not self._extended_markets:
+            return {}, False
+        try:
+            catalogue, books = await self._client.fetch_extended_line_books(
+                market_start_from=query_now,
+                market_start_to=query_now + self._window,
+                event_type_ids=self._event_type_ids,
+            )
+        except (httpx.HTTPError, BetfairApiError) as exc:
+            logger.warning("betfair api EXTENDED capture FAILED: %s", type(exc).__name__)
+            return {}, True
+        home_away = {m.event_id: (m.home, m.away) for m in odds if m.home and m.away}
+        quotes_by_event: dict[str, list[BetfairLineQuote]] = {}
+        for quote in join_extended_lines(catalogue, books, home_away):
+            quotes_by_event.setdefault(quote.event_id, []).append(quote)
+        return quotes_by_event, False
+
     async def capture_once(self) -> BetfairApiShadowReport:
         """Run one shadow cycle. RPC/auth errors propagate to the caller (the
         scheduler logs type-only and skips) — never swallowed as a silent
@@ -1069,10 +1510,15 @@ class BetfairApiShadowCapture:
             market_start_to=query_now + self._window,
             event_type_ids=self._event_type_ids,
         )
+        # EXTENDED markets (default OFF): ONE extra catalogue+book batch over
+        # the AH + goal-line types, for the same events the h2h fetch covers.
+        extended_by_event, extended_failed = await self._fetch_extended_quotes(query_now, odds)
         # Capture only after the complete catalogue/book response sequence.
         # This is conservative: a slow request that crosses kickoff can never be
         # stamped with its pre-request time and promoted as a pre-match anchor.
         observed_at = self._now_fn()
+        extended_groups: set[tuple[str, Market, str]] = set()
+        extended_event_refs: set[str] = set()
         candidates = list(await self._candidates())
         matched = 0
         unmatched = 0
@@ -1109,6 +1555,18 @@ class BetfairApiShadowCapture:
             hit = outcome.candidate
             matched += 1
             snapshots.extend(self._snapshots_for(market, hit.home, hit.away, hit.ref, observed_at))
+            # EXTENDED lines for the SAME resolved event (AH + O/U goal lines),
+            # attached under the canonical ref with canonical selection strings.
+            ext_quotes = extended_by_event.get(market.event_id, ())
+            ext_rows = self._extended_snapshots_for(
+                ext_quotes, hit.home, hit.away, hit.ref, observed_at
+            )
+            if ext_rows:
+                snapshots.extend(ext_rows)
+                extended_event_refs.add(hit.ref)
+                for row in ext_rows:
+                    if row.market_detail is not None:
+                        extended_groups.add((hit.ref, row.market, row.market_detail))
             # Teams for the (only-when-promoting) attach-only persist; sourced from
             # the matched canonical candidate, never the Betfair competition name.
             teams_by_event[hit.ref] = EventTeams(
@@ -1143,6 +1601,9 @@ class BetfairApiShadowCapture:
             snapshots=tuple(snapshots),
             comparison=comparison,
             promoted=self._promote,
+            extended_lines=len(extended_groups),
+            extended_events=len(extended_event_refs),
+            extended_failed=extended_failed,
         )
         await self._maybe_promote(snapshots, teams_by_event)
         self._log(report)
@@ -1254,6 +1715,14 @@ class BetfairApiShadowCapture:
 
     def _log(self, report: BetfairApiShadowReport) -> None:
         persisted = "promoted to the live sharp anchor" if report.promoted else "persisted nothing"
+        if self._extended_markets:
+            # Counts only — never team names, refs, or prices in this line.
+            logger.info(
+                "betfair api EXTENDED: lines=%d events=%d%s",
+                report.extended_lines,
+                report.extended_events,
+                " (fetch FAILED this cycle)" if report.extended_failed else "",
+            )
         cmp = report.comparison
         if cmp is not None and cmp.compared:
             logger.info(
@@ -1300,6 +1769,7 @@ def build_shadow_capture(
     link_sink: LinkSink | None = None,
     verdict_sink: VerdictSink | None = None,
     verdict_ticks: float = 1.0,
+    extended_markets: bool = False,
 ) -> BetfairApiShadowCapture | None:
     """Build the shadow capture, or None when the integration is INERT — i.e.
     disabled OR any credential blank. None means the scheduler adds NO job and no
@@ -1330,4 +1800,5 @@ def build_shadow_capture(
         link_sink=link_sink,
         verdict_sink=verdict_sink,
         verdict_ticks=verdict_ticks,
+        extended_markets=extended_markets,
     )

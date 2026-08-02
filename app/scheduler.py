@@ -1608,7 +1608,13 @@ def build_scheduler(
             link_sink=_betfair_api_link_sink,
             verdict_sink=_betfair_api_verdict_sink,
             verdict_ticks=settings.value_betfair_staleness_ticks,
+            extended_markets=settings.value_betfair_api_extended_markets,
         )
+        if settings.value_betfair_api_extended_markets:
+            logger.info(
+                "betfair API EXTENDED markets ENABLED (AH + O/U goal lines; "
+                "one extra catalogue+book batch per cycle, read-only)"
+            )
 
         async def capture_betfair_api_shadow() -> None:
             if betfair_api_capture is None:

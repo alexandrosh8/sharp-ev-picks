@@ -1218,6 +1218,18 @@ class Settings(BaseSettings):
     # "betfair api COMPARE/SHADOW" logs: mean|delta|, %within-1-tick, %api-fresher).
     # Inert wiring: when false the promote sink is never even constructed.
     value_betfair_api_promote: bool = False
+    # EXTENDED markets flag (DEFAULT OFF). When true the API capture ALSO reads
+    # the soccer ASIAN_HANDICAP + goal-line (OVER_UNDER_x5 / ALT_TOTAL_GOALS)
+    # catalogues for the SAME events its Match-Odds pass resolves — exactly ONE
+    # extra listMarketCatalogue + one batched listMarketBook pass per cycle
+    # (read-only, same ops/allowlist). Motivation (audit 2026-08-02): 88% of the
+    # no_sharp_anchor gate slice is overround_implausible on soccer spreads/AH —
+    # the scrape only sees one-sided exchange AH backs, so a two-sided book
+    # never forms. Lines are emitted under the SCRAPED canonical vocabulary
+    # (spreads_minus_X_Y / totals_X_Y) with BOTH sides best-back priced, so the
+    # overround gate finally sees a plausible book. Rows follow the same
+    # shadow/promote tagging as the h2h path (VALUE_BETFAIR_API_PROMOTE).
+    value_betfair_api_extended_markets: bool = False
     # Betfair application key (the "delayed"/live App Key from the developer
     # account). NOT a betting scope — it only identifies the app to the read-only
     # market-data API. Secret: never logged, never persisted.
