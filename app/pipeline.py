@@ -450,9 +450,7 @@ def _loader_matches_found(loader: OddsLoader, sport_key: str) -> int | None:
 def _anchor_match_provenance(
     anchor_type: str,
     event_ref: str,
-    provenance: Mapping[tuple[str, str], tuple[float, str]],
-    *,
-    api_promote_enabled: bool = False,
+    provenance: Mapping[tuple[str, str], tuple[float | None, str]],
 ) -> tuple[float | None, str | None]:
     """(anchor_match_confidence, anchor_match_method) for one value pick.
 
@@ -460,15 +458,17 @@ def _anchor_match_provenance(
       pinnacle-typed pick with NO map entry (theoretically impossible — only the
       injector produces "Pinnacle" rows on scraped events) stores None +
       'unscored': fail HONEST, never fabricate 1.0.
-    - 'sharp' (inline Betfair/Smarkets): rows live on the pick's OWN canonical
-      event — no pick-time matching happened, so confidence is 1.0 by
-      construction (both the main-scrape inline rows and the loader-injected
-      dedicated capture, which was exact-ref-matched at ingestion).
-      EXCEPT under VALUE_BETFAIR_API_PROMOTE: promoted API rows were attached
-      by the FUZZY hardened matcher at ingestion and are indistinguishable
-      per-row from inline rows here, so with promotion enabled every sharp
-      anchor stores None/'inline_or_promoted_unattributed' — fail HONEST
-      (per-row snapshot provenance is the prerequisite for restoring 1.0).
+    - 'sharp' (inline Betfair/Smarkets): the LOADER owns attribution via its
+      per-(event, anchor_type) provenance map (fix 2026-08-02). A map entry is
+      stored verbatim — (1.0, 'inline_betfair_canonical') for scrape/dedicated
+      rows on the pick's own canonical event, the API capture's persisted link
+      score ('promoted_<method>', its real hardened-matcher confidence) for a
+      VALUE_BETFAIR_API_PROMOTE event, or the explicit fail-honest
+      (None, 'inline_or_promoted_unattributed') when the link read failed.
+      NO entry means no loader-injected exchange rows exist for this event, so
+      the anchor row came from the RAW scrape's inline exchange quotes on the
+      pick's own canonical event — 1.0 by construction (promoted API rows can
+      only enter a cycle through the loader's DB read, never the raw scrape).
     - 'consensus' (or anything else): None/None — no cross-source match exists.
     Observability only: never influences minting or anchor selection.
     """
@@ -476,8 +476,9 @@ def _anchor_match_provenance(
         entry = provenance.get((event_ref, "pinnacle"))
         return entry if entry is not None else (None, "unscored")
     if anchor_type == "sharp":
-        if api_promote_enabled:
-            return (None, "inline_or_promoted_unattributed")
+        entry = provenance.get((event_ref, "sharp"))
+        if entry is not None:
+            return entry
         return (1.0, "inline_betfair_canonical")
     return (None, None)
 
@@ -489,7 +490,7 @@ def _anchor_match_provenance(
 #: pick can persist HOW its sharp anchor was matched (observability only).
 SharpAnchorLoader = Callable[
     [str, Sequence[OddsSnapshotIn]],
-    Awaitable[tuple[Sequence[OddsSnapshotIn], Mapping[tuple[str, str], tuple[float, str]]]],
+    Awaitable[tuple[Sequence[OddsSnapshotIn], Mapping[tuple[str, str], tuple[float | None, str]]]],
 ]
 
 #: Pick-time odds-history reader (PipelineDeps.steam_history_loader): given the
@@ -2009,7 +2010,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     # (event_ref, anchor_type) -> (match_confidence, match_method): HOW each
     # injected sharp anchor was matched to its fixture (observability only —
     # persisted per pick as anchor_match_confidence/anchor_match_method).
-    anchor_provenance: Mapping[tuple[str, str], tuple[float, str]] = {}
+    anchor_provenance: Mapping[tuple[str, str], tuple[float | None, str]] = {}
     if deps.sharp_anchor_loader is not None:
         try:
             extra, anchor_provenance = await deps.sharp_anchor_loader(sport_key, snapshots)
@@ -2746,7 +2747,6 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 anchor_type_for(v.sharp_book),
                 event_id,
                 anchor_provenance,
-                api_promote_enabled=deps.value_policy.betfair_api_promote,
             )
             # Betfair staleness-guard mint stamp (OBSERVABILITY only — never
             # gates): the event's effective verdict read this cycle. Scoped to
@@ -3502,8 +3502,10 @@ def group_market_liquidity(snapshots: Sequence[OddsSnapshotIn]) -> LiquidityByMa
 
 
 # Markets whose outcomes are mutually exclusive and exhaustive — direct
-# anchor devig of one book is sound. Loader config guarantees SPREADS groups
-# are half-line AH (no pushes) or 3-way European handicap. Double chance is
+# anchor devig of one book is sound. SPREADS groups carry the AH/game-handicap
+# product only: the 3-way European handicap is dropped at the OddsChecker
+# parser (fix 2026-08-02 — its Draw-legged quotes shared the AH spreads_<line>
+# keys and devigged as one mixed group, minting fake edges). Double chance is
 # NOT direct (overlapping legs, quotes sum ~200%) — derived from 1X2.
 # Market-agnostic absolute price ceiling. Above this, a value pick's best price is
 # a data artefact (mis-mapped/garbage longshot), not a real edge — the per-market

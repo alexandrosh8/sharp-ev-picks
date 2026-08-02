@@ -552,6 +552,160 @@ async def test_loader_drops_stale_pinnacle_but_keeps_fresh_betfair_per_source(fa
     assert (ref, "pinnacle") not in provenance
 
 
+async def _seed_betfair_event(factory, ref: str, *, kickoff, captured) -> None:  # type: ignore[no-untyped-def]
+    snaps = [
+        OddsSnapshotIn(
+            event_id=ref,
+            bookmaker="Betfair Exchange",
+            market=Market.H2H,
+            selection=sel,
+            decimal_odds=o,
+            captured_at=captured,
+            ingested_at=captured,
+        )
+        for sel, o in (("Home FC", 2.40), ("Draw", 3.50), ("Away FC", 3.20))
+    ]
+    teams = {ref: EventTeams(home="Home FC", away="Away FC", starts_at=kickoff)}
+    await persist_odds_snapshots(factory, snaps, teams, "soccer", "soccer")
+
+
+async def test_loader_promote_provenance_carries_persisted_api_link(factory) -> None:  # type: ignore[no-untyped-def]
+    # Defect B (fix 2026-08-02): with api_promote=True and a persisted
+    # betfair_api link on the canonical event, the loader must attribute the
+    # event's exchange rows with the API capture's OWN hardened-matcher score
+    # ('promoted_<method>', its real confidence — a fuzzy score is carried
+    # verbatim, never rounded up to 1.0).
+    from app.clv_trueup import build_sharp_anchor_loader
+    from app.ingestion.base import EventDirectory
+    from app.storage.repositories import SourceLinkByRef, record_source_links
+
+    now = datetime.now(UTC)
+    kickoff = now + timedelta(hours=2)
+    ref = "evt-promoted-link"
+    await _seed_betfair_event(factory, ref, kickoff=kickoff, captured=now - timedelta(hours=1))
+    await record_source_links(
+        factory,
+        [
+            SourceLinkByRef(
+                source="betfair_api",
+                source_event_id="bfapi-33445566",
+                canonical_external_ref=ref,
+                confidence=0.9312,
+                method="jw_two_tier",
+                matched_at=now - timedelta(minutes=5),
+            )
+        ],
+    )
+
+    directory = EventDirectory()
+    directory.register(ref, EventTeams(home="Home FC", away="Away FC", starts_at=kickoff))
+    loader = build_sharp_anchor_loader(
+        factory,
+        directory,
+        use_betfair=True,
+        use_pinnacle=False,
+        max_age_seconds=14400.0,
+        api_promote=True,
+    )
+    scrape = [
+        OddsSnapshotIn(
+            event_id=ref,
+            bookmaker="SoftBook",
+            market=Market.H2H,
+            selection="Home FC",
+            decimal_odds=2.90,
+            captured_at=now,
+            ingested_at=now,
+        )
+    ]
+    out, provenance = await loader("soccer", scrape)
+    assert {s.bookmaker for s in out} == {"Betfair Exchange"}
+    assert provenance.get((ref, "sharp")) == (0.9312, "promoted_jw_two_tier")
+
+
+async def test_loader_promote_without_api_link_stays_inline(factory) -> None:  # type: ignore[no-untyped-def]
+    # api_promote=True but NO betfair_api link on the event: its exchange rows
+    # can only be scrape-persisted inline on the canonical ref (promoted rows
+    # always record a link) — inline 1.0 by construction, unchanged.
+    from app.clv_trueup import build_sharp_anchor_loader
+    from app.ingestion.base import EventDirectory
+
+    now = datetime.now(UTC)
+    kickoff = now + timedelta(hours=2)
+    ref = "evt-promote-no-link"
+    await _seed_betfair_event(factory, ref, kickoff=kickoff, captured=now - timedelta(hours=1))
+
+    directory = EventDirectory()
+    directory.register(ref, EventTeams(home="Home FC", away="Away FC", starts_at=kickoff))
+    loader = build_sharp_anchor_loader(
+        factory,
+        directory,
+        use_betfair=True,
+        use_pinnacle=False,
+        max_age_seconds=14400.0,
+        api_promote=True,
+    )
+    scrape = [
+        OddsSnapshotIn(
+            event_id=ref,
+            bookmaker="SoftBook",
+            market=Market.H2H,
+            selection="Home FC",
+            decimal_odds=2.90,
+            captured_at=now,
+            ingested_at=now,
+        )
+    ]
+    _out, provenance = await loader("soccer", scrape)
+    assert provenance.get((ref, "sharp")) == (1.0, "inline_betfair_canonical")
+
+
+async def test_loader_promote_off_ignores_api_link(factory) -> None:  # type: ignore[no-untyped-def]
+    # Default api_promote=False: byte-identical to the historical behavior even
+    # when a (shadow-mode) betfair_api link exists — shadow captures record
+    # links too, but with promote OFF no API row can be in the anchor set.
+    from app.clv_trueup import build_sharp_anchor_loader
+    from app.ingestion.base import EventDirectory
+    from app.storage.repositories import SourceLinkByRef, record_source_links
+
+    now = datetime.now(UTC)
+    kickoff = now + timedelta(hours=2)
+    ref = "evt-promote-off-link"
+    await _seed_betfair_event(factory, ref, kickoff=kickoff, captured=now - timedelta(hours=1))
+    await record_source_links(
+        factory,
+        [
+            SourceLinkByRef(
+                source="betfair_api",
+                source_event_id="bfapi-77889900",
+                canonical_external_ref=ref,
+                confidence=0.9312,
+                method="jw_two_tier",
+                matched_at=now - timedelta(minutes=5),
+            )
+        ],
+    )
+
+    directory = EventDirectory()
+    directory.register(ref, EventTeams(home="Home FC", away="Away FC", starts_at=kickoff))
+    loader = build_sharp_anchor_loader(
+        factory, directory, use_betfair=True, use_pinnacle=False, max_age_seconds=14400.0
+    )
+    scrape = [
+        OddsSnapshotIn(
+            event_id=ref,
+            bookmaker="SoftBook",
+            market=Market.H2H,
+            selection="Home FC",
+            decimal_odds=2.90,
+            captured_at=now,
+            ingested_at=now,
+        )
+    ]
+    _out, provenance = await loader("soccer", scrape)
+    assert provenance.get((ref, "sharp")) == (1.0, "inline_betfair_canonical")
+
+
 async def test_sharp_anchor_loader_event_wide_freshness(factory) -> None:  # type: ignore[no-untyped-def]
     # REGRESSION (review 2026-06-21): the pick-time sharp-anchor freshness gate is
     # EVENT-WIDE — a recently-captured event keeps its Betfair anchor; an event

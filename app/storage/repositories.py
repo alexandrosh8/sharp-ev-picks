@@ -3428,6 +3428,38 @@ async def upsert_event_source_links(session: AsyncSession, links: Sequence[Sourc
     return len(values)
 
 
+async def latest_source_link_provenance(
+    session: AsyncSession, *, source: str, external_ref: str
+) -> tuple[float, str] | None:
+    """(confidence, method) of the newest ACTIVE cross-source link that points a
+    ``source`` capture at the canonical event ``external_ref``, or None when no
+    such link exists.
+
+    Read-only observability lookup (fix 2026-08-02, defect B): under
+    VALUE_BETFAIR_API_PROMOTE the promoted Betfair-API rows on a canonical event
+    are per-row indistinguishable from scrape-persisted inline exchange rows, but
+    the API capture PERSISTED its own hardened-matcher score here
+    (source='betfair_api') — the pick-time sharp-anchor loader reads it back so
+    a promoted anchor carries the capture's real confidence/method instead of a
+    blanket fail-honest None."""
+    row = (
+        await session.execute(
+            select(EventSourceLink.confidence_score, EventSourceLink.match_method)
+            .join(Event, EventSourceLink.canonical_event_id == Event.id)
+            .where(
+                EventSourceLink.source == source,
+                EventSourceLink.active.is_(True),
+                Event.external_ref == external_ref,
+            )
+            .order_by(EventSourceLink.matched_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return None
+    return float(row[0]), str(row[1])
+
+
 async def record_source_links(
     session_factory: "async_sessionmaker", links: Sequence[SourceLinkByRef]
 ) -> int:

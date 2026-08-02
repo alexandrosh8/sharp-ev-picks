@@ -104,6 +104,192 @@ def test_set_and_game_handicap_same_line_never_share_a_devig_key() -> None:
     assert set_result[1] != game_result[1]
 
 
+# --- 3-way EUROPEAN handicap folded into the ASIAN spreads_* key space --------
+# Live defect (premium pick 946692, event 19946 "Celtic -1"): OC's soccer
+# "Handicap" market is the 3-WAY European handicap (a Draw leg exists; the team
+# leg LOSES on a win by exactly the line), while "Asian Handicap" is the 2-way
+# AH (push at the line). Both passed _is_spread_market_type and slugged to the
+# SAME spreads_<line> detail, so one devig group mixed two products with a
+# structural ~15pp implied gap (exchange AH 1.28 vs soft EH 1.57) — fair 1.30
+# vs offered 1.60 minted a fake +14% edge. The EH product is fail-closed OUT of
+# the spreads_* vocabulary: a market whose key says "3 way" / whose bet set (or
+# the bet itself) carries a Draw handicap leg never maps to Market.SPREADS.
+# (In OC's selection-signed key space an EH group can NEVER form a valid devig
+# book — reverse-line legs share one key — so there is no honest namespaced
+# devig home for it either; unmapped EH markets remain capturable only via the
+# sharp-anchor-gated Market.OTHER history path.)
+
+
+def test_three_way_handicap_key_never_maps_to_spreads() -> None:
+    from app.ingestion.oddschecker import _market_for_type
+
+    assert _market_for_type("Handicap 3 Way", "-1") is None
+    assert _market_for_type("3-Way Handicap", "-2") is None
+
+
+def test_draw_leg_selection_never_maps_to_spreads() -> None:
+    from app.ingestion.oddschecker import _market_for_type
+
+    assert _market_for_type("Handicap", "-1", "Draw -1") is None
+    assert _market_for_type("Handicap", "+1", "Draw") is None
+    assert _market_for_type("Asian Handicap", "-1", "The Draw -1") is None
+
+
+def test_draw_leg_in_market_bet_names_fails_the_whole_market_closed() -> None:
+    # The TEAM legs of a 3-way handicap market are the poison (they share the
+    # AH selection strings byte-for-byte), so the whole MARKET must fail
+    # closed, not just the Draw bet.
+    from app.ingestion.oddschecker import _market_for_type
+
+    eh_bets = ("Celtic -1", "Draw -1", "Dundee +1")
+    assert _market_for_type("Handicap", "-1", "Celtic -1", bet_names=eh_bets) is None
+    assert _market_for_type("Handicap", "+1", "Dundee +1", bet_names=eh_bets) is None
+
+
+def test_soccer_bare_handicap_is_three_way_even_without_draw_evidence() -> None:
+    # Belt for partial feeds (a suspended/missing Draw bet must not re-admit
+    # the EH team legs for a cycle): in OC's SOCCER vocabulary the 2-way
+    # product is always named "Asian Handicap"; a bare "Handicap" market is
+    # the 3-way EH — fail closed on the market-type name alone.
+    from app.ingestion.oddschecker import _market_for_type
+
+    assert _market_for_type("Handicap", "-1", "Celtic -1", soccer=True) is None
+    assert _market_for_type("1st Half Handicap", "-1", "Celtic -1", soccer=True) is None
+    assert _market_for_type("Asian Handicap", "-1", "Celtic -1", soccer=True) == (
+        Market.SPREADS,
+        "spreads_minus_1",
+    )
+    # Non-soccer sports keep the historical bare-"Handicap" 2-way mapping.
+    assert _market_for_type("Handicap", "-1.5", "Muchova -1.5") == (
+        Market.SPREADS,
+        "spreads_minus_1_5",
+    )
+
+
+def test_two_way_handicap_vocabulary_is_byte_identical_with_bet_names() -> None:
+    # A draw-free bet set proves the 2-way product; the historical spreads_*
+    # vocabulary must be preserved EXACTLY (stamped picks stay matched).
+    from app.ingestion.oddschecker import _market_for_type
+
+    ah_bets = ("Celtic -1", "Dundee +1")
+    assert _market_for_type("Asian Handicap", "-1", "Celtic -1", bet_names=ah_bets) == (
+        Market.SPREADS,
+        "spreads_minus_1",
+    )
+    tennis_bets = ("Muchova -1.5", "Noskova +1.5")
+    assert _market_for_type("Handicap", "-1.5", "Muchova -1.5", bet_names=tennis_bets) == (
+        Market.SPREADS,
+        "spreads_minus_1_5",
+    )
+
+
+def test_parse_market_api_payloads_drops_three_way_handicap_market() -> None:
+    directory = EventDirectory()
+    now = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
+    common = {
+        "subeventId": 19946,
+        "subeventName": "Celtic vs Dundee",
+        "subeventStartTime": "2026-08-03T19:00:00Z",
+        "eventName": "Scottish Premiership Matches",
+    }
+
+    def _odd(bet_id: int, code: str, price: float) -> dict[str, object]:
+        return {
+            "betId": bet_id,
+            "bookmakerCode": code,
+            "oddsDecimal": price,
+            "status": "ACTIVE",
+            "betFeedTimestamp": "2026-08-02T11:59:00Z",
+        }
+
+    payloads = [
+        {  # 3-way European handicap (Draw leg) — must emit NO SPREADS rows
+            **common,
+            "marketId": 200,
+            "marketTypeName": "Handicap",
+            "bets": [
+                {"betId": 1, "betName": "Celtic", "line": "-1"},
+                {"betId": 2, "betName": "Draw", "line": "-1"},
+                {"betId": 3, "betName": "Dundee", "line": "+1"},
+            ],
+            "odds": [_odd(1, "WH", 1.6), _odd(2, "WH", 4.33), _odd(3, "WH", 6.0)],
+        },
+        {  # 2-way Asian handicap at the SAME line — unchanged vocabulary
+            **common,
+            "marketId": 201,
+            "marketTypeName": "Asian Handicap",
+            "bets": [
+                {"betId": 4, "betName": "Celtic", "line": "-1"},
+                {"betId": 5, "betName": "Dundee", "line": "+1"},
+            ],
+            "odds": [_odd(4, "B3", 1.28), _odd(5, "B3", 3.9)],
+        },
+    ]
+
+    snapshots = parse_market_api_payloads(
+        payloads,
+        url="https://www.oddschecker.com/football/scottish/premiership/celtic-v-dundee/winner",
+        directory=directory,
+        now=now,
+    )
+
+    spreads = {(s.selection, s.market_detail, s.bookmaker) for s in snapshots}
+    assert spreads == {
+        ("Celtic -1", "spreads_minus_1", "bet365"),
+        ("Dundee +1", "spreads_plus_1", "bet365"),
+    }
+    # No William Hill EH quote may reach the spreads_minus_1 devig group.
+    assert not any(s.bookmaker == "William Hill" for s in snapshots)
+
+
+def test_three_way_handicap_still_flows_to_sharp_gated_other_capture() -> None:
+    # Dropped from the devig-mapped vocabulary, the EH market keeps its odds
+    # HISTORY under the sharp-anchor-gated Market.OTHER path (never devigged,
+    # never picked — see the OTHER enum note).
+    directory = EventDirectory()
+    now = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
+    payloads = [
+        {
+            "subeventId": 19946,
+            "subeventName": "Celtic vs Dundee",
+            "subeventStartTime": "2026-08-03T19:00:00Z",
+            "eventName": "Scottish Premiership Matches",
+            "marketId": 200,
+            "marketTypeName": "Handicap",
+            "bets": [
+                {"betId": 1, "betName": "Celtic", "line": "-1"},
+                {"betId": 2, "betName": "Draw", "line": "-1"},
+            ],
+            "odds": [
+                {
+                    "betId": 1,
+                    "bookmakerCode": "BF",
+                    "oddsDecimal": 1.55,
+                    "status": "ACTIVE",
+                    "betFeedTimestamp": "2026-08-02T11:59:00Z",
+                },
+                {
+                    "betId": 2,
+                    "bookmakerCode": "BF",
+                    "oddsDecimal": 4.2,
+                    "status": "ACTIVE",
+                    "betFeedTimestamp": "2026-08-02T11:59:00Z",
+                },
+            ],
+        }
+    ]
+    snapshots = parse_market_api_payloads(
+        payloads,
+        url="https://www.oddschecker.com/football/scottish/premiership/celtic-v-dundee/winner",
+        directory=directory,
+        now=now,
+        capture_other=True,
+    )
+    assert snapshots, "sharp-anchored EH market must still be captured as OTHER history"
+    assert all(s.market is Market.OTHER for s in snapshots)
+    assert all(s.market_detail is not None and s.market_detail.startswith("oc_") for s in snapshots)
+
+
 # --- corners/cards leak into the goals TEAM_TOTALS namespace (unit collision) --
 # "Total Away Corners" / "Total Home Team Cards" substring-match the
 # "total away"/"total home" team-total vocabulary, so a corners 4.5 line and a

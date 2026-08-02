@@ -246,6 +246,27 @@ def test_trusted_clv_rule_pins() -> None:
     assert "p.has_snapshot_close === true" in text
 
 
+def test_open_pick_without_real_close_never_wears_exclusion_chips() -> None:
+    """Defect C (fix 2026-08-02): while a pick is OPEN (not settled/superseded)
+    and closing_odds is NULL, closing_fair_probability is only the LIVE
+    re-priced fair (at mint it equals model_probability), so the tautology/
+    exclusion read is meaningless — the provenance area must show the existing
+    'no close recorded' state, and exclusion chips may render only once a real
+    close exists or the pick is closed. Trusted-CLV gating (isTrustedClv /
+    clvExclusionOf) stays byte-identical — this is a display-state guard only."""
+    text = _text()
+    # The pre-close guard exists and clvStateLabel consults it FIRST.
+    assert "function closePending(p)" in text
+    assert "p.closing_odds == null" in text
+    label_fn = text.split("function clvStateLabel(p)", 1)[1]
+    assert label_fn.index("closePending(p)") < label_fn.index("clvExclusionOf(p)")
+    # The indicative CLV% value is suppressed while the close is pending.
+    assert "!closePending(p) && p.clv_log != null" in text
+    # Trusted gating unchanged: the exclusion read itself has no pending guard.
+    excl_fn = text.split("function clvExclusionOf(p)", 1)[1].split("function ", 1)[0]
+    assert "closePending" not in excl_fn
+
+
 def test_clv_fabrication_mirror_nets_exchange_commission() -> None:
     """AH-2 (audit 2026-07-26): the JS clvIsFabricated mirror must judge the same
     COMMISSION-NETTED effective fill as the backend _clv_row_is_fabricated

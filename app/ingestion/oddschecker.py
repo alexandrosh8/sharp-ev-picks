@@ -1052,6 +1052,9 @@ def _market_for_type(
     market_type: str,
     line: Any,
     selection: str | None = None,
+    *,
+    bet_names: Iterable[str] | None = None,
+    soccer: bool = False,
 ) -> tuple[Market, str] | None:
     key = market_type.strip().lower()
     direct = _SUPPORTED_MARKET_TYPES.get(key)
@@ -1066,6 +1069,26 @@ def _market_for_type(
     if key == "double chance":
         return Market.DOUBLE_CHANCE, "double_chance"
     if _is_spread_market_type(key):
+        # 3-WAY EUROPEAN handicap fail-close (live defect 2026-08-02, premium
+        # pick 946692 "Celtic -1"): OC's soccer "Handicap" market is the 3-way
+        # EH product (Draw leg; the team leg LOSES on a win by exactly the
+        # line) while "Asian Handicap" is the 2-way AH (push at the line).
+        # Both used to slug to the SAME spreads_<line> devig key, mixing two
+        # products with a structural ~15pp implied gap — a fabricated edge.
+        # In OC's selection-signed key space an EH group can never form a
+        # valid devig book (reverse-line legs share one key — see
+        # docs/research/2026-07-10-ah-spreads-vocabulary-audit.md finding 1),
+        # so the product is dropped from the devig-mapped vocabulary entirely
+        # (deterministic, no threshold); sharp-anchored callers still capture
+        # it as Market.OTHER history. ``bet_names`` is the market's full bet
+        # set when the caller has it — the Draw leg proves 3-way for the TEAM
+        # legs too, which share the AH selection strings byte-for-byte.
+        # ``soccer`` (from the match URL) arms the vocabulary belt: OC names
+        # the 2-way soccer product "Asian Handicap" explicitly, so a bare
+        # soccer "Handicap" is the 3-way EH even when the Draw bet is missing
+        # from this cycle's feed (suspended leg / partial page).
+        if _is_three_way_handicap_market(key, selection, bet_names, soccer=soccer):
+            return None
         # SET-vs-GAME handicap collision guard (hardening 2026-07-11): a tennis
         # SET handicap and a GAME handicap at the same numeric line used to slug
         # to the SAME spreads_<line> detail, risking a mixed devig group of two
@@ -1089,6 +1112,49 @@ def _is_spread_market_type(key: str) -> bool:
     if not any(term in key for term in ("handicap", "spread")):
         return False
     return not any(term in key for term in _EXCLUDED_PLAYER_PROP_TERMS)
+
+
+def _is_soccer_match_url(url: str) -> bool:
+    """True for an OddsChecker FOOTBALL (soccer) match/page URL — the
+    '/football/' path segment. '/american-football/' does NOT match (its
+    segment is '-football/', not '/football/')."""
+    return "/football/" in url
+
+
+def _is_draw_handicap_selection(name: str) -> bool:
+    """True for the Draw leg of a 3-way (European) handicap bet name — the
+    bare "Draw"/"The Draw" or a line-bearing "Draw ±N" form. A Draw leg only
+    exists on the 3-way product, so its presence proves EH."""
+    key = name.strip().lower()
+    if key.startswith("the "):
+        key = key[4:]
+    return key == "draw" or key.startswith("draw ")
+
+
+def _is_three_way_handicap_market(
+    key: str,
+    selection: str | None,
+    bet_names: Iterable[str] | None,
+    *,
+    soccer: bool = False,
+) -> bool:
+    """True when a spread-vocabulary market is the 3-WAY European handicap.
+
+    Deterministic, threshold-free evidence, any of: the market type names the
+    3-way product outright; the bet itself is a Draw handicap leg; the
+    market's full bet-name set (when the caller has it) contains a Draw leg —
+    the team legs of that market are then EH too and must fail closed with it;
+    or, on a SOCCER page, the handicap type is not explicitly Asian (OC names
+    the 2-way soccer product "Asian Handicap"; a bare soccer "Handicap" is the
+    3-way EH — this belt holds even when the Draw bet is absent from a cycle's
+    feed)."""
+    if "3 way" in key or "3-way" in key:
+        return True
+    if soccer and "handicap" in key and "asian" not in key:
+        return True
+    if selection is not None and _is_draw_handicap_selection(selection):
+        return True
+    return bet_names is not None and any(_is_draw_handicap_selection(n) for n in bet_names)
 
 
 def _is_set_handicap_market_type(key: str) -> bool:
@@ -1380,7 +1446,15 @@ def parse_match_page(
                 continue
             selection = exact_sets_selection
         else:
-            mapped = _market_for_type(market_type, bet.get("line"), selection)
+            mapped = _market_for_type(
+                market_type,
+                bet.get("line"),
+                selection,
+                # Full per-market bet-name set: lets the 3-way-handicap guard
+                # fail the TEAM legs closed off the market's Draw leg.
+                bet_names=bet_names_by_market.get(str(bet.get("marketId") or ""), ()),
+                soccer=_is_soccer_match_url(url),
+            )
             if mapped is None:
                 continue
             market_key, market_detail = mapped
@@ -1514,7 +1588,14 @@ def supported_market_ids_from_match_page(
         if not isinstance(market, Mapping):
             continue
         market_type = str(market.get("marketTypeName") or "")
-        mapped = _market_for_type(market_type, None)
+        mapped = _market_for_type(
+            market_type,
+            None,
+            # 3-way-handicap fail-close: a Draw-legged handicap market must not
+            # count as a MAPPED (devig-sound) market — with include_other it is
+            # still fetched for the sharp-gated OTHER capture, never for devig.
+            bet_names=bet_names_by_market.get(market_id, ()),
+        )
         if mapped is None:
             if (
                 _exact_sets_totals_map(market_type, bet_names_by_market.get(market_id, ()))
@@ -1637,12 +1718,14 @@ def parse_market_api_payloads(
             and not _is_boost_market(market_type)
             and _odds_have_sharp_anchor(raw_odds, _sharp_anchor_codes(bm_entities))
         )
-        # Best-of-3 exact-sets bijection (computed once/market from the FULL
-        # bet-name set — the market-level proof of format).
-        exact_sets_map = _exact_sets_totals_map(
-            market_type,
-            (str(b.get("betName") or "") for b in raw_bets if isinstance(b, Mapping)),
+        # FULL per-market bet-name set (computed once/market): the market-level
+        # proof of format for the exact-sets bijection AND the 3-way-handicap
+        # fail-close (the Draw leg condemns the market's team legs too).
+        market_bet_names = tuple(
+            str(b.get("betName") or "") for b in raw_bets if isinstance(b, Mapping)
         )
+        # Best-of-3 exact-sets bijection.
+        exact_sets_map = _exact_sets_totals_map(market_type, market_bet_names)
         event_id = _api_event_id(market_payload, url)
         home, away = _split_match_name(str(market_payload.get("subeventName") or "")) or ("", "")
         if not home and not away:
@@ -1689,7 +1772,15 @@ def parse_market_api_payloads(
                 if wanted is not None and market_key not in wanted:
                     continue
                 selection = exact_sets_selection
-            elif (mapped := _market_for_type(market_type, line, selection)) is not None:
+            elif (
+                mapped := _market_for_type(
+                    market_type,
+                    line,
+                    selection,
+                    bet_names=market_bet_names,
+                    soccer=_is_soccer_match_url(url),
+                )
+            ) is not None:
                 if capture_only_other:
                     continue
                 market_key, market_detail = mapped
@@ -1783,12 +1874,22 @@ def parse_legacy_match_page(
     )
     market_type = str(table.get("data-mname") or "").strip()
     snapshots: list[OddsSnapshotIn] = []
-    for row in table.select("tbody tr.diff-row.evTabRow"):
+    rows = table.select("tbody tr.diff-row.evTabRow")
+    # FULL table selection set (one legacy table = one market): the market-level
+    # 3-way-handicap proof — a Draw leg condemns the table's team legs too.
+    table_bet_names = tuple(name for name in (_legacy_row_selection(r) for r in rows) if name)
+    for row in rows:
         raw_selection = _legacy_row_selection(row)
         if not raw_selection:
             continue
         line = _legacy_row_line(row, raw_selection)
-        mapped = _market_for_type(market_type, line, raw_selection)
+        mapped = _market_for_type(
+            market_type,
+            line,
+            raw_selection,
+            bet_names=table_bet_names,
+            soccer=_is_soccer_match_url(url),
+        )
         if mapped is None:
             continue
         market_key, market_detail = mapped

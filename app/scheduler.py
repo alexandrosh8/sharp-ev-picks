@@ -740,6 +740,13 @@ def build_scheduler(
                 # price (change-only persistence -> old row, still current) is NOT
                 # dropped; only a stale/abandoned event is (review 2026-06-21).
                 max_age_seconds=14400.0,
+                # Fix 2026-08-02 (defect B): under VALUE_BETFAIR_API_PROMOTE the
+                # loader attributes each resolved Betfair event via the API
+                # capture's persisted event_source_links score, so promoted
+                # sharp anchors carry a REAL confidence/method instead of the
+                # blanket fail-honest None that kept every sharp premium pick
+                # rendered untrusted on the dashboard.
+                api_promote=settings.value_betfair_api_promote,
             )
             logger.info(
                 "LIVE sharp-anchor injection ENABLED (betfair=%s pinnacle=%s) — picks "

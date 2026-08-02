@@ -2486,6 +2486,17 @@
           const logv = Number(p.clv_log);
           return isFinite(logv) && Math.abs(logv) > CLV_LOG_CEILING;
         }
+        // Defect C (fix 2026-08-02): while a pick is OPEN (not settled/
+        // superseded) and no REAL close exists (closing_odds is null),
+        // closing_fair_probability is only the LIVE re-priced fair — at mint it
+        // equals model_probability, so the tautology read labelled every fresh
+        // open pick "Tautological Close Excluded". Pre-close, the honest
+        // provenance state is "no close recorded"; exclusion chips render only
+        // once a real close exists or the pick is closed. DISPLAY-STATE ONLY:
+        // isTrustedClv/clvExclusionOf (the trusted-CLV gating) are unchanged.
+        function closePending(p) {
+          return p.status !== "settled" && p.status !== "superseded" && p.closing_odds == null;
+        }
         function clvIsTautological(p) {
           const cf = numOf(p.closing_fair_probability), mf = numOf(p.model_probability);
           if (p.clv_log == null || !isFinite(cf) || !isFinite(mf)) return false;
@@ -2498,6 +2509,7 @@
           return null;
         }
         function clvStateLabel(p) {
+          if (closePending(p)) return "—"; // open + no real close: renders "no close recorded"
           const excl = clvExclusionOf(p);
           if (excl === "tautological") return "Tautological Close Excluded";
           if (excl === "circular") return "Circular Close Excluded";
@@ -4247,7 +4259,7 @@
           clvTag.textContent = clvState === "—" ? "no close recorded" : clvState;
           if (clvState === "—") clvTag.title = "no closing line captured for this pick yet";
           ev.appendChild(clvTag);
-          if (p.clv_log != null && !clvExclusionOf(p)) {
+          if (!closePending(p) && p.clv_log != null && !clvExclusionOf(p)) {
             const clvVal = document.createElement("span"); clvVal.className = "mono"; clvVal.style.marginLeft = "8px";
             clvVal.textContent = fmtSignedPct(clvPctFromLog(p.clv_log) / 100);
             ev.appendChild(clvVal);

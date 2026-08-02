@@ -1783,9 +1783,10 @@ def build_sharp_anchor_loader(
     use_betfair: bool,
     use_pinnacle: bool,
     max_age_seconds: float,
+    api_promote: bool = False,
 ) -> Callable[
     [str, Sequence[OddsSnapshotIn]],
-    Awaitable[tuple[list[OddsSnapshotIn], dict[tuple[str, str], tuple[float, str]]]],
+    Awaitable[tuple[list[OddsSnapshotIn], dict[tuple[str, str], tuple[float | None, str]]]],
 ]:
     """Pick-time SHARP-ANCHOR loader for PipelineDeps.sharp_anchor_loader.
 
@@ -1803,20 +1804,36 @@ def build_sharp_anchor_loader(
     ``(1.0, 'inline_betfair_canonical')``. Observability only: the snapshots
     and their acceptance are unchanged.
 
+    ``api_promote`` mirrors VALUE_BETFAIR_API_PROMOTE (fix 2026-08-02,
+    defect B): promoted Betfair-API rows are persisted onto the canonical
+    event under the SAME 'betfair exchange' name as scrape-persisted inline
+    rows, so this DB read is exactly where they become per-row
+    indistinguishable. When enabled, each resolved Betfair event's provenance
+    is attributed via the API capture's OWN persisted event_source_links row
+    (source='betfair_api'): link found -> (its hardened-matcher confidence,
+    'promoted_<its method>'), carried verbatim — a fuzzy score is never
+    rounded up to 1.0; no link -> the event's rows can only be
+    scrape-persisted inline (promoted rows always record a link), so
+    (1.0, 'inline_betfair_canonical'); link READ failure -> the explicit
+    fail-honest (None, 'inline_or_promoted_unattributed').
+
     FRESHNESS-GATED (review 2026-06-21): a LIVE pick must anchor on a CURRENT
     sharp line, so any captured snapshot older than ``max_age_seconds`` is
     dropped. The 'old price still valid' (change-only) reasoning applies to the
     settlement CLOSE, never to a live pick-time anchor.
     """
-    from app.storage.repositories import resolve_pinnacle_close_snaps
+    from app.storage.repositories import (
+        latest_source_link_provenance,
+        resolve_pinnacle_close_snaps,
+    )
 
     async def loader(
         sport_key: str, snapshots: Sequence[OddsSnapshotIn]
-    ) -> tuple[list[OddsSnapshotIn], dict[tuple[str, str], tuple[float, str]]]:
+    ) -> tuple[list[OddsSnapshotIn], dict[tuple[str, str], tuple[float | None, str]]]:
         base = arcadia_base_sport(sport_key)
         now = datetime.now(tz=UTC)
         out: list[OddsSnapshotIn] = []
-        provenance: dict[tuple[str, str], tuple[float, str]] = {}
+        provenance: dict[tuple[str, str], tuple[float | None, str]] = {}
         seen: set[str] = set()
 
         # temporal-leakage-1: gate freshness PER SOURCE, not on a single event-wide
@@ -1868,8 +1885,42 @@ def build_sharp_anchor_loader(
                     )
                     if betfair_rows:
                         event_snaps.extend(betfair_rows)
-                        # exact canonical-ref lookup — no pick-time matching
-                        provenance[(ref, "sharp")] = (1.0, "inline_betfair_canonical")
+                        if api_promote:
+                            # Promoted API rows share the inline 'betfair
+                            # exchange' name — attribute via the capture's own
+                            # persisted link (see docstring); read failure
+                            # fail-honests, never fabricates 1.0.
+                            try:
+                                link = await latest_source_link_provenance(
+                                    session, source="betfair_api", external_ref=ref
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "betfair promote link provenance read failed: %s",
+                                    type(exc).__name__,
+                                )
+                                provenance[(ref, "sharp")] = (
+                                    None,
+                                    "inline_or_promoted_unattributed",
+                                )
+                            else:
+                                if link is not None:
+                                    confidence, method = link
+                                    provenance[(ref, "sharp")] = (
+                                        confidence,
+                                        f"promoted_{method}"[:32],
+                                    )
+                                else:
+                                    # No API link ever attached rows here — the
+                                    # event's exchange rows are scrape-persisted
+                                    # inline on its own canonical ref.
+                                    provenance[(ref, "sharp")] = (
+                                        1.0,
+                                        "inline_betfair_canonical",
+                                    )
+                        else:
+                            # exact canonical-ref lookup — no pick-time matching
+                            provenance[(ref, "sharp")] = (1.0, "inline_betfair_canonical")
                 if use_pinnacle:
                     pin_provenance: dict[str, tuple[float, str]] = {}
                     pin_outcome: dict[str, str] = {}
