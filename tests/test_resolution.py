@@ -508,13 +508,15 @@ def test_conflicted_alias_never_resolves_again() -> None:
     assert "sporting x" in table.conflicts
 
 
-def test_seed_alias_conflicts_are_exactly_the_known_two() -> None:
+def test_seed_alias_conflicts_are_exactly_the_known_one() -> None:
     # Tripwire: any NEW cross-canonical alias claim added to the seed fails
-    # here. The two known conflicts (the América Futebol Clube / America
-    # Mineiro fork and the Drogheda United F.C. / Drogheda United fork) are
-    # quarantined: the alias resolves to its own normalized form, never to
-    # either claimant, instead of the old nondeterministic last-write-wins.
+    # here. The known conflict (the América Futebol Clube / America Mineiro
+    # fork) is quarantined: the alias resolves to its own normalized form,
+    # never to either claimant, instead of the old nondeterministic
+    # last-write-wins. (The Drogheda United F.C. / Drogheda United fork was
+    # MERGED into one group in the 2026-08-03 alias batch — same club.)
     table = AliasTable.from_seed()
-    assert set(table.conflicts) == {"america mineiro", "drogheda united"}
+    assert set(table.conflicts) == {"america mineiro"}
     assert table.canonical("America Mineiro") == "america mineiro"
     assert table.canonical("Drogheda United") == "drogheda united"
+    assert table.canonical("Drogheda United F.C.") == "drogheda united"

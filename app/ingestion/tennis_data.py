@@ -26,8 +26,16 @@ on before selection (this loader reports the honest winner-first truth and
 leaves that randomization to the backtest layer).
 
 DATA QUALITY: only ``Comment == "Completed"`` matches settle cleanly; Retired /
-Walkover / Awarded matches are surfaced via ``completed=False`` so the caller can
-quarantine them (a staked match-winner market would void or resolve ambiguously).
+Walkover / Awarded matches are surfaced via ``completed=False`` (plus the raw
+``comment``) so the caller can quarantine them (a staked match-winner market
+would void or resolve ambiguously).
+
+GAMES-LEVEL SCORES (settlement audit 2026-08-02 follow-up): the workbooks also
+carry per-set GAME scores (``W1``/``L1`` .. ``W5``/``L5``, winner-first) and set
+counts (``Wsets``/``Lsets``). These are parsed into ``winner_games``/
+``loser_games`` totals so a tennis GAME-handicap pick can be graded from real
+games — never from a set score. A half-blank set pair (one side missing) makes
+the totals None (refuse, never guess).
 
 Columns verified against the ATP 2023 workbook (36 cols, 2026-06-28). Decimal at
 the odds boundary (NUMERIC discipline — never float); tz-aware UTC dates only.
@@ -89,6 +97,12 @@ class TennisMatchRow:
     maxl: Decimal | None  # best-of-books pre-match, LOSER side (soft)
     avgw: Decimal | None  # average pre-match, WINNER side
     avgl: Decimal | None  # average pre-match, LOSER side
+    # Games-level result fields (defaults keep older constructions valid).
+    comment: str | None = None  # raw Comment: "Completed"/"Retired"/"Walkover"/...
+    winner_games: int | None = None  # total games, WINNER side (sum of W1..W5)
+    loser_games: int | None = None  # total games, LOSER side (sum of L1..L5)
+    winner_sets: int | None = None  # Wsets column (sets won by the winner)
+    loser_sets: int | None = None  # Lsets column
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -106,6 +120,46 @@ def _to_decimal(value: object) -> Decimal | None:
     except (InvalidOperation, ValueError):
         return None
     return dec if dec > 1 else None
+
+
+def _to_int(value: object) -> int | None:
+    """A game/set-count cell -> non-negative int, or None for missing/garbage.
+
+    xlsx cells arrive as int/float (6 or 6.0), CSV as str; anything that is not
+    a whole non-negative number is None — the caller refuses, never guesses."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        dec = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    if dec < 0 or dec != dec.to_integral_value():
+        return None
+    return int(dec)
+
+
+def _games_totals(raw: Mapping[str, object]) -> tuple[int | None, int | None]:
+    """Sum the per-set game columns (W1..W5 / L1..L5) into (winner, loser)
+    totals. Sets are paired: a set with BOTH cells blank simply wasn't played;
+    a HALF-blank pair is a source anomaly -> (None, None) (refuse). No parsed
+    set at all -> (None, None)."""
+    winner_total = loser_total = 0
+    any_set = False
+    for i in range(1, 6):
+        w, l_ = _to_int(raw.get(f"W{i}")), _to_int(raw.get(f"L{i}"))
+        if w is None and l_ is None:
+            continue
+        if w is None or l_ is None:
+            return None, None
+        winner_total += w
+        loser_total += l_
+        any_set = True
+    if not any_set:
+        return None, None
+    return winner_total, loser_total
 
 
 def _parse_date(value: object) -> datetime | None:
@@ -144,6 +198,7 @@ def _row_from_mapping(raw: Mapping[str, object]) -> TennisMatchRow | None:
     if winner is None or loser is None or when is None:
         return None
     comment = _opt_str(raw.get("Comment")) or ""
+    winner_games, loser_games = _games_totals(raw)
     return TennisMatchRow(
         match_date=when,
         tournament=_opt_str(raw.get("Tournament")),
@@ -158,6 +213,11 @@ def _row_from_mapping(raw: Mapping[str, object]) -> TennisMatchRow | None:
         maxl=_to_decimal(raw.get("MaxL")),
         avgw=_to_decimal(raw.get("AvgW")),
         avgl=_to_decimal(raw.get("AvgL")),
+        comment=_opt_str(raw.get("Comment")),
+        winner_games=winner_games,
+        loser_games=loser_games,
+        winner_sets=_to_int(raw.get("Wsets")),
+        loser_sets=_to_int(raw.get("Lsets")),
     )
 
 

@@ -1,0 +1,70 @@
+# Rejected alias candidates — NEGATIVE-alias suggestions (human consideration
+# only; add the vetted ones to the _NOT_ADDED list in
+# tests/test_resolution_nameform_aliases.py so they stay distinct forever):
+# _NOT_ADDED_CANDIDATES = [
+#     ('atletico madrid', 'atletico guayaquil'),  # weak_similarity — poisoned base: seed alias 'Atletico'->Atletico Madrid made canonical('Atletico FC') = atletico madrid (alias removed this batch); bare 'atletico' must stay unowned - Ecuador Serie B link needs league-scoped aliasing, not a seed alias
+#     ('st albans city', 'st albans saints'),  #  — query base poisoned by seed alias 'St. Albans'->St. Albans City FC (England) - alias removed this batch; bare 'st albans' left unowned (same-name clubs in England and Australia)
+#     ('canberra', 'canberra gunners'),  # city_club_ambiguity — bare-city NBL1: the same query near-missed BOTH Canberra Gunners (men) and Canberra Nationals (women) on the same slate - doubleheader gender ambiguity, wrong-game-unsafe
+#     ('canberra', 'canberra nationals'),  # weak_similarity|city_club_ambiguity — bare-city NBL1: second candidate of the Canberra gender-ambiguous pair (delta 120min = classic doubleheader)
+#     ('cairns marlins', 'cairns dolphins'),  #  — distinct teams: Cairns Marlins (men) vs Cairns Dolphins (women), NBL1 North
+#     ('southern district', 'southern districts spartans'),  #  — cross-sport bare-name clash: Southern District FC (Hong Kong Premier League soccer); house precedent rejects cross-sport shared names (FC Jazz/Utah Jazz)
+#     ('dandenong', 'dandenong rangers'),  # city_club_ambiguity — bare-city NBL1 (Dandenong): men/women doubleheader ambiguity class - see Canberra evidence
+#     ('eltham', 'eltham wildcats'),  # weak_similarity|city_club_ambiguity — bare-city NBL1 (Eltham): doubleheader ambiguity class
+#     ('eltham', 'eltham wildcats'),  # weak_similarity|city_club_ambiguity — bare-city NBL1 (Eltham): doubleheader ambiguity class
+#     ('geelong', 'geelong supercats'),  # weak_similarity|city_club_ambiguity — bare-city NBL1 (Geelong): doubleheader ambiguity class
+#     ('geelong', 'geelong supercats'),  # weak_similarity|city_club_ambiguity — bare-city NBL1 (Geelong): doubleheader ambiguity class
+#     ('knox', 'knox raiders'),  # weak_similarity|city_club_ambiguity — bare-city NBL1 (Knox): doubleheader ambiguity class
+#     ('mt gambier', 'mt gambier pioneers'),  # city_club_ambiguity — bare-city NBL1 (Mt Gambier): doubleheader ambiguity class
+#     ('nunawading', 'nunawading spectres'),  # city_club_ambiguity — bare-city NBL1 (Nunawading): doubleheader ambiguity class
+#     ('nunawading', 'nunawading spectres'),  # city_club_ambiguity — bare-city NBL1 (Nunawading): doubleheader ambiguity class
+#     ('waverley', 'waverley falcons'),  # city_club_ambiguity — bare-city NBL1 (Waverley): doubleheader ambiguity class
+#     ('waverley', 'waverley falcons'),  # city_club_ambiguity — bare-city NBL1 (Waverley): doubleheader ambiguity class
+#     ('waverley', 'waverley falcons'),  # city_club_ambiguity — bare-city NBL1 (Waverley): doubleheader ambiguity class
+#     ('waverley', 'waverley falcons'),  # city_club_ambiguity — bare-city NBL1 (Waverley): doubleheader ambiguity class
+#     ('argentino de quilmes', 'argentinos juniors'),  # weak_similarity — distinct clubs: Argentino de Quilmes vs Argentinos Juniors; kickoff delta 28h also fails the accept bound
+#     ('defensores unidos', 'defensores de cambaceres'),  # weak_similarity — distinct clubs: Defensores Unidos (Zarate) vs Defensores de Cambaceres (Ensenada); kickoff delta 24h
+#     ('san martin de san juan', 'san martin de tucuman'),  # weak_similarity — distinct clubs: San Martin de San Juan vs San Martin de Tucuman - classic same-prefix trap
+#     ('ferro', 'ferro carril oeste'),  # weak_similarity|city_club_ambiguity — bare 'ferro' contested: Ferro Carril Oeste (Buenos Aires) vs Ferro Carril Oeste (General Pico) both active
+#     ('sol de america', 'sol de america de formosa'),  # city_club_ambiguity — bare 'sol de america' is Club Sol de America (Paraguay Primera) - aliasing it to the Formosa club would merge distinct clubs
+#     ('universidad catolica', 'universidad catolica del ecuador'),  # city_club_ambiguity — bare 'universidad catolica' is Universidad Catolica (Chile) - aliasing to the Ecuadorian club would merge two first-division clubs
+#     ('rangers', 'csd rangers'),  # weak_similarity|city_club_ambiguity — bare 'rangers' is Rangers FC (Glasgow) - CD-Nacional class; Rangers de Talca needs league-scoped handling
+#     ('perth azzurri', 'perth'),  # weak_similarity|city_club_ambiguity — bare 'perth' contested (Perth Glory, Perth SC/Azzurri, Perth RedStar)
+#     ('fluminense f c', 'fluminense de joinville'),  # weak_similarity — normalize strips '-SC' so Fluminense-SC already collides with the Fluminense FC (RJ) base; an alias would formalize a giant-club merge - needs a scoped fix, not a seed alias
+#     ('athletic mg', 'athletic'),  # city_club_ambiguity — bare 'athletic' equals normalize('Athletic Club') = Athletic Bilbao's listed form - CD-Nacional class
+#     ('operario', 'operario ferroviario'),  # weak_similarity|city_club_ambiguity — bare 'operario' shared by Operario-PR, Operario-MS and Operario VG - not seed-safe
+#     ('operario', 'operario ferroviario'),  # weak_similarity|city_club_ambiguity — bare 'operario' shared by multiple Brazilian Operarios - not seed-safe
+#     ('operario', 'operario ferroviario'),  # weak_similarity|city_club_ambiguity — bare 'operario' shared by multiple Brazilian Operarios - not seed-safe
+#     ('americano bacabal', 'americano'),  # city_club_ambiguity — bare 'americano' shared (Americano FC, Rio de Janeiro) - not seed-safe
+#     ('shenzhen', 'shenzhen 2028'),  # city_club_ambiguity — bare 'shenzhen' shared (Shenzhen Peng City ex-Shenzhen FC, Shenzhen Juniors) - not seed-safe
+#     ('santa cruz', 'santa cruz pe'),  # city_club_ambiguity — bare 'santa cruz' shared (Santa Cruz de Natal-RN, active Serie D) - not seed-safe
+#     ('portuguesa', 'portuguesa sp'),  # city_club_ambiguity — bare 'portuguesa' shared (AA Portuguesa-RJ, Portuguesa Santista, Portuguesa FC Venezuela) - not seed-safe
+#     ('mornar', 'mornar bar'),  # city_club_ambiguity — cross-sport clash: KK Mornar Bar (ABA basketball) shares the bare name - FC Jazz precedent
+#     ('neftchi baku', 'neftchi'),  # city_club_ambiguity — bare 'neftchi' shared (Neftchi Baku vs Neftchi Fergana, Uzbekistan) - not seed-safe
+#     ('shkendija 79', 'shkendija'),  # city_club_ambiguity — bare 'shkendija' shared (Shkendija Tetovo vs Kosovar/Albanian Shkendija clubs) - not seed-safe
+#     ('ce europa', 'europa'),  # weak_similarity|city_club_ambiguity — bare 'europa' shared (Europa FC and Europa Point FC, Gibraltar - UEFA-active) vs CE Europa (Barcelona)
+#     ('ce europa', 'europa'),  # weak_similarity|city_club_ambiguity — bare 'europa' shared (Europa FC Gibraltar) - not seed-safe
+#     ('ss virtus', 'virtus'),  # weak_similarity|city_club_ambiguity — bare 'virtus' shared (SS Virtus San Marino vs Italian Virtus clubs incl. cross-sport Virtus Bologna)
+#     ('peninsula', 'peninsula power'),  # city_club_ambiguity — bare 'peninsula' contested (Peninsula Power QLD vs Peninsula Strikers, NPL Victoria)
+#     ('peninsula', 'peninsula power'),  # city_club_ambiguity — bare 'peninsula' contested (Peninsula Strikers, NPL Victoria)
+#     ('hurstville zagreb', 'hurstville'),  # city_club_ambiguity — bare 'hurstville' contested (Hurstville Zagreb vs Hurstville City Minotaurs, NSW)
+#     ('hurstville zagreb', 'hurstville'),  # city_club_ambiguity — bare 'hurstville' contested (Hurstville City Minotaurs, NSW)
+#     ('kopavogur', 'hk kopavogur'),  # city_club_ambiguity — bare 'kopavogur' contested (HK, IK and Breidablik are all Kopavogur clubs)
+#     ('throttur', 'throttur reykjavik'),  # weak_similarity|city_club_ambiguity — bare 'throttur' contested (Throttur Reykjavik vs Throttur Vogar/Neskaupstadur)
+#     ('paysandu pa', 'paysandu f c'),  #  — contested base: arcadia 'Paysandu F.C.' (Paysandu SC, Belem - Serie C) normalizes to 'paysandu f c', a base ALSO claimed by the Uruguayan Paysandu FC Wikidata seed entry (entry removed this batch as a latent poison); the base is used by two real clubs so it stays unowned - needs league-scoped aliasing
+#     ('bregenz', 'sw bregenz'),  # city_club_ambiguity — kickoff delta 480min exceeds the 360min accept bound - friendly with unproven fixture agreement; re-queue on tighter evidence
+#     ('ceara in running', 'ceara'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Ceara) - ingestion-layer fix, not an alias
+#     ('juventude in running', 'juventude'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Juventude) - ingestion-layer fix, not an alias
+#     ('gyori eto in running', 'gyori eto'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Gyori ETO) - ingestion-layer fix, not an alias
+#     ('inter escaldes in running', 'inter d escaldes'),  # weak_similarity — '[In Running]' capture artifact (Inter Club d'Escaldes) - ingestion-layer fix, not an alias
+#     ('kups in running', 'kups'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (KuPS) - ingestion-layer fix, not an alias
+#     ('levski sofia in running', 'levski sofia'),  # city_club_ambiguity — '[In Running]' capture artifact (Levski Sofia) - ingestion-layer fix, not an alias
+#     ('riga in running', 'riga'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Riga FC) - ingestion-layer fix, not an alias
+#     ('shamrock rovers in running', 'shamrock rovers'),  # city_club_ambiguity — '[In Running]' capture artifact (Shamrock Rovers) - ingestion-layer fix, not an alias
+#     ('bate borisov in running', 'bate borisov'),  # city_club_ambiguity — '[In Running]' capture artifact (BATE Borisov) - ingestion-layer fix, not an alias
+#     ('belgium in running', 'belgium'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Belgium NT) - ingestion-layer fix, not an alias
+#     ('colombia in running', 'colombia'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Colombia NT) - ingestion-layer fix, not an alias
+#     ('egypt in running', 'egypt'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Egypt NT) - ingestion-layer fix, not an alias
+#     ('england in running', 'england'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (England NT) - ingestion-layer fix, not an alias
+#     ('norway in running', 'norway'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Norway NT) - ingestion-layer fix, not an alias
+#     ('spain in running', 'spain'),  # weak_similarity|city_club_ambiguity — '[In Running]' capture artifact (Spain NT) - ingestion-layer fix, not an alias
+# ]

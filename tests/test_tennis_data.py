@@ -235,3 +235,68 @@ def test_season_url_atp_and_wta() -> None:
 def test_season_url_unknown_tour_raises() -> None:
     with pytest.raises(ValueError, match="unknown tour"):
         season_url("itf", 2023)
+
+
+# --- games-level scores (settlement audit 2026-08-02 follow-up) -------------
+_GAMES_HEADER = (
+    "ATP,Location,Tournament,Date,Series,Court,Surface,Round,Best of,Winner,Loser,"
+    "WRank,LRank,W1,L1,W2,L2,W3,L3,W4,L4,W5,L5,Wsets,Lsets,Comment,"
+    "PSW,PSL,MaxW,MaxL,AvgW,AvgL"
+)
+
+
+def _games_csv(*rows: str) -> str:
+    return "\n".join((_GAMES_HEADER, *rows)) + "\n"
+
+
+def test_per_set_games_sum_to_totals_with_comment() -> None:
+    row = (
+        "1,Umag,Croatia Open,19/07/2026,ATP250,Outdoor,Clay,Final,3,"
+        "Rublev A.,Darderi L.,11,53,6,4,6,3,,,,,,,2,0,Completed,"
+        "1.60,2.40,1.65,2.45,1.58,2.35"
+    )
+    r = parse_season_csv(_games_csv(row))[0]
+    assert r.comment == "Completed" and r.completed is True
+    assert (r.winner_games, r.loser_games) == (12, 7)  # 6-4 6-3
+    assert (r.winner_sets, r.loser_sets) == (2, 0)
+
+
+def test_half_blank_set_pair_refuses_games_totals() -> None:
+    # W2 present but L2 blank: source anomaly -> totals None (refuse, no guess)
+    row = (
+        "1,Umag,Croatia Open,19/07/2026,ATP250,Outdoor,Clay,Final,3,"
+        "Rublev A.,Darderi L.,11,53,6,4,6,,,,,,,,2,0,Completed,"
+        "1.60,2.40,1.65,2.45,1.58,2.35"
+    )
+    r = parse_season_csv(_games_csv(row))[0]
+    assert r.winner_games is None and r.loser_games is None
+    assert r.completed is True  # the completion flag is independent of the anomaly
+
+
+def test_no_set_columns_at_all_leaves_games_none() -> None:
+    # legacy header (no W1..L5): totals None, comment still surfaced
+    r = parse_season_csv(_csv(_ROW.replace(",Completed,", ",Retired,")))[0]
+    assert r.winner_games is None and r.loser_games is None
+    assert r.comment == "Retired" and r.completed is False
+
+
+def test_retired_row_keeps_partial_games_and_raw_comment() -> None:
+    row = (
+        "1,Umag,Croatia Open,20/07/2026,ATP250,Outdoor,Clay,QF,3,"
+        "Alpha A.,Beta B.,1,2,6,4,2,1,,,,,,,1,0,Retired,"
+        "1.60,2.40,,,,"
+    )
+    r = parse_season_csv(_games_csv(row))[0]
+    assert r.completed is False and r.comment == "Retired"
+    assert (r.winner_games, r.loser_games) == (8, 5)  # games at stoppage
+
+
+def test_games_cells_reject_negative_and_fractional() -> None:
+    row = (
+        "1,Umag,Croatia Open,20/07/2026,ATP250,Outdoor,Clay,QF,3,"
+        "Alpha A.,Beta B.,1,2,-6,4,6.5,1,,,,,,,2,0,Completed,"
+        "1.60,2.40,,,,"
+    )
+    r = parse_season_csv(_games_csv(row))[0]
+    # -6 and 6.5 are garbage -> their pairs half-blank -> totals refuse
+    assert r.winner_games is None and r.loser_games is None

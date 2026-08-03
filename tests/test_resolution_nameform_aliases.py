@@ -102,6 +102,34 @@ _NOT_ADDED: list[tuple[str, str]] = [
     ("Brevard SC", "Brevard Fire"),  # distinct Brevard clubs
     ("Zielona Gora", "Lechia Zielona Gora"),  # bare city name — ambiguous
     ("Galanta", "Slovan Galanta"),  # bare "Galanta" — disambiguating prefix
+    # 2026-08-03 queue batch (docs/review/alias_candidates_queue_2026-08-03.csv)
+    # — reviewed and REJECTED; must stay distinct forever:
+    ("Atletico FC", "Atletico Madrid"),  # removed poison: bare 'atletico' unowned
+    ("St Albans", "St. Albans City FC"),  # removed poison: bare form unowned (AUS/ENG clubs)
+    ("Paysandu PA", "Paysandú F.C."),  # contested base: Paysandu SC (Belém) vs Paysandú FC (UY)
+    ("Athletic Club MG", "Athletic Club"),  # bare 'athletic' = Athletic Bilbao's listed form
+    ("Operario", "Operario Ferroviario"),  # bare 'operario' shared by -PR/-MS/-VG
+    ("Americano Bacabal", "Americano"),  # bare 'americano' shared (Americano-RJ)
+    ("Santa Cruz", "Santa Cruz PE"),  # bare shared (Santa Cruz de Natal-RN)
+    ("Portuguesa", "Portuguesa SP"),  # bare shared (Portuguesa-RJ/Santista/Venezuela)
+    ("Universidad Catolica", "Universidad Catolica del Ecuador"),  # bare = the Chilean club
+    ("Rangers", "CSD Rangers"),  # bare 'rangers' = Rangers FC (Glasgow)
+    ("Perth Azzurri", "Perth"),  # bare 'perth' contested (Glory/SC/RedStar)
+    ("Sol de America", "Sol de America de Formosa"),  # bare = the Paraguayan club
+    ("San Martin de San Juan", "San Martin de Tucuman"),  # distinct clubs, same prefix
+    ("Cairns Marlins", "Cairns Dolphins"),  # men's vs women's NBL1 teams
+    ("Canberra Gunners", "Canberra Nationals"),  # men's vs women's NBL1 teams
+    ("Defensores Unidos", "Defensores de Cambaceres"),  # distinct clubs (Zárate/Ensenada)
+    ("Argentino de Quilmes", "Argentinos Juniors"),  # distinct clubs
+    ("Ferro", "Ferro Carril Oeste"),  # bare 'ferro' contested (BA vs General Pico)
+    ("Neftchi", "Neftchi Baku"),  # bare shared (Neftchi Fergana)
+    ("Europa", "CE Europa"),  # bare shared (Europa FC / Europa Point, Gibraltar)
+    ("Shkendija", "Shkendija 79"),  # bare shared across Balkan Shkendija clubs
+    ("Virtus", "SS Virtus"),  # bare shared (Italian Virtus clubs, cross-sport Bologna)
+    ("Mornar", "Mornar Bar"),  # cross-sport clash (KK Mornar, ABA)
+    ("Peninsula", "Peninsula Power"),  # bare contested (Peninsula Strikers, NPL VIC)
+    ("Hurstville", "Hurstville Zagreb"),  # bare contested (Hurstville City Minotaurs)
+    ("Shenzhen", "Shenzhen 2028"),  # bare contested (Shenzhen Peng City / Juniors)
 ]
 
 

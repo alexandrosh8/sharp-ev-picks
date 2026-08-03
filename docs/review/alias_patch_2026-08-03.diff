@@ -1,0 +1,323 @@
+--- a/app/resolution/aliases_seed.json
++++ b/app/resolution/aliases_seed.json
+@@ -408,7 +408,8 @@
+       "Athletic Bilbao"
+     ],
+     "Athlone Town F.C.": [
+-      "Athlone Town"
++      "Athlone Town",
++      "Athlone"
+     ],
+     "Atlanta Dream": [
+       "Atlanta Dream W"
+@@ -628,7 +629,8 @@
+       "Bradford"
+     ],
+     "Bray Wanderers A.F.C.": [
+-      "Bray Wanderers"
++      "Bray Wanderers",
++      "Bray"
+     ],
+     "Brentford FC": [
+       "Brentford Football Club"
+@@ -1142,7 +1144,8 @@
+       "Derby County Football Club"
+     ],
+     "Derry City F.C.": [
+-      "Derry City"
++      "Derry City",
++      "Derry"
+     ],
+     "Desportivo de Chaves": [
+       "Desp. Chaves"
+@@ -1589,7 +1592,8 @@
+       "Gallipoli Football 1909 SSD"
+     ],
+     "Galway United F.C.": [
+-      "Galway United"
++      "Galway United",
++      "Galway"
+     ],
+     "Gareji": [
+       "Gareji Sagarejo"
+@@ -3075,7 +3079,8 @@
+       "CA San Martín (San Juan)"
+     ],
+     "Sarpsborg 08 FF": [
+-      "Sarpsborg 08 Fotballforening"
++      "Sarpsborg 08 Fotballforening",
++      "Sarpsborg"
+     ],
+     "Scarborough Athletic FC": [
+       "Scarborough"
+@@ -3906,6 +3911,270 @@
+       "Évian",
+       "Évian Thonon Gaillard",
+       "Évian Thonon Gaillard Football Club"
++    ],
++    "Edmonton Elks": [
++      "EDM Elks"
++    ],
++    "Hamilton Tiger-Cats": [
++      "HAM Tiger Cats"
++    ],
++    "Penrith Panthers": [
++      "Penrith P."
++    ],
++    "Atletico Mineiro": [
++      "Atletico MG"
++    ],
++    "Botafogo FR RJ": [
++      "Botafogo RJ"
++    ],
++    "Gremio FBPA": [
++      "Gremio"
++    ],
++    "Cuiaba EC": [
++      "Cuiaba"
++    ],
++    "Goias EC": [
++      "Goias"
++    ],
++    "Sao Bernardo SP": [
++      "Sao Bernardo"
++    ],
++    "Audax Rio": [
++      "Audax RJ"
++    ],
++    "Tigres do Brasil": [
++      "Tigres Brasil"
++    ],
++    "SP Tre Fiori": [
++      "Tre Fiori"
++    ],
++    "CS Petrocub": [
++      "Petrocub"
++    ],
++    "NK Celje": [
++      "Celje"
++    ],
++    "SK Sturm Graz": [
++      "Sturm Graz"
++    ],
++    "Vardar Skopje": [
++      "Vardar"
++    ],
++    "Cracovia Krakow": [
++      "Cracovia"
++    ],
++    "Fram Reykjavik": [
++      "Fram"
++    ],
++    "Hviti Riddarinn": [
++      "Hviti"
++    ],
++    "FH Hafnarfjordur": [
++      "Hafnarfjordur"
++    ],
++    "Maardu Linnameeskond": [
++      "Maardu"
++    ],
++    "PAOK Salonika": [
++      "PAOK"
++    ],
++    "Sheriff Tiraspol": [
++      "Sheriff"
++    ],
++    "Guangzhou Dandelion Alpha": [
++      "Guangzhou Dandelion"
++    ],
++    "Nantong Haimen Codion": [
++      "Nantong Haimen"
++    ],
++    "Xi'an Chongde Ronghai": [
++      "Shanxi Chongde Ronghai"
++    ],
++    "Wenzhou Professional": [
++      "Wenzhou"
++    ],
++    "Zhejiang Professional": [
++      "Zhejiang"
++    ],
++    "Deportivo Cuenca": [
++      "Dep. Cuenca"
++    ],
++    "Villa Nova MG": [
++      "Villa Nova"
++    ],
++    "Sydney United": [
++      "Sydney Utd"
++    ],
++    "Launceston United Soccer": [
++      "Launceston United"
++    ],
++    "Hills United Brumbies": [
++      "Hills United"
++    ],
++    "KFUM Oslo": [
++      "KFUM"
++    ],
++    "SK Brann": [
++      "Brann"
++    ],
++    "Khangarid Klub": [
++      "Khangarid"
++    ],
++    "Zhenis": [
++      "Zhenys"
++    ],
++    "Brown de Adrogue": [
++      "Brown Adrogue"
++    ],
++    "Talleres de Remedios": [
++      "Talleres R.E."
++    ],
++    "Juventud Unida San Miguel": [
++      "Juventud Unida S.M."
++    ],
++    "Victoriano Arenas": [
++      "Victoriano A."
++    ],
++    "Guemes": [
++      "A. Guemes"
++    ],
++    "Central Norte Salta": [
++      "Central Norte"
++    ],
++    "Argentino Monte Maiz": [
++      "Argentino MM"
++    ],
++    "Gimnasia y Esgrima de Concepcion": [
++      "Gimnasia E.R."
++    ],
++    "Arbroath": [
++      "Abroath"
++    ],
++    "Airdrieonians": [
++      "Airdrie"
++    ],
++    "Dundee United": [
++      "Dundee Utd"
++    ],
++    "Hamilton Academical": [
++      "Hamilton"
++    ],
++    "Inverness CT": [
++      "Inverness"
++    ],
++    "Queen of the South": [
++      "Queen of South"
++    ],
++    "Miramar Misiones": [
++      "Miramar"
++    ],
++    "Floresta EC": [
++      "Floresta"
++    ],
++    "XV de Piracicaba": [
++      "Piracicaba"
++    ],
++    "Treze": [
++      "Treze PB"
++    ],
++    "Deportivo Santo Domingo": [
++      "Dep. Santo Domingo"
++    ],
++    "Dinamo City": [
++      "Dinamo Tirana"
++    ],
++    "03 Differdange": [
++      "Differdange"
++    ],
++    "CSKA 1948 Sofia": [
++      "CSKA 1948"
++    ],
++    "Debreceni VSC": [
++      "Debrecen"
++    ],
++    "Hegelmann Litauen": [
++      "Hegelmann"
++    ],
++    "GKS Katowice": [
++      "Katowice"
++    ],
++    "KF Dukagjini": [
++      "Dukagjini"
++    ],
++    "SP La Fiorita": [
++      "La Fiorita"
++    ],
++    "Ludogorets Razgrad": [
++      "Ludogorets"
++    ],
++    "Milsami Ursidos": [
++      "Milsami"
++    ],
++    "Polissya Zhytomyr": [
++      "Polissya"
++    ],
++    "Rakow Czestochowa": [
++      "Rakow"
++    ],
++    "Sileks Kratovo": [
++      "Sileks"
++    ],
++    "Valur Reykjavik": [
++      "Valur"
++    ],
++    "Zrinjski Mostar": [
++      "Zrinjski"
++    ],
++    "Zira IK": [
++      "Zira"
++    ],
++    "Dziugas Telsiai": [
++      "Dziugas"
++    ],
++    "Arsenal Dzyarzhynsk": [
++      "Arsenal Dzerzhinsk"
++    ],
++    "Curtin University": [
++      "Curtin Univ"
++    ],
++    "Inglewood United": [
++      "Inglewood Utd"
++    ],
++    "Murdoch University Melville": [
++      "Murdoch Melville"
++    ],
++    "North Geelong Warriors": [
++      "North Geelong"
++    ],
++    "Port Melbourne Sharks": [
++      "Port Melbourne"
++    ],
++    "Manningham United Blues": [
++      "Manningham United"
++    ],
++    "Minnesota United": [
++      "Minnesota Utd"
++    ],
++    "Nashville SC": [
++      "Nashville Soccer Club"
++    ],
++    "D.C. United": [
++      "DC United"
++    ],
++    "Incheon United": [
++      "Incheon Utd"
++    ],
++    "SER Caxias": [
++      "Caxias"
++    ],
++    "Ferroviaria SP": [
++      "Ferroviaria"
++    ],
++    "Sport Recife": [
++      "Sport do Recife"
++    ],
++    "KF Drita": [
++      "Drita"
+     ]
+   }
+ }
