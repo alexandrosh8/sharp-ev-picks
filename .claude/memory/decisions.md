@@ -1027,3 +1027,9 @@ coverage accrues.
   `scraped_date` semantics. score_only (finished-score) stays Playwright header-only.
   Still OFF by default; READ-ONLY GET-only. Files: app/ingestion/oddsportal_json.py,
   app/ingestion/oddsportal.py, app/config.py, app/scheduler.py.
+
+- **Consensus-anchored picks = informational-only, pinned (2026-08-03):**
+  ADR-0027 (docs/adr/adr-0027-consensus-anchor-evidence-and-actionability.md) —
+  consensus trusted CLV −0.0705 [−0.1230, −0.0180] n=153 vs sharp cells positive;
+  never actionable/alerted, keep minting at volume tier for telemetry; revisit only
+  at n≥100 post-2026-08-03 with CI excluding 0 from above (operator-signed).
