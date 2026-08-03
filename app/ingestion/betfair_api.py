@@ -107,6 +107,12 @@ EXTENDED_MARKET_TYPES: tuple[str, ...] = (
     *OVER_UNDER_MARKET_TYPES,
 )
 _OVER_UNDER_TYPE_RE = re.compile(r"^OVER_UNDER_(\d{2})$")
+# Extended-catalogue eventIds cap: 11 extended market types per event x 18
+# events = 198 markets <= the 200-result catalogue ceiling, so one filtered
+# call can never lose markets to FIRST_TO_START truncation (live defect
+# 2026-08-03 — the unfiltered call covered only the ~18 soonest events of the
+# whole window and starved the capture to 0 lines on a full slate).
+_EXTENDED_MAX_EVENTS = 18
 # Betfair's constant selectionId for "The Draw" on a soccer Match-Odds market.
 DRAW_SELECTION_ID = 58805
 
@@ -1035,6 +1041,7 @@ class BetfairApiClient:
         market_type_codes: Sequence[str] = (MARKET_TYPE_MATCH_ODDS,),
         max_results: int = 200,
         include_market_description: bool = False,
+        event_ids: Sequence[str] | None = None,
     ) -> list[BetfairMarketCatalogue]:
         if isinstance(max_results, bool) or not 1 <= max_results <= MAX_MARKETS_PER_FETCH:
             raise BetfairApiError(f"betfair max_results must be within 1..{MAX_MARKETS_PER_FETCH}")
@@ -1048,7 +1055,11 @@ class BetfairApiClient:
             _OP_LIST_MARKET_CATALOGUE,
             {
                 "filter": _build_filter(
-                    event_type_ids, market_type_codes, market_start_from, market_start_to
+                    event_type_ids,
+                    market_type_codes,
+                    market_start_from,
+                    market_start_to,
+                    event_ids=event_ids,
                 ),
                 "marketProjection": projection,
                 "maxResults": max_results,
@@ -1146,6 +1157,7 @@ class BetfairApiClient:
         *,
         market_start_from: datetime,
         market_start_to: datetime,
+        event_ids: Sequence[str],
         event_type_ids: Sequence[str] = (EVENT_TYPE_SOCCER,),
         max_results: int = 200,
     ) -> tuple[
@@ -1156,7 +1168,18 @@ class BetfairApiClient:
         market types plus ONE batched book pass — the exact request shape of the
         h2h path, so arming the flag adds exactly one catalogue+book batch per
         cycle. Empty catalogue -> ([], {}) (a benign quiet slate; RPC errors
-        raise, never a silent success)."""
+        raise, never a silent success).
+
+        ``event_ids`` (REQUIRED — the matched Betfair events, live defect
+        2026-08-03): an unfiltered call caps at ``max_results`` markets ~= the
+        ~18 soonest events of the window (11 types/event, FIRST_TO_START) and
+        starves the capture to 0 lines on a full slate. Empty -> ([], {}) with
+        NO network call. Ids beyond ``_EXTENDED_MAX_EVENTS`` are truncated
+        (caller order preserved — soonest-first from the h2h scan) so the
+        catalogue result ceiling can never silently drop markets mid-slate."""
+        ids = list(event_ids)[:_EXTENDED_MAX_EVENTS]
+        if not ids:
+            return [], {}
         catalogue = await self.list_market_catalogue(
             event_type_ids=event_type_ids,
             market_start_from=market_start_from,
@@ -1164,6 +1187,7 @@ class BetfairApiClient:
             market_type_codes=EXTENDED_MARKET_TYPES,
             max_results=max_results,
             include_market_description=True,
+            event_ids=ids,
         )
         if not catalogue:
             return [], {}
@@ -1176,10 +1200,18 @@ def _build_filter(
     market_type_codes: Sequence[str],
     market_start_from: datetime | None,
     market_start_to: datetime | None,
+    event_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     market_filter: dict[str, Any] = {"eventTypeIds": list(event_type_ids)}
     if market_type_codes:
         market_filter["marketTypeCodes"] = list(market_type_codes)
+    if event_ids:
+        # Scope the catalogue to specific Betfair events (the extended-markets
+        # fix, live defect 2026-08-03): without this, FIRST_TO_START + the
+        # 200-result cap silently truncate a full slate to the ~18
+        # soonest-starting events — which almost never intersect the matched
+        # canonical slate, starving the capture to lines=0.
+        market_filter["eventIds"] = list(event_ids)
     time_range: dict[str, str] = {}
     if market_start_from is not None:
         time_range["from"] = _iso_z(market_start_from)
@@ -1470,19 +1502,26 @@ class BetfairApiShadowCapture:
         return rows
 
     async def _fetch_extended_quotes(
-        self, query_now: datetime, odds: Sequence[BetfairMatchOdds]
+        self,
+        query_now: datetime,
+        odds: Sequence[BetfairMatchOdds],
+        matched_event_ids: Sequence[str],
     ) -> tuple[dict[str, list[BetfairLineQuote]], bool]:
-        """({betfair_event_id: line quotes}, failed) for the extended markets.
+        """({betfair_event_id: line quotes}, failed) for the extended markets
+        of the MATCHED Betfair events only (eventIds-filtered catalogue — see
+        the live-defect note on ``fetch_extended_line_books``). No matched
+        events -> no network call at all.
 
         A fetch/RPC failure is FLAGGED (WARNING, type-only — never a URL or
         token) and returns failed=True, but never kills the h2h anchor capture:
         the extended feed is an add-on, the h2h anchor is live-promoted."""
-        if not self._extended_markets:
+        if not self._extended_markets or not matched_event_ids:
             return {}, False
         try:
             catalogue, books = await self._client.fetch_extended_line_books(
                 market_start_from=query_now,
                 market_start_to=query_now + self._window,
+                event_ids=matched_event_ids,
                 event_type_ids=self._event_type_ids,
             )
         except (httpx.HTTPError, BetfairApiError) as exc:
@@ -1510,21 +1549,17 @@ class BetfairApiShadowCapture:
             market_start_to=query_now + self._window,
             event_type_ids=self._event_type_ids,
         )
-        # EXTENDED markets (default OFF): ONE extra catalogue+book batch over
-        # the AH + goal-line types, for the same events the h2h fetch covers.
-        extended_by_event, extended_failed = await self._fetch_extended_quotes(query_now, odds)
         # Capture only after the complete catalogue/book response sequence.
         # This is conservative: a slow request that crosses kickoff can never be
         # stamped with its pre-request time and promoted as a pre-match anchor.
         observed_at = self._now_fn()
-        extended_groups: set[tuple[str, Market, str]] = set()
-        extended_event_refs: set[str] = set()
         candidates = list(await self._candidates())
         matched = 0
         unmatched = 0
         snapshots: list[OddsSnapshotIn] = []
         teams_by_event: dict[str, EventTeams] = {}
         matched_pairs: list[tuple[BetfairMatchOdds, str]] = []
+        matched_hits: list[tuple[BetfairMatchOdds, EventCandidate]] = []
         link_observations: list[SourceLinkObservation] = []
         for market in odds:
             if not market.home or not market.away or market.kickoff is None:
@@ -1555,18 +1590,7 @@ class BetfairApiShadowCapture:
             hit = outcome.candidate
             matched += 1
             snapshots.extend(self._snapshots_for(market, hit.home, hit.away, hit.ref, observed_at))
-            # EXTENDED lines for the SAME resolved event (AH + O/U goal lines),
-            # attached under the canonical ref with canonical selection strings.
-            ext_quotes = extended_by_event.get(market.event_id, ())
-            ext_rows = self._extended_snapshots_for(
-                ext_quotes, hit.home, hit.away, hit.ref, observed_at
-            )
-            if ext_rows:
-                snapshots.extend(ext_rows)
-                extended_event_refs.add(hit.ref)
-                for row in ext_rows:
-                    if row.market_detail is not None:
-                        extended_groups.add((hit.ref, row.market, row.market_detail))
+            matched_hits.append((market, hit))
             # Teams for the (only-when-promoting) attach-only persist; sourced from
             # the matched canonical candidate, never the Betfair competition name.
             teams_by_event[hit.ref] = EventTeams(
@@ -1591,6 +1615,39 @@ class BetfairApiShadowCapture:
                         raw_start_time_utc=market.kickoff,
                     )
                 )
+
+        # EXTENDED markets (default OFF): fetched AFTER matching, filtered to
+        # the MATCHED Betfair event ids (live defect 2026-08-03 — an unfiltered
+        # window-wide catalogue truncates at 200 results to the ~18 soonest
+        # events and never intersects the matched slate). Still exactly ONE
+        # catalogue call + one batched book pass; zero calls when nothing
+        # matched. Rows are stamped POST-extended-fetch and re-guarded against
+        # kickoff, the same conservative pre-match rule as the h2h rows.
+        extended_by_event, extended_failed = await self._fetch_extended_quotes(
+            query_now, odds, [market.event_id for market, _ in matched_hits if market.event_id]
+        )
+        # Post-extended-fetch stamp; taken only when the fetch produced quotes
+        # (flag off / nothing matched / empty slate never consumes now_fn).
+        ext_observed_at = self._now_fn() if extended_by_event else observed_at
+        extended_groups: set[tuple[str, Market, str]] = set()
+        extended_event_refs: set[str] = set()
+        for market, hit in matched_hits:
+            if market.kickoff is None or market.kickoff <= ext_observed_at:
+                continue  # crossed kickoff during the extended fetch: never a pre-match row
+            ext_rows = self._extended_snapshots_for(
+                extended_by_event.get(market.event_id, ()),
+                hit.home,
+                hit.away,
+                hit.ref,
+                ext_observed_at,
+            )
+            if not ext_rows:
+                continue
+            snapshots.extend(ext_rows)
+            extended_event_refs.add(hit.ref)
+            for row in ext_rows:
+                if row.market_detail is not None:
+                    extended_groups.add((hit.ref, row.market, row.market_detail))
 
         await self._record_links(link_observations)
         comparison = await self._compare(matched_pairs, observed_at)

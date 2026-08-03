@@ -1185,6 +1185,63 @@ def test_extended_market_types_are_price_read_codes_only() -> None:
     )
 
 
+async def test_extended_catalogue_is_filtered_to_matched_event_ids() -> None:
+    # LIVE DEFECT 2026-08-03: an UNFILTERED extended catalogue caps at 200
+    # markets ~= the 18 soonest events of the whole window (11 types/event,
+    # FIRST_TO_START), which never intersect the matched slate -> lines=0 for
+    # 21 cycles. The fix: fetch AFTER matching, filtered by eventIds of the
+    # MATCHED Betfair events.
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    mock = _extended_mock()
+    report = await _extended_capture(mock, candidates).capture_once()
+    assert report.extended_lines == 3  # coverage preserved end-to-end
+    rpc_bodies = [json.loads(content) for url, _, content in mock.requests if url == JSON_RPC_URL]
+    catalogues = [b["params"] for b in rpc_bodies if b["method"].endswith("listMarketCatalogue")]
+    assert len(catalogues) == 2
+    assert "eventIds" not in catalogues[0]["filter"]  # h2h scan stays window-wide
+    # The extended call asks ONLY for the matched Betfair event.
+    assert catalogues[1]["filter"]["eventIds"] == ["30001"]
+    assert set(catalogues[1]["filter"]["marketTypeCodes"]) == set(EXTENDED_MARKET_TYPES)
+
+
+async def test_extended_fetch_is_skipped_when_nothing_matched() -> None:
+    # No matched events -> no extended catalogue/book calls at all (budget win,
+    # and no pointless 200-market scan of unmatchable fixtures).
+    candidates = [
+        EventCandidate(ref="evt-other", home="Gamma City", away="Delta Town", kickoff=KICKOFF)
+    ]
+    mock = _extended_mock()
+    report = await _extended_capture(mock, candidates).capture_once()
+    assert report.matched == 0
+    assert report.extended_lines == 0
+    assert report.extended_failed is False
+    rpc = [url for url, _, _ in mock.requests if url == JSON_RPC_URL]
+    assert len(rpc) == 2  # h2h catalogue + h2h book only
+
+
+async def test_extended_event_ids_are_capped_under_catalogue_result_limit() -> None:
+    # 11 market types/event x 18 events = 198 <= the 200-result catalogue cap;
+    # a larger matched slate must truncate (soonest-first order preserved),
+    # never silently lose markets to the result ceiling mid-response.
+    mock = MockBetfair(
+        rpc_results={
+            "listMarketCatalogue": {"result": EXTENDED_CATALOGUE_RESULT},
+            "listMarketBook": {"result": EXTENDED_BOOK_RESULT},
+        }
+    )
+    client = make_client(mock)
+    ids = [f"ev-{i}" for i in range(30)]
+    await client.fetch_extended_line_books(
+        market_start_from=KICKOFF - timedelta(hours=6),
+        market_start_to=KICKOFF + timedelta(hours=66),
+        event_ids=ids,
+    )
+    body = json.loads(mock.requests[-2][2])  # catalogue call (book call is last)
+    assert body["params"]["filter"]["eventIds"] == ids[:18]
+
+
 def test_no_unsafe_http_method_strings_in_module() -> None:
     # GET + (read-only JSON-RPC) POST only — no mutating HTTP verbs anywhere.
     source = Path(betfair_api.__file__).read_text(encoding="utf-8")
