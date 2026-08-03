@@ -1411,8 +1411,10 @@ def build_scheduler(
         from app.clv_trueup import resolve_betfair_back_snaps
         from app.ingestion.betfair_api import (
             EVENT_TYPE_SOCCER,
+            EVENT_TYPE_TENNIS,
             PROMOTED_BOOKMAKER,
             AnchorVerdictObservation,
+            BetfairApiClient,
             ReferenceOdds,
             SourceLinkObservation,
             build_shadow_capture,
@@ -1545,31 +1547,36 @@ def build_scheduler(
         # matcher's confidence. Best effort — record_source_links commits its own
         # short session and the capture wraps sink failures (type-name-only log);
         # never gates the capture or the anchors.
-        async def _betfair_api_link_sink(
-            observations: Sequence[SourceLinkObservation],
-        ) -> None:
-            from app.storage.repositories import SourceLinkByRef, record_source_links
+        def _make_betfair_api_link_sink(
+            sport: str,
+        ) -> Callable[[Sequence[SourceLinkObservation]], Awaitable[None]]:
+            async def _sink(observations: Sequence[SourceLinkObservation]) -> None:
+                from app.storage.repositories import SourceLinkByRef, record_source_links
 
-            await record_source_links(
-                bfapi_session_factory,
-                [
-                    SourceLinkByRef(
-                        source=obs.source,
-                        source_event_id=obs.source_event_id,
-                        source_market_id=obs.source_market_id,
-                        canonical_external_ref=obs.canonical_external_ref,
-                        confidence=obs.confidence,
-                        method=obs.method,
-                        matched_at=obs.matched_at,
-                        raw_sport="soccer",
-                        raw_league=obs.raw_league,
-                        raw_home=obs.raw_home,
-                        raw_away=obs.raw_away,
-                        raw_start_time_utc=obs.raw_start_time_utc,
-                    )
-                    for obs in observations
-                ],
-            )
+                await record_source_links(
+                    bfapi_session_factory,
+                    [
+                        SourceLinkByRef(
+                            source=obs.source,
+                            source_event_id=obs.source_event_id,
+                            source_market_id=obs.source_market_id,
+                            canonical_external_ref=obs.canonical_external_ref,
+                            confidence=obs.confidence,
+                            method=obs.method,
+                            matched_at=obs.matched_at,
+                            raw_sport=sport,
+                            raw_league=obs.raw_league,
+                            raw_home=obs.raw_home,
+                            raw_away=obs.raw_away,
+                            raw_start_time_utc=obs.raw_start_time_utc,
+                        )
+                        for obs in observations
+                    ],
+                )
+
+            return _sink
+
+        _betfair_api_link_sink = _make_betfair_api_link_sink("soccer")
 
         # STALENESS-VERDICT sink (betfair_anchor_verdicts): persist each compared
         # selection's inline-vs-API verdict (keep-latest upsert + retention
@@ -1602,9 +1609,19 @@ def build_scheduler(
                 ],
             )
 
+        # ONE shared read-only session client across the per-sport captures — a
+        # second interactive login could invalidate the first session token.
+        bfapi_creds = settings.betfair_api_credentials()
+        assert bfapi_creds is not None  # guarded by the enclosing if
+        bfapi_client = BetfairApiClient(
+            app_key=bfapi_creds[0],
+            username=bfapi_creds[1],
+            password=bfapi_creds[2],
+            client=bfapi_http,
+        )
         betfair_api_capture = build_shadow_capture(
             enabled=settings.value_betfair_api_enabled,
-            credentials=settings.betfair_api_credentials(),
+            credentials=bfapi_creds,
             window_hours=settings.betfair_api_window_hours,
             http_client=bfapi_http,
             candidates_fn=_betfair_api_candidates,
@@ -1616,7 +1633,58 @@ def build_scheduler(
             verdict_sink=_betfair_api_verdict_sink,
             verdict_ticks=settings.value_betfair_staleness_ticks,
             extended_markets=settings.value_betfair_api_extended_markets,
+            api_client=bfapi_client,
         )
+
+        # TENNIS scope — SHADOW-ONLY (default OFF; shadow-first sport-promotion
+        # policy). Never promoted: promote/promote_sink/reference/verdict stay
+        # unset, so rows keep the non-sharp SHADOW bookmaker and nothing is
+        # persisted except event_source_links observability. Coverage research
+        # 2026-08-03: 193 Betfair tennis events vs a 58-event canonical tennis
+        # slate (14 matched immediately) while soccer's slate held 10.
+        betfair_api_tennis_capture = None
+        if settings.value_betfair_api_tennis_enabled:
+            from app.resolution.tennis_names import canonical_tennis_name
+
+            async def _betfair_api_tennis_candidates() -> list[EventCandidate]:
+                # Candidate names are FOLDED to the tennis canonical form
+                # ("surname f") so they sit in the same name space as the
+                # capture's name_fold of the Betfair runner names.
+                rows = await select_betfair_targets(
+                    bfapi_session_factory,
+                    sport="tennis",
+                    window=bfapi_window,
+                    limit=bfapi_limit,
+                    ref_likes=("http%", "oddschecker:%"),
+                )
+                return [
+                    EventCandidate(
+                        ref=row.external_ref,
+                        home=canonical_tennis_name(row.home),
+                        away=canonical_tennis_name(row.away),
+                        kickoff=row.starts_at,
+                    )
+                    for row in rows
+                    if row.starts_at is not None
+                ]
+
+            betfair_api_tennis_capture = build_shadow_capture(
+                enabled=True,
+                credentials=bfapi_creds,
+                window_hours=settings.betfair_api_window_hours,
+                http_client=bfapi_http,
+                candidates_fn=_betfair_api_tennis_candidates,
+                event_type_ids=(EVENT_TYPE_TENNIS,),
+                link_sink=_make_betfair_api_link_sink("tennis"),
+                ordered=False,
+                name_fold=canonical_tennis_name,
+                label="tennis",
+                api_client=bfapi_client,
+            )
+            logger.info(
+                "betfair API TENNIS scope ENABLED (SHADOW-only, read-only, "
+                "one extra catalogue+book pass per cycle on the shared session)"
+            )
         if settings.value_betfair_api_extended_markets:
             logger.info(
                 "betfair API EXTENDED markets ENABLED (AH + O/U goal lines; "
@@ -1624,12 +1692,16 @@ def build_scheduler(
             )
 
         async def capture_betfair_api_shadow() -> None:
-            if betfair_api_capture is None:
-                return
-            try:
-                await betfair_api_capture.capture_once()
-            except Exception as exc:  # type-only log (never the URL/creds)
-                logger.error("betfair api shadow capture failed: %s", type(exc).__name__)
+            # Per-sport captures run SEQUENTIALLY on the shared session (never
+            # concurrently — one job, one client). A sport failing never blocks
+            # the next; each failure logs type-only (never the URL/creds).
+            for capture in (betfair_api_capture, betfair_api_tennis_capture):
+                if capture is None:
+                    continue
+                try:
+                    await capture.capture_once()
+                except Exception as exc:  # type-only log (never the URL/creds)
+                    logger.error("betfair api shadow capture failed: %s", type(exc).__name__)
 
         scheduler.add_job(
             capture_betfair_api_shadow,

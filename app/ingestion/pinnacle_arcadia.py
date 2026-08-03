@@ -138,7 +138,14 @@ _TRANSIENT_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 # transient status (this is NOT an anti-bot bypass: GET-only through the
 # already-configured proxy pool). After all attempts it still surfaces as
 # PinnacleArcadiaError(403), so a genuinely-blocked-everywhere fetch is honest.
-_PROXY_ROTATE_STATUSES: frozenset[int] = frozenset({403})
+# 401 joined 2026-08-03: read-only probes measured BURSTY per-request 401s on
+# the production pool (a sport's fetch 401s twice in a row, then the identical
+# request serves 7x200 minutes later on the same pool) — an edge/egress
+# rejection wearing a 401, not a credential failure (no key is configured, and
+# the endpoints require none). Without rotation one such burst instantly costs
+# the sport's ENTIRE capture cycle; the ~Jul 18-26 capture blackout is the
+# worst-case of this failure mode.
+_PROXY_ROTATE_STATUSES: frozenset[int] = frozenset({401, 403})
 
 
 class _TransientStatusError(Exception):

@@ -1230,6 +1230,18 @@ class Settings(BaseSettings):
     # overround gate finally sees a plausible book. Rows follow the same
     # shadow/promote tagging as the h2h path (VALUE_BETFAIR_API_PROMOTE).
     value_betfair_api_extended_markets: bool = False
+    # SHADOW-ONLY tennis scope for the Betfair API capture (default OFF;
+    # shadow-first sport-promotion policy 2026-07-04). Coverage research
+    # 2026-08-03: the soccer-only capture fetched ~184 Betfair markets against
+    # a 10-event canonical soccer slate (off-season) while 193 Betfair TENNIS
+    # events sat unfetched against a 58-event canonical tennis slate (14
+    # matched immediately via the hardened matcher + canonical_tennis_name).
+    # When enabled: one extra catalogue + batched book pass per cycle on the
+    # SHARED read-only session, ordered=False matching, rows stay the
+    # non-sharp SHADOW bookmaker (never promoted, nothing persisted except
+    # event_source_links observability). Promotion would need its own
+    # operator-signed evidence gate — there is deliberately no flag for it.
+    value_betfair_api_tennis_enabled: bool = False
     # Betfair application key (the "delayed"/live App Key from the developer
     # account). NOT a betting scope — it only identifies the app to the read-only
     # market-data API. Secret: never logged, never persisted.

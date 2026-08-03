@@ -109,6 +109,10 @@ _BATCH: list[tuple[str, str, str]] = [
     ("Ferroviaria", "Ferroviaria SP", "ser caxias"),
     ("Sport do Recife", "Sport Recife", "cuiaba ec"),
     ("KF Drita", "KF Drita", "kauno zalgiris"),
+    # 2026-08-03 Betfair-API coverage probe: the ONE name-form miss of the
+    # 10-event slate — Betfair "PFC Levski Sofia" vs canonical "Levski Sofia"
+    # (UEFA CL Qualifying vs Kairat Almaty). Reviewed single-club alias.
+    ("PFC Levski Sofia", "Levski Sofia", "kairat almaty"),
 ]
 
 _KO = datetime(2026, 7, 2, 18, 0, tzinfo=UTC)

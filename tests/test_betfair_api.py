@@ -1247,3 +1247,176 @@ def test_no_unsafe_http_method_strings_in_module() -> None:
     source = Path(betfair_api.__file__).read_text(encoding="utf-8")
     for verb in ('"PUT"', "'PUT'", '"DELETE"', "'DELETE'", '"PATCH"', "'PATCH'"):
         assert verb not in source
+
+
+# --- multi-sport scope: tennis (SHADOW-ONLY, coverage lever 2026-08-03) ------ #
+# Research (scratchpad betfair_coverage probe, 2026-08-03): the soccer-only
+# capture fetched 184 Betfair markets against a 10-event canonical soccer slate
+# (off-season) while 193 Betfair TENNIS events sat unfetched against a 58-event
+# canonical tennis slate (14 matched immediately via the hardened matcher +
+# canonical_tennis_name). These tests lock the generalized capture surface:
+# ordered=False + name_fold, two-runner (no-draw) markets, slate-relative
+# coverage telemetry, and a shared read-only client across sport captures.
+
+TENNIS_CATALOGUE_RESULT: list[dict[str, Any]] = [
+    {
+        "marketId": "1.777001",
+        "marketStartTime": "2026-06-30T18:00:00.000Z",
+        "event": {"id": "40001", "name": "Panna Udvardy v Eva Lys"},
+        "competition": {"name": "WTA Some Open 2026"},
+        "runners": [
+            {"selectionId": 611, "runnerName": "Panna Udvardy", "sortPriority": 1},
+            {"selectionId": 622, "runnerName": "Eva Lys", "sortPriority": 2},
+        ],
+    }
+]
+
+TENNIS_BOOK_RESULT: list[dict[str, Any]] = [
+    {
+        "marketId": "1.777001",
+        "status": "OPEN",
+        "inplay": False,
+        "runners": [
+            {"selectionId": 611, "ex": {"availableToBack": [{"price": 1.8, "size": 120}]}},
+            {"selectionId": 622, "ex": {"availableToBack": [{"price": 2.2, "size": 90}]}},
+        ],
+    }
+]
+
+
+def _tennis_mock() -> MockBetfair:
+    return MockBetfair(
+        rpc_results={
+            "listMarketCatalogue": {"result": TENNIS_CATALOGUE_RESULT},
+            "listMarketBook": {"result": TENNIS_BOOK_RESULT},
+        }
+    )
+
+
+def test_event_type_tennis_constant() -> None:
+    assert betfair_api.EVENT_TYPE_TENNIS == "2"
+
+
+async def test_tennis_unordered_name_fold_matches_two_runner_market() -> None:
+    from app.resolution.tennis_names import canonical_tennis_name
+
+    candidates = [
+        EventCandidate(
+            ref="oddschecker:tennis/panna-udvardy-v-eva-lys",
+            home=canonical_tennis_name("Panna Udvardy"),
+            away=canonical_tennis_name("Eva Lys"),
+            kickoff=KICKOFF,
+        )
+    ]
+    capture = BetfairApiShadowCapture(
+        make_client(_tennis_mock()),
+        candidates_fn=lambda: candidates,
+        window=timedelta(hours=72),
+        aliases=default_aliases(),
+        now_fn=lambda: KICKOFF - timedelta(hours=6),
+        event_type_ids=(betfair_api.EVENT_TYPE_TENNIS,),
+        ordered=False,
+        name_fold=canonical_tennis_name,
+    )
+    report = await capture.capture_once()
+    assert report.markets_fetched == 1
+    assert report.matched == 1
+    assert report.unmatched == 0
+    # Two-runner market: home/away rows only, never a manufactured Draw row.
+    selections = {s.selection for s in report.snapshots}
+    assert selections == {
+        canonical_tennis_name("Panna Udvardy"),
+        canonical_tennis_name("Eva Lys"),
+    }
+    assert all(s.bookmaker == SHADOW_BOOKMAKER for s in report.snapshots)
+
+
+async def test_name_fold_never_leaks_into_raw_link_observation_fields() -> None:
+    from app.resolution.tennis_names import canonical_tennis_name
+
+    seen: list[Any] = []
+
+    async def link_sink(observations: Any) -> None:
+        seen.extend(observations)
+
+    candidates = [
+        EventCandidate(
+            ref="oddschecker:tennis/panna-udvardy-v-eva-lys",
+            home=canonical_tennis_name("Panna Udvardy"),
+            away=canonical_tennis_name("Eva Lys"),
+            kickoff=KICKOFF,
+        )
+    ]
+    capture = BetfairApiShadowCapture(
+        make_client(_tennis_mock()),
+        candidates_fn=lambda: candidates,
+        window=timedelta(hours=72),
+        aliases=default_aliases(),
+        now_fn=lambda: KICKOFF - timedelta(hours=6),
+        ordered=False,
+        name_fold=canonical_tennis_name,
+        link_sink=link_sink,
+    )
+    await capture.capture_once()
+    assert len(seen) == 1
+    # raw_* fields keep the BETFAIR runner names (audit provenance), not the fold.
+    assert seen[0].raw_home == "Panna Udvardy"
+    assert seen[0].raw_away == "Eva Lys"
+
+
+async def test_report_carries_candidates_considered_and_slate_coverage() -> None:
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF),
+        EventCandidate(ref="evt-other", home="Gamma City", away="Delta Town", kickoff=KICKOFF),
+    ]
+    report = await _shadow_capture(_full_odds_mock(), candidates).capture_once()
+    assert report.candidates_considered == 2
+    assert report.matched == 1
+    assert report.slate_coverage == pytest.approx(0.5)
+
+
+async def test_slate_coverage_zero_candidates_is_zero_not_nan() -> None:
+    report = await _shadow_capture(_full_odds_mock(), []).capture_once()
+    assert report.candidates_considered == 0
+    assert report.slate_coverage == 0.0
+
+
+async def test_build_shadow_capture_shares_an_injected_api_client() -> None:
+    # ONE read-only session across per-sport captures: a second interactive
+    # login could invalidate the first session token depending on account
+    # settings, so the scheduler builds one BetfairApiClient and injects it.
+    mock = _full_odds_mock()
+    client = make_client(mock)
+    soccer = build_shadow_capture(
+        enabled=True,
+        credentials=(APP_KEY, USERNAME, PASSWORD),
+        window_hours=72,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(mock.handler)),
+        candidates_fn=lambda: [],
+        api_client=client,
+    )
+    tennis = build_shadow_capture(
+        enabled=True,
+        credentials=(APP_KEY, USERNAME, PASSWORD),
+        window_hours=72,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(mock.handler)),
+        candidates_fn=lambda: [],
+        api_client=client,
+        event_type_ids=(betfair_api.EVENT_TYPE_TENNIS,),
+        ordered=False,
+    )
+    assert soccer is not None and tennis is not None
+    assert soccer._client is client
+    assert tennis._client is client
+
+
+def test_ordered_defaults_true_and_name_fold_defaults_none() -> None:
+    # The soccer path is byte-identical to the pre-tennis capture by default.
+    capture = BetfairApiShadowCapture(
+        make_client(_full_odds_mock()),
+        candidates_fn=lambda: [],
+        window=timedelta(hours=72),
+        aliases=default_aliases(),
+    )
+    assert capture._ordered is True
+    assert capture._name_fold is None

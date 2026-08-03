@@ -91,8 +91,12 @@ _ALLOWED_OPS = frozenset({_OP_LIST_MARKET_CATALOGUE, _OP_LIST_MARKET_BOOK})
 # batch <=25 markets/call (~125 weight) to stay under the cap (else TOO_MUCH_DATA).
 _MARKET_BOOK_BATCH = 25
 
-# Soccer event type (the only one this read-only shadow capture fetches).
+# Betfair eventType ids this read-only capture may fetch. Soccer is the
+# promoted anchor path; TENNIS is SHADOW-ONLY (coverage research 2026-08-03:
+# 193 Betfair tennis events sat unfetched in the 72h window against a 58-event
+# canonical tennis slate, while the soccer slate held only 10 events).
 EVENT_TYPE_SOCCER = "1"
+EVENT_TYPE_TENNIS = "2"
 MARKET_TYPE_MATCH_ODDS = "MATCH_ODDS"
 # EXTENDED price-read market types (default-OFF, VALUE_BETFAIR_API_EXTENDED_
 # MARKETS): the soccer Asian-Handicap ladder, the "Goal Lines" asian-total
@@ -1345,6 +1349,13 @@ class BetfairApiShadowReport:
     snapshots: tuple[OddsSnapshotIn, ...]
     comparison: ComparisonAggregate | None = None
     promoted: bool = False
+    # Canonical candidates the matcher was given this cycle. ``match_rate``
+    # divides by BETFAIR's slate (how much of the exchange we can attach);
+    # ``slate_coverage`` divides by OUR slate (how much of the pick universe
+    # got a Betfair anchor) — the number that actually measures coverage
+    # (2026-08-03: a healthy 9-of-10-slate cycle read as "5.8%" because only
+    # match_rate was logged).
+    candidates_considered: int = 0
     # EXTENDED-markets telemetry (counts only): distinct (event, market, detail)
     # line groups emitted / distinct events they cover, and whether the extended
     # fetch FAILED this cycle (flagged loudly, never a silent pretend-success).
@@ -1355,6 +1366,11 @@ class BetfairApiShadowReport:
     @property
     def match_rate(self) -> float:
         return self.matched / self.markets_fetched if self.markets_fetched else 0.0
+
+    @property
+    def slate_coverage(self) -> float:
+        """Matched share of OUR candidate slate (0.0 when the slate is empty)."""
+        return self.matched / self.candidates_considered if self.candidates_considered else 0.0
 
 
 class BetfairApiShadowCapture:
@@ -1378,10 +1394,24 @@ class BetfairApiShadowCapture:
         verdict_sink: VerdictSink | None = None,
         verdict_ticks: float = 1.0,
         extended_markets: bool = False,
+        ordered: bool = True,
+        name_fold: Callable[[str], str] | None = None,
+        label: str = "soccer",
     ) -> None:
         self._client = client
         self._candidates_fn = candidates_fn
         self._window = window
+        # MULTI-SPORT surface (2026-08-03, shadow-only tennis): ``ordered``
+        # feeds the hardened matcher (False for two-player tennis — no fixed
+        # home/away orientation); ``name_fold`` is applied to the BETFAIR
+        # runner names at MATCH time only (e.g. canonical_tennis_name) — the
+        # candidates_fn feeds already-folded candidate names, and the raw
+        # Betfair names still ride the link observations untouched. Defaults
+        # keep the soccer path byte-identical. ``label`` tags the telemetry
+        # lines so per-sport cycles are distinguishable.
+        self._ordered = ordered
+        self._name_fold = name_fold
+        self._label = label
         # EXTENDED markets (VALUE_BETFAIR_API_EXTENDED_MARKETS, default OFF):
         # when False, zero extra RPC calls — the rate budget is byte-identical
         # to the h2h-only capture.
@@ -1574,14 +1604,18 @@ class BetfairApiShadowCapture:
             # OddsPortal league names, so passing them would FALSE-BLOCK every
             # market; name + tight kickoff window + ambiguity guard carry
             # precision. Unmatched -> skipped, never guessed (a wrong attach would
-            # be fake CLV).
+            # be fake CLV). ``name_fold`` (tennis: canonical_tennis_name) folds
+            # the Betfair runner names into the candidates' name space at match
+            # time only — raw names still ride the link observations.
+            match_home = self._name_fold(market.home) if self._name_fold else market.home
+            match_away = self._name_fold(market.away) if self._name_fold else market.away
             outcome = match_event_hardened_scored(
-                market.home,
-                market.away,
+                match_home,
+                match_away,
                 market.kickoff,
                 candidates,
                 aliases=self._aliases,
-                ordered=True,
+                ordered=self._ordered,
                 league=None,
             )
             if outcome is None:
@@ -1658,6 +1692,7 @@ class BetfairApiShadowCapture:
             snapshots=tuple(snapshots),
             comparison=comparison,
             promoted=self._promote,
+            candidates_considered=len(candidates),
             extended_lines=len(extended_groups),
             extended_events=len(extended_event_refs),
             extended_failed=extended_failed,
@@ -1783,13 +1818,17 @@ class BetfairApiShadowCapture:
         cmp = report.comparison
         if cmp is not None and cmp.compared:
             logger.info(
-                "betfair api SHADOW: fetched=%d matched=%d unmatched=%d match_rate=%.1f%% "
+                "betfair api SHADOW [%s]: fetched=%d matched=%d unmatched=%d match_rate=%.1f%% "
+                "slate=%d slate_coverage=%.1f%% "
                 "would-be-anchor-rows=%d | COMPARE compared=%d mean|delta|=%s within1tick=%s%% "
                 "api_fresher=%s%% (%s — measure before trusting)",
+                self._label,
                 report.markets_fetched,
                 report.matched,
                 report.unmatched,
                 report.match_rate * 100.0,
+                report.candidates_considered,
+                report.slate_coverage * 100.0,
                 len(report.snapshots),
                 cmp.compared,
                 _fmt_num(cmp.mean_abs_delta),
@@ -1799,12 +1838,16 @@ class BetfairApiShadowCapture:
             )
             return
         logger.info(
-            "betfair api SHADOW: fetched=%d matched=%d unmatched=%d match_rate=%.1f%% "
+            "betfair api SHADOW [%s]: fetched=%d matched=%d unmatched=%d match_rate=%.1f%% "
+            "slate=%d slate_coverage=%.1f%% "
             "would-be-anchor-rows=%d (%s — measure before trusting)",
+            self._label,
             report.markets_fetched,
             report.matched,
             report.unmatched,
             report.match_rate * 100.0,
+            report.candidates_considered,
+            report.slate_coverage * 100.0,
             len(report.snapshots),
             persisted,
         )
@@ -1827,6 +1870,10 @@ def build_shadow_capture(
     verdict_sink: VerdictSink | None = None,
     verdict_ticks: float = 1.0,
     extended_markets: bool = False,
+    ordered: bool = True,
+    name_fold: Callable[[str], str] | None = None,
+    label: str = "soccer",
+    api_client: BetfairApiClient | None = None,
 ) -> BetfairApiShadowCapture | None:
     """Build the shadow capture, or None when the integration is INERT — i.e.
     disabled OR any credential blank. None means the scheduler adds NO job and no
@@ -1840,10 +1887,16 @@ def build_shadow_capture(
     verdicts (betfair_anchor_verdicts) computed at ``verdict_ticks``."""
     if not enabled or credentials is None:
         return None
-    app_key, username, password = credentials
-    client = BetfairApiClient(
-        app_key=app_key, username=username, password=password, client=http_client
-    )
+    if api_client is not None:
+        # SHARED read-only session across per-sport captures (2026-08-03): a
+        # second interactive login can invalidate the first session token, so
+        # the composition root builds ONE BetfairApiClient and injects it.
+        client = api_client
+    else:
+        app_key, username, password = credentials
+        client = BetfairApiClient(
+            app_key=app_key, username=username, password=password, client=http_client
+        )
     return BetfairApiShadowCapture(
         client,
         candidates_fn=candidates_fn,
@@ -1858,4 +1911,7 @@ def build_shadow_capture(
         verdict_sink=verdict_sink,
         verdict_ticks=verdict_ticks,
         extended_markets=extended_markets,
+        ordered=ordered,
+        name_fold=name_fold,
+        label=label,
     )
