@@ -1,0 +1,47 @@
+--- a/app/resolution/aliases_seed.json
++++ b/app/resolution/aliases_seed.json
+@@ -1769,7 +1769,8 @@
+     ],
+     "Helsingin Jalkapalloklubi": [
+       "HJK Helsinki",
+-      "HJK"
++      "HJK",
++      "Helsinki"
+     ],
+     "Henan F.C.": [
+       "Henan Construction",
+@@ -4172,6 +4173,34 @@
+     ],
+     "KF Drita": [
+       "Drita"
++    ],
++    "AGF Aarhus": [
++      "AGF"
++    ],
++    "KF Ballkani": [
++      "Ballkani"
++    ],
++    "Crawley Town": [
++      "Crawley"
++    ],
++    "Elgin City": [
++      "Elgin"
++    ],
++    "Levadia Tallinn": [
++      "FCI Tallinn",
++      "Levadia"
++    ],
++    "Forfar Athletic": [
++      "Forfar"
++    ],
++    "KI Klaksvik": [
++      "Klaksvik"
++    ],
++    "Operario Ferroviario": [
++      "Operario-PR"
++    ],
++    "The New Saints": [
++      "TNS"
+     ]
+   }
+ }

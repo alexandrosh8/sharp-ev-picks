@@ -1160,3 +1160,19 @@ def test_value_gone_chip_on_open_premium_failing_edge_gate() -> None:
     # Never on settled/superseded/started rows: the predicate is scoped to
     # open (alerted, pre-kickoff) premium rows only.
     assert re.search(r"function valueGone\([^)]*\)\s*\{[^}]*\"alerted\"", text)
+
+
+def test_value_lost_timestamp_beside_value_gone_chip() -> None:
+    """Operator item 2 (2026-08-04): the value-lost transition is persisted
+    (picks.value_lost_at) and the dashboard shows "VALUE LOST <relative time>"
+    from that stamp NEXT TO the existing VALUE GONE chip — additive only, the
+    chip logic itself is untouched (test above still pins its call sites)."""
+    text = _text()
+    # One builder definition + exactly two call sites (card row, drawer head).
+    assert text.count("function valueLostAtEl") == 1
+    assert text.count("valueLostAtEl") == 3
+    # Renders the PERSISTED timestamp via the shared relative-age formatter —
+    # never a client-side re-derivation of when value was lost.
+    assert re.search(r"\"VALUE LOST \" \+ fmtRelAge\(p\.value_lost_at\)", text)
+    # Absent timestamp (pre-column rows / re-qualified picks) renders nothing.
+    assert re.search(r"function valueLostAtEl\([^)]*\)\s*\{[^}]*value_lost_at\) return null", text)

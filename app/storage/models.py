@@ -479,6 +479,15 @@ class Pick(Base):
     # queue (app/clv_trueup.py).
     revalidated_at: Mapped[datetime | None]
     revalidation_attempted_at: Mapped[datetime | None]
+    # Operator item 2 (2026-08-04, "when premium lost its value it has to be
+    # mentioned"): UTC instant an ALERTED PREMIUM pick's re-priced current_edge
+    # FIRST crossed below its tier floor. Hysteresis is floor-crossing only —
+    # set on the first failing re-price, cleared (NULL) when a later re-price
+    # re-qualifies (edge >= floor); no extra flapping guard. Drives the
+    # dashboard's "VALUE LOST <when>" stamp and the one-per-transition
+    # value-lost alert. NULL = never lost / re-qualified / pre-column row.
+    # Additive + nullable (migration b7e1d4a9c3f6).
+    value_lost_at: Mapped[datetime | None]
 
 
 class ManualBetLog(Base):

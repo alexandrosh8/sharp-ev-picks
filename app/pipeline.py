@@ -3051,6 +3051,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 deps.devig_method,
                 record_drift=deps.clv_record_drift,
                 value_policy=deps.value_policy,
+                # Operator item 2 (2026-08-04): arm the value-lost mention —
+                # premium floor + the existing premium alert channel.
+                premium_min_edge=deps.value_min_edge,
+                dispatcher=deps.dispatcher,
             )
         except Exception as exc:  # revalidation must never break picking
             # Type only: HTTP-client tracebacks can contain request URLs,
@@ -3064,6 +3068,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 covered_event_ids={s.event_id for s in snapshots},
                 devig_method=deps.devig_method,
                 value_policy=deps.value_policy,
+                premium_min_edge=deps.value_min_edge,
+                dispatcher=deps.dispatcher,
             )
         except Exception as exc:  # revalidation must never break picking
             logger.error("off-window revalidation failed: %s", type(exc).__name__)

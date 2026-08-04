@@ -1150,6 +1150,11 @@ async def latest_picks_with_events(
             # only when the original book dropped the selection at revalidation)
             "current_bookmaker": p.current_bookmaker,
             "revalidated_at": p.revalidated_at.isoformat() if p.revalidated_at else None,
+            # Operator item 2 (2026-08-04): when this ALERTED PREMIUM pick's
+            # re-priced edge FIRST crossed below its tier floor (null = never /
+            # re-qualified since). The dashboard renders "VALUE LOST <ago>"
+            # beside the existing VALUE GONE chip from this stamp.
+            "value_lost_at": p.value_lost_at.isoformat() if p.value_lost_at else None,
             # execution helper: "still +EV down to X.XX" (null = not
             # computable — min_edge unset or fair prob >= floor impossible)
             "min_acceptable_odds": _min_acceptable(p),

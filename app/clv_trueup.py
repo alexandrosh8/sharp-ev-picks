@@ -23,7 +23,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlparse
 
 from sqlalchemy import and_, or_, select, update
@@ -40,6 +40,7 @@ from app.edge.value import (
 from app.edge.value_policy import ValuePolicy
 from app.identity import BOOKMAKER_MAX_BYTES, require_bounded_identity
 from app.ingestion.base import EventDirectory, OddsLoader
+from app.notifications.base import Alert, build_value_lost_alert
 from app.pipeline import (
     GroupedMarkets,
     _is_settleable_market_detail,
@@ -67,6 +68,14 @@ logger = logging.getLogger(__name__)
 _EMPTY_VALUE_POLICY = ValuePolicy()
 
 
+class _ValueLostDispatcher(Protocol):
+    """Minimal alert-dispatch surface for the value-lost mention
+    (app.notifications.dispatcher.AlertDispatcher satisfies it). Structural so
+    tests inject a recorder and no sink/network is ever constructed here."""
+
+    async def dispatch(self, alert: Alert) -> object: ...
+
+
 def _settlement_fill_for_clv(pick: Pick) -> tuple[float, str, bool]:
     """Blended commission-net fill, representative book, mixed-book flag."""
     stake = pick.settlement_stake_amount or Decimal("0")
@@ -81,6 +90,37 @@ def _settlement_fill_for_clv(pick: Pick) -> tuple[float, str, bool]:
             provenance_untrusted,
         )
     return effective_odds(pick.bookmaker, float(pick.decimal_odds)), pick.bookmaker, False
+
+
+def value_lost_transition(
+    *,
+    tier: str,
+    current_edge: Decimal | None,
+    edge_floor: float | None,
+    prior_value_lost_at: datetime | None,
+    now: datetime,
+) -> tuple[datetime | None, bool]:
+    """Pure value-lost hysteresis step (operator item 2, 2026-08-04: "when
+    premium lost its value it has to be mentioned"). Returns
+    (new_value_lost_at, transitioned_to_lost).
+
+    Hysteresis is floor-crossing ONLY — no additional flapping guard:
+    - SET (now, True) the first time a premium pick's re-priced edge falls
+      strictly below its tier floor while unset;
+    - HOLD (prior, False) while the edge stays below (one mention per
+      transition, never per cycle);
+    - CLEAR (None, False) when a later re-price re-qualifies (edge >= floor —
+      the same boundary as the dashboard's hasQualifyingEdgeNow);
+    - out of scope (volume tier / no floor configured / no re-price this
+      cycle) holds prior state unchanged: absence of a live price proves
+      nothing. Callers only reach this for status='alerted' rows."""
+    if tier != "premium" or edge_floor is None or current_edge is None:
+        return prior_value_lost_at, False
+    if float(current_edge) < edge_floor:
+        if prior_value_lost_at is None:
+            return now, True
+        return prior_value_lost_at, False
+    return None, False
 
 
 def _best_soft_book(books: dict[str, float]) -> tuple[str | None, float | None]:
@@ -340,9 +380,20 @@ async def revalidate_open_picks(
     *,
     record_drift: bool = False,
     value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
+    premium_min_edge: float | None = None,
+    dispatcher: "_ValueLostDispatcher | None" = None,
 ) -> int:
     """Refresh closing-fair/CLV and current-odds/edge on open picks from
     already-scraped snapshots. Returns rows updated.
+
+    `premium_min_edge` (Settings.value_min_edge, from the composition root)
+    arms the VALUE-LOST transition (operator item 2, 2026-08-04): an ALERTED
+    PREMIUM pick whose re-priced current_edge first crosses below the floor
+    gets `value_lost_at` stamped (cleared again on re-qualification —
+    hysteresis is floor-crossing only, see value_lost_transition) and ONE
+    value-lost alert dispatched through `dispatcher` (the premium alert
+    channel; no-ops gracefully on unconfigured sinks). None = feature inert
+    (legacy callers).
 
     CLV netting convention: BOTH sides of clv_log are commission-netted.
     The closing fair probability comes from anchors devigged on EFFECTIVE
@@ -458,11 +509,21 @@ async def revalidate_open_picks(
         return 0
     now = datetime.now(tz=UTC)
     updated = 0
+    # Value-lost transitions to MENTION (operator item 2): alerts are built
+    # inside the loop at the set-crossing but dispatched only AFTER the commit
+    # below succeeds — a rolled-back transition must never notify. If the
+    # commit raises, value_lost_at is not persisted, so the next cycle simply
+    # re-detects the same transition and retries the mention.
+    value_lost_alerts: list[Alert] = []
+    _vl_home = aliased(Team)
+    _vl_away = aliased(Team)
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(Pick, Event.external_ref)
+                select(Pick, Event.external_ref, _vl_home.name, _vl_away.name)
                 .join(Event, Pick.event_id == Event.id)
+                .join(_vl_home, Event.home_team_id == _vl_home.id)
+                .join(_vl_away, Event.away_team_id == _vl_away.id)
                 # STARTED events are excluded: once a game kicks off the
                 # scraper follows OddsPortal's in-play pages, and in-play
                 # prices must neither overwrite the last pre-kickoff
@@ -476,7 +537,7 @@ async def revalidate_open_picks(
                 )
             )
         ).all()
-        for pick, external_ref in rows:
+        for pick, external_ref, home_name, away_name in rows:
             # TERMINAL no-close state (CLV-2 escalation, 2026-07-26): reason
             # stamped with the close columns NULL means the implausible-close
             # guard already gave up on this pick — never re-process, never
@@ -685,6 +746,32 @@ async def revalidate_open_picks(
                 # leave a stale edge beside a refreshed fair, which made the dashboard
                 # Edge/valueGone contradict the Fair/EV/"ok >=" floor (audit 2026-06-26).
                 pick.current_edge = _consistent_current_edge(pick, closing_fair)
+            # VALUE-LOST transition (operator item 2, 2026-08-04): ALERTED
+            # PREMIUM picks only (this query already filters status='alerted').
+            # Hysteresis = floor crossing only (value_lost_transition); the
+            # alert is built at the SET crossing exactly once per transition.
+            new_lost_at, transitioned = value_lost_transition(
+                tier=pick.tier,
+                current_edge=pick.current_edge,
+                edge_floor=premium_min_edge,
+                prior_value_lost_at=pick.value_lost_at,
+                now=now,
+            )
+            pick.value_lost_at = new_lost_at
+            if transitioned and premium_min_edge is not None and pick.current_edge is not None:
+                value_lost_alerts.append(
+                    build_value_lost_alert(
+                        pick_id=pick.id,
+                        event=f"{home_name} vs {away_name}",
+                        market=pick.market,
+                        selection=pick.selection,
+                        bookmaker=pick.current_bookmaker or pick.bookmaker,
+                        decimal_odds=pick.decimal_odds,
+                        current_edge=float(pick.current_edge),
+                        edge_floor=premium_min_edge,
+                        value_lost_at=now,
+                    )
+                )
             # Success-only stamp (dashboard "verified" badge) — plus the
             # attempt clock, since a successful re-price is also an attempt.
             pick.revalidated_at = now
@@ -705,6 +792,25 @@ async def revalidate_open_picks(
                 )
             updated += 1
         await session.commit()
+    # Dispatch value-lost mentions only after the transition is durably
+    # persisted. One alert per transition (built at the set-crossing only);
+    # the dispatcher's own idempotency store + per-transition dedupe key make
+    # a replay harmless. Unconfigured sinks no-op but still log their intent
+    # line (sink-level "not configured; skipping alert"), so the mention is
+    # visible in logs today and reaches Telegram/webhook the moment sinks are
+    # configured. Failures never break revalidation (type name only).
+    for alert in value_lost_alerts:
+        logger.info("value-lost transition for pick %s: alerting premium channel", alert.pick_id)
+        if dispatcher is None:
+            continue
+        try:
+            await dispatcher.dispatch(alert)
+        except Exception as exc:  # alerting must never break the re-price cycle
+            logger.error(
+                "value-lost alert dispatch failed for pick %s: %s",
+                alert.pick_id,
+                type(exc).__name__,
+            )
     if updated:
         logger.info("revalidation refreshed %d open picks", updated)
     return updated
@@ -917,6 +1023,8 @@ async def revalidate_offwindow_picks(
     covered_event_ids: set[str],
     devig_method: DevigMethod = DevigMethod.SHIN,
     value_policy: ValuePolicy = _EMPTY_VALUE_POLICY,
+    premium_min_edge: float | None = None,
+    dispatcher: "_ValueLostDispatcher | None" = None,
 ) -> int:
     """Re-price open picks whose games were NOT in this cycle's scrape
     (taken weeks ahead of kickoff): scrape their match pages directly.
@@ -1004,7 +1112,14 @@ async def revalidate_offwindow_picks(
     # composition root) so off-window re-pricing stays comparable to in-window
     # CLV numbers — fill and close share the identical per-market method.
     return await revalidate_open_picks(
-        session_factory, snapshots, devig_method, value_policy=value_policy
+        session_factory,
+        snapshots,
+        devig_method,
+        value_policy=value_policy,
+        # Off-window premium picks get the same value-lost mention as
+        # in-window ones (operator item 2) — same floor, same channel.
+        premium_min_edge=premium_min_edge,
+        dispatcher=dispatcher,
     )
 
 

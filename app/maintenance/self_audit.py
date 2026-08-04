@@ -62,6 +62,15 @@ LISTING_DARK_K = 3
 SHARP_ANCHOR_CLIFF_DROP = 0.80
 SHARP_ANCHOR_CLIFF_MIN_PRIOR = 50
 
+#: Pinnacle capture dead-man (operator item 1, 2026-08-04): WARN when zero NEW
+#: pinnacle-namespace events (sports.key 'pinnacle_<sport>' — the arcadia
+#: archive's isolated warehouse namespace) were created within this window.
+#: The arcadia feed went silent 2026-07-18..26 (8 days, zero events created)
+#: with no alarm. Config-surfaced as Settings.arcadia_silence_hours; the
+#: composition root suppresses the check entirely (window=None) when
+#: ARCADIA_ENABLED is false.
+PINNACLE_SILENCE_DEFAULT_HOURS = 6
+
 #: Impossible-market alarm (settlement audit 2026-08-02): a (sport,
 #: market_detail-family) with at least this many GRADED results (won/lost/
 #: half_*) and ZERO wins is a grading defect, not variance — tennis
@@ -256,6 +265,30 @@ def evaluate_sharp_anchor_cliff(
     )
 
 
+def evaluate_pinnacle_capture_silence(
+    new_pinnacle_events: int,
+    *,
+    window_hours: float,
+) -> Anomaly | None:
+    """Pure Pinnacle-capture dead-man check (operator item 1, 2026-08-04): WARN
+    when ZERO new pinnacle-namespace events were created inside the window —
+    the arcadia sharp feed went silent 2026-07-18..26 (8 days, zero
+    ``pinnacle_*`` events) with no alarm. Counts only — never a URL, key, or
+    proxy. The caller suppresses the check (never invokes it) when
+    ARCADIA_ENABLED is false; transition dedupe in the job wrapper keeps the
+    alert channel to one notification per outage."""
+    if new_pinnacle_events > 0:
+        return None
+    return Anomaly(
+        "WARN",
+        "pinnacle_capture_silent",
+        f"zero NEW pinnacle-namespace events created in the last {window_hours:g}h "
+        "— the arcadia sharp capture appears DEAD (2026-07-18..26 shape: 8 silent "
+        "days, no alarm); check arcadia proxies/feed and the "
+        "capture_pinnacle_arcadia job",
+    )
+
+
 def evaluate_impossible_market_families(
     families: Sequence[tuple[str, str, int, int]],
     *,
@@ -358,6 +391,7 @@ async def run_self_audit(
     *,
     awaiting_grace: timedelta = timedelta(hours=6),
     cycle_window: timedelta | None = None,
+    pinnacle_silence_window: timedelta | None = None,
 ) -> tuple[list[Anomaly], int]:
     """READ-ONLY DB self-audit.
 
@@ -365,7 +399,12 @@ async def run_self_audit(
     plus the count of NEW non-archive odds rows ingested within `cycle_window`
     (0 when no window is given) — the dead-man's-switch input. The fresh count
     EXCLUDES the sharp archives, matching the stale-odds check, so an archive
-    heartbeat can never mask a dead live (OddsPortal) scrape."""
+    heartbeat can never mask a dead live (OddsPortal) scrape.
+
+    `pinnacle_silence_window` (operator item 1, 2026-08-04) arms the arcadia
+    capture dead-man: WARN when zero NEW ``pinnacle_*``-namespace events were
+    created inside the window. None = check suppressed (the composition root
+    passes None when ARCADIA_ENABLED is false)."""
     now = now or datetime.now(tz=UTC)
     async with session_factory() as session:
         backlog = (
@@ -421,6 +460,23 @@ async def run_self_audit(
                 )
             )
         ) or 0
+        # Pinnacle capture dead-man input (operator item 1, 2026-08-04): NEW
+        # events created in the arcadia archive's isolated pinnacle_* sport
+        # namespaces inside the window. Bounded aggregate on created_at;
+        # startswith(autoescape) keeps '_' literal so 'pinnacleX' can't match.
+        new_pinnacle_events = 0
+        if pinnacle_silence_window is not None:
+            new_pinnacle_events = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Event)
+                    .join(Sport, Event.sport_id == Sport.id)
+                    .where(
+                        Sport.key.startswith("pinnacle_", autoescape=True),
+                        Event.created_at >= now - pinnacle_silence_window,
+                    )
+                )
+            ) or 0
         # Impossible-market alarm input (settlement audit 2026-08-02): graded
         # (won/lost/half_*) result counts + win counts per (sport,
         # market_detail-family). NULL details fall back to the market string so
@@ -455,6 +511,16 @@ async def run_self_audit(
     cliff = evaluate_sharp_anchor_cliff(recent_24h=sharp_recent, prior_24h=sharp_prior)
     if cliff is not None:
         found.append(cliff)
+    # Pinnacle capture dead-man (operator item 1, 2026-08-04): rides the same
+    # anomaly channel — transition dedupe keeps dispatch to one alert per
+    # outage while the WARN log line repeats each run (health-monitor parity).
+    if pinnacle_silence_window is not None:
+        silent = evaluate_pinnacle_capture_silence(
+            new_pinnacle_events,
+            window_hours=pinnacle_silence_window.total_seconds() / 3600.0,
+        )
+        if silent is not None:
+            found.append(silent)
     impossible = evaluate_impossible_market_families(family_rows)
     if impossible is not None:
         found.append(impossible)
@@ -478,6 +544,7 @@ async def self_audit_job(
     cycle_window: timedelta = timedelta(seconds=600),
     dead_mans_k: int = DEAD_MANS_DEFAULT_K,
     proxy_headroom: tuple[int, int] | None = None,
+    pinnacle_silence_window: timedelta | None = None,
 ) -> int:
     """Run the self-audit, emit one WARNING/ERROR per anomaly (so the health
     monitor catches them) or one INFO when clean, AND (P0-2) dispatch an alert
@@ -544,7 +611,10 @@ async def self_audit_job(
                     )
     try:
         anomalies, fresh_odds = await run_self_audit(
-            session_factory, now, cycle_window=cycle_window
+            session_factory,
+            now,
+            cycle_window=cycle_window,
+            pinnacle_silence_window=pinnacle_silence_window,
         )
     except Exception as exc:  # a monitoring job must never take the scheduler down
         logger.error("self_audit failed: %s", type(exc).__name__)

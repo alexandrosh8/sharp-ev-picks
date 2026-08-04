@@ -1053,6 +1053,14 @@ def build_scheduler(
             # K consecutive empty audits ≈ K cycles with no live odds ingested.
             cycle_window=timedelta(seconds=settings.self_audit_interval_seconds),
             proxy_headroom=proxy_headroom,
+            # Operator item 1 (2026-08-04): arcadia capture dead-man — WARN on
+            # zero NEW pinnacle_* events in the window. None (suppressed) when
+            # the arcadia capture is deliberately disabled.
+            pinnacle_silence_window=(
+                timedelta(hours=settings.arcadia_silence_hours)
+                if settings.arcadia_enabled
+                else None
+            ),
         )
 
     scheduler.add_job(

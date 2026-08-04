@@ -124,7 +124,7 @@ def test_alembic_graph_has_single_head() -> None:
 
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["d5a1c7f3e9b2"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["b7e1d4a9c3f6"]
 
 
 # --------------------------------------------------------------------------- #

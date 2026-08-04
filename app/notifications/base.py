@@ -6,6 +6,8 @@ decision; nothing here (or anywhere) places bets.
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 
 from app.edge.value import ceil_odds, min_acceptable_odds
@@ -147,3 +149,43 @@ def build_pick_alert(
         ]
     )
     return Alert(pick_id=pick.pick_id, title=title, body=body, dedupe_key=dedupe_key)
+
+
+def build_value_lost_alert(
+    *,
+    pick_id: int,
+    event: str,
+    market: str,
+    selection: str,
+    bookmaker: str,
+    decimal_odds: Decimal,
+    current_edge: float,
+    edge_floor: float,
+    value_lost_at: datetime,
+) -> Alert:
+    """Render a premium VALUE-LOST transition as a "mentioned" event (operator
+    item 2, 2026-08-04): the pick's re-priced edge crossed below its tier floor
+    and the operator must hear about it without opening the dashboard.
+
+    The dedupe key hashes (pick DB id, value_lost_at) — the TRANSITION identity.
+    The revalidation loop only builds this alert at the set-crossing (never
+    while the state persists), so one transition dispatches exactly once; a
+    later re-loss after re-qualification carries a fresh timestamp and therefore
+    a fresh key. Informational wording only: this platform never places,
+    modifies, or cashes out bets — the message says "do not bet", nothing more.
+    Body carries names/odds/percentages only — never URLs or credentials."""
+    raw_key = f"value-lost|{pick_id}|{value_lost_at.isoformat()}"
+    dedupe_key = hashlib.sha256(raw_key.encode()).hexdigest()[:32]
+    title = f"⚠️ VALUE LOST: {event} — {selection}"
+    body = "\n".join(
+        [
+            f"⚠️ VALUE LOST — {event}",
+            f"❌ {selection} @ {bookmaker} ({market}) — minted at {decimal_odds:.2f}",
+            "",
+            f"📉 Re-priced edge {current_edge:+.1%} is below the premium floor {edge_floor:.1%}.",
+            "This pick no longer qualifies — do not bet it now.",
+            "",
+            ALERT_FOOTER,
+        ]
+    )
+    return Alert(pick_id=str(pick_id), title=title, body=body, dedupe_key=dedupe_key)

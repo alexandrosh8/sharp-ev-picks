@@ -548,3 +548,138 @@ def test_sharp_anchor_cliff_quiet_on_ordinary_dip_and_thin_prior() -> None:
     assert evaluate_sharp_anchor_cliff(recent_24h=0, prior_24h=0) is None
     # At the floor exactly, the check is live.
     assert evaluate_sharp_anchor_cliff(recent_24h=0, prior_24h=50) is not None
+
+
+# --- Pinnacle capture dead-man (arcadia silence, operator item 1 2026-08-04) -- #
+
+
+def test_pinnacle_capture_silence_fires_on_zero_new_events() -> None:
+    """Jul 18-26 shape: the arcadia feed went silent for 8 days (zero NEW
+    pinnacle_* namespace events created) with no alarm. Zero new events inside
+    the window -> WARN through the standard anomaly channel."""
+    from app.maintenance.self_audit import evaluate_pinnacle_capture_silence
+
+    warn = evaluate_pinnacle_capture_silence(0, window_hours=6.0)
+    assert warn is not None
+    assert (warn.severity, warn.code) == ("WARN", "pinnacle_capture_silent")
+    # Counts + window only — never odds, URLs, or credentials.
+    assert "6" in warn.detail
+    assert "http" not in warn.detail.lower()
+
+
+def test_pinnacle_capture_silence_quiet_when_events_flow() -> None:
+    from app.maintenance.self_audit import evaluate_pinnacle_capture_silence
+
+    # Any new pinnacle-namespace event inside the window -> healthy.
+    assert evaluate_pinnacle_capture_silence(1, window_hours=6.0) is None
+    assert evaluate_pinnacle_capture_silence(424, window_hours=6.0) is None
+
+
+async def test_self_audit_job_pinnacle_silence_threads_window(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """self_audit_job forwards pinnacle_silence_window to run_self_audit; the
+    anomaly rides the standard transition-dedupe dispatch channel (alert on
+    APPEAR, quiet while it persists)."""
+    from app.maintenance import self_audit as sa
+
+    seen_windows: list[timedelta | None] = []
+    sent: list[object] = []
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        seen_windows.append(kwargs.get("pinnacle_silence_window"))
+        anomaly = sa.evaluate_pinnacle_capture_silence(0, window_hours=6.0)
+        assert anomaly is not None
+        return [anomaly], 100
+
+    class Dispatcher:
+        async def dispatch(self, alert):  # type: ignore[no-untyped-def]
+            sent.append(alert)
+            return None
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    state = sa.SelfAuditMonitorState()
+    window = timedelta(hours=6)
+    n = await sa.self_audit_job(
+        _NO_FACTORY,
+        dispatcher=Dispatcher(),
+        monitor_state=state,
+        pinnacle_silence_window=window,
+    )
+    assert n == 1
+    assert seen_windows == [window]
+    assert len(sent) == 1  # alert on APPEAR
+    # Outage persists -> transition dedupe keeps the channel quiet.
+    await sa.self_audit_job(
+        _NO_FACTORY,
+        dispatcher=Dispatcher(),
+        monitor_state=state,
+        pinnacle_silence_window=window,
+    )
+    assert len(sent) == 1
+
+
+async def test_run_self_audit_counts_new_pinnacle_namespace_events() -> None:
+    """DB-backed (compose Postgres, skips when absent): the pinnacle dead-man
+    counts EVENTS CREATED in pinnacle_* sport namespaces inside the window —
+    an event older than the window (or in a live namespace) must not silence
+    the alarm; a fresh pinnacle_* event must."""
+    import pytest
+    from sqlalchemy import update
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.maintenance.self_audit import run_self_audit
+    from app.storage.models import Base, Event, League, Sport, Team
+    from tests.database import TEST_DATABASE_URL
+
+    engine = create_async_engine(TEST_DATABASE_URL)
+    try:
+        async with engine.connect() as probe:
+            await probe.exec_driver_sql("SELECT 1")
+    except Exception:
+        await engine.dispose()
+        pytest.skip("compose Postgres not reachable on :5433")
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(
+            bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        )
+        now = datetime.now(tz=UTC)
+        async with factory() as session:
+            sport = Sport(key="pinnacle_soccer", name="pinnacle_soccer")
+            session.add(sport)
+            await session.flush()
+            league = League(sport_id=sport.id, key="pinnacle_soccer", name="pinnacle_soccer")
+            session.add(league)
+            await session.flush()
+            h = Team(sport_id=sport.id, name="Home FC", normalized_name="home fc pin")
+            a = Team(sport_id=sport.id, name="Away FC", normalized_name="away fc pin")
+            session.add_all([h, a])
+            await session.flush()
+            session.add(
+                Event(
+                    sport_id=sport.id,
+                    league_id=league.id,
+                    home_team_id=h.id,
+                    away_team_id=a.id,
+                    external_ref="pin-evt-1",
+                    starts_at=now + timedelta(hours=12),
+                )
+            )
+            await session.commit()
+
+        window = timedelta(hours=6)
+        anomalies, _ = await run_self_audit(factory, now, pinnacle_silence_window=window)
+        assert "pinnacle_capture_silent" not in {x.code for x in anomalies}
+
+        # Backdate the event beyond the window -> the alarm fires.
+        async with factory() as session:
+            await session.execute(update(Event).values(created_at=now - timedelta(hours=7)))
+            await session.commit()
+        anomalies, _ = await run_self_audit(factory, now, pinnacle_silence_window=window)
+        assert "pinnacle_capture_silent" in {x.code for x in anomalies}
+
+        # Window None (ARCADIA_ENABLED=false at the composition root) -> quiet.
+        anomalies, _ = await run_self_audit(factory, now, pinnacle_silence_window=None)
+        assert "pinnacle_capture_silent" not in {x.code for x in anomalies}
+        await trans.rollback()
+    await engine.dispose()

@@ -1047,6 +1047,11 @@ class Settings(BaseSettings):
     # short interval just tracks repricings; near kickoff is what matters. The
     # >=30s floor blocks hammering-by-typo on a free source.
     arcadia_poll_interval_seconds: int = Field(default=120, ge=30)
+    # Pinnacle-capture dead-man window (operator item 1, 2026-08-04): the
+    # self-audit WARNs when zero NEW pinnacle_* namespace events were created
+    # within this many hours (the arcadia feed went silent 2026-07-18..26 with
+    # no alarm). Suppressed automatically while ARCADIA_ENABLED is false.
+    arcadia_silence_hours: int = Field(default=6, ge=1)
     # Optional outbound proxies for Arcadia/Pinnacle archive capture only.
     # Store real values in .env as comma-separated http(s) proxy URLs:
     # http://user:pass@host:port,http://user:pass@host:port

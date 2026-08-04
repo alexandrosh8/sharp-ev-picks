@@ -130,6 +130,11 @@ _NOT_ADDED: list[tuple[str, str]] = [
     ("Peninsula", "Peninsula Power"),  # bare contested (Peninsula Strikers, NPL VIC)
     ("Hurstville", "Hurstville Zagreb"),  # bare contested (Hurstville City Minotaurs)
     ("Shenzhen", "Shenzhen 2028"),  # bare contested (Shenzhen Peng City / Juniors)
+    # 2026-08-04 pinnacle-pairs batch (docs/review/
+    # alias_candidates_pinnacle_2026-08-04.csv) — reviewed and REJECTED:
+    ("Varteks", "Varazdin"),  # distinct clubs: NK Varteks (2011, fan-founded,
+    # Croatian lower leagues) vs NK Varazdin (UEFA lists the 2026-07-30 UECL
+    # fixture entity as Varazdin); one stale feed label is not a merge.
 ]
 
 
