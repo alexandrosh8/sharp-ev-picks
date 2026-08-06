@@ -14,6 +14,7 @@ and NEVER raises (a monitoring job must not crash the scheduler).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -78,6 +79,22 @@ PINNACLE_SILENCE_DEFAULT_HOURS = 6
 #: because game handicaps were graded against set scores. At fair odds ~0.4+,
 #: 30 graded picks with 0 wins has p < 1e-6.
 IMPOSSIBLE_MARKET_MIN_GRADED = 30
+
+#: Wrong-game anchor anomaly code (emitted by app.maintenance.wrong_game_audit).
+#: Unlike every other code, MANY instances can coexist (one per flagged pick),
+#: so its transition-dedupe key is per-pick and its alerts carry a bounded
+#: once-per-day suppression floor (the Zandschulo cascade, 2026-08-06: one
+#: audit false-positive re-alerted 43x in ~30h because the per-CODE key made
+#: the flapping 200-pick sample window clear and re-fire the same pick).
+WRONG_GAME_ANCHOR_CODE = "wrong_game_anchor"
+
+#: Minimum interval between alerts for the SAME wrong-game pick (daily floor).
+WRONG_GAME_REALERT_INTERVAL = timedelta(hours=24)
+
+#: Hard cap on the per-pick daily-suppression map (entries also expire with
+#: WRONG_GAME_REALERT_INTERVAL, so the cap only matters under a mass anomaly;
+#: eviction can only cause an extra alert, never silence one).
+_WRONG_GAME_DAILY_MAX_KEYS = 256
 
 
 class _Dispatcher(Protocol):
@@ -364,6 +381,13 @@ class SelfAuditMonitorState:
     #: only when a >0 listing follows a streak >= LISTING_DARK_K. Restart
     #: semantics match the dead-man's switch: the streak rebuilds from 0.
     listing_dark_streak: int = 0
+    #: Per-pick daily suppression for wrong_game_anchor alerts: dedupe key ->
+    #: last CONFIRMED dispatch time. Bounded: entries expire after
+    #: WRONG_GAME_REALERT_INTERVAL and the map is hard-capped at
+    #: _WRONG_GAME_DAILY_MAX_KEYS (oldest evicted first). Complements the
+    #: transition dedupe, which alone re-alerts every time the flapping audit
+    #: sample window drops and re-adds the same pick (the 43x cascade).
+    wrong_game_alerted: dict[str, datetime] = field(default_factory=dict)
 
 
 def anomaly_alert(anomaly: Anomaly, now: datetime) -> Alert:
@@ -374,6 +398,13 @@ def anomaly_alert(anomaly: Anomaly, now: datetime) -> Alert:
     recurrence, while the in-process transition tracker (SelfAuditMonitorState)
     is what prevents per-cycle repeats of an ONGOING anomaly."""
     mark = "🛑" if anomaly.severity == "ERROR" else "⚠️"
+    # wrong_game_anchor is per-PICK: two picks flagged in the same minute must
+    # not collapse in the dispatcher's idempotency store, so the key carries a
+    # short stable digest of the detail (the pick+anchor fixture identity).
+    discriminator = ""
+    if anomaly.code == WRONG_GAME_ANCHOR_CODE:
+        digest = hashlib.blake2s(anomaly.detail.encode("utf-8")).hexdigest()[:10]
+        discriminator = f":{digest}"
     return Alert(
         pick_id=f"self-audit-{anomaly.code}",
         title=f"{mark} Self-audit: {anomaly.code}",
@@ -381,7 +412,7 @@ def anomaly_alert(anomaly: Anomaly, now: datetime) -> Alert:
             f"{mark} {anomaly.detail}\n\n"
             "(automated monitor — decision-support only, no bets are placed)"
         ),
-        dedupe_key=f"self-audit:{anomaly.code}:{now.strftime('%Y%m%dT%H%M')}",
+        dedupe_key=f"self-audit:{anomaly.code}{discriminator}:{now.strftime('%Y%m%dT%H%M')}",
     )
 
 
@@ -666,6 +697,30 @@ def _dispatch_confirmed(result: object) -> bool:
     return any(delivered for _name, delivered in sink_results)
 
 
+def _anomaly_dedupe_key(anomaly: Anomaly) -> str:
+    """Transition-dedupe key for an anomaly. Every code but one is a singleton
+    (at most one instance can exist), so the code alone is the key.
+    ``wrong_game_anchor`` is per-PICK — many distinct picks can be flagged at
+    once and each deserves its own transition — so its key carries the detail
+    (the pick+anchor fixture identity)."""
+    if anomaly.code == WRONG_GAME_ANCHOR_CODE:
+        return f"{anomaly.code}:{anomaly.detail}"
+    return anomaly.code
+
+
+def _prune_wrong_game_alerted(alerted: dict[str, datetime], now: datetime) -> None:
+    """Bound the wrong-game daily-suppression map in place: stamps older than
+    WRONG_GAME_REALERT_INTERVAL no longer suppress anything and are dropped;
+    beyond _WRONG_GAME_DAILY_MAX_KEYS the OLDEST stamps are evicted (eviction
+    can only cause an extra alert, never silence one)."""
+    for key in [k for k, t in alerted.items() if now - t >= WRONG_GAME_REALERT_INTERVAL]:
+        del alerted[key]
+    overflow = len(alerted) - _WRONG_GAME_DAILY_MAX_KEYS
+    if overflow > 0:
+        for key, _stamp in sorted(alerted.items(), key=lambda kv: kv[1])[:overflow]:
+            del alerted[key]
+
+
 async def _dispatch_anomalies(
     anomalies: list[Anomaly],
     dead_man: Anomaly | None,
@@ -680,17 +735,31 @@ async def _dispatch_anomalies(
     WP7 confirm-before-consume: dedupe/one-shot state flips ONLY on a confirmed
     dispatch. An anomaly whose alert reached no sink is NOT marked active (so it
     re-dispatches next cycle), and a failed dead-man's-switch delivery leaves
-    `dead_man_alerted` False so the switch retries instead of going silent."""
+    `dead_man_alerted` False so the switch retries instead of going silent.
+
+    wrong_game_anchor anomalies additionally carry a bounded once-per-day floor
+    (SelfAuditMonitorState.wrong_game_alerted): the audit's 200-pick sample
+    window flaps, so pure transition dedupe re-alerted the SAME pick every time
+    it dropped out and returned (43x in ~30h, the 2026-08-06 Zandschulo
+    cascade). A suppressed reappearance is still marked active — the per-run
+    ERROR log lines (health-monitor parity) are unaffected."""
     prior = monitor_state.active_anomalies if monitor_state is not None else set()
-    codes = {a.code for a in anomalies}
-    to_send = [a for a in anomalies if a.code not in prior]
+    keys = {_anomaly_dedupe_key(a) for a in anomalies}
+    to_send = [a for a in anomalies if _anomaly_dedupe_key(a) not in prior]
     if dead_man is not None:
         to_send.append(dead_man)
     # Anomalies that PERSIST stay active; cleared ones drop out. Newly-seen
-    # codes join below only once their alert delivery is confirmed.
+    # keys join below only once their alert delivery is confirmed.
     if monitor_state is not None:
-        monitor_state.active_anomalies = codes & prior
+        monitor_state.active_anomalies = keys & prior
+        _prune_wrong_game_alerted(monitor_state.wrong_game_alerted, now)
     for anomaly in to_send:
+        key = _anomaly_dedupe_key(anomaly)
+        if monitor_state is not None and anomaly.code == WRONG_GAME_ANCHOR_CODE:
+            last = monitor_state.wrong_game_alerted.get(key)
+            if last is not None and now - last < WRONG_GAME_REALERT_INTERVAL:
+                monitor_state.active_anomalies.add(key)
+                continue
         confirmed = False
         try:
             confirmed = _dispatch_confirmed(await dispatcher.dispatch(anomaly_alert(anomaly, now)))
@@ -705,4 +774,6 @@ async def _dispatch_anomalies(
         if dead_man is not None and anomaly.code == dead_man.code:
             monitor_state.dead_man_alerted = True
         else:
-            monitor_state.active_anomalies.add(anomaly.code)
+            monitor_state.active_anomalies.add(key)
+            if anomaly.code == WRONG_GAME_ANCHOR_CODE:
+                monitor_state.wrong_game_alerted[key] = now

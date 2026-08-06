@@ -44,7 +44,9 @@ from app.backtesting.calibration import bet_band_reliability
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
 from app.maintenance.calibration_drift import calibration_drift_status
+from app.resolution.matching import normalize_name
 from app.resolution.shadow import summarize_anchor_coverage, summarize_match_rate
+from app.resolution.tennis_names import canonical_tennis_name
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.settlement.outcomes import pick_pnl, pick_roi
@@ -1213,6 +1215,121 @@ async def _warehouse_available_games(
         return []
 
 
+# Duplicate-fixture window for /games publication. OddsChecker lists the SAME
+# real tennis match twice — a coupon-slug event ("Match Coupon" pseudo-league)
+# and a numeric tour event (real tour name) — with kickoffs skewed by minutes up
+# to ~2h between the two listings (verified live 2026-08-06: 31 duplicate pairs,
+# 28% of Radar rows). ±2h absorbs that skew, while genuine repeat fixtures
+# between the same two names (doubleheader/rematch class) sit further apart and
+# survive. A same-name pair INSIDE the window is treated as one match by design.
+_GAMES_DEDUPE_WINDOW_SECONDS = 7200.0
+
+
+def _is_pseudo_league(league: object, sport: str) -> bool:
+    """True for coupon/placeholder league labels that should lose a dedupe tie.
+
+    "Match Coupon" (and friends) is a discovery bucket, not a competition; the
+    pipeline also falls back to the bare sport key when a source names no league.
+    """
+    text = str(league or "").strip().casefold()
+    return not text or "coupon" in text or text == sport.casefold()
+
+
+def _published_game_identity(row: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    """Normalized (sport, home, away) identity for duplicate-fixture detection.
+
+    Tennis names cross two formats ("Frances Tiafoe" vs "Tiafoe F."), so tennis
+    keys use the surname+initial canonical form; team sports use the strict
+    matcher normalization. Rows without both names (or that normalize to "")
+    opt out of dedupe — never guess.
+    """
+    sport = str(row.get("sport", ""))
+    home = row.get("home")
+    away = row.get("away")
+    if not home or not away:
+        return None
+    if sport == "tennis" or sport.startswith("tennis_"):
+        home_key = canonical_tennis_name(str(home)) or normalize_name(str(home))
+        away_key = canonical_tennis_name(str(away)) or normalize_name(str(away))
+    else:
+        home_key = normalize_name(str(home))
+        away_key = normalize_name(str(away))
+    if not home_key or not away_key:
+        return None
+    return (sport, home_key, away_key)
+
+
+def _parse_game_starts_at(row: Mapping[str, Any]) -> datetime | None:
+    raw = row.get("starts_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _dedupe_published_games(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse duplicate listings of the same real fixture before publication.
+
+    Rows sharing a normalized (sport, home, away) identity with kickoffs within
+    ±2h of a cluster anchor are ONE match published twice (tennis coupon-slug vs
+    numeric tour event). The survivor is the variant with a real league name
+    over a coupon/pseudo-league (then the richer snapshot history), and it keeps
+    unvalidated=True when ANY collapsed variant had it — tennis is shadow-only
+    and dedupe must never wash out the display-only flag. Rows without an
+    identity or kickoff pass through untouched.
+    """
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    passthrough: list[dict[str, Any]] = []
+    for row in rows:
+        identity = _published_game_identity(row)
+        if identity is None or _parse_game_starts_at(row) is None:
+            passthrough.append(row)
+        else:
+            grouped.setdefault(identity, []).append(row)
+
+    def survivor_rank(row: dict[str, Any]) -> tuple[int, int]:
+        sport = str(row.get("sport", ""))
+        pseudo = _is_pseudo_league(row.get("league"), sport)
+        snapshots = row.get("snapshot_count")
+        return (0 if not pseudo else 1, -int(snapshots) if isinstance(snapshots, int) else 0)
+
+    deduped: list[dict[str, Any]] = passthrough
+
+    def flush(cluster: list[dict[str, Any]]) -> None:
+        if not cluster:
+            return
+        keeper = min(cluster, key=survivor_rank)
+        if any(bool(variant.get("unvalidated")) for variant in cluster) and not bool(
+            keeper.get("unvalidated")
+        ):
+            keeper = {**keeper, "unvalidated": True}
+        deduped.append(keeper)
+
+    for group in grouped.values():
+        group.sort(key=lambda row: _parse_game_starts_at(row) or datetime.max.replace(tzinfo=UTC))
+        cluster: list[dict[str, Any]] = []
+        anchor: datetime | None = None
+        for candidate in group:
+            starts = _parse_game_starts_at(candidate)
+            if starts is None:  # unreachable: grouped rows carry a parsed kickoff
+                continue
+            if anchor is None or abs((starts - anchor).total_seconds()) <= (
+                _GAMES_DEDUPE_WINDOW_SECONDS
+            ):
+                if anchor is None:
+                    anchor = starts
+                cluster.append(candidate)
+            else:
+                flush(cluster)
+                cluster = [candidate]
+                anchor = starts
+        flush(cluster)
+    return deduped
+
+
 @router.get("/games", dependencies=[Depends(require_dashboard_auth)])
 async def available_games(
     request: Request,
@@ -1249,7 +1366,7 @@ async def available_games(
     }
     for row in memory_rows:
         merged[(str(row.get("sport", "")), str(row.get("event_id", "")))] = row
-    rows = list(merged.values())
+    rows = _dedupe_published_games(list(merged.values()))
     rows.sort(key=lambda row: (row["starts_at"] is None, row["starts_at"] or "", row["event"]))
     return rows[:limit]
 

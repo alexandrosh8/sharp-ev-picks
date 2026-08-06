@@ -21,7 +21,7 @@ Pure module: no IO. Input is per-bookmaker decimal odds for one market.
 import math
 import re
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -488,6 +488,86 @@ def is_legacy_product_mismatch(
     if minted_at >= LEGACY_EH_SPREADS_FIX_DEPLOYED_AT:
         return False
     return market_detail is None or _INTEGER_SPREADS_DETAIL_RE.fullmatch(market_detail) is not None
+
+
+# Named gate reason for the NON-COMPLEMENTARY spreads devig refusal (live
+# defect 2026-08-06, pick 960785 "Toronto Argonauts -2.5" CFL): OddsChecker's
+# selection-signed key space slugs BOTH teams' minus legs into ONE
+# spreads_minus_<line> group, so a devig group can hold a same-sign
+# opposite-team pair that is NOT a true two-sided market — the 2-way devig of
+# that pair fabricates edge (Betfair 1.94/2.06 summed ~1.0009 gross, LOOKING
+# like a fair book, while the true complement lived in spreads_plus_2_5).
+# Orientation sibling of the 3-way-EH mixed-group class dropped at the parser
+# 2026-08-02. ``event_fair_probs`` refuses such a group fail-closed (no sharp
+# NOR consensus fair) under this slug; the pipeline surfaces it in the
+# candidate_evaluations reason mix so /lab/gate-reasons shows the refusal.
+SPREAD_PAIR_INCOHERENT_REASON = "spread_pair_incoherent"
+
+# "{team} {signed line}" — the canonical handicap selection string of every
+# live vocabulary (scrape + injected arcadia adoption). The SELECTION carries
+# the authoritative signed line; detail-token signs are producer-dependent
+# (docs/research/2026-07-10-ah-spreads-vocabulary-audit.md). The sign is
+# REQUIRED: an unsigned trailing number cannot prove line orientation.
+_SPREAD_SELECTION_RE = re.compile(r"^(?P<team>.*\S)\s+(?P<line>[+-]\d+(?:\.\d+)?)$")
+
+
+def parse_spread_selection(selection: str) -> tuple[str, float] | None:
+    """(normalized team, signed line) for one handicap selection string —
+    ``"Toronto Argonauts -2.5"`` -> ``("toronto argonauts", -2.5)`` — or None
+    when the team+sign cannot be parsed (missing sign, empty team, totals/EH
+    shapes). Pure (str/re only)."""
+    match = _SPREAD_SELECTION_RE.match(selection.strip())
+    if match is None:
+        return None
+    return _norm(match.group("team")), float(match.group("line"))
+
+
+def _is_draw_spread_leg(selection: str) -> bool:
+    """True for the Draw leg of a 3-way (European) handicap group — the bare
+    "Draw"/"The Draw" or a line-bearing "Draw (-1)" / "Draw -1" form. A club
+    whose NAME merely starts with "Draw…" ("Drawsko") never matches: after the
+    prefix the token must end or be followed by a space/parenthesis."""
+    key = _norm(selection)
+    if key.startswith("the "):
+        key = key[4:]
+    return key == "draw" or key.startswith(("draw ", "draw("))
+
+
+def spread_pair_coherent(selections: Iterable[str]) -> bool:
+    """True iff a SPREADS devig group's ``selections`` are a devig-sound
+    outcome set (mutually exclusive & exhaustive):
+
+    * TWO selections parsing as ``{team_a +X, team_b -X}`` — two DIFFERENT
+      teams on the SAME |line| with OPPOSITE signs (``line_a == -line_b``; a
+      zero line is its own complement, so the level-handicap ``{A +0, B +0}``
+      pair stays eligible); or
+    * THREE selections where exactly one is a Draw leg and the two team legs
+      form that same complementary pair — the NAMESPACED 3-way European
+      handicap ("european_handicap_-1": Home -1 / Draw (-1) / Away +1), which
+      is devig-sound at any line. (The OddsChecker selection-signed
+      spreads_<line> key space never carries a Draw leg — 3-way EH was
+      dropped from it at the parser, fix 2026-08-02.)
+
+    Everything else — same-sign opposite-team legs (the 960785 class),
+    one-sided or 4+-selection groups, mismatched |line| magnitudes, same-team
+    legs, or any unparsable team+sign — REFUSES devig, fail-closed. Pure
+    function (no IO); callers gate under ``SPREAD_PAIR_INCOHERENT_REASON``."""
+    sels = list(selections)
+    if len(sels) == 3:
+        team_legs = [s for s in sels if not _is_draw_spread_leg(s)]
+        if len(team_legs) != 2:
+            return False
+        sels = team_legs
+    if len(sels) != 2:
+        return False
+    first = parse_spread_selection(sels[0])
+    second = parse_spread_selection(sels[1])
+    if first is None or second is None:
+        return False
+    (team_a, line_a), (team_b, line_b) = first, second
+    if team_a == team_b:
+        return False
+    return line_a == -line_b
 
 
 @dataclass(frozen=True)

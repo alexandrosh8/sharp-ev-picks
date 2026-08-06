@@ -108,10 +108,12 @@ def test_lookup_unique_containment_fallback() -> None:
 
 
 def test_lookup_ambiguous_containment_returns_none() -> None:
-    # Two source entries both containment-match the pick name -> refuse, stay open.
+    # Two source entries both containment-match the pick name WITH conflicting
+    # scores -> refuse, stay open. (Identical payloads are NOT ambiguous —
+    # grading is the same either way — see test_results_ambiguous_dedup.py.)
     same_day = [
         fs(home="Santos FC", away="Palmeiras"),
-        fs(home="Santos Laguna", away="Palmeiras"),
+        FinalScore("Santos Laguna", "Palmeiras", date(2026, 6, 9), 0, 3),
     ]
     book = ScoreBook(same_day)
     assert book.lookup("Santos", "Palmeiras", datetime(2026, 6, 9, 22, 0, tzinfo=UTC)) is None

@@ -67,6 +67,7 @@ def snap(
     detail: str | None = None,
     market: Market = Market.H2H,
     event: str = EVENT,
+    liquidity: float | None = None,
 ) -> OddsSnapshotIn:
     return OddsSnapshotIn(
         event_id=event,
@@ -74,6 +75,7 @@ def snap(
         market=market,
         selection=sel,
         decimal_odds=odds,
+        liquidity=liquidity,
         captured_at=captured,
         ingested_at=captured,
         market_detail=detail,
@@ -284,6 +286,78 @@ async def test_attach_only_attaches_to_existing_event(factory) -> None:  # type:
         )
     assert set(books) == {"SoftBook", "Betfair Exchange"}
     assert event_count == 1  # exactly ONE canonical event row
+
+
+async def test_attach_only_empty_league_persists_to_existing_event(  # type: ignore[no-untyped-def]
+    factory,
+) -> None:
+    """Regression (live defect 2026-08-04, dead promote persistence): the
+    Betfair-API promote sink calls attach-only persist with sport='soccer',
+    default_league='' and EventTeams whose league is '' (Betfair carries no
+    canonical league name). The attach path must resolve league/team identity
+    FROM the already-existing event row — an empty league can never matter on
+    an attach — so the API rows (liquidity included) actually land."""
+    ref = "evt-attach-empty-league-1"
+    home, away = "Promote Home FC", "Promote Away FC"
+    kickoff = NOW + timedelta(hours=6)
+    seed_teams = {ref: EventTeams(home=home, away=away, league="promote-league", starts_at=kickoff)}
+    seed = [snap("SoftBook", home, 2.30, event=ref)]
+    assert await persist_odds_snapshots(factory, seed, seed_teams, "soccer", "test-league") == 1
+
+    # EXACT promote-sink shape (app/scheduler.py): league defaults to "" on the
+    # Betfair EventTeams AND default_league is "".
+    bf_teams = {ref: EventTeams(home=home, away=away, starts_at=kickoff)}
+    bf = [snap("betfair exchange", home, 2.14, event=ref, liquidity=812.5)]
+    written = await persist_odds_snapshots(
+        factory,
+        bf,
+        bf_teams,
+        sport="soccer",
+        default_league="",
+        attach_only_to_existing=True,
+    )
+    assert written == 1
+    assert ref in written.successful_event_ids
+    assert not written.failed_event_ids
+
+    async with factory() as session:
+        row = await session.scalar(
+            select(OddsSnapshot)
+            .join(Event, OddsSnapshot.event_id == Event.id)
+            .where(Event.external_ref == ref, OddsSnapshot.bookmaker == "betfair exchange")
+        )
+        event_count = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == ref)
+        )
+    assert row is not None
+    assert row.liquidity == Decimal("812.5")
+    assert event_count == 1  # attached to the seed event, no second row
+
+
+async def test_create_path_empty_league_still_refuses(  # type: ignore[no-untyped-def]
+    factory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A CREATE with an empty league stays a loud failure (corrupt input must
+    never mint an identity-less league row) — and the skip log + cycle summary
+    now NAME the ValueError cause (live defect 2026-08-04: 487 cycles of bare
+    'ValueError' hid that the promote persistence was 100% dead)."""
+    ref = "evt-create-empty-league-1"
+    teams = {ref: EventTeams(home="NoLeague Home FC", away="NoLeague Away FC")}
+    rows = [snap("SoftBook", "NoLeague Home FC", 2.30, event=ref)]
+    with caplog.at_level("WARNING", logger="app.storage.repositories"):
+        result = await persist_odds_snapshots(factory, rows, teams, "soccer", "")
+    assert result == 0
+    assert ref in result.failed_event_ids
+    async with factory() as session:
+        event_count = await session.scalar(
+            select(func.count()).select_from(Event).where(Event.external_ref == ref)
+        )
+    assert event_count == 0
+    messages = [record.getMessage() for record in caplog.records]
+    # 1b: the per-event skip line carries the identity guard's message.
+    assert any("skipped event" in m and "league key must be non-empty" in m for m in messages)
+    # 1b: the 0-written/N-skipped cycle summary carries the cause too.
+    assert any("skipped this cycle" in m and "league key must be non-empty" in m for m in messages)
 
 
 async def test_persisted_row_values_and_line_qualified_market(factory) -> None:  # type: ignore[no-untyped-def]

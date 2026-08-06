@@ -1646,6 +1646,68 @@ async def _record_candidate_audit(
         )
 
 
+async def _record_spread_pair_refusal_audit(
+    deps: "PipelineDeps",
+    sport_key: str,
+    event_ref: str,
+    market: Market,
+    detail: str | None,
+    selections: Sequence[str],
+    now: datetime,
+) -> None:
+    """Stage candidate_evaluations rows (one per quoted selection) for a
+    SPREADS group whose devig was REFUSED as a non-complementary pair
+    (``spread_pair_incoherent`` — live defect 2026-08-06, pick 960785).
+
+    A refused group never builds a candidate, so ``_record_candidate_audit``
+    (which needs a PickOut) can never see it — but the refusal must still be
+    legible on /lab/gate-reasons (the exact lesson of the 2026-07-26
+    no_sharp_anchor telemetry finding: an unnamed gate hides regressions).
+    Rows carry tier='refused' (nothing was kept or demoted — no pick exists),
+    the named reason slug, and NO anchor/fill provenance (none was computed;
+    fabricating any would be dishonest). Pure MEASUREMENT: isolated, own
+    session, type-only logged; a failure here never alters the cycle. The
+    cycle-keyed unique constraint keeps a retried cycle idempotent."""
+    if deps.session_factory is None:
+        return
+    from sqlalchemy import select
+
+    from app.edge.value import SPREAD_PAIR_INCOHERENT_REASON
+    from app.storage.candidate_audit import (
+        CandidateEvaluationInput,
+        record_candidate_evaluation,
+    )
+    from app.storage.models import Event
+
+    try:
+        async with deps.session_factory() as session:
+            event_pk = await session.scalar(select(Event.id).where(Event.external_ref == event_ref))
+            if event_pk is None:
+                return  # event not persisted: no FK target
+            for selection in selections:
+                await record_candidate_evaluation(
+                    session,
+                    CandidateEvaluationInput(
+                        event_id=event_pk,
+                        sport_key=sport_key,
+                        market=str(market),
+                        market_detail=detail or "",
+                        selection=selection,
+                        tier="refused",
+                        reasons=(SPREAD_PAIR_INCOHERENT_REASON,),
+                        evaluated_at=now,
+                    ),
+                )
+            await session.commit()
+    except Exception as exc:  # audit write must NEVER break the cycle
+        logger.error(
+            "spread-pair refusal audit write failed for %s/%s: %s",
+            sport_key,
+            event_ref,
+            type(exc).__name__,
+        )
+
+
 async def _complete_before_propagating_cancellation[T](
     operation: Coroutine[Any, Any, T],
 ) -> T:
@@ -1909,6 +1971,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         GLOBAL_ODDS_CEILING_REASON,
         SHARP_BOOKS,
         SHARP_MISS_NO_FULL_MARKET,
+        SPREAD_PAIR_INCOHERENT_REASON,
         ah_candidate_plausible,
         anchor_type_for,
         dc_candidate_plausible,
@@ -2158,6 +2221,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_non_settleable = 0
     n_tennis_game_line = 0
     n_integer_line_totals = 0
+    n_spread_pair_incoherent = 0
     n_visibility_capped = 0
     n_ah_rejected = 0
     n_sanity_dropped = 0
@@ -2255,6 +2319,22 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             continue
         anchored = fair.get((event_id, market, detail))
         if anchored is None:
+            # SPREADS pair-coherence refusal (pick 960785): event_fair_probs
+            # REFUSED to devig this group — its selections are not a true
+            # complementary two-sided pair (same-sign opposite-team legs /
+            # unparsable team+sign), so any 2-way fair would be fabricated.
+            # Fail-closed but NEVER silent: counted, logged below, and written
+            # to candidate_evaluations under the named reason so
+            # /lab/gate-reasons surfaces the refusal. Every other missing-fair
+            # market keeps the silent skip (no trustworthy fair — unchanged).
+            if (
+                sharp_miss_by_market.get((event_id, market, detail))
+                == SPREAD_PAIR_INCOHERENT_REASON
+            ):
+                n_spread_pair_incoherent += 1
+                await _record_spread_pair_refusal_audit(
+                    deps, sport_key, event_id, market, detail, list(prices), now
+                )
             continue  # no trustworthy fair value for this market
         anchor_book, fair_by_sel = anchored
         # Buchalter bet-volume smoke detector (Task 8 probe, log-only): this
@@ -3300,6 +3380,20 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             sport_key,
             n_integer_line_totals,
         )
+    if n_spread_pair_incoherent:
+        # The spreads pair-coherence refusal is never silent: these groups'
+        # selections are not a complementary {team_a +X, team_b -X} pair
+        # (same-sign opposite-team legs or an unparsable team+sign — the pick
+        # 960785 class), so devig was REFUSED at group construction: no fair,
+        # no candidate, premium OR shadow.
+        logger.warning(
+            "value pipeline %s: %s refused devig for %d spreads group(s) whose "
+            "selections are not a complementary two-sided pair (a 2-way devig "
+            "of such a pair fabricates edge)",
+            sport_key,
+            SPREAD_PAIR_INCOHERENT_REASON,
+            n_spread_pair_incoherent,
+        )
     if n_thin_books:
         logger.info(
             "value pipeline %s: %d market(s) skipped below their VALUE_MIN_BOOKS_PER_MARKET floor",
@@ -3572,14 +3666,36 @@ def event_fair_probs(
     pipeline can emit 'no_sharp_anchor:<cause>' instead of the single opaque
     label that hid the PR #164 liquidity-floor regression for 13 days. A
     derived DOUBLE_CHANCE market inherits its 1X2 anchor's miss reason. None
-    (the default) is bit-identical."""
-    from app.edge.value import anchor_fair_probs_with_provenance, double_chance_fair
+    (the default) is bit-identical. A SPREADS group refused as a
+    non-complementary pair records ``spread_pair_incoherent`` here instead
+    (and, unlike a sharp miss, produces NO fair at all — not even consensus)."""
+    from app.edge.value import (
+        SPREAD_PAIR_INCOHERENT_REASON,
+        anchor_fair_probs_with_provenance,
+        double_chance_fair,
+        spread_pair_coherent,
+    )
 
     out: EventFairProbs = {}
     h2h_3way: dict[str, tuple[tuple[str, dict[str, float]], list[str], bool]] = {}
     h2h_miss_by_event: dict[str, str] = {}
     for (event_id, market, detail), (prices, _) in grouped.items():
         if market in _DIRECT_MARKETS:
+            # SPREADS pair-coherence refusal (live defect 2026-08-06, pick
+            # 960785): the selection-signed key space can land BOTH teams'
+            # same-sign legs in ONE group ("Toronto -2.5" + "Calgary -2.5" in
+            # spreads_minus_2_5) — a NON-complementary pair whose 2-way devig
+            # fabricates edge (the true complement lives in the plus_<line>
+            # group). A spreads group is devig-eligible ONLY when its
+            # selections parse as {team_a +X, team_b -X} for one |X| (the
+            # selection string carries the authoritative signed line);
+            # anything else refuses FAIL-CLOSED — no sharp OR consensus fair,
+            # for the mint AND the close/true-up path alike — under the named
+            # ``spread_pair_incoherent`` reason (surfaced via sharp_miss_out).
+            if market is Market.SPREADS and not spread_pair_coherent(prices):
+                if sharp_miss_out is not None:
+                    sharp_miss_out[(event_id, market, detail)] = SPREAD_PAIR_INCOHERENT_REASON
+                continue
             miss_out: list[str] = []
             result = anchor_fair_probs_with_provenance(
                 prices,

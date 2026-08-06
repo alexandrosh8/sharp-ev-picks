@@ -683,3 +683,130 @@ async def test_run_self_audit_counts_new_pinnacle_namespace_events() -> None:
         assert "pinnacle_capture_silent" not in {x.code for x in anomalies}
         await trans.rollback()
     await engine.dispose()
+
+
+# --- wrong_game_anchor per-pick daily alert dedupe (2026-08-06) ------------- #
+# The Zandschulo cascade: ONE audit false-positive re-alerted 43x in ~30h
+# because (a) the code-level transition key made every wrong-game pick share
+# one dedupe slot and (b) the 200-pick sample window flaps, clearing and
+# re-firing the code each time. Wrong-game anomalies now key per PICK (detail)
+# and carry a bounded 24h suppression floor.
+
+
+def _wg(detail: str):  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    return sa.Anomaly("ERROR", "wrong_game_anchor", detail)
+
+
+async def test_wrong_game_alerts_per_pick_not_per_code(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    cycle = {"anoms": [_wg("pick A"), _wg("pick B")]}
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return list(cycle["anoms"]), 5
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    disp = _FakeDispatcher()
+    state = sa.SelfAuditMonitorState()
+    t0 = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+
+    # two DISTINCT flagged picks in one cycle -> two alerts (not one per code)
+    await sa.self_audit_job(_NO_FACTORY, t0, dispatcher=disp, monitor_state=state)
+    assert disp.sent == ["self-audit-wrong_game_anchor"] * 2
+
+    # both persist -> quiet (transition dedupe)
+    await sa.self_audit_job(
+        _NO_FACTORY, t0 + timedelta(minutes=10), dispatcher=disp, monitor_state=state
+    )
+    assert len(disp.sent) == 2
+
+    # a THIRD pick appears while the first two persist -> exactly one new alert
+    cycle["anoms"] = [_wg("pick A"), _wg("pick B"), _wg("pick C")]
+    await sa.self_audit_job(
+        _NO_FACTORY, t0 + timedelta(minutes=20), dispatcher=disp, monitor_state=state
+    )
+    assert len(disp.sent) == 3
+
+
+async def test_wrong_game_flapping_pick_alerts_once_per_day(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    cycle = {"anoms": [_wg("pick A")]}
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return list(cycle["anoms"]), 5
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    disp = _FakeDispatcher()
+    state = sa.SelfAuditMonitorState()
+    t0 = datetime(2026, 8, 6, 0, 0, tzinfo=UTC)
+
+    await sa.self_audit_job(_NO_FACTORY, t0, dispatcher=disp, monitor_state=state)
+    assert len(disp.sent) == 1
+
+    # the pick falls OUT of the audit sample (flap), then reappears within 24h:
+    # the daily floor suppresses the re-alert the transition dedupe would fire
+    for i in range(1, 6):
+        cycle["anoms"] = [] if i % 2 else [_wg("pick A")]
+        await sa.self_audit_job(
+            _NO_FACTORY, t0 + timedelta(hours=i), dispatcher=disp, monitor_state=state
+        )
+    assert len(disp.sent) == 1
+
+    # after the 24h floor elapses a still-flagged pick re-alerts once
+    cycle["anoms"] = [_wg("pick A")]
+    await sa.self_audit_job(
+        _NO_FACTORY, t0 + timedelta(hours=25), dispatcher=disp, monitor_state=state
+    )
+    assert len(disp.sent) == 2
+
+    # other codes keep pure transition semantics (clear -> recur re-alerts)
+    assert state.wrong_game_alerted  # the daily stamp map is in use
+
+
+async def test_wrong_game_daily_map_is_bounded_and_pruned(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.maintenance import self_audit as sa
+
+    cycle = {"anoms": [_wg("old pick")]}
+
+    async def fake_run(session_factory, now=None, **kwargs):  # type: ignore[no-untyped-def]
+        return list(cycle["anoms"]), 5
+
+    monkeypatch.setattr(sa, "run_self_audit", fake_run)
+    disp = _FakeDispatcher()
+    state = sa.SelfAuditMonitorState()
+    t0 = datetime(2026, 8, 6, 0, 0, tzinfo=UTC)
+    await sa.self_audit_job(_NO_FACTORY, t0, dispatcher=disp, monitor_state=state)
+    assert len(state.wrong_game_alerted) == 1
+
+    # stamps older than the re-alert interval are pruned (bounded by expiry)
+    cycle["anoms"] = [_wg("new pick")]
+    await sa.self_audit_job(
+        _NO_FACTORY, t0 + timedelta(hours=25), dispatcher=disp, monitor_state=state
+    )
+    assert all("new pick" in k for k in state.wrong_game_alerted)
+
+    # hard cap: the map never exceeds the documented bound
+    cycle["anoms"] = [_wg(f"pick {i}") for i in range(sa._WRONG_GAME_DAILY_MAX_KEYS + 50)]
+    await sa.self_audit_job(
+        _NO_FACTORY, t0 + timedelta(hours=26), dispatcher=disp, monitor_state=state
+    )
+    await sa.self_audit_job(
+        _NO_FACTORY, t0 + timedelta(hours=27), dispatcher=disp, monitor_state=state
+    )
+    assert len(state.wrong_game_alerted) <= sa._WRONG_GAME_DAILY_MAX_KEYS
+
+
+def test_wrong_game_alert_dedupe_keys_are_per_pick() -> None:
+    from app.maintenance import self_audit as sa
+
+    now = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+    k_a = sa.anomaly_alert(_wg("pick A"), now).dedupe_key
+    k_b = sa.anomaly_alert(_wg("pick B"), now).dedupe_key
+    # two picks flagged in the SAME minute must not collapse in the
+    # dispatcher's idempotency store
+    assert k_a != k_b
+    # deterministic per pick (retries next cycle still dedupe downstream)
+    assert k_a == sa.anomaly_alert(_wg("pick A"), now).dedupe_key

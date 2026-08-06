@@ -30,7 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from app.maintenance.self_audit import Anomaly
+from app.maintenance.self_audit import WRONG_GAME_ANCHOR_CODE, Anomaly
 from app.storage.models import Event, League, Pick, Sport, Team
 
 logger = logging.getLogger(__name__)
@@ -97,9 +97,15 @@ def _names_same_game(a: str, b: str) -> bool:
     # Gate on the RAW names, not base_a/base_b: strip_markers removes a
     # first-initial that is also a club marker ("b" -> B team), which would hide
     # a tennis "surname b" anchor ("tomic b", "shick b") and defeat this branch.
+    # Compare the tennis-canonical shapes ALIAS-canonicalized: the matcher
+    # aliases the canonical forms too (the seed's tennis entries are keyed on
+    # 'surname f'), so a reviewed spelling alias ('zandschulo b' -> 'zandschulp
+    # b', the OddsChecker slug typo of 2026-08-06) unifies here as well instead
+    # of false-flagging the correct anchor 43x/day. Reviewed aliases only map
+    # SAME-player forms, so this can only SUPPRESS a false ERROR.
     if _tennis_initial(a) is not None or _tennis_initial(b) is not None:
         ca, cb = canonical_tennis_name(a), canonical_tennis_name(b)
-        if ca and cb and ca == cb:
+        if ca and cb and aliases.canonical(ca) == aliases.canonical(cb):
             return True
     # Two base names differing ONLY by a club-disambiguating token (United/City/
     # Sociedad/B/II/...) are DIFFERENT clubs — never the same game.
@@ -172,7 +178,9 @@ def verify_same_game(
     )
 
     def flag(reason: str) -> Anomaly:
-        return Anomaly("ERROR", "wrong_game_anchor", f"{reason}: {detail}")
+        # WRONG_GAME_ANCHOR_CODE gets per-pick transition dedupe + a daily
+        # alert floor in self_audit._dispatch_anomalies — keep them in sync.
+        return Anomaly("ERROR", WRONG_GAME_ANCHOR_CODE, f"{reason}: {detail}")
 
     # 3. kickoff window
     if abs((anchor_kickoff - pick_kickoff).total_seconds()) > max_minute_drift * 60:

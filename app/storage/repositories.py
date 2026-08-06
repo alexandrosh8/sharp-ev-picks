@@ -429,6 +429,75 @@ async def _get_or_create_team(
 # leg reversals swap the ids and so miss the oriented key entirely).
 _RESOLVER_TOLERANCE = timedelta(hours=2)
 
+# Re-date guard (live defect 2026-08): a provider can RE-ISSUE a numeric
+# external_ref for a DIFFERENT real-world fixture days later (OddsChecker
+# numeric ids — settled Washington picks and a fresh Montreal pick fused onto
+# one canonical event). A starts_at move beyond this window on an event that
+# already has settled picks is never a postponement we should absorb silently.
+_EVENT_REDATE_GUARD_WINDOW = timedelta(hours=48)
+
+
+async def _redate_allowed(
+    session: AsyncSession,
+    existing: "Event",
+    target: datetime | None,
+    external_ref: str,
+) -> bool:
+    """Whether the existing-row fast-path may move ``existing.starts_at`` to
+    ``target``. Moves within ``_EVENT_REDATE_GUARD_WINDOW`` (and NULL upgrades)
+    always may. A larger move on an event WITH settled picks is REFUSED and
+    routed to match_review_queue (reason 'redate_settled_event') — likely
+    provider ref re-use for another fixture; re-dating would corrupt the
+    settled history. A larger move on a pick-less event is allowed with an
+    INFO line (a genuine re-schedule with no settled money at risk)."""
+    if existing.starts_at is None or target is None:
+        return True
+    delta = abs(target - existing.starts_at)
+    if delta <= _EVENT_REDATE_GUARD_WINDOW:
+        return True
+    moved_hours = delta.total_seconds() / 3600.0
+    window_hours = _EVENT_REDATE_GUARD_WINDOW.total_seconds() / 3600.0
+    settled_pick_id = await session.scalar(
+        select(Pick.id).where(Pick.event_id == existing.id, Pick.status == "settled").limit(1)
+    )
+    if settled_pick_id is None:
+        logger.info(
+            "event %s (id %d) starts_at re-date of %.1fh (> %.0fh) with no settled "
+            "picks — allowing",
+            external_ref,
+            existing.id,
+            moved_hours,
+            window_hours,
+        )
+        return True
+    await enqueue_match_reviews(
+        session,
+        [
+            MatchReviewIn(
+                source=_source_of_ref(external_ref),
+                source_event_id=external_ref,
+                candidate_canonical_event_id=existing.id,
+                confidence=0.0,
+                reason="redate_settled_event",
+                evidence={
+                    "stored_starts_at": existing.starts_at.isoformat(),
+                    "incoming_starts_at": target.isoformat(),
+                    "moved_hours": round(moved_hours, 1),
+                },
+            )
+        ],
+    )
+    logger.warning(
+        "REFUSED starts_at re-date on event %s (id %d): move of %.1fh exceeds %.0fh "
+        "and the event has settled picks — likely provider ref re-use for a "
+        "different fixture; queued for review",
+        external_ref,
+        existing.id,
+        moved_hours,
+        window_hours,
+    )
+    return False
+
 
 def _source_of_ref(external_ref: str) -> str:
     """The event_source_links.source tag for an external_ref — the prefix before
@@ -757,6 +826,8 @@ async def _get_or_create_event(
         # a real time captured on an earlier cycle (root cause 2026-06-24).
         target = prefer_kickoff(existing.starts_at, starts_at)
         if target != existing.starts_at:
+            if not await _redate_allowed(session, existing, target, external_ref):
+                return existing.id
             existing.starts_at = target
             await session.flush()
         return existing.id
@@ -3116,16 +3187,40 @@ async def persist_odds_snapshots(
             if not by_event:
                 return SnapshotPersistResult(0, failed_event_ids=failed_event_ids)
         sport_id = await _get_or_create_sport(session, sport, sport.title())
+        skip_causes: dict[str, int] = {}
         for external_ref, event_snapshots in by_event.items():
             teams = teams_by_event[external_ref]
             try:
                 event_written = 0
                 async with session.begin_nested():
-                    league_id = await _get_or_create_league(
-                        session, sport_id, teams.league or default_league, teams.country
-                    )
-                    home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
-                    away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)
+                    if attach_only_to_existing:
+                        # ATTACH-ONLY: the Event row already exists (pre-query
+                        # above) — resolve league/team ids FROM that row instead
+                        # of re-resolving them from provider metadata. Betfair's
+                        # EventTeams carries no league name ("" — live defect
+                        # 2026-08-04: the empty key tripped the identity guard
+                        # and killed EVERY promote-persist event for 487+
+                        # cycles), and an attach must never mint or relabel
+                        # identity rows anyway. The create path below still
+                        # fails loudly on an empty league.
+                        anchor = await session.scalar(
+                            select(Event).where(Event.external_ref == external_ref)
+                        )
+                        if anchor is None:  # pragma: no cover - raced away post pre-query
+                            raise RuntimeError(f"attach-only event vanished: {external_ref!r}")
+                        league_id = anchor.league_id
+                        home_id = anchor.home_team_id
+                        away_id = anchor.away_team_id
+                    else:
+                        league_id = await _get_or_create_league(
+                            session, sport_id, teams.league or default_league, teams.country
+                        )
+                        home_id = await _get_or_create_team(
+                            session, sport_id, league_id, teams.home
+                        )
+                        away_id = await _get_or_create_team(
+                            session, sport_id, league_id, teams.away
+                        )
                     event_id = await _get_or_create_event(
                         session,
                         sport_id,
@@ -3176,19 +3271,34 @@ async def persist_odds_snapshots(
             except Exception as exc:  # poisoned event: skip it, keep the cycle
                 failed_events += 1
                 failed_event_ids.add(external_ref)
+                # A ValueError here is one of OUR guards (identity bounds /
+                # sport fence) whose message names only the field + bound —
+                # safe to log, and hiding it made the 2026-08-04 dead promote
+                # path invisible for 487 cycles. Other exception types keep
+                # the type-name-only rule (HTTP/driver strings may carry URLs).
+                cause = f": {exc}" if isinstance(exc, ValueError) else ""
+                if cause:
+                    skip_causes[str(exc)] = skip_causes.get(str(exc), 0) + 1
                 logger.warning(
-                    "odds snapshot persistence skipped event '%s vs %s' (%d rows): %s",
+                    "odds snapshot persistence skipped event '%s vs %s' (%d rows): %s%s",
                     teams.home,
                     teams.away,
                     len(event_snapshots),
                     type(exc).__name__,
+                    cause,
                 )
         await session.commit()
     if failed_events:
+        causes = (
+            "; causes: " + ", ".join(f"{msg!r} x{n}" for msg, n in sorted(skip_causes.items()))
+            if skip_causes
+            else ""
+        )
         logger.warning(
-            "odds snapshot persistence: %d/%d events skipped this cycle",
+            "odds snapshot persistence: %d/%d events skipped this cycle%s",
             failed_events,
             len(by_event),
+            causes,
         )
     return SnapshotPersistResult(
         written,

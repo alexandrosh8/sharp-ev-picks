@@ -18,7 +18,7 @@ import logging
 import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 import httpx
@@ -179,6 +179,20 @@ def _markers_agree(ours: str, theirs: str) -> bool:
     return distinguishing_markers(ours) == distinguishing_markers(theirs)
 
 
+# Ambiguous-match warning rate-limit (verified audit 2026-08-06): the 30s
+# settlement cycle re-warned the same stuck fixture every cycle (~180k
+# lines/48h). Warn once per (fixture, UTC day); repeats stay silent until the
+# day rolls over. Mirrors the engine's unsettleable-warning dedup (c780c1a).
+# In-memory only — a restart re-warns each fixture once, which is acceptable.
+_AMBIGUOUS_WARNED: dict[tuple[str, str, date], date] = {}
+
+
+def reset_ambiguous_warning_state() -> None:
+    """Forget which ambiguous fixtures were already warned about (tests +
+    operator tooling)."""
+    _AMBIGUOUS_WARNED.clear()
+
+
 class ScoreBook:
     """Final scores indexed for lookup by (team names, kickoff datetime)."""
 
@@ -244,7 +258,21 @@ class ScoreBook:
         if len(candidates) == 1:
             return candidates[0]
         if len(candidates) > 1:
-            logger.warning("ambiguous score match for %s vs %s — leaving open", home, away)
+            # Duplicate feed rows are NOT ambiguous: when every candidate
+            # carries the same score/outcome payload, grading is identical
+            # whichever row is "the" game — settle with it. Only genuinely
+            # conflicting payloads stay open (fail-closed unchanged).
+            payloads = {
+                (s.home_score, s.away_score, s.completion, s.winner_side) for s in candidates
+            }
+            if len(payloads) == 1:
+                return candidates[0]
+            key = (h, a, d0)
+            today = datetime.now(tz=UTC).date()
+            if _AMBIGUOUS_WARNED.get(key) != today:
+                # Once per (fixture, UTC day) — not per 30s cycle.
+                _AMBIGUOUS_WARNED[key] = today
+                logger.warning("ambiguous score match for %s vs %s — leaving open", home, away)
         return None
 
 

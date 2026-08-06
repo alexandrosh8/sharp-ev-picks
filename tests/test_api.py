@@ -574,6 +574,210 @@ def test_games_endpoint_serves_unrestricted_latest_fixture_view() -> None:
         AVAILABLE_GAMES.update(saved)
 
 
+def _tennis_game_row(
+    *,
+    event_id: str,
+    home: str,
+    away: str,
+    league: str,
+    starts_at: str,
+    unvalidated: bool = True,
+) -> dict[str, object]:
+    return {
+        "sport": "tennis",
+        "sport_label": "Tennis",
+        "event_id": event_id,
+        "event": f"{home} vs {away}",
+        "home": home,
+        "away": away,
+        "league": league,
+        "starts_at": starts_at,
+        "market_count": 1,
+        "markets": ["h2h"],
+        "bookmaker_count": 1,
+        "bookmakers": ["A"],
+        "snapshot_count": 3,
+        "first_captured_at": "2026-08-06T10:00:00+00:00",
+        "last_captured_at": "2026-08-06T10:01:00+00:00",
+        "updated_at": "2026-08-06T10:02:00+00:00",
+        "unvalidated": unvalidated,
+    }
+
+
+def test_games_dedupes_coupon_and_tour_variants_of_the_same_tennis_match() -> None:
+    """The Radar defect: OddsChecker publishes the SAME real tennis match twice —
+    a coupon-slug event ('Match Coupon' pseudo-league) and a numeric tour event
+    (real tour name) — and /games listed both. The publication path must collapse
+    the pair to ONE row, keeping the real-tour variant, and the survivor must
+    still carry unvalidated=True when EITHER variant had it (tennis is
+    shadow-only; dedupe must never wash out the display-only flag)."""
+    from app.pipeline import AVAILABLE_GAMES
+
+    saved = dict(AVAILABLE_GAMES)
+    AVAILABLE_GAMES.clear()
+    AVAILABLE_GAMES["tennis"] = [
+        # Coupon variant: slug id, pseudo-league, "Firstname Surname" names.
+        _tennis_game_row(
+            event_id="tennis/frances-tiafoe-v-arthur-rinderknech",
+            home="Frances Tiafoe",
+            away="Arthur Rinderknech",
+            league="Match Coupon",
+            starts_at="2026-08-07T00:10:00+00:00",
+            unvalidated=True,
+        ),
+        # Tour variant: numeric id, real tour name, "Surname I." names, kickoff
+        # published 40 minutes earlier (inside the ±2h window).
+        _tennis_game_row(
+            event_id="101730578",
+            home="Tiafoe F.",
+            away="Rinderknech A.",
+            league="ATP Washington",
+            starts_at="2026-08-06T23:30:00+00:00",
+            unvalidated=False,
+        ),
+    ]
+    try:
+        rows = TestClient(make_app()).get("/games?sport=tennis").json()
+    finally:
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved)
+
+    assert [row["event_id"] for row in rows] == ["101730578"]
+    assert rows[0]["league"] == "ATP Washington"
+    # OR-merge of the doctrine flag: the coupon variant was unvalidated, so the
+    # surviving tour row must stay display-only.
+    assert rows[0]["unvalidated"] is True
+
+
+def test_games_dedupe_keeps_same_name_fixtures_outside_the_window() -> None:
+    """±2h window choice: live coupon-vs-tour listings of the same match skew
+    kickoff by minutes up to ~2h, while genuine repeat fixtures between the same
+    two names (doubleheader/rematch class) sit further apart. Same names 3h
+    apart must therefore BOTH survive — they only collapse within the window."""
+    from app.pipeline import AVAILABLE_GAMES
+
+    saved = dict(AVAILABLE_GAMES)
+    AVAILABLE_GAMES.clear()
+    AVAILABLE_GAMES["tennis"] = [
+        _tennis_game_row(
+            event_id="tennis/ann-li-v-elena-rybakina",
+            home="Ann Li",
+            away="Elena Rybakina",
+            league="Match Coupon",
+            starts_at="2026-08-07T16:00:00+00:00",
+        ),
+        _tennis_game_row(
+            event_id="101799999",
+            home="Ann Li",
+            away="Elena Rybakina",
+            league="WTA Toronto",
+            starts_at="2026-08-07T19:00:00+00:00",
+        ),
+    ]
+    try:
+        rows = TestClient(make_app()).get("/games?sport=tennis").json()
+    finally:
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved)
+
+    assert sorted(row["event_id"] for row in rows) == [
+        "101799999",
+        "tennis/ann-li-v-elena-rybakina",
+    ]
+
+
+def test_games_dedupe_leaves_distinct_non_tennis_rows_untouched() -> None:
+    """Distinct fixtures (different normalized names) must never collapse, and
+    validated football/NBA rows pass through the dedupe step unchanged."""
+    from app.pipeline import AVAILABLE_GAMES
+
+    saved = dict(AVAILABLE_GAMES)
+    AVAILABLE_GAMES.clear()
+    AVAILABLE_GAMES["soccer"] = [
+        {
+            **_available_game_row(event_id="evt-a", event="Alpha FC vs Beta FC"),
+            "home": "Alpha FC",
+            "away": "Beta FC",
+            "unvalidated": False,
+        },
+        {
+            **_available_game_row(event_id="evt-b", event="Gamma FC vs Delta FC"),
+            "home": "Gamma FC",
+            "away": "Delta FC",
+            "unvalidated": False,
+        },
+    ]
+    try:
+        rows = TestClient(make_app()).get("/games?sport=soccer").json()
+    finally:
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved)
+
+    assert sorted(row["event_id"] for row in rows) == ["evt-a", "evt-b"]
+    assert all(row["unvalidated"] is False for row in rows)
+
+
+def test_games_dedupe_covers_the_warehouse_fallback_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedupe lives at the shared publication point, so the restart-durability
+    warehouse path collapses coupon/tour duplicates exactly like live memory."""
+    from app.api import routes
+    from app.pipeline import AVAILABLE_GAMES
+
+    saved = dict(AVAILABLE_GAMES)
+    AVAILABLE_GAMES.clear()
+
+    class FakeSessionFactory:
+        def __call__(self) -> "FakeSessionFactory":
+            return self
+
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    async def fake_latest_available_games_with_events(
+        session: object,
+        limit: int,
+        sport: str | None,
+    ) -> list[dict[str, object]]:
+        return [
+            _tennis_game_row(
+                event_id="tennis/viktorija-golubic-v-iga-swiatek",
+                home="Viktorija Golubic",
+                away="Iga Swiatek",
+                league="Match Coupon",
+                starts_at="2026-08-06T16:30:00+00:00",
+            ),
+            _tennis_game_row(
+                event_id="101788888",
+                home="Golubic V.",
+                away="Swiatek I.",
+                league="WTA Montreal",
+                starts_at="2026-08-06T16:30:00+00:00",
+            ),
+        ]
+
+    monkeypatch.setattr(
+        routes,
+        "latest_available_games_with_events",
+        fake_latest_available_games_with_events,
+    )
+    app = make_app()
+    app.state.session_factory = FakeSessionFactory()
+    try:
+        rows = TestClient(app).get("/games?sport=tennis").json()
+    finally:
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved)
+
+    assert [row["event_id"] for row in rows] == ["101788888"]
+    assert rows[0]["league"] == "WTA Montreal"
+    assert rows[0]["unvalidated"] is True
+
+
 def test_games_endpoint_skips_warehouse_for_healthy_published_slates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
