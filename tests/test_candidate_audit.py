@@ -73,6 +73,8 @@ def test_documented_reason_vocabulary_covers_pipeline_gates() -> None:
         "consensus_anchor_dropped",
         "tennis_game_line_unsettleable",
         "shots_totals_veto",
+        # ADR-0028 shadow-cohort MARKER (tier unchanged, measurement only)
+        "premium_floor_shadow_dnb",
     } == set(CANDIDATE_EVALUATION_REASONS)
 
 

@@ -473,3 +473,22 @@ async def test_load_espn_scores_queries_each_configured_sports_sources() -> None
     async with httpx.AsyncClient(transport=transport) as client:
         assert await load_espn_scores(client, ["curling"], [date(2024, 1, 15)]) == []
     assert seen == []
+
+
+def test_soccer_sources_cover_scottish_leagues_and_efl_cup() -> None:
+    """Backlog audit 2026-08-07: Scottish Premiership (43 picks), Championship
+    and the EFL Cup (10 picks) had no ESPN feed. All three slugs verified
+    returning finals 2026-08-07."""
+    from app.ingestion.espn_scores import SPORT_ESPN_SOURCES
+
+    soccer = {s.league for s in SPORT_ESPN_SOURCES["soccer"]}
+    assert {"sco.1", "sco.2", "eng.league_cup"} <= soccer
+
+
+def test_american_football_sources_exclude_dead_espn_cfl_feed() -> None:
+    """ESPN's football/cfl scoreboard is dead (stuck at season 2023, zero
+    events for 2026 dates — verified 2026-08-07). It must NOT be added: CFL
+    has no free result feed; those picks settle manually or expire."""
+    from app.ingestion.espn_scores import SPORT_ESPN_SOURCES
+
+    assert "cfl" not in {s.league for s in SPORT_ESPN_SOURCES["american_football"]}

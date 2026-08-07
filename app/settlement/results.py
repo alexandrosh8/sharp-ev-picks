@@ -99,15 +99,83 @@ _SLUG_SOURCES: dict[str, ScoreSource] = {
     "belgium-jupiler-pro-league": ScoreSource(kind="season", code="B1"),
     "turkey-super-lig": ScoreSource(kind="season", code="T1"),
     "greece-super-league": ScoreSource(kind="season", code="G1"),
+    # Scottish lower leagues (registered by register_extra_leagues, backlog
+    # audit 2026-08-07: 30 Scottish League 2 picks had no results source).
+    "scotland-league-one": ScoreSource(kind="season", code="SC2"),
+    "scotland-league-two": ScoreSource(kind="season", code="SC3"),
+}
+
+
+def current_season_code(as_of: date) -> str:
+    """football-data's 4-digit season code ("2627" = 2026-27) current at
+    `as_of`. European seasons roll in July: the new files appear on
+    football-data as soon as the season starts, while a configured
+    FOOTBALLDATA_SEASONS list rots at every rollover (audit 2026-08-07:
+    seasons=2425,2526 left the whole 2026-27 Scottish Premiership start
+    unsettleable). Callers append this code to the configured list; a
+    not-yet-published file 404s and is skipped quietly."""
+    start_year = as_of.year if as_of.month >= 7 else as_of.year - 1
+    return f"{start_year % 100:02d}{(start_year + 1) % 100:02d}"
+
+
+# Letters with NO NFKD ASCII decomposition — the encode("ascii","ignore") pass
+# silently DROPPED them, so ESPN "FC Nordsjælland" could never match
+# OddsChecker "FC Nordsjaelland" (2026-08-07 backlog audit: 94 stuck
+# Conference-qual picks were dominated by this class). Applied BEFORE NFKD;
+# decomposable accents (é, ö, ä, …) keep going through NFKD as before.
+_TRANSLITERATE = str.maketrans(
+    {
+        "ø": "o",
+        "Ø": "O",
+        "æ": "ae",
+        "Æ": "Ae",
+        "đ": "d",
+        "Đ": "D",
+        "ð": "d",
+        "Ð": "D",
+        "þ": "th",
+        "Þ": "Th",
+        "ł": "l",
+        "Ł": "L",
+        "ß": "ss",
+    }
+)
+
+# EXPLICIT settlement aliases: exonym/nickname/typo pairs no token rule can
+# bridge, mapped on the FULL normalized name (never a token/substring, so a
+# marked variant like "heart of midlothian w" can NOT alias onto the senior
+# side — the marker veto in _markers_agree stays authoritative regardless).
+# One real club/player per row; every row evidence-backed against live result
+# payloads vs the stuck-pick backlog (audit 2026-08-07). Values are the
+# normalized form our OddsChecker-scraped events carry.
+_NAME_ALIASES: dict[str, str] = {
+    "f c kobenhavn": "fc copenhagen",  # ESPN Danish exonym (after ø translit)
+    "heart of midlothian": "hearts",
+    "red star belgrade": "crvena zvezda",
+    "the new saints": "tns",
+    "din tbilisi": "dinamo tbilisi",  # our scrape abbreviates; ESPN is full
+    "dinamo city": "dinamo tirana",  # FK Dinamo City = renamed Dinamo Tirana
+    "ml vitebsk": "bc maxline",  # Maxline Vitebsk sponsor-vs-city naming
+    "red bull new york": "new york red bulls",
+    "abroath": "arbroath",  # OddsChecker typo observed in live events
+    "hapoel be er": "hapoel beer sheva",  # ESPN truncates "Be'er"
+    "pafos": "aep paphos",  # same Cypriot club, merged-era naming
+    "botic van de zandschulo": "botic van de zandschulp",  # scrape typo
 }
 
 
 def normalize_team(name: str) -> str:
-    """Casefold, strip accents, keep alphanumerics, collapse whitespace."""
-    decomposed = unicodedata.normalize("NFKD", name)
+    """Casefold, strip accents, keep alphanumerics, collapse whitespace.
+
+    Non-decomposable letters transliterate first (see _TRANSLITERATE); the
+    finished form then passes through the explicit full-name alias table so
+    both sides of any lookup speak one canonical spelling.
+    """
+    decomposed = unicodedata.normalize("NFKD", name.translate(_TRANSLITERATE))
     ascii_only = decomposed.encode("ascii", "ignore").decode("ascii")
     cleaned = "".join(ch if ch.isalnum() else " " for ch in ascii_only.casefold())
-    return " ".join(cleaned.split())
+    normalized = " ".join(cleaned.split())
+    return _NAME_ALIASES.get(normalized, normalized)
 
 
 # Club-type prefix/suffix tokens that differ between result providers for the SAME
@@ -146,13 +214,26 @@ _CLUB_TOKENS = frozenset(
 )
 
 
+# Same-club spelling variants canonicalized at token level ("Dundee Utd" vs
+# ESPN "Dundee United"; "Queens Park FC" vs ESPN "Queen's Park", whose
+# apostrophe splits to a dropped single letter). A rewrite never REMOVES a
+# distinguishing token — it only respells it — so two distinct clubs can never
+# be merged by this table.
+_TOKEN_REWRITES = {"utd": "united", "queens": "queen"}
+
+
 def _core_tokens(normalized: str) -> frozenset[str]:
     """Distinguishing tokens of an already-normalized name: drop club-type tokens
-    and single letters (the ``d`` of "d'Escaldes"). Multi-digit tokens are KEPT —
+    and single letters (the ``d`` of "d'Escaldes"), then canonicalize known
+    same-club spellings (_TOKEN_REWRITES). Multi-digit tokens are KEPT —
     they are frequently the only thing separating two clubs ("1860 Munich" vs
     "Bayern Munich"); a one-sided trailing number ("Shkendija 79" vs "Shkendija")
     still recovers through the subset relation in _names_match."""
-    return frozenset(t for t in normalized.split() if t not in _CLUB_TOKENS and len(t) > 1)
+    return frozenset(
+        _TOKEN_REWRITES.get(t, t)
+        for t in normalized.split()
+        if t not in _CLUB_TOKENS and len(t) > 1
+    )
 
 
 def _names_match(ours: str, theirs: str) -> bool:
@@ -350,8 +431,15 @@ async def load_scores(
                 text = await fetch_new_league_csv(client, source.code)
                 scores.extend(scores_from_match_rows(parse_new_league_csv(text)))
             elif source.kind == "season" and source.code is not None:
-                for season in seasons:
-                    text = await fetch_season_csv(client, source.code, season)
+                # The CURRENT season is always fetched too (config lists rot at
+                # the July rollover); dict.fromkeys dedupes, order preserved.
+                for season in dict.fromkeys([*seasons, current_season_code(on_or_after)]):
+                    try:
+                        text = await fetch_season_csv(client, source.code, season)
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            continue  # season file not published yet — normal
+                        raise
                     scores.extend(scores_from_match_rows(parse_season_csv(text)))
         except httpx.HTTPError as exc:
             logger.error("results source %s failed: %s", source.kind, type(exc).__name__)

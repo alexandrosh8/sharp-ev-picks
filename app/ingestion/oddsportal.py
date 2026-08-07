@@ -230,6 +230,11 @@ _EXTRA_LEAGUES: dict[str, dict[str, str]] = {
         "belgium-jupiler-pro-league": (
             "https://www.oddsportal.com/football/belgium/jupiler-pro-league"
         ),
+        # Scottish lower leagues (verified HTTP 200 on 2026-08-07) — give the
+        # settlement slug map (app/settlement/results.py) registry-valid keys
+        # for the football-data SC2/SC3 results sources.
+        "scotland-league-one": "https://www.oddsportal.com/football/scotland/league-one/",
+        "scotland-league-two": "https://www.oddsportal.com/football/scotland/league-two/",
     },
     # OddsHarvester (0.3.0/0.4.0) ships only nfl/ncaa for american football; CFL
     # (active Jun-Nov) and UFL (spring) are the other live AF leagues

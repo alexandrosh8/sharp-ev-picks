@@ -213,6 +213,18 @@ def parse_visibility_only_markets(raw: str) -> tuple[str, ...]:
     A malformed sport-qualified key (empty sport, empty market, or more than one
     colon) FAILS FAST here at the composition root so it never reaches the frozen
     policy.
+
+    ADR-0026 AMENDMENT (2026-08-07, vocabulary hole): the soccer AH product is
+    scraped under TWO vocabularies — the OddsPortal JSON feed's
+    "asian_handicap_<line>" details AND the OddsChecker native "spreads_<line>"
+    (integer/fractional) details. A "soccer:asian_handicap" entry therefore ALSO
+    emits "soccer:spreads" (deduplicated) so scraped soccer spreads_* candidates
+    can never bypass the visibility cap — verified live 2026-08-07: the
+    Celtic -1 "spreads_minus_1" group reached tier=premium on a fabricated
+    cross-product (AH-vs-EH, stale-leg) devig. The alias is SOCCER-ONLY and
+    applies only to the sport-qualified key: the plain "asian_handicap" entry is
+    NOT expanded (it would cap basketball/NFL point spreads too), and other
+    sports' asian_handicap entries are left untouched.
     """
     out: list[str] = []
     for raw_key in raw.split(","):
@@ -229,9 +241,14 @@ def parse_visibility_only_markets(raw: str) -> tuple[str, ...]:
                     f"{raw_key.strip()!r}; expected '<sport>:<market>' or '<market>'"
                 )
             out.append(f"{sport}:{market}")
+            # ADR-0026 amendment: soccer AH cap covers BOTH scrape vocabularies.
+            if sport == "soccer" and market == "asian_handicap":
+                out.append("soccer:spreads")
         else:
             out.append(key)
-    return tuple(out)
+    # Deduplicate preserving first-seen order (the alias may collide with an
+    # operator-listed "soccer:spreads").
+    return tuple(dict.fromkeys(out))
 
 
 def parse_proxy_urls(raw: str, env_name: str = "ARCADIA_PROXY_URLS") -> tuple[str, ...]:

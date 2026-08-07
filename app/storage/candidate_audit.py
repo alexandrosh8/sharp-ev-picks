@@ -81,6 +81,13 @@ CANDIDATE_EVALUATION_REASONS: frozenset[str] = frozenset(
         # totals-2.5 candidate demoted because the shots screen leans the other
         # way (app/pipeline SHOTS_TOTALS_VETO_REASON).
         "shots_totals_veto",
+        # ADR-0028 shadow-cohort MARKER (NOT a demotion — tier unchanged): a
+        # sharp-anchored soccer DNB candidate in the [1.5%, premium-floor) edge
+        # band that failed ONLY the premium floor; minted at the volume tier
+        # exactly as before, marked so the cohort's forward trusted CLV is
+        # queryable for the pre-registered promotion decision
+        # (app/edge/value.PREMIUM_FLOOR_SHADOW_DNB_REASON).
+        "premium_floor_shadow_dnb",
     }
 )
 

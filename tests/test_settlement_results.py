@@ -292,3 +292,127 @@ def test_league_score_sources_all_expands_to_every_source() -> None:
     sources = league_score_sources(["all"])
     assert INTERNATIONAL in sources
     assert len(sources) == len({s for s in _SLUG_SOURCES.values()})
+
+
+# --- 2026-08-07 backlog audit: cross-source name forms + season rollover -----
+
+
+def test_normalize_team_transliterates_non_decomposable_chars() -> None:
+    """ø/æ/đ/þ/ł have NO NFKD ASCII decomposition — they were silently DROPPED,
+    so ESPN "FC Nordsjælland" could never match OddsChecker "FC Nordsjaelland"
+    (94 Conference-qual picks stuck unsettled, audit 2026-08-07)."""
+    assert normalize_team("FC Nordsjælland") == "fc nordsjaelland"
+    assert normalize_team("Tromsø") == "tromso"
+    assert normalize_team("Łódź") == "lodz"
+    assert normalize_team("Þór Akureyri") == "thor akureyri"
+    assert normalize_team("Đurđevac") == "durdevac"
+
+
+def test_normalize_team_applies_explicit_settlement_aliases() -> None:
+    """Exonym/nickname pairs that no token rule can bridge live in the explicit
+    alias table (one club per row, evidence: 2026-08-07 backlog vs live ESPN
+    payloads). Both sides of a lookup normalize through the same table."""
+    assert normalize_team("F.C. København") == normalize_team("FC Copenhagen")
+    assert normalize_team("Heart of Midlothian") == normalize_team("Hearts")
+    assert normalize_team("Red Star Belgrade") == normalize_team("Crvena zvezda")
+    assert normalize_team("The New Saints") == normalize_team("TNS")
+    assert normalize_team("Din Tbilisi") == normalize_team("Dinamo Tbilisi")
+    assert normalize_team("Dinamo City") == normalize_team("Dinamo Tirana")
+    assert normalize_team("ML Vitebsk") == normalize_team("BC Maxline")
+    assert normalize_team("Red Bull New York") == normalize_team("New York Red Bulls")
+    assert normalize_team("Abroath") == normalize_team("Arbroath")
+    assert normalize_team("Hapoel Be'er") == normalize_team("Hapoel Beer Sheva")
+    assert normalize_team("Pafos") == normalize_team("AEP Paphos")
+    assert normalize_team("Botic Van de Zandschulo") == normalize_team("Botic van de Zandschulp")
+
+
+def test_alias_does_not_bleed_onto_marked_teams() -> None:
+    """The alias table maps FULL normalized names only — a marked variant
+    ("Heart of Midlothian W") must NOT alias onto the senior side."""
+    assert normalize_team("Heart of Midlothian W") == "heart of midlothian w"
+
+
+def test_names_match_canonicalizes_utd_and_queens_spellings() -> None:
+    from app.settlement.results import _names_match
+
+    def m(a: str, b: str) -> bool:
+        return _names_match(normalize_team(a), normalize_team(b))
+
+    assert m("Dundee Utd", "Dundee United")  # 5 Scottish Prem picks, 2026-08-07
+    assert m("Minnesota Utd", "Minnesota United FC")  # 15 MLS picks
+    assert m("Queens Park FC", "Queen's Park")  # 11 Scottish League Cup picks
+    assert m("Queen of South", "Queen of the South")
+    assert not m("Manchester United", "Manchester City")
+    assert not m("Newcastle Utd", "Newcastle Jets")  # distinct clubs stay distinct
+
+
+def test_lookup_recovers_espn_name_forms_but_keeps_marker_veto() -> None:
+    """End-to-end: an ESPN-named final settles the OddsChecker-named fixture;
+    the women/youth marker veto stays authoritative over any alias/containment."""
+    d = date(2026, 8, 6)
+    book = ScoreBook(
+        [
+            FinalScore("Valur Reykjavik", "FC Nordsjælland", d, 0, 2),
+            FinalScore("Benfica", "Heart of Midlothian", d, 6, 1),
+        ]
+    )
+    kickoff = datetime(2026, 8, 6, 18, 30, tzinfo=UTC)
+    hit = book.lookup("Valur", "FC Nordsjaelland", kickoff)
+    assert hit is not None and (hit.home_score, hit.away_score) == (0, 2)
+    assert book.lookup("Benfica", "Hearts", kickoff) is not None
+    # marker veto: a women's pick must not settle from the senior final
+    assert book.lookup("Benfica W", "Hearts W", kickoff) is None
+
+
+def test_current_season_code_rolls_in_july() -> None:
+    from app.settlement.results import current_season_code
+
+    assert current_season_code(date(2026, 8, 7)) == "2627"
+    assert current_season_code(date(2026, 7, 1)) == "2627"
+    assert current_season_code(date(2026, 6, 30)) == "2526"
+    assert current_season_code(date(2025, 12, 31)) == "2526"
+
+
+def test_slug_sources_cover_scottish_lower_leagues() -> None:
+    from app.settlement.results import _SLUG_SOURCES
+
+    assert _SLUG_SOURCES["scotland-league-one"] == ScoreSource(kind="season", code="SC2")
+    assert _SLUG_SOURCES["scotland-league-two"] == ScoreSource(kind="season", code="SC3")
+
+
+SEASON_CSV_2526 = (
+    "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\nSC0,10/05/2026,Old Season FC,Stale Rovers,1,0,H\n"
+)
+SEASON_CSV_2627 = (
+    "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\nSC0,01/08/2026,Dundee United,Rangers,2,2,D\n"
+)
+
+
+async def test_load_scores_auto_appends_current_season_and_tolerates_404() -> None:
+    """FOOTBALLDATA_SEASONS rots at season rollover (=2425,2526 while the
+    2026-27 SC0 file carries the new Scottish Premiership results — 43 picks
+    stuck, audit 2026-08-07). load_scores must fetch the CURRENT season code
+    too, and a 404 on a not-yet-published season file must skip quietly
+    without killing the source's other seasons."""
+    fetched: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        fetched.append(path)
+        if path.endswith("/2627/SC0.csv"):
+            return httpx.Response(200, text=SEASON_CSV_2627)
+        if path.endswith("/2526/SC0.csv"):
+            return httpx.Response(200, text=SEASON_CSV_2526)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        scores = await load_scores(
+            client,
+            slugs=["scotland-premiership"],
+            seasons=["2425", "2526"],  # stale config: current season absent
+            on_or_after=date(2026, 7, 24),
+        )
+    assert any(p.endswith("/2627/SC0.csv") for p in fetched)  # auto-appended
+    assert any(p.endswith("/2425/SC0.csv") for p in fetched)  # 404 tolerated
+    names = {(s.home_team, s.away_team) for s in scores}
+    assert ("Dundee United", "Rangers") in names

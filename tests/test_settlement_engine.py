@@ -1784,3 +1784,63 @@ async def test_run_settlement_cycle_wires_expiry_from_settings(
         assert row.outcome == "void"
         assert row.note == EXPIRED_NO_RESULT_NOTE
     clear_feed_cache()
+
+
+async def test_settles_cross_source_name_form_from_new_scottish_feed(session) -> None:  # type: ignore[no-untyped-def]
+    """Backlog audit 2026-08-07 integration: a pick on the OddsChecker spelling
+    ("Dundee Utd") settles from a result feed carrying the football-data/ESPN
+    spelling ("Dundee United") — the newly covered Scottish Premiership path
+    (SC0 current-season CSV / ESPN sco.1) through the REAL settlement engine."""
+    pick = await seed_pick(
+        session,
+        "evt-sco1-nameform",
+        home="Dundee Utd",
+        away="Rangers",
+        market=Market.H2H,
+        selection="Rangers",
+    )
+    book = ScoreBook(
+        [
+            FinalScore(
+                home_team="Dundee United",
+                away_team="Rangers",
+                match_date=KICKOFF.date(),
+                home_score=0,
+                away_score=2,
+            )
+        ]
+    )
+    assert await settle_open_picks(session, book, NOW) == 1
+    await session.refresh(pick)
+    assert pick.status == "settled"
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == pick.id))
+    assert row is not None
+    assert row.outcome == "won"
+    assert (row.home_score, row.away_score) == (0, 2)
+
+
+async def test_marker_veto_still_blocks_aliased_name_form(session) -> None:  # type: ignore[no-untyped-def]
+    """The alias/name-form recovery must never outrank the wrong-game marker
+    veto: a women's-marked pick stays open when only the senior final exists."""
+    pick = await seed_pick(
+        session,
+        "evt-sco1-marker",
+        home="Dundee Utd W",
+        away="Rangers W",
+        market=Market.H2H,
+        selection="Rangers W",
+    )
+    book = ScoreBook(
+        [
+            FinalScore(
+                home_team="Dundee United",
+                away_team="Rangers",
+                match_date=KICKOFF.date(),
+                home_score=0,
+                away_score=2,
+            )
+        ]
+    )
+    assert await settle_open_picks(session, book, NOW) == 0
+    await session.refresh(pick)
+    assert pick.status == "alerted"  # left open — never settled from the senior score

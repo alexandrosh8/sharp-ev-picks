@@ -1000,9 +1000,38 @@ def test_parse_visibility_only_markets_plain_and_sport_qualified() -> None:
     assert parse_visibility_only_markets(" Asian_Handicap , SOCCER:Asian_Handicap ,, totals ") == (
         "asian_handicap",
         "soccer:asian_handicap",
+        "soccer:spreads",  # ADR-0026 amendment 2026-08-07 (vocabulary alias)
         "totals",
     )
     assert parse_visibility_only_markets("") == ()
+
+
+def test_parse_soccer_ah_entry_also_caps_scraped_soccer_spreads() -> None:
+    # ADR-0026 amendment 2026-08-07: the soccer AH product is scraped under TWO
+    # vocabularies — the OddsPortal feed's "asian_handicap_<line>" details AND
+    # the OddsChecker native "spreads_<line>" (integer/fractional) details. The
+    # "soccer:asian_handicap" cap therefore ALSO emits "soccer:spreads" so
+    # scraped soccer spreads_* candidates can never bypass the visibility cap
+    # (verified live 2026-08-07: the Celtic -1 spreads_minus_1 group reached
+    # tier=premium on a fabricated cross-product devig).
+    from app.config import parse_visibility_only_markets
+
+    assert parse_visibility_only_markets("soccer:asian_handicap") == (
+        "soccer:asian_handicap",
+        "soccer:spreads",
+    )
+    # no duplicate emission when the operator already lists soccer:spreads
+    assert parse_visibility_only_markets("soccer:asian_handicap,soccer:spreads") == (
+        "soccer:asian_handicap",
+        "soccer:spreads",
+    )
+    # the PLAIN (all-sports) asian_handicap key gets NO expansion — it would
+    # otherwise cap basketball/NFL point spreads too
+    assert parse_visibility_only_markets("asian_handicap") == ("asian_handicap",)
+    # other sports' asian_handicap entries are NOT expanded (soccer-only alias)
+    assert parse_visibility_only_markets("basketball:asian_handicap") == (
+        "basketball:asian_handicap",
+    )
 
 
 @pytest.mark.parametrize(

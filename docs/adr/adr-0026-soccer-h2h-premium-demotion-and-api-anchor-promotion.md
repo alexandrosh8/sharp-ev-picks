@@ -63,3 +63,21 @@ readout; the decision itself stays operator-signed.
   honesty of the CLV fill side going forward.
 - Rollback: remove `soccer:h2h` from the env list / set
   `VALUE_BETFAIR_API_PROMOTE=false`; both are pure config.
+
+## Amendment 2026-08-07 — soccer AH cap covers the scraped `spreads_*` vocabulary
+
+The `soccer:asian_handicap` visibility entry only matched the OddsPortal
+feed's `asian_handicap_<line>` details; the OddsChecker scrape keys the SAME
+soccer handicap product under native `spreads_<line>` details
+(`spreads_minus_1`, `spreads_minus_0_75`, …), which therefore bypassed the
+cap — a vocabulary hole. Verified live 2026-08-07: the Celtic −1
+`spreads_minus_1` group reached tier=premium at a fabricated 14.6% edge
+(Betfair Asian-line legs devigged against soft European-handicap quotes plus
+an ~11 h-stale Draw leg; the class is now refused fail-closed by
+`spread_pair_incoherent`, f008173). `app/config.py
+parse_visibility_only_markets` now expands `soccer:asian_handicap` to also
+emit `soccer:spreads` (soccer-scoped; the plain all-sports `asian_handicap`
+key and other sports' entries are NOT expanded), so scraped soccer spreads
+candidates are capped at the volume tier until forward evidence clears the
+market. Rollback: pure config (remove the entry); no env change was needed to
+deploy the amendment.

@@ -250,6 +250,34 @@ def test_visibility_only_plain_key_caps_all_sports() -> None:
     assert is_visibility_only_market(pol, str(Market.SPREADS), "asian_handicap_-1_5")
 
 
+def test_soccer_ah_cap_covers_scraped_spreads_vocabulary() -> None:
+    # ADR-0026 amendment 2026-08-07 (vocabulary hole): the OddsChecker scrape
+    # keys the SAME soccer AH product under native "spreads_<line>" details,
+    # which bypassed the "soccer:asian_handicap" cap (verified live: the
+    # Celtic -1 "spreads_minus_1" group reached tier=premium on a fabricated
+    # cross-product devig). The PARSED config now also emits "soccer:spreads",
+    # so both vocabularies cap — for SOCCER only.
+    from app.config import parse_visibility_only_markets
+
+    pol = ValuePolicy(
+        visibility_only_markets=parse_visibility_only_markets("soccer:asian_handicap")
+    )
+    # native scraped spreads_<line> details (integer, fractional, level)
+    for detail in ("spreads_minus_1", "spreads_minus_0_75", "spreads_plus_0"):
+        assert is_visibility_only_market(pol, str(Market.SPREADS), detail, sport="soccer")
+    # the AH vocabulary stays capped exactly as before
+    assert is_visibility_only_market(
+        pol, str(Market.SPREADS), "asian_handicap_-1_5", sport="soccer"
+    )
+    # non-soccer spreads are untouched (the alias is soccer-scoped)
+    assert not is_visibility_only_market(
+        pol, str(Market.SPREADS), "spreads_-7_5", sport="basketball"
+    )
+    assert not is_visibility_only_market(
+        pol, str(Market.SPREADS), "spreads_sets_-1_5", sport="tennis"
+    )
+
+
 def test_pick_tier_premium_then_visibility_cap_demotes_to_volume() -> None:
     # An AH candidate with a premium-level edge still caps at 'volume'.
     pol = ValuePolicy(visibility_only_markets=("asian_handicap",))

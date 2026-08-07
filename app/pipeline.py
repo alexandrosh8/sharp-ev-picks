@@ -1969,6 +1969,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         CONSENSUS_ANCHOR,
         DRAW_SELECTION_DEMOTION_REASON,
         GLOBAL_ODDS_CEILING_REASON,
+        PREMIUM_FLOOR_SHADOW_DNB_MIN_EDGE,
+        PREMIUM_FLOOR_SHADOW_DNB_REASON,
         SHARP_BOOKS,
         SHARP_MISS_NO_FULL_MARKET,
         SPREAD_PAIR_INCOHERENT_REASON,
@@ -1979,6 +1981,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         find_value_bets_with_fair,
         global_odds_ceiling_violation,
         is_sharp_anchored,
+        premium_floor_shadow_dnb,
         structural_sanity_violation,
     )
 
@@ -2234,6 +2237,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_shots_tagged = 0
     n_consensus_anchor_dropped = 0
     n_too_early_demoted = 0
+    n_dnb_floor_shadow = 0
     # Task 8 probe (Buchalter bet-volume smoke detector, log-only): market
     # groups that reached the value scan this cycle (anchored fair present).
     n_eligible_markets = 0
@@ -2784,6 +2788,36 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 sanity_note = (
                     " | STRUCTURAL SANITY: impossible fair/offered pair — demoted to shadow"
                 )
+            # ADR-0028 SHADOW-COHORT MARK (pre-registration — measurement ONLY,
+            # never a gate). A sharp-anchored soccer DNB candidate whose edge
+            # sits in the pre-registered [1.5%, premium-floor) band failed ONLY
+            # the premium floor (below the floor no premium demotion gate ever
+            # ran), so it mints at the volume (shadow) tier exactly as before —
+            # but is MARKED with the named reason 'premium_floor_shadow_dnb'
+            # (reason_summary note + candidate_evaluations slug) so the
+            # cohort's OWN forward trusted CLV is queryable for the ADR-0028
+            # promotion decision. Tier / alerting / stakes are UNTOUCHED. The
+            # visibility-cap check keeps the cohort honest: a market capped at
+            # volume by config did not fail "only the premium floor".
+            dnb_floor_shadow_note = ""
+            if (
+                tier == "volume"
+                and sport_key.startswith("soccer")
+                and market is Market.DNB
+                and premium_floor_shadow_dnb(
+                    str(market),
+                    v.edge,
+                    premium_floor=premium_floor,
+                    anchor_book=anchor_book,
+                )
+                and not is_visibility_only_market(deps.value_policy, str(market), detail, sport_key)
+            ):
+                n_dnb_floor_shadow += 1
+                dnb_floor_shadow_note = (
+                    f" | {PREMIUM_FLOOR_SHADOW_DNB_REASON} (ADR-0028 cohort): edge "
+                    f"{v.edge:.4f} in [{PREMIUM_FLOOR_SHADOW_DNB_MIN_EDGE:g}, "
+                    f"{premium_floor:g}) — volume as before (marker only)"
+                )
             # Stake from the sharp fair prob at the EFFECTIVE (net) price. The
             # daily-exposure ledger is consumed AFTER persistence (below), and
             # ONLY for brand-new premium detections — so the pick is built with
@@ -2906,6 +2940,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     + ml_note
                     + steam_note
                     + sanity_note
+                    + dnb_floor_shadow_note
                 ),
                 tier=tier,
                 value_filter_score=ml_score,
@@ -2989,6 +3024,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 audit_reasons.append("steam")
             if sanity_note:
                 audit_reasons.append("structural_sanity")
+            if dnb_floor_shadow_note:
+                # ADR-0028 shadow-cohort MARKER (not a demotion — tier unchanged):
+                # the slug makes the cohort queryable in candidate_evaluations.
+                audit_reasons.append(PREMIUM_FLOOR_SHADOW_DNB_REASON)
             await _record_candidate_audit(
                 deps, pick, detail or "", tuple(audit_reasons), steam_anchor_age_seconds, now
             )
@@ -3399,6 +3438,19 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "value pipeline %s: %d market(s) skipped below their VALUE_MIN_BOOKS_PER_MARKET floor",
             sport_key,
             n_thin_books,
+        )
+    if n_dnb_floor_shadow:
+        # ADR-0028 shadow-cohort marker (never silent, never a gate): these
+        # sharp-anchored soccer DNB candidates in the [1.5%, premium-floor)
+        # band minted at the volume tier exactly as before — the marker only
+        # makes the cohort queryable for the pre-registered promotion decision.
+        logger.info(
+            "value pipeline %s: %s marked %d sharp-anchored soccer DNB candidate(s) "
+            "in the [%.1f%%, premium-floor) band (ADR-0028 shadow cohort — tier unchanged)",
+            sport_key,
+            PREMIUM_FLOOR_SHADOW_DNB_REASON,
+            n_dnb_floor_shadow,
+            PREMIUM_FLOOR_SHADOW_DNB_MIN_EDGE * 100.0,
         )
     if n_stale:
         # The silent failure mode of a too-slow cycle: candidates captured

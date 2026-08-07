@@ -727,6 +727,39 @@ def draw_selection_demotion(market: str, selection: str) -> bool:
     return False
 
 
+PREMIUM_FLOOR_SHADOW_DNB_REASON = "premium_floor_shadow_dnb"
+# ADR-0028 pre-registered band floor (fixed by the pre-registration, NOT a
+# config knob — re-tuning it would invalidate the cohort's forward evidence).
+# The band is [this, premium-floor): candidates below the current 3.0% premium
+# floor but at/above 1.5% that failed ONLY that floor.
+PREMIUM_FLOOR_SHADOW_DNB_MIN_EDGE = 0.015
+
+
+def premium_floor_shadow_dnb(
+    market: str, edge: float, *, premium_floor: float, anchor_book: str
+) -> bool:
+    """ADR-0028 shadow-cohort MARKER predicate — measurement only, never a gate.
+
+    True for a genuinely SHARP-anchored DNB candidate whose edge sits in the
+    pre-registered ``[PREMIUM_FLOOR_SHADOW_DNB_MIN_EDGE, premium_floor)`` band —
+    i.e. it failed ONLY the premium floor (below the floor no premium demotion
+    gate ever runs, so nothing else can have blocked it). The pipeline marks the
+    candidate with ``PREMIUM_FLOOR_SHADOW_DNB_REASON`` (reason_summary note +
+    candidate_evaluations slug) while minting it at the volume tier EXACTLY as
+    before — zero behavior change to tiers/alerts/stakes. Soccer scoping lives
+    at the call site (sport_key), mirroring ``draw_selection_demotion``. The
+    consensus fallback / soft anchors are excluded: the ADR-0028 evidence base
+    is strictly the sharp-anchored cell (trusted CLV +5.78% ± 2.20%, n=54 —
+    2026-08-07 diagnosis). Pure function (stdlib only, no IO);
+    informational-only platform — nothing here places a bet.
+    """
+    return (
+        market.strip().lower() == "dnb"
+        and is_sharp_anchored(anchor_book)
+        and PREMIUM_FLOOR_SHADOW_DNB_MIN_EDGE <= edge < premium_floor
+    )
+
+
 def structural_sanity_violation(
     bet: ValueBet,
     *,

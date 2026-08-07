@@ -329,6 +329,13 @@ SPORT_ESPN_SOURCES: dict[str, tuple[EspnSource, ...]] = {
         EspnSource("soccer", "nor.1"),
         EspnSource("soccer", "irl.1"),
         EspnSource("soccer", "sco.cis"),  # Scottish League Cup (verified finals)
+        # Scottish league + EFL Cup feeds (backlog audit 2026-08-07: 43
+        # Premiership + 10 EFL Cup picks had no source; all three slugs
+        # verified returning finals 2026-08-07). football-data SC0/SC1 also
+        # cover the leagues — dual coverage, same cross-source dedup guard.
+        EspnSource("soccer", "sco.1"),
+        EspnSource("soccer", "sco.2"),
+        EspnSource("soccer", "eng.league_cup"),
         # Majors (football-data primary; ESPN as a cross-source/backup).
         EspnSource("soccer", "eng.1"),
         EspnSource("soccer", "esp.1"),
@@ -359,6 +366,9 @@ SPORT_ESPN_SOURCES: dict[str, tuple[EspnSource, ...]] = {
     "american_football": (
         EspnSource("football", "nfl"),
         EspnSource("football", "college-football"),
+        # NO "cfl": ESPN's football/cfl scoreboard is DEAD (stuck at season
+        # 2023, zero events for 2026 dates — verified 2026-08-07). CFL picks
+        # have no free results feed; they settle manually or expire.
     ),
     "tennis": (
         EspnSource("tennis", "atp", kind="tennis"),
